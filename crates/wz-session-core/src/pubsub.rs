@@ -1247,24 +1247,51 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// it is told ([`SubscriberRegistry::register_sink`]); a table with many peers
     /// leaves each of them to see the epoch move ([`SubscriberPeer::reconcile`]).
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
-        let before = self.subscribers.len();
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        let reached_local = self
-            .subscribers
-            .iter()
-            .find(|s| s.id == id)
-            .is_some_and(|s| s.allowed_origin.allows_local());
-        self.subscribers.retain(|s| s.id != id);
-        let removed = before != self.subscribers.len();
-        if removed {
-            self.epoch = self.epoch.saturating_add(1);
-            #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-            if reached_local {
-                self.local_live
-                    .fetch_sub(1, core::sync::atomic::Ordering::Release);
-            }
+        let Some(at) = self.subscribers.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        self.take_at(at).is_some()
+    }
+
+    /// Remove the subscription at `at`, in the table's order, and hand its sink back for the
+    /// caller to let go of where it chooses: `None` past the table's end. The subscriptions after
+    /// it move down, so a walk by position (a replay of the session's declarations) keeps its
+    /// order; the epoch moves as [`Self::unregister`]'s does.
+    pub fn take_at(&mut self, at: usize) -> Option<C> {
+        if at >= self.subscribers.len() {
+            return None;
         }
-        removed
+        let removed = self.subscribers.remove(at);
+        self.epoch = self.epoch.saturating_add(1);
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        if removed.allowed_origin.allows_local() {
+            self.local_live
+                .fetch_sub(1, core::sync::atomic::Ordering::Release);
+        }
+        Some(removed.sink)
+    }
+
+    /// The pattern and the sink of the subscription at `at`, in the table's order: the order the
+    /// subscriptions were registered in, a removal closing its gap.
+    pub fn row_at(&self, at: usize) -> Option<(&str, &C)> {
+        self.subscribers
+            .get(at)
+            .map(|subscriber| (&*subscriber.pattern, &subscriber.sink))
+    }
+
+    /// The place, in the table's order, of the first subscription whose sink `found` picks.
+    pub fn position_of(&self, found: impl Fn(&C) -> bool) -> Option<usize> {
+        self.subscribers
+            .iter()
+            .position(|subscriber| found(&subscriber.sink))
+    }
+
+    /// Whether one more subscription would be refused for want of a row: the table holds as
+    /// many as its limit admits, or its storage has no row left. Asked before anything is taken
+    /// for a declaration, so a full table refuses it with nothing spent.
+    pub fn is_full(&self) -> bool {
+        !self.quota.admits(self.subscribers.len().saturating_add(1))
+            || self.subscribers.free_slots() == 0
     }
 
     /// Number of currently-registered subscribers across all keyexpr
@@ -8529,6 +8556,75 @@ mod entity_id_space_tests {
             .register_sink("topic/b", Locality::Any, BoxedSink::new(|_| {}))
             .expect("registers");
         assert_eq!((first.entity_id(), second.entity_id()), (1, 2));
+    }
+
+    /// A sink a test can tell apart from another.
+    struct Tagged(u8);
+
+    impl SampleSink for Tagged {
+        fn deliver(&mut self, _sample: &dyn SampleView) {}
+    }
+
+    /// A subscription is read and taken by its place in the table's order, the ones after it
+    /// closing the gap, and its sink is handed back to the taker; a place past the end takes
+    /// nothing and moves nothing.
+    #[test]
+    fn a_row_is_read_and_taken_by_its_place() {
+        let mut table = SubscriberTable::<Tagged>::with_sink_backing();
+        for (key, tag) in [("topic/a", 1), ("topic/b", 2), ("topic/c", 3)] {
+            table
+                .register_sink(key, Locality::Any, Tagged(tag))
+                .expect("registers");
+        }
+        assert_eq!(
+            table.row_at(1).map(|(key, sink)| (key, sink.0)),
+            Some(("topic/b", 2))
+        );
+        assert!(table.row_at(3).is_none());
+        let epoch = table.epoch;
+        assert_eq!(table.take_at(1).map(|sink| sink.0), Some(2));
+        assert_eq!(table.epoch, epoch + 1, "a removal moves the table");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.row_at(1).map(|(key, _)| key), Some("topic/c"));
+        assert!(table.take_at(2).is_none(), "nothing past the end");
+        assert_eq!(table.epoch, epoch + 1, "a take of nothing moves nothing");
+    }
+
+    /// A subscription is found by what its sink holds, at its place in the table's order.
+    #[test]
+    fn a_row_is_found_by_its_sink() {
+        let mut table = SubscriberTable::<Tagged>::with_sink_backing();
+        for (key, tag) in [("topic/a", 1), ("topic/b", 2)] {
+            table
+                .register_sink(key, Locality::Any, Tagged(tag))
+                .expect("registers");
+        }
+        assert_eq!(table.position_of(|sink| sink.0 == 2), Some(1));
+        assert_eq!(table.position_of(|sink| sink.0 == 3), None);
+        assert!(table.take_at(0).is_some());
+        assert_eq!(table.position_of(|sink| sink.0 == 2), Some(0));
+    }
+
+    /// A table holding as many subscriptions as its limit admits is full, and refuses the next;
+    /// one taken out makes it not full again.
+    #[test]
+    fn a_table_at_its_limit_is_full() {
+        let mut table = SubscriberTable::<Tagged>::with_sink_backing();
+        for at in 0..caps::MAX_SUBSCRIPTIONS {
+            assert!(!table.is_full(), "row {at} is free");
+            table
+                .register_sink(&alloc::format!("topic/{at}"), Locality::Any, Tagged(0))
+                .expect("a row is left");
+        }
+        assert!(table.is_full());
+        assert_eq!(
+            table
+                .register_sink("topic/past", Locality::Any, Tagged(0))
+                .map(|_| ()),
+            Err(RegisterError::TableFull)
+        );
+        assert!(table.take_at(0).is_some());
+        assert!(!table.is_full());
     }
 
     /// An aggregate interest's reply takes its declaration id from the same

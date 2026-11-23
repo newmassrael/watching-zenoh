@@ -79,7 +79,9 @@ fn a_subscribers_callback_is_dropped_once_on_undeclare() {
     let id = declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
     assert_eq!(counts.minted(), 1);
     assert_eq!(counts.callbacks_dropped(), 0, "a declared callback is held");
+    assert_eq!(engine.subscriber_rows(), 1, "the subscriber is one row");
     engine.undeclare_subscriber(id);
+    assert_eq!(engine.subscriber_rows(), 0, "its row is taken out");
     assert_eq!(counts.callbacks_dropped(), 1);
     engine.undeclare_subscriber(id);
     assert_eq!(
@@ -127,8 +129,10 @@ fn the_close_leaves_no_callback_in_the_table() {
         0
     );
     assert_eq!(engine.callbacks_held(), 2, "one for each declaration");
+    assert_eq!(engine.subscriber_rows(), 1);
     SessionDrive::close(&*engine);
     assert_eq!(engine.callbacks_held(), 0, "the close took the table whole");
+    assert_eq!(engine.subscriber_rows(), 0, "and the subscribers' rows");
     assert_eq!(counts.callbacks_dropped(), 1);
     assert!(
         alive.upgrade().is_none(),

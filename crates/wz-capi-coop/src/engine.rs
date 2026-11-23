@@ -102,7 +102,6 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
-use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::{QosLevel, SampleKind};
@@ -114,7 +113,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
@@ -1228,8 +1227,6 @@ type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
 pub(crate) struct EntryBytes;
 
 impl EntryBytes {
-    /// A subscriber's row.
-    pub(crate) const SUBSCRIBER: usize = core::mem::size_of::<SubEntry>();
     /// A queryable's row.
     #[cfg(feature = "queryable")]
     pub(crate) const QUERYABLE: usize = core::mem::size_of::<QblEntry>();
@@ -1318,7 +1315,6 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entities: EntityRows,
     /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
     keys: KeySpace,
-    subscribers: Rows<SubEntry, { caps::MAX_SUBSCRIPTIONS }>,
     keyexprs: Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
@@ -1514,26 +1510,50 @@ impl IdleWait {
     }
 }
 
-struct SubEntry {
+/// One of the session's own subscribers, as a row of the session core's subscriber table holds
+/// it: the row keeps the pattern the subscriber matches, and this, its sink, everything else the
+/// session knows of it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1).
+pub(crate) struct SubscriberRow {
     id: SubId,
-    registration: SubscriptionId,
     retraction: Option<RetractionKey>,
-    keyexpr: RowKey,
     /// The key the declaration names, kept to declare it again over a new link; holding it also
-    /// keeps alive what it holds.
+    /// keeps alive what it holds, so a row is let go of with no lock of the session held.
     wire: WireKey,
+    /// Where a sample the row matches is offered, under the subscriber's id.
+    lane: Arc<SharedLane>,
 }
 
-impl SubEntry {
-    /// Declare this subscriber over `actions`: whether the link took it.
-    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let wire = on_link(actions, &self.keyexpr, &self.wire);
+impl SubscriberRow {
+    /// Declare this subscriber, which matches `keyexpr`, over `actions`: whether the link took
+    /// it.
+    fn declare<C: ClockSource + 'static>(&self, keyexpr: &str, actions: &McuActions<C>) -> bool {
+        let wire = on_link(actions, keyexpr, &self.wire);
         if wire.is_literal() {
-            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
+            actions.send_declare_subscriber(self.id, 0, Some(keyexpr))
         } else {
             actions.send_declare_subscriber(self.id, wire.mapping_id, wire.suffix.as_deref())
         }
         .is_ok()
+    }
+
+    /// Retract this subscriber over `actions`, naming its key when its declaration asked to.
+    fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        match &self.retraction {
+            Some(key) => actions.send_undeclare_subscriber_naming(
+                u64::from(self.id),
+                key.mapping_id,
+                &key.suffix,
+            ),
+            None => actions.send_undeclare_subscriber(u64::from(self.id)),
+        }
+    }
+}
+
+impl SampleSink for SubscriberRow {
+    fn deliver(&mut self, sample: &dyn SampleView) {
+        // SAFETY: the session core's table hands its sinks a sample under the session's lock: it
+        // is the registry's, which only `Core` holds.
+        unsafe { self.lane.offer_sample(self.id, sample) }
     }
 }
 
@@ -3515,7 +3535,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The tables of the session's own declarations, lent from the arena as the plan counts
         // them. Declared after the arena, so a refusal before `core` holds them drops them first.
         let entities = plan.entities();
-        let subscribers = arena.lend(entities.subscribers).map_err(OpenError::Arena)?;
         let keyexprs = arena.lend(entities.keyexprs).map_err(OpenError::Arena)?;
         let filters = arena
             .lend(
@@ -3615,7 +3634,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             wire_zid: wire,
             entities,
             keys,
-            subscribers,
             keyexprs,
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
@@ -3918,6 +3936,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn clock_reads(&self) -> usize {
         self.core.lock().0.clock_reads.get()
+    }
+
+    /// How many subscribers the session core's table holds, each one row: what a test of a
+    /// subscriber's ends reads. Read under the lock, uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn subscriber_rows(&self) -> usize {
+        self.core.lock().0.registry.borrow().app.subscribers.len()
     }
 
     /// How many callbacks the table of callbacks holds: what a test of the close reads.
@@ -5461,26 +5486,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return self.next_entity_id();
         };
         let core = &mut guard.0;
-        // A full table refuses the subscriber before it takes an id, registers or sends anything;
-        // the sink goes with the refusal.
-        if core.subscribers.free_slots() == 0 {
+        // The subscriber is one row of the session core's table. A full table refuses it before
+        // it takes an id, registers or sends anything; the sink goes with the refusal.
+        if core.registry.borrow().app.subscribers.is_full() {
             return None;
         }
-        // So does a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
-        let lane = self.samples.clone();
-        let registration = core.registry.borrow_mut().app.subscribers.register_sink(
-            keyexpr,
-            allowed_origin,
-            // SAFETY: the registry hands its sinks a sample under the session's lock.
-            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
-        );
-        // A registration the observer refuses is a refused declaration, told as one: an id
-        // answered for it would name a subscriber that hears nothing and was never announced.
-        let Ok(registration) = registration else {
-            return None;
+        // The row goes at the end of the table, where the replay finds it.
+        let at = core.registry.borrow().app.subscribers.len();
+        let row = SubscriberRow {
+            id,
+            retraction,
+            wire,
+            lane: self.samples.clone(),
         };
+        // A registration the table refuses (a key longer than a row holds or with no room in the
+        // key arena) is a refused declaration, told as one: an id answered for it would name a
+        // subscriber that hears nothing and was never announced.
+        let registered =
+            core.registry
+                .borrow_mut()
+                .app
+                .subscribers
+                .register_sink(keyexpr, allowed_origin, row);
+        if registered.is_err() {
+            return None;
+        }
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
         let callback = sample_shown(exposed_by(&core.policy), sink());
@@ -5488,24 +5519,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             TargetKey::Subscriber(id),
             Target::Subscriber(Arc::new(Mutex::new(callback))),
         ));
-        let entry = SubEntry {
-            id,
-            registration,
-            retraction,
-            keyexpr: key,
-            wire,
-        };
-        core.announce(Kind::Subscriber, |actions| entry.declare(actions));
-        #[cfg(feature = "group")]
-        core.announce_to_groups(GroupEntity {
-            what: GroupDeclaration::Subscriber,
-            entity: id,
-            keyexpr: &entry.keyexpr,
-            wire: &entry.wire,
-            retraction: entry.retraction.as_ref(),
-            allowed_origin,
+        // Each link is told it from the row, which names the key as the table keeps it.
+        let registry = Rc::clone(&core.registry);
+        core.announce_stored(Kind::Subscriber, at, |actions| {
+            registry
+                .borrow()
+                .app
+                .subscribers
+                .row_at(at)
+                .is_some_and(|(keyexpr, row)| row.declare(keyexpr, actions))
         });
-        keep(&mut core.subscribers, entry);
+        #[cfg(feature = "group")]
+        {
+            let registry = core.registry.borrow();
+            if let Some((keyexpr, row)) = registry.app.subscribers.row_at(at) {
+                core.announce_to_groups(GroupEntity {
+                    what: GroupDeclaration::Subscriber,
+                    entity: id,
+                    keyexpr,
+                    wire: &row.wire,
+                    retraction: row.retraction.as_ref(),
+                    allowed_origin,
+                });
+            }
+        }
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -5549,34 +5586,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop((live, callback));
             return;
         }
+        // The row is taken out of the table under the lock and let go of after it: its key may hold
+        // a declaration whose release reaches the session (`WireKey`).
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let at = core.subscribers.iter().position(|s| s.id == id)?;
-            let links = core.retract(Kind::Subscriber, at);
-            let mut entry = core.subscribers.remove(at);
-            #[cfg(feature = "group")]
-            core.retract_from_groups(id);
-            core.registry
-                .borrow_mut()
+            let at = core
+                .registry
+                .borrow()
                 .app
                 .subscribers
-                .unregister(entry.registration);
+                .position_of(|row| row.id == id)?;
+            let links = core.retract(Kind::Subscriber, at);
+            #[cfg(feature = "group")]
+            core.retract_from_groups(id);
+            let row = core.registry.borrow_mut().app.subscribers.take_at(at)?;
             for actions in links {
-                match &entry.retraction {
-                    Some(key) => actions.send_undeclare_subscriber_naming(
-                        u64::from(id),
-                        key.mapping_id,
-                        &key.suffix,
-                    ),
-                    None => actions.send_undeclare_subscriber(u64::from(id)),
-                }
+                row.retract(&actions);
             }
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
-            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
-            entry.keyexpr.let_go();
-            Some(entry)
+            Some(row)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
         drop((entry, callback));
@@ -6733,7 +6763,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         core.end_links();
         // The rows go back to their tables with the session: a table lent from its arena keeps
         // its rows. Their callbacks are the table of callbacks', taken whole below.
-        core.subscribers.clear();
+        {
+            let mut registry = core.registry.borrow_mut();
+            let subscribers = &mut registry.app.subscribers;
+            while let Some(last) = subscribers.len().checked_sub(1) {
+                drop(subscribers.take_at(last));
+            }
+        }
         core.matches.clear();
         #[cfg(feature = "queryable")]
         core.queryables.clear();

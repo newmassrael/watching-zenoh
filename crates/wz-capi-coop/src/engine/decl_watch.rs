@@ -23,10 +23,10 @@ use wz_capi_port::os::Mutex;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
-use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
+use wz_session_core::slot_observer::SlotObserverOf;
 
 use super::lock;
-use super::registry::FaceTables;
+use super::registry::{CoopSinks, FaceTables};
 
 /// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
 /// declarations the engine reads for its publishers' write filters, queryables with a querier or a
@@ -181,7 +181,7 @@ impl DeclWatches {
     /// observer.
     pub(super) fn observe<P: Storage>(
         &self,
-        app: &mut SlotObserverOf<HeapSinks, P>,
+        app: &mut SlotObserverOf<CoopSinks, P>,
         plane: DeclPlane,
     ) -> Result<(), DeclWatchRefused> {
         let mut table = lock(&self.table);
@@ -254,7 +254,7 @@ impl DeclWatches {
     /// `None` when no watch is declared under `id`.
     pub(super) fn undeclare<P: Storage>(
         &self,
-        app: &mut SlotObserverOf<HeapSinks, P>,
+        app: &mut SlotObserverOf<CoopSinks, P>,
         id: DeclWatchId,
     ) -> Option<DeclWatchSink> {
         let mut table = lock(&self.table);
@@ -357,7 +357,7 @@ fn undeclared_sink(plane: DeclPlane, staged: &Arc<Mutex<Vec<Staged>>>) -> BoxedU
 
 /// Install in `app` the two observers of `plane`, both or neither.
 fn install<P: Storage>(
-    app: &mut SlotObserverOf<HeapSinks, P>,
+    app: &mut SlotObserverOf<CoopSinks, P>,
     plane: DeclPlane,
     staged: &Arc<Mutex<Vec<Staged>>>,
 ) -> Result<Observers, DeclWatchRefused> {
@@ -418,7 +418,7 @@ fn install<P: Storage>(
 }
 
 /// Take the two observers `observers` names out of `app`.
-fn uninstall<P: Storage>(app: &mut SlotObserverOf<HeapSinks, P>, observers: Observers) {
+fn uninstall<P: Storage>(app: &mut SlotObserverOf<CoopSinks, P>, observers: Observers) {
     match observers.plane {
         DeclPlane::Subscribers => {
             app.remote_subscribers

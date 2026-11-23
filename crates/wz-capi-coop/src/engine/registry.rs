@@ -34,19 +34,22 @@
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, LendRefused, Lent};
+use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use wz_session_core::slot_observer::{
-    HeapSinks, ObserverRows, OtherPeers, Requesters, SlotObserverOf,
+    ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
 };
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
+use super::SubscriberRow;
 use crate::arena::{FacePeers, GetTables};
 use wz_capi_port::FilterPlane;
 use wz_session_core::locality::Locality;
@@ -255,9 +258,21 @@ impl OtherPeers for Others<'_> {
 #[cfg(feature = "local-queryable")]
 pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 
+/// What the application's tables hold on this engine: the heap profile's registrations, but for
+/// the session's own subscribers, each of whose rows is the engine's whole record of it
+/// ([`SubscriberRow`]), not a closure over the engine's own.
+pub(super) struct CoopSinks;
+
+impl ObserverSinks for CoopSinks {
+    type Subscriber = SubscriberRow;
+    type Queryable = BoxedQuerySink;
+    type Declared = BoxedDeclSink;
+    type Undeclared = BoxedUndeclSink;
+}
+
 /// What the application registered on the session: its tables' rows lent from the session's
 /// arena at its open, each as many as the limit the open resolved.
-pub(super) type App = SlotObserverOf<HeapSinks, Lent>;
+pub(super) type App = SlotObserverOf<CoopSinks, Lent>;
 
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {

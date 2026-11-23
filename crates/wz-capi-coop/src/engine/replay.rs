@@ -191,7 +191,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
             Kind::Keyexpr => self.keyexprs.len(),
-            Kind::Subscriber => self.subscribers.len(),
+            Kind::Subscriber => self.registry.borrow().app.subscribers.len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
             Kind::Queryable => self.queryables.len(),
@@ -209,6 +209,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .take_while(|&&earlier| earlier != kind)
             .map(|&earlier| self.len_of(earlier))
             .sum()
+    }
+
+    /// The place a declaration of `kind` stored next takes in the replay's order.
+    fn end_of(&self, kind: Kind) -> usize {
+        self.start_of(kind) + self.len_of(kind)
     }
 
     /// How many declarations the session holds, which is how many a replay owes.
@@ -232,7 +237,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         .send_declare_keyexpr(entry.id, &entry.keyexpr)
                         .is_ok()
                 }
-                Kind::Subscriber => self.subscribers[left].declare(actions),
+                Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
+                    Some((keyexpr, row)) => row.declare(keyexpr, actions),
+                    None => true,
+                },
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => self.queryables[left].declare(actions),
@@ -288,22 +296,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.faces[at].replay.settle(cursor, told, refused, now_ms)
     }
 
-    /// A declaration of `kind` is about to be stored at the end of its list: tell the peer of each
+    /// A declaration takes `place` in the replay's order: tell the peer of each
     /// face that is up of it with `send`, unless it is not to be told now, and say whether it was
     /// taken. It is not told to a face that is not up, which declares it when it comes up, and
     /// when that face's replay has not reached its place, which sends it in its turn; both count
     /// as taken. A refusal is answered as `on_refusal` says: [`OnRefusal::Forget`] counts what
     /// was refused as told, and [`OnRefusal::Undo`] makes the declaration over, putting every
     /// face's replay back as it was and taking back, with `undo`, what the faces that took it
-    /// were told. Call it once, before the push.
+    /// were told. Call it once for each declaration.
     fn announce_with(
         &mut self,
-        kind: Kind,
+        place: usize,
         on_refusal: OnRefusal,
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        let place = self.start_of(kind) + self.len_of(kind);
         // What each face's replay was and what its link made of the declaration, so that a refusal
         // that undoes the declaration can put every face back.
         let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
@@ -337,7 +344,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// that a link refused is counted as told, and the peer learns it when the session declares
     /// over a new link.
     pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
-        self.announce_with(kind, OnRefusal::Forget, send, |_| {});
+        let place = self.end_of(kind);
+        self.announce_with(place, OnRefusal::Forget, send, |_| {});
+    }
+
+    /// [`Self::announce`] for a declaration its table stored already, at `index` of its list: a
+    /// row of the session core's tables is the declaration itself, so it is in its table before
+    /// any link is told of it.
+    pub(super) fn announce_stored(
+        &mut self,
+        kind: Kind,
+        index: usize,
+        send: impl Fn(&McuActions<C>) -> bool,
+    ) {
+        let place = self.start_of(kind) + index;
+        self.announce_with(place, OnRefusal::Forget, send, |_| {});
     }
 
     /// [`Self::announce_with`] for a declaration that is not made when a link refuses it: whether
@@ -348,7 +369,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        self.announce_with(kind, OnRefusal::Undo, send, undo)
+        let place = self.end_of(kind);
+        self.announce_with(place, OnRefusal::Undo, send, undo)
     }
 
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
