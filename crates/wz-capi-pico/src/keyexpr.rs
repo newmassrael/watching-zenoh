@@ -367,29 +367,6 @@ impl DeclaredKeyexpr {
         }
     }
 
-    /// The declaration's id when it covers the WHOLE key on `shared`, which is when
-    /// [`Self::wire`] would answer an alias with no remainder: a put on it names the
-    /// key by this id alone. `None` for a literal key, a prefix declaration (the
-    /// remainder rides the wire) or another session's declaration.
-    ///
-    /// The id is stable for as long as the key is held: the key owns its
-    /// declaration, and the declaration is retracted only when the last key
-    /// holding it lets go, so a publisher asks once at declare rather than per put.
-    pub(crate) fn whole_key_mapping(
-        &self,
-        shared: &Engine,
-    ) -> Option<wz_session_core::wire_id::ExprId> {
-        // A session whose links name keys their own way (`crate::key_ids`) is sent a put the
-        // general way, which each link names as its form says: no id goes to every link at once.
-        #[cfg(feature = "shared-key-ids")]
-        if shared.names_keys_by_link() {
-            return None;
-        }
-        self.declared_on(shared)
-            .filter(|d| d.prefix_len == self.literal().len())
-            .map(|d| d.id)
-    }
-
     /// What an entity held on this key names when it retracts itself, or `None`
     /// when it retracts by id alone, on a session whose role is `mode` and whose
     /// registry is `shared`: the two facts it reads, which a door has in the

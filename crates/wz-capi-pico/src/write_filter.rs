@@ -48,7 +48,7 @@
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
+use wz_capi_port::{FilterId, FilterPlane, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
@@ -205,25 +205,27 @@ impl WriteFilter {
         self.shared.write_filter_active(self.id)
     }
 
-    /// Whether the filter keeps a put, a delete or a get from being sent: [`Self::active`],
-    /// unless the session holds a multicast group, where pico sends whatever the filter says
-    /// (the engine's `write_filter_holds_back`). A matching status still reads
-    /// [`Self::active`].
+    /// Whether the filter keeps a get from being sent: [`Self::active`], unless the session
+    /// holds a multicast group, where pico sends whatever the filter says (the engine's
+    /// `write_filter_holds_back`). A matching status still reads [`Self::active`]; a put and
+    /// a delete are judged by the engine in the step that sends them ([`Self::publish`]).
+    #[cfg(feature = "query")]
     pub(crate) fn holds_back(&self) -> bool {
         self.shared.write_filter_holds_back(self.id)
     }
 
-    /// [`Self::active`] followed by a plain put on a declared key, in one step of the
-    /// registry (the engine's `put_plain_filtered`).
-    pub(crate) fn put_plain(
+    /// A put or a delete of the entity this filter is for, sent unless the filter holds it
+    /// back, which answers `Ok(0)` as pico answers a suppressed write: the engine's one entry
+    /// for it (`publish_filtered`), which also judges whether it goes the plain way.
+    pub(crate) fn publish(
         &self,
         keyexpr: &str,
-        mapping_id: wz_session_core::wire_id::ExprId,
+        wire: &WireKey,
         payload: &[u8],
-        params: &wz_session_core::publish_options::PlainPutParams,
-    ) -> FilteredPut {
+        opts: &wz_session_core::publish_options::PublishOptions,
+    ) -> Result<usize, wz_capi_port::FanoutError> {
         self.shared
-            .put_plain_filtered(self.id, keyexpr, mapping_id, payload, params)
+            .publish_filtered(self.id, keyexpr, wire, payload, opts)
     }
 }
 

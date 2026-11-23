@@ -382,6 +382,45 @@ pub trait SessionEngine: Send + Sync + 'static {
         params: &PlainPutParams,
     ) -> FilteredPut;
 
+    /// Publish what an entity holding write filter `filter` writes: the one entry a declared
+    /// entity's put and delete go through. Nothing is sent when the filter holds the write back,
+    /// answered `Ok(0)` as zenoh-pico answers a suppressed write. A Put `opts` leave plain, on a
+    /// key a declaration covers whole, goes the plain way ([`Self::put_plain_filtered`]), which
+    /// judges the filter in the same step; every other write goes the general way
+    /// ([`Self::publish_on_wire_all`]). The caller hands the same arguments whatever the write,
+    /// so it keeps no plain form of its own.
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        let whole = wire.mapping_id != 0 && wire.suffix.is_none();
+        // A link that names keys its own way is sent the general way, which names the key as
+        // each link's form says.
+        #[cfg(feature = "shared-key-ids")]
+        let whole = whole && !self.names_keys_by_link();
+        match opts.plain_put_params().filter(|_| whole) {
+            Some(params) => {
+                match self.put_plain_filtered(filter, keyexpr, wire.mapping_id, payload, &params) {
+                    FilteredPut::Suppressed => return Ok(0),
+                    FilteredPut::Sent(sent) => return sent,
+                    // The filter let it through; a local subscriber, a group or a link that
+                    // rewrites keys takes the general way.
+                    FilteredPut::NotPlain => {}
+                }
+            }
+            None => {
+                if self.write_filter_holds_back(filter) {
+                    return Ok(0);
+                }
+            }
+        }
+        self.publish_on_wire_all(keyexpr, wire, payload, opts)
+    }
+
     /// Whether the session has a transport to carry a batch window: a face, or a listener that
     /// takes one. This is zenoh-pico's `_z_transport_get_common` being non-NULL, which its three
     /// `zp_batch_*` answer `_Z_ERR_TRANSPORT_NOT_AVAILABLE` for when it is not (a client whose

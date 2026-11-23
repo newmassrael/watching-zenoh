@@ -52,7 +52,7 @@ use crate::result::{
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, SubId, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
@@ -1227,15 +1227,6 @@ pub(crate) struct PlainPublisher {
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
     declared: PublisherQos,
-    /// The facts a put that brings nothing of its own is sent from, worked out ONCE
-    /// at declare from the QoS above ([`PublishOptions::plain_put_params`]), and the
-    /// id the key is named by when its declaration covers the whole key. Both
-    /// `Some` is what lets [`PlainPublisher::publish_plain`] skip the per-put clone
-    /// of the options and the per-put look-up of the key's wire form.
-    plain: Option<(
-        wz_session_core::publish_options::PlainPutParams,
-        wz_session_core::wire_id::ExprId,
-    )>,
 }
 
 /// What a pico publisher is declared with, and sends with on every put and
@@ -1368,10 +1359,6 @@ impl PlainPublisher {
             &wire,
             declared.counts_local(),
         )?;
-        let plain = declared
-            .apply(put_options())
-            .plain_put_params()
-            .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1380,34 +1367,7 @@ impl PlainPublisher {
             key,
             wire,
             declared,
-            plain,
         })
-    }
-
-    /// [`Self::publish`] for a put that brings no options of its own: sent from the
-    /// facts worked out at declare when this publisher has them, and through the
-    /// general path when it has not, or when this node's own subscriber wants the
-    /// put or a face stamps what it sends (`put_plain_declared` answers `None`
-    /// then, with nothing sent).
-    pub(crate) fn publish_plain(&self, payload: &[u8]) -> ZResult {
-        // pico's session check comes first, before the write filter
-        // (`_z_publisher_put_impl`, `Z_FEATURE_SESSION_CHECK`).
-        if self.shared.is_closed() {
-            return Z_ERR_SESSION_CLOSED;
-        }
-        let Some((params, mapping)) = &self.plain else {
-            return self.publish(payload, put_options());
-        };
-        match self
-            .filter
-            .put_plain(self.key.literal(), *mapping, payload, params)
-        {
-            FilteredPut::Suppressed => Z_OK,
-            FilteredPut::Sent(sent) => publish_code(sent),
-            // Nothing was sent, and the put is wanted: the filter said so, or the session holds
-            // a multicast group the filter does not hold the put back from.
-            FilteredPut::NotPlain => self.publish_filtered(payload, put_options()),
-        }
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the
@@ -1416,8 +1376,8 @@ impl PlainPublisher {
     /// `Z_OK`, as `z_publisher_put` / `z_publisher_delete` do upstream
     /// (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`). A session that holds a multicast group
-    /// sends whatever the filter says, as upstream's multicast transport does
-    /// ([`WriteFilter::holds_back`]).
+    /// sends whatever the filter says, as upstream's multicast transport does. The engine
+    /// judges the filter and the plain way in the one step that sends ([`WriteFilter::publish`]).
     pub(crate) fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
@@ -1425,21 +1385,11 @@ impl PlainPublisher {
         if self.shared.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        if self.filter.holds_back() {
-            return Z_OK;
-        }
-        self.publish_filtered(payload, opts)
-    }
-
-    /// [`Self::publish`] once the write filter has said the put is wanted.
-    fn publish_filtered(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         let opts = self.declared.apply(opts);
-        publish_code(self.shared.publish_on_wire_all(
-            self.key.literal(),
-            &self.wire,
-            payload,
-            &opts,
-        ))
+        publish_code(
+            self.filter
+                .publish(self.key.literal(), &self.wire, payload, &opts),
+        )
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -1491,11 +1441,6 @@ impl PublisherState {
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
     fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         self.core.publish(payload, opts)
-    }
-
-    /// [`Self::publish`] for a put that carries nothing of its own — [`PlainPublisher::publish_plain`].
-    fn publish_plain(&self, payload: &[u8]) -> ZResult {
-        self.core.publish_plain(payload)
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -2807,10 +2752,10 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        match publisher_put_options(options) {
-            Some(opts) => state.publish(&buf, opts),
-            None => state.publish_plain(&buf),
-        }
+        state.publish(
+            &buf,
+            publisher_put_options(options).unwrap_or_else(put_options),
+        )
     })
 }
 

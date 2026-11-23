@@ -1326,6 +1326,57 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+/// The one entry a declared entity's write goes through (`publish_filtered`) holds a put back
+/// while its filter says nothing matches, answering it sent to no one, and sends it once a
+/// subscriber opens the filter.
+#[test]
+fn a_filtered_publish_is_held_back_then_sent() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/x",
+            &WireKey::literal(),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some("demo/x".to_owned()),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) > 0
+    });
+    let opts = PublishOptions::put();
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", &opts),
+        Ok(0),
+        "no subscriber yet: the put is held back"
+    );
+    for _ in 0..20 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        router.seen(|s| s.pushes),
+        0,
+        "CONTROL: a held-back put never reaches the wire"
+    );
+
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    assert!(engine
+        .publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", &opts)
+        .is_ok());
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.pushes) == 1
+    });
+    SessionDrive::close(&*engine);
+}
+
 /// A matching listener records each verdict it is told.
 fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
