@@ -1099,7 +1099,8 @@ impl Tables {
     /// How many nodes the room is spent on: the ones held and the ones asked for.
     #[cfg(not(feature = "lifecycle-verbs"))]
     fn nodes(&self) -> usize {
-        self.held.len() + self.requests.len()
+        // Both are rows of tables the size of the room.
+        self.held.len().saturating_add(self.requests.len())
     }
 
     #[cfg(feature = "lifecycle-verbs")]
