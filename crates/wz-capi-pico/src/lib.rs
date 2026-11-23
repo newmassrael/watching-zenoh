@@ -592,8 +592,6 @@ pub mod event_log;
 pub mod ext_interface;
 // The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the supervision deadline of the observation plane).
-// Totality debt TD-180 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 mod ffi;
 #[cfg(feature = "query")]
 // Totality debt TD-169 (docs/c-abi-architecture.md section 7).
