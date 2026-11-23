@@ -247,6 +247,36 @@ config WZ_LIMIT_HELD_PAYLOADS
 	  object when the program reserved none (object-pool). A constructor past it
 	  answers out of memory and leaves its payload null.
 
+config WZ_LIMIT_HELD_CONFIGS
+	int "HELD_CONFIGS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The configs (z_owned_config_t) a program of the pico C ABI holds at once,
+	  each from z_config_default or z_config_clone to its move into an open or a
+	  scout, or its drop: the slots of the pool of configs the library reserves at
+	  its first object, each the size of one config of the build. One more is
+	  refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_HELLOS
+	int "HELD_HELLOS"
+	default 16
+	help
+	  The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
+	  with as many locators as a scouting window keeps of one Hello: the slots of
+	  the pool of kept hellos the library reserves at its first object. One more
+	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_PAYLOAD_BYTES
+	int "HELD_PAYLOAD_BYTES"
+	default 131072
+	help
+	  The bytes the owned payloads, strings and slices a program of the pico C ABI
+	  holds carry at once: the payloads' area the library reserves at its first
+	  object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
+	  smallest that holds its bytes and a 16-byte head. A payload no free block
+	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+
 config WZ_LIMIT_CONFIG_ENTRIES
 	int "CONFIG_ENTRIES"
 	range 1 255

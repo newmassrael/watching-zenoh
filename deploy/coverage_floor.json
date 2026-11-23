@@ -1,0 +1,32 @@
+{
+  "about": "The line, branch and function coverage of the cooperative engine's crates, one row per crate. Layer Vcov runs the tests of each unit of scripts/lib/verify_plan.py (each crate in the feature sets the C library and the MCU kit images build it in) instrumented with -Cinstrument-coverage -Zcoverage-options=branch on the nightly crates/wz-fuzz/rust-toolchain.toml pins, merges the profiles, and `scripts/lib/coverage_floor_gate.py --check` judges the merged llvm-cov export against these rows. A row holds each measure as the covered share in percent, rounded down to two places, to that floor less `tolerance` percentage points: a reading below it fails, a reading above it passes and prints the tighter row to commit. A null measure is not measured yet and reads NOT-MEASURED, never a pass; `--fill <export>` prints the rows an export writes, and never loosens a filled one. A crate's sources are its files under crates/<crate>/src/ without the files that hold only tests; a line counts once whichever test executable reached it. A row is written from the gate's own output for an export, never by hand.",
+  "schema": "wz-coverage-floor/1",
+  "tolerance": 0.1,
+  "crates": {
+    "wz-capi-pico": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "wz-capi-coop": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "wz-runtime-coop": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "wz-session-core": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "wz-session-mcu": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    }
+  }
+}

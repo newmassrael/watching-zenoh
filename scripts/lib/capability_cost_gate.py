@@ -2031,24 +2031,47 @@ def comment_linker(dump: str) -> str:
     return f"{NO_LINKER_NAMED} (GNU ld names none)"
 
 
-def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+@dataclass(frozen=True)
+class CaseBuild:
+    """How a case's library is built: the cargo command (run from `crates/`), the environment it
+    runs in, the library it leaves, and the linker arguments its flags give, which its zenoh-pico
+    reference is linked with alike (`reference_build`). The host performance matrix
+    (`scripts/host-bench/perf_matrix.py wz-arm`) builds its arm W by this plan, so the library it
+    times is built as the library this gate measures."""
+
+    cmd: tuple[str, ...]
+    env: Mapping[str, str]
+    lib: pathlib.Path
+    link_args: tuple[str, ...]
+
+
+def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
+               cfg: set[str] | None = None) -> CaseBuild:
+    """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
+    files is built for the host's own target, `triple` (this host's when not given), whose
+    `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags reach the
+    library's crates and not the build scripts."""
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
     flags = list(GATE_RUSTFLAGS)
     if case.cargo_configs:
-        triple = host_triple()
-        flags += case_config_flags(case, triple, target_cfg(triple))
+        triple = triple or host_triple()
+        flags += case_config_flags(case, triple, target_cfg(triple) if cfg is None else cfg)
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
-    env = with_rustflags(env, flags)
-    linked = link_args(flags)
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
-    subprocess.run(cmd, cwd=CRATES, env=env, check=True)
-    lib = lib_dir / case.lib
+    return CaseBuild(tuple(cmd), with_rustflags(env, flags), lib_dir / case.lib,
+                     tuple(link_args(flags)))
+
+
+def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+    plan = case_build(case, env)
+    subprocess.run(list(plan.cmd), cwd=CRATES, env=dict(plan.env), check=True)
+    lib = plan.lib
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
@@ -2071,7 +2094,7 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
                     leaked=tuple(build_normalization.leaked(data, prefixes)),
                     undefined=tuple(line.split()[-1] for line in undefined if line.split()),
-                    needed=needed, linker=linker_of(lib), link_args=tuple(linked),
+                    needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
                     eh_frame=has_unwind_tables(data))
@@ -2743,6 +2766,27 @@ def cmd_selftest() -> int:
            and link_findings("t", Measured(900, [], 3, eh_frame=True)) == [])
     expect("every library the gate builds is linked by GNU ld through cc",
            link_args(GATE_RUSTFLAGS) == [GNU_LD] and "linker=cc" in GATE_RUSTFLAGS)
+    # The plan of a case's build, which the performance matrix builds its arm W by.
+    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {})
+    expect("a case of no configuration file is built for the default target, by the gate's linker",
+           plain.cmd[:6] == ("cargo", "build", "--profile", "release", "-p", "wz-capi-pico")
+           and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
+           and "--target" not in plain.cmd and plain.lib == TARGET / "release" / "libt.so"
+           and plain.link_args == (GNU_LD,)
+           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
+    expect("a case of the crate's default features names none",
+           "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
+           and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
+    bare_build = case_build(by_case["pico-client-coop-nostd"], {}, "x86_64-unknown-linux-gnu",
+                            linux_gnu)
+    expect("a case of configuration files is built for the target named, their flags the library's",
+           bare_build.cmd[bare_build.cmd.index("--target") + 1] == "x86_64-unknown-linux-gnu"
+           and bare_build.lib
+           == TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
+           and "force-unwind-tables=no"
+           in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+           and discards_unwind_tables(bare_build.link_args)
+           and PACKED_RELOCS_LINK in bare_build.link_args)
     expect("the GNU ld line of the C compiler's linker version is read, and none is None",
            gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
            == "GNU ld (GNU Binutils for Ubuntu) 2.38"

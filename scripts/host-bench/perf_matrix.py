@@ -9,13 +9,29 @@ committed rows.
 
 `scripts/pico-compare.sh perf` builds the arms and runs this; the subcommands are its steps.
 
-    perf_matrix.py reference --out DIR --engine ENGINE
+    perf_matrix.py bench-stdlib [STDLIB]
+        the standard library arm W is built with: STDLIB (std or nostd, PICO_CMP_STDLIB) when given, to
+        compare the two forms, else the one form the pico C ABI's release ships
+        (`pico_windows_package.RELEASE_STDLIBS`), so a run reads what ships unless told another
+    perf_matrix.py reference --out DIR --engine ENGINE --stdlib STDLIB
         zenoh-pico built as the same build as wz-capi-pico's default capabilities on ENGINE (tokio or
-        coop, what `wz_config.py --bench-engine` resolved, `wz_config.bench_features`): the build the
-        capability cost gate measures (`capability_cost_gate.pico_reference_tree` under the gate's
-        `build_env`, its switches from `wz_config.pico_reference`), its library copied to DIR/lib-P,
-        its headers to DIR/include-P, and what both arms are built as (the reference's pin, toolchain and switches, the wz features) to
-        DIR/reference.json, the engine among it (`wz_engine`), which the run's record and the gate read
+        coop, what `wz_config.py --bench-engine` resolved) with STDLIB (`bench-stdlib`,
+        `wz_config.bench_features`): the build the capability cost gate measures
+        (`capability_cost_gate.pico_reference_tree` under the gate's `build_env`, its switches from
+        `wz_config.pico_reference`), linked and compiled as the gate builds the reference of arm W's form
+        (`capability_cost_gate.reference_build` of the linker arguments of arm W's build, SHAPE_CASES:
+        without `std`, C with no unwind tables and the script that discards the rest), its library copied
+        to DIR/lib-P, its headers to DIR/include-P, and what both arms are built as (the reference's pin,
+        toolchain, switches, linker arguments and C flags, the wz features and arm W's profile and
+        configuration) to DIR/reference.json, the engine (`wz_engine`) and the standard library
+        (`wz_stdlib`) among it, which the run's record and the gate read
+    perf_matrix.py wz-arm --out DIR --arm ARM --engine ENGINE --stdlib STDLIB [--features F,...]
+        arm ARM (W, or Wapp with app-transport) of wz-capi-pico: the bench's build on ENGINE with STDLIB
+        and the capabilities F over its default ones, built as the size gate builds the case of that form
+        (SHAPE_CASES, `capability_cost_gate.case_build` in the gate's `build_env`: its profile, its cargo
+        configuration files, its linker), its library copied to DIR/lib-ARM and pico's headers to
+        DIR/include-ARM: the reference export's (`reference` first), with the config.h of the build's
+        feature list (`wz_config.pico_config_header`) in place of the reference's
     perf_matrix.py pico-sys-include REPORT
         the include directory of the one zenoh-pico-sys build cargo's JSON REPORT names
     perf_matrix.py external-record OUT [WHY]
@@ -31,8 +47,9 @@ committed rows.
     perf_matrix.py --gate RESULT [--table TABLE] [--external-table FILE] [--without-external]
         the gate over a run's perf.json: every cell of W over P held to its row of TABLE (by default the
         committed table of the run's platform, PLATFORMS: deploy/pico_perf_ceiling.json for a run on
-        Linux, deploy/pico_perf_ceiling_windows.json for one on Windows, and a table of another platform
-        is refused), and W over X to the rows of the table outside the repository
+        Linux, deploy/pico_perf_ceiling_windows.json for one on Windows, and a table of another platform,
+        or of rows filled from arm W of another engine or another standard library, is refused), and W
+        over X to the rows of the table outside the repository
         (--external-table, by default WZ_PERF_EXTERNAL_TABLE) when the run measured arm X. Exit 0 every
         row held, 1 a row failed, 2 an input refused, 3 nothing failed but a row or arm X was not
         measured (--without-external: a run without arm X is not that)
@@ -40,9 +57,11 @@ committed rows.
         the committed table's shape, and that its rows are the population of the default matrix
     perf_matrix.py windows-plan PACKAGE OUT
         the plan of a run on Windows (scripts/host-bench/windows/perf_matrix.ps1), written to OUT: arm W is
-        the library of the Windows package PACKAGE (the zip pico_windows_package.py builds), verified
-        against its manifest, and arm P zenoh-pico built as the same build, its switches derived from the
-        package's features as `reference` derives them from the bench's build; with the figures, the
+        the library of the Windows package PACKAGE (the zip pico_windows_package.py builds, without `std`
+        as a release ships it unless built otherwise; its manifest's `stdlib` is recorded as the Linux
+        reference records its own), verified against its manifest, and arm P zenoh-pico built as the
+        same build, its switches derived from the package's features as `reference` derives them from the
+        bench's build; with the figures, the
         reasons a cell is not applicable and the rules of a cell the runner applies, so the runner states
         none of its own. A package built from a commit whose inputs of that derivation differ from this
         tree's is refused
@@ -80,8 +99,14 @@ nothing and still counts the put. Both arms run the same arguments.
          count over a --window-s window that starts --warmup-ms after its first sample. Figures: messages
          and payload bytes a second delivered in the window, the rate the publisher put, the CPU per
          message of each side (the publisher's over its loop per put, the subscriber's over the window per
-         message delivered) and their sum, and the whole CPU and peak RSS of each process. A window that
-         did not lie inside the publisher's loop (both read the one monotonic clock) is no rate.
+         message delivered) and their sum, the puts not delivered, and the whole CPU and peak RSS of each
+         process. A window that did not lie inside the publisher's loop (both read the one monotonic clock)
+         is no rate. After its loop the publisher puts an end marker that carries its count of puts that
+         answered success, and keeps its session until it is stopped; the subscriber says how many it had
+         been handed when the first marker reached it, and it is given DRAIN_S to hand on its backlog first.
+         On a reliable stream (STREAM_TRANSPORTS) a put under congestion control block is delivered or
+         refused, so a marker that never came, or a count it was not handed, loses the cell (`delivery`):
+         a library that answers success for a put it dropped has its puts' CPU spent on nothing.
 
 A cell is VALID only when the pinned CPUs were used by nothing else while it ran (nodrop.py's rule: their
 busy time less the CPU of the two processes, over the CPU seconds the cell had, at most 10 percent); a
@@ -187,6 +212,7 @@ METRICS = {
     "rtt_min_us": "lower", "rtt_max_us": "lower", "round_trips": "higher", "lost": "lower",
     "ping_cpu_ns_per_rtt": "lower", "pong_cpu_ns_per_rtt": "lower",
     "msgs_per_s": "higher", "bytes_per_s": "higher", "offered_msgs_per_s": "higher", "put_failed": "lower",
+    "undelivered": "lower",
     "cpu_ns_per_msg_pub": "lower", "cpu_ns_per_msg_sub": "lower", "cpu_ns_per_msg": "lower",
     "cpu_user_s_client": "lower", "cpu_sys_s_client": "lower", "cpu_user_s_server": "lower",
     "cpu_sys_s_server": "lower", "rss_kib_client": "lower", "rss_kib_server": "lower", "rss_kib": "lower",
@@ -198,6 +224,18 @@ PONG_KEYS = ("answered", "cpu_ns", "stopped_by")
 PUB_KEYS = ("sent", "failed", "elapsed_ns", "cpu_ns", "start_ns", "end_ns")
 SUB_KEYS = ("received", "bytes", "window_ns", "cpu_ns", "start_ns", "end_ns")
 SUB_END_KEYS = ("total", "last_growth_ns", "peers")
+SUB_MARK_KEYS = ("pub_sent", "received_before_end")
+#: The transports whose links are reliable streams: a put under congestion control block is delivered there or
+#: refused, so one that answered success and never arrived loses its cell (`delivery`). A zenoh-pico peer, whose
+#: stream sockets do not block, leaves a batch it could not write whole to no one and answers success
+#: (docs/pico-perf-matrix.md section 4).
+STREAM_TRANSPORTS = ("tcp", "program")
+#: The seconds the subscriber is given, once the publisher printed its result, to hand on its backlog up to the
+#: publisher's end marker: the socket buffers of a loopback stream hold seconds of what a slow reader has not read.
+DRAIN_S = 20
+#: The same wait on a transport of datagrams, which may lose the marker as it loses any put: the figure is then
+#: not given, and the cell is not lost for it.
+MARK_WAIT_S = 2
 
 
 class Disturbed(Lost):
@@ -317,6 +355,30 @@ def thr_figures(pub: dict[str, str], sub: dict[str, str], client: Usage, server:
     }
     figures.update(process_figures(client, server))
     return figures
+
+
+def delivery(transport: str, put: dict[str, str], mark: dict[str, str] | None) -> int | None:
+    """The puts that answered success and had not been handed to the subscriber when the publisher's first end
+    marker reached it, or None when no marker did. On a reliable stream (STREAM_TRANSPORTS) a put under congestion
+    control block is delivered or refused, so a put that answered success and was not delivered, or a marker that
+    never came, loses the cell (Lost); on a transport of datagrams the count is a figure of the cell."""
+    sent = int(put["sent"])
+    stream = transport in STREAM_TRANSPORTS
+    if mark is None:
+        if stream:
+            raise Lost(f"the publisher's end marker ({put.get('end_marks', '?')} put(s) of it answered success) did "
+                       f"not reach the subscriber in {DRAIN_S} s, on a reliable stream under congestion control "
+                       "block")
+        return None
+    if int(mark["pub_sent"]) != sent:
+        raise Lost(f"the end marker carried {mark['pub_sent']} puts and the publisher said {sent}")
+    missing = sent - int(mark["received_before_end"])
+    if stream and missing != 0:
+        raise Lost(f"{sent} puts answered success and {mark['received_before_end']} reached the subscriber before "
+                   "the publisher's end marker, on a reliable stream under congestion control block: "
+                   + (f"{missing} answered success and were never delivered" if missing > 0
+                      else f"{-missing} more were delivered than were put"))
+    return missing
 
 
 def endpoint_args(transport: str, port: int, name: str) -> tuple[list[str], list[str]]:
@@ -513,6 +575,18 @@ def shown(value: float | None, spec: str) -> str:
 
 # -- the runs -----------------------------------------------------------------------------------------------
 
+def await_line(proc: Process, role: str, keys: tuple[str, ...], seconds: float) -> dict[str, str] | None:
+    """The line of `role` that carries `keys` once `proc` printed it, waited for up to `seconds`; None when it was
+    not printed by then, or the process ended without it."""
+    deadline = time.monotonic() + seconds
+    while True:
+        ended = proc.reap(0)
+        found = fields(proc.text(), role, keys)
+        if found is not None or ended or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.05)
+
+
 class Matrix:
     def __init__(self, args: argparse.Namespace, run: pathlib.Path):
         self.args = args
@@ -590,27 +664,36 @@ class Matrix:
             sub = self.start(binary, "sub", ["-m", "peer", *server, "-w", str(args.warmup_ms),
                                              "-t", str(args.window_s)], "server", tag)
             pub = None
+            ended = False
             try:
                 time.sleep(SETTLE_S)
                 pub = self.start(binary, "pub", ["-m", "peer", *client, "-s", str(size), "-t", str(pub_s), *flags],
                                  "client", tag)
-                done = pub.reap(pub_s + READY_S + 30)
+                # The publisher keeps its session after its result, so what it sent is not cut off by its close
+                # while the subscriber still reads it; both are stopped once the subscriber said what reached it.
+                if await_line(pub, "pub", PUB_KEYS, pub_s + READY_S + 30) is not None:
+                    await_line(sub, "sub", SUB_MARK_KEYS, DRAIN_S if transport in STREAM_TRANSPORTS else MARK_WAIT_S)
+                else:
+                    ended = pub.reap(0)
             finally:
                 if pub is not None:
                     pub.stop()
                 sub.stop()
-            if not done:
-                raise Lost("pub did not finish in time")
             put = fields(pub.text(), "pub", PUB_KEYS)
             got = fields(sub.text(), "sub", SUB_KEYS)
             if put is None:
-                raise Lost(f"pub gave no result; it said: {last_words(pub.text())}")
+                raise Lost(f"pub gave no result; it said: {last_words(pub.text())}" if ended
+                           else "pub did not finish in time")
             if got is None:
                 raise Lost(f"sub gave no window; it said: {last_words(sub.text())}")
             try:
-                return thr_figures(put, got, usage_of(pub), usage_of(sub)), [pub, sub]
+                figures = thr_figures(put, got, usage_of(pub), usage_of(sub))
+                missing = delivery(transport, put, fields(sub.text(), "sub", SUB_MARK_KEYS))
             except Lost as why:
                 raise Lost(f"{why}; {stall_note(put, fields(sub.text(), 'sub', SUB_END_KEYS))}") from None
+            if missing is not None:
+                figures["undelivered"] = missing
+            return figures, [pub, sub]
 
         return self.timed(body)
 
@@ -648,6 +731,13 @@ def run_engine(builds: dict) -> str | None:
     return engine if engine in ENGINES else None
 
 
+def run_stdlib(builds: dict) -> str | None:
+    """The standard library a run's arm W was built with, as the record of its build states it (`reference
+    --stdlib`); `None` when it states none, or no standard library."""
+    stdlib = builds.get("wz_stdlib")
+    return stdlib if stdlib in STDLIBS else None
+
+
 def host_record(args: argparse.Namespace) -> dict:
     cpu = "unknown"
     try:
@@ -672,6 +762,7 @@ def host_record(args: argparse.Namespace) -> dict:
     if args.reference_record:
         record["builds"] = json.loads(pathlib.Path(args.reference_record).read_text(encoding="utf-8"))
     record["engine"] = run_engine(record.get("builds") or {})
+    record["stdlib"] = run_stdlib(record.get("builds") or {})
     record["external"] = (json.loads(pathlib.Path(args.external_record).read_text(encoding="utf-8"))
                           if args.external_record else
                           {"status": "not-measured", "why": "the run was given no record of arm X"})
@@ -692,9 +783,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("perf-matrix: a payload is at least 8 bytes (the round trip's sequence number)", flush=True)
         return 64
     record = host_record(args)
-    if record["engine"] is None:
+    if record["engine"] is None or record["stdlib"] is None:
         print("perf-matrix: NOT-MEASURED, the run names no record of the build it measures that states its "
-              "engine (--reference-record, written by `reference --engine`)", flush=True)
+              "engine and its standard library (--reference-record, written by `reference --engine --stdlib`)",
+              flush=True)
         return 2
     arms = run_arms(record["external"])
     wanted = {binary_name(arm, t) for arm in arms for t in transports} - {None}
@@ -717,7 +809,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             for arm in (arms if rep % 2 else arms[::-1])]
     print(f"perf-matrix: {args.reps} repetition(s) of {', '.join(transports)} x batching {', '.join(batchings)} "
           f"x {', '.join(workloads)} x {', '.join(map(str, sizes))} B, arms {', '.join(arms)}; client side on "
-          f"{args.client_cpus}, server side on {args.server_cpus}; arm W on the {record['engine']} engine", flush=True)
+          f"{args.client_cpus}, server side on {args.server_cpus}; arm W on the {record['engine']} engine, "
+          f"{record['stdlib']}", flush=True)
     with (run / "cells.jsonl").open("w", encoding="utf-8") as log:
 
         def run_one(spec: tuple, again: bool) -> dict:
@@ -754,18 +847,61 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_reference(out: pathlib.Path, engine: str) -> int:
-    """zenoh-pico built as the same build as wz-capi-pico's default capabilities on `engine`, into
-    `out`."""
+#: The size gate's case whose build arm W is built as, by the engine and the standard library of the run
+#: (`capability_cost_gate.CASES`): its profile, its cargo configuration files and so its linker arguments, with
+#: the bench's features in the place of the case's (`bench_case`). The library timed here is then built as the
+#: library whose size the gate measures, and its reference zenoh-pico by the gate's rule for that build
+#: (`capability_cost_gate.reference_build`): without `std`, C with no unwind tables, linked with the script
+#: that discards what the C runtime still brings, as the size ratio of that form is read.
+SHAPE_CASES = {("coop", "nostd"): "pico-client-coop-nostd", ("coop", "std"): "pico-client-coop",
+               ("tokio", "std"): "pico-default"}
+
+
+def bench_stdlib(stated: str, released: tuple[str, ...]) -> str:
+    """The standard library a run builds arm W with: `stated` when the caller names one (PICO_CMP_STDLIB), to
+    compare the two forms, else the one form the pico C ABI's release ships (`released`,
+    `pico_windows_package.RELEASE_STDLIBS`, the one declaration of it), so a table filled by default reads what
+    ships. A name that is no standard library, and a release of no form or of more than one with none named,
+    are refused (Refused)."""
+    if stated:
+        if stated not in STDLIBS:
+            raise Refused(f"`{stated}` is no standard library arm W is built with; one of {', '.join(STDLIBS)}")
+        return stated
+    if len(released) != 1 or released[0] not in STDLIBS:
+        raise Refused(f"the release ships {', '.join(released) or 'no form'}, so a run names the standard library "
+                      f"it measures (PICO_CMP_STDLIB, one of {', '.join(STDLIBS)})")
+    return released[0]
+
+
+def bench_case(arm: str, engine: str, stdlib: str, named: list[str]):
+    """Arm `arm`'s build as a case of the size gate: the case of its form (SHAPE_CASES) with the bench's feature
+    list `named` (`wz_config.bench_named_features`) in the place of the case's, over the crate's default
+    features on the tokio engine, as `wz_config.bench_features` resolves them. A form no case builds is refused
+    (Refused)."""
+    import capability_cost_gate as cost
+
+    shape = SHAPE_CASES.get((engine, stdlib))
+    if shape is None:
+        raise Refused(f"no size case builds wz-capi-pico on the {engine} engine with {stdlib}")
+    base = {case.id: case for case in cost.CASES}[shape]
+    features = ",".join((["default"] if engine == "tokio" else []) + list(named))
+    return cost.Case(f"perf-{arm}", base.package, base.lib, features, 0, profile=base.profile,
+                     cargo_configs=base.cargo_configs)
+
+
+def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
+    """zenoh-pico built as the same build as wz-capi-pico's default capabilities on `engine` with `stdlib`, by
+    the size gate's rule for arm W's form, into `out`."""
     # The gate's builder and resolver, imported here and not at the top: the selftest needs neither.
     import capability_cost_gate as cost
     import wz_config
 
     table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
     try:
-        features = wz_config.bench_features(engine, [], table)
-        program_features = wz_config.bench_features(engine, ["app-transport"], table)
-    except wz_config.PresetError as error:
+        features = wz_config.bench_features(engine, [], table, stdlib)
+        program_features = wz_config.bench_features(engine, ["app-transport"], table, stdlib)
+        shape = bench_case("W", engine, stdlib, wz_config.bench_named_features(engine, [], table, stdlib))
+    except (wz_config.PresetError, KeyError, Refused) as error:
         print(f"perf-matrix: NOT-MEASURED, {error}", flush=True)
         return 2
     asked = wz_config.pico_reference(wz_config.load_decl(), features)
@@ -776,7 +912,11 @@ def cmd_reference(out: pathlib.Path, engine: str) -> int:
     except ValueError as error:
         print(f"perf-matrix: NOT-MEASURED, the build normalisation refused this host: {error}", flush=True)
         return 2
-    work, pin, toolchain = cost.pico_reference_tree(asked, env)
+    # Linked and compiled as the gate builds the reference of arm W's form, from the linker arguments arm W's
+    # build is given (`wz-arm` builds it by the same plan).
+    plan = cost.case_build(shape, env)
+    link, cflags = cost.reference_build(plan.link_args)
+    work, pin, toolchain = cost.pico_reference_tree(asked, env, link, cflags)
     header = work / "build" / "include" / "zenoh-pico" / "config.h"
     refused = cost.refused_switches(asked, header.read_text(encoding="utf-8"))
     lib = out / "lib-P"
@@ -795,14 +935,73 @@ def cmd_reference(out: pathlib.Path, engine: str) -> int:
     shutil.copytree(work / "src" / "include", inc, symlinks=True)
     shutil.copytree(work / "build" / "include", inc, dirs_exist_ok=True)
     record = {"reference_pin": pin, "reference_toolchain": toolchain, "reference_switches": asked,
-              "reference_refused": refused, "wz_features": sorted(features),
-              "wz_program_transport_features": sorted(program_features), "wz_engine": engine}
+              "reference_refused": refused, "reference_link_args": list(link), "reference_cflags": list(cflags),
+              "wz_features": sorted(features), "wz_program_transport_features": sorted(program_features),
+              "wz_engine": engine, "wz_stdlib": stdlib,
+              "wz_build": {"size_case": SHAPE_CASES[(engine, stdlib)], "profile": shape.profile,
+                           "cargo_configs": list(shape.cargo_configs), "link_args": list(plan.link_args)}}
     (out / "reference.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"perf-matrix: reference zenoh-pico {pin[:12]} as the same build ({toolchain}); "
-          f"{len(asked)} switches set from the declaration", flush=True)
+          f"{len(asked)} switches set from the declaration; linked with {list(link)} and compiled with "
+          f"{list(cflags)} beyond the rule's, as the size gate builds the reference of "
+          f"{SHAPE_CASES[(engine, stdlib)]}", flush=True)
     if refused:
         print(f"perf-matrix: pico built {', '.join(refused)} otherwise than asked, so the two builds differ "
               f"there (reference.json says so)", flush=True)
+    return 0
+
+
+def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: list[str]) -> int:
+    """Arm `arm` of wz-capi-pico: the bench's build on `engine` with `stdlib` and the capabilities `asked`,
+    built as the size gate builds the case of its form (`bench_case`, `capability_cost_gate.case_build` in the
+    gate's `build_env`), its library copied to OUT/lib-ARM and pico's headers to OUT/include-ARM. The headers are
+    the reference export's (`reference` writes OUT/include-P first), the pinned pico's own, with the config.h of
+    this build's feature list in the place of the reference's: a program compiled against another config.h
+    allocates the option structs of another build."""
+    import capability_cost_gate as cost
+    import wz_config
+
+    table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
+    decl = wz_config.load_decl()
+    try:
+        named = wz_config.bench_named_features(engine, asked, table, stdlib)
+        header = wz_config.pico_config_header(decl, wz_config.bench_features(engine, asked, table, stdlib),
+                                              dict(os.environ))
+        case = bench_case(arm, engine, stdlib, named)
+        env, _ = cost.build_env()
+    except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
+        print(f"perf-matrix: NOT-MEASURED, arm {arm}: {error}", flush=True)
+        return 2
+    conflicts = wz_config.pico_header_conflicts(decl, "pico", header)
+    if conflicts:
+        print(f"perf-matrix: NOT-MEASURED, the config.h of arm {arm} reads back as another build: "
+              f"{'; '.join(conflicts)}", flush=True)
+        return 2
+    reference_include = out / "include-P"
+    if not (reference_include / "zenoh-pico" / "config.h").is_file():
+        print(f"perf-matrix: NOT-MEASURED, {reference_include} holds no headers of the reference: run "
+              "`reference` first", flush=True)
+        return 2
+    plan = cost.case_build(case, env)
+    log = out / f"build-wz-{arm}.log"
+    with log.open("w", encoding="utf-8") as stream:
+        built = subprocess.run(list(plan.cmd), cwd=cost.CRATES, env=dict(plan.env), stdout=stream,
+                               stderr=subprocess.STDOUT)
+    if built.returncode != 0:
+        print(f"perf-matrix: NOT-MEASURED, wz-capi-pico for arm {arm} did not build (see {log})", flush=True)
+        return 2
+    lib = out / f"lib-{arm}"
+    inc = out / f"include-{arm}"
+    for stale in (lib, inc):
+        if stale.exists():
+            shutil.rmtree(stale)
+    lib.mkdir(parents=True)
+    shutil.copy2(plan.lib, lib / plan.lib.name)
+    shutil.copytree(reference_include, inc, symlinks=True)
+    (inc / "zenoh-pico" / "config.h").write_text(header, encoding="utf-8")
+    print(f"perf-matrix: arm {arm}: wz-capi-pico on the {engine} engine, {stdlib}, built as the size gate's "
+          f"{SHAPE_CASES[(engine, stdlib)]} (profile {case.profile}, {list(case.cargo_configs) or 'no'} cargo "
+          f"configuration, linker arguments {list(plan.link_args)}), {len(named)} feature(s) named", flush=True)
     return 0
 
 
@@ -866,6 +1065,12 @@ TABLE_SCHEMA = "wz-pico-perf-ceiling/1"
 #: The engines arm W is built on, as `wz_config.PICO_ENGINES` names them: a run records the one it measured
 #: and a table the one its rows were filled from, and the gate refuses a run against another engine's rows.
 ENGINES = ("tokio", "coop")
+#: The standard libraries arm W is built with, as `wz_config.PICO_STDLIBS` names them: a run records the one it
+#: measured and a table the one its rows were filled from, and the gate refuses a run against another's rows, as
+#: it refuses another engine's.
+STDLIBS = ("std", "nostd")
+#: The standard library of a reading that names none: every library was built with `std` before the field.
+UNSTATED_STDLIB = "std"
 PAIR_NAMES = {"P": "W/P", "X": "W/X"}
 #: The figures the gate holds, per workload: the round trip at its middle and its tail, the CPU the
 #: answering side spent per answer, the delivered rate and the CPU a delivered message cost both sides, and
@@ -1129,6 +1334,31 @@ def table_engine(text: str) -> str | None:
     return engine
 
 
+def table_stdlib(text: str) -> str | None:
+    """The standard library a table says arm W was built with when its rows were filled, `None` when it says
+    none; one that is no standard library is refused."""
+    try:
+        doc = json.loads(text)
+    except ValueError as error:
+        raise Refused(f"not JSON: {error}") from None
+    stdlib = doc.get("stdlib") if isinstance(doc, dict) else None
+    if stdlib is not None and stdlib not in STDLIBS:
+        raise Refused(f"`stdlib` is one of {', '.join(STDLIBS)}, not {stdlib!r}")
+    return stdlib
+
+
+def stdlib_named(record: object, what: str) -> str:
+    """The standard library a run's record names, `std` when it names none (UNSTATED_STDLIB); one that is no
+    standard library is refused."""
+    stdlib = record.get("stdlib") if isinstance(record, dict) else None
+    if stdlib is None:
+        return UNSTATED_STDLIB
+    if stdlib not in STDLIBS:
+        raise Refused(f"{what} names the standard library {stdlib!r}, and arm W is built with one of "
+                      f"{', '.join(STDLIBS)}")
+    return stdlib
+
+
 def platform_named(doc: object, what: str) -> str:
     """The platform a run's record or a table names, Linux when it names none; one that is no platform of
     PLATFORMS is refused."""
@@ -1149,15 +1379,15 @@ def table_platform(text: str) -> str:
     return platform_named(doc, "the table")
 
 
-def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None, str]:
-    """The rows, the tolerance, the engine and the platform of the table at `path`."""
+def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None, str, str | None]:
+    """The rows, the tolerance, the engine, the platform and the standard library of the table at `path`."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise Refused(f"{path} cannot be read: {error}") from None
     try:
         rows, tolerance = parse_table(text, pair)
-        return rows, tolerance, table_engine(text), table_platform(text)
+        return rows, tolerance, table_engine(text), table_platform(text), table_stdlib(text)
     except Refused as why:
         raise Refused(f"{path}: {why}") from None
 
@@ -1177,9 +1407,9 @@ def repository_roots() -> list[pathlib.Path]:
     return roots
 
 
-def table_document(pair: str, rows: dict, tolerance: float, engine: str, platform: str) -> str:
+def table_document(pair: str, rows: dict, tolerance: float, engine: str, platform: str, stdlib: str) -> str:
     return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "engine": engine, "platform": platform,
-                       "tolerance": tolerance, "rows": rows}, indent=1)
+                       "stdlib": stdlib, "tolerance": tolerance, "rows": rows}, indent=1)
 
 
 def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judged]) -> str:
@@ -1207,11 +1437,12 @@ def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judg
 
 
 def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: list[pathlib.Path],
-              engine: str, platform: str) -> str:
-    """Judge the pair of W and `ref`, arm W measured on `engine` in a run on `platform`. A table of W over X
-    inside the repository is refused; one that is not named, or does not exist yet, fails with the whole table to
-    write printed. A table whose rows were filled from another engine, or on another platform, is refused, and
-    so is a table of W over P that does not say its engine."""
+              engine: str, platform: str, stdlib: str) -> str:
+    """Judge the pair of W and `ref`, arm W measured on `engine` with `stdlib` in a run on `platform`. A table of W
+    over X inside the repository is refused; one that is not named, or does not exist yet, fails with the whole
+    table to write printed. A table whose rows were filled from another engine, another standard library or on
+    another platform is refused, and so is a table of W over P that does not say its engine or its standard
+    library."""
     pair = PAIR_NAMES[ref]
     found = readings(cells, ref)
     if ref == "X":
@@ -1224,12 +1455,12 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
             rows = {key: fill_row(found[key]) for key in sorted(found, key=key_order)}
             print(f"perf-gate {pair}: arm X was measured and no table judges it ({where}); the table this run "
                   f"writes, to be kept outside the repository:", flush=True)
-            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine, platform), flush=True)
+            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine, platform, stdlib), flush=True)
             print(f"perf-gate {pair}: FAIL", flush=True)
             return "FAIL"
     if table is None:
         raise Refused(f"no table of {pair} was named")
-    rows, tolerance, filled_from, filled_on = load_table(table, pair)
+    rows, tolerance, filled_from, filled_on, filled_with = load_table(table, pair)
     if filled_on != platform:
         raise Refused(f"{table} holds rows of runs on {filled_on}, and this run was made on {platform}: judge "
                       f"it against the table of its own platform ({PLATFORMS[platform].relative_to(ROOT)})")
@@ -1239,7 +1470,14 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
         raise Refused(f"{table} holds rows filled from the {filled_from} engine, and this run measured the "
                       f"{engine} engine: judge it against a table of its own engine, or run that engine "
                       f"(PICO_CMP_ENGINE={filled_from})")
-    print(f"perf-gate {pair}: arm W on the {engine} engine", flush=True)
+    if filled_with is None and ref == "P":
+        raise Refused(f"{table} does not say which standard library arm W was built with when its rows were "
+                      "filled (`stdlib`)")
+    if filled_with is not None and filled_with != stdlib:
+        raise Refused(f"{table} holds rows filled from arm W built {filled_with}, and this run measured it built "
+                      f"{stdlib}: judge it against a table of its own form, or run that form "
+                      f"(PICO_CMP_STDLIB={filled_with})")
+    print(f"perf-gate {pair}: arm W on the {engine} engine, {stdlib}", flush=True)
     return print_pair(pair, str(table), tolerance, judge(found, rows, tolerance))
 
 
@@ -1253,6 +1491,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         if engine not in ENGINES:
             raise Refused(f"{args.result} does not say which engine arm W was built on")
         platform = platform_named(doc.get("record"), f"the record of {args.result}")
+        stdlib = stdlib_named(doc.get("record"), f"the record of {args.result}")
         external = doc.get("record", {}).get("external") or {
             "status": "not-measured", "why": "the run's record says nothing of arm X"}
         # A transport the run left out says why in its record (a group the host's network does not carry);
@@ -1260,11 +1499,11 @@ def cmd_gate(args: argparse.Namespace) -> int:
         for transport, why in sorted((doc.get("record", {}).get("not_measured") or {}).items()):
             print(f"perf-gate: the run did not measure {transport}: {why}", flush=True)
         table = pathlib.Path(args.table) if args.table else PLATFORMS[platform]
-        outcomes = [gate_pair("P", cells, table, [], engine, platform)]
+        outcomes = [gate_pair("P", cells, table, [], engine, platform, stdlib)]
         if external.get("status") == "built":
             named = args.external_table or os.environ.get(EXTERNAL_TABLE, "")
             outcomes.append(gate_pair("X", cells, pathlib.Path(named) if named else None, repository_roots(),
-                                      engine, platform))
+                                      engine, platform, stdlib))
         elif args.without_external:
             print(f"perf-gate W/X: not asked (--without-external); arm X NOT-MEASURED, {external.get('why')}",
                   flush=True)
@@ -1282,7 +1521,7 @@ def check_table(path: pathlib.Path) -> int:
     is the one its platform's runs are judged by (PLATFORMS), so the table of one platform cannot stand where the
     other's is read."""
     try:
-        rows, tolerance, engine, platform = load_table(path, PAIR_NAMES["P"])
+        rows, tolerance, engine, platform, stdlib = load_table(path, PAIR_NAMES["P"])
     except Refused as why:
         print(f"perf-gate table: refused: {why}", file=sys.stderr)
         return 2
@@ -1293,6 +1532,10 @@ def check_table(path: pathlib.Path) -> int:
     if engine is None:
         print(f"  perf-gate table FAIL: {path} does not say which engine its rows were filled from (`engine`)",
               file=sys.stderr)
+        return 1
+    if stdlib is None:
+        print(f"  perf-gate table FAIL: {path} does not say which standard library arm W was built with when its "
+              "rows were filled (`stdlib`)", file=sys.stderr)
         return 1
     wanted = set(population("P"))
     missing = sorted(wanted - set(rows), key=key_order)
@@ -1305,14 +1548,15 @@ def check_table(path: pathlib.Path) -> int:
         return 1
     filled = sum(value is not None for value in rows.values())
     print(f"  perf-gate table: {len(rows)} row(s), the population of the default matrix; {filled} filled, "
-          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine on {platform}")
+          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine, {stdlib}, on "
+          f"{platform}")
     return 0
 
 
 # -- a run on Windows ----------------------------------------------------------------------------------------
 
 #: What `windows-plan` writes and scripts/host-bench/windows/perf_matrix.ps1 reads.
-WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/1"
+WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/2"
 WINDOWS_PLATFORM = "windows-x64"
 #: The width of Windows a plan is made for, by the package's name for it (pico_windows_package.ARCHES).
 WINDOWS_ARCH = "x64"
@@ -1331,11 +1575,14 @@ WINDOWS_NOT_RUN = {
 
 def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str) -> dict:
     """What a run on Windows measures, from a package's manifest and build statement: arm W is the package's
-    library, built for `target` with the features its manifest lists on the engine its statement states, and
-    arm P zenoh-pico built as the same build, every switch the declaration answers set from those features
-    (`wz_config.pico_reference`), as `reference` derives the Linux arm from the bench's build. `table` is the
-    feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that names a feature
-    the crate lacks, and one whose statement's engine is not the one its features run are refused."""
+    library, built for `target` with the features its manifest lists on the engine its statement states and with
+    the standard library its manifest states (`pico_windows_package.stdlib_of`: the release ships the library
+    without `std`), and arm P zenoh-pico built as the same build, every switch the declaration answers set from
+    those features (`wz_config.pico_reference`), as `reference` derives the Linux arm from the bench's build.
+    `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that
+    names a feature the crate lacks, one whose statement's engine is not the one its features run, and one whose
+    manifest states no standard library, or one its features do not build, are refused."""
+    import pico_windows_package as pwp
     import wz_config
 
     if manifest.get("target") != target:
@@ -1354,7 +1601,14 @@ def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, targe
     runs_on = wz_config.statement_engine("pico", enabled)
     if runs_on != engine:
         raise Refused(f"the package's statement says the {engine} engine, and its features run the {runs_on} one")
-    return {"wz_features": sorted(features), "wz_engine": engine,
+    try:
+        stdlib = pwp.stdlib_of(manifest)
+    except pwp.Refusal as why:
+        raise Refused(f"the package's manifest: {why}") from None
+    if (stdlib == "std") != ("std" in enabled):
+        raise Refused(f"the package's manifest says it is built {stdlib}, and its features turn `std` "
+                      f"{'on' if 'std' in enabled else 'off'}")
+    return {"wz_features": sorted(features), "wz_engine": engine, "wz_stdlib": stdlib,
             "reference_switches": wz_config.pico_reference(decl, enabled)}
 
 
@@ -1417,12 +1671,14 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
         "not_applicable": {f"{arm}/{transport}": why for (arm, transport), why in NOT_APPLICABLE.items()},
         "not_run": WINDOWS_NOT_RUN,
         "line_keys": {"ping": list(PING_KEYS), "pong": list(PONG_KEYS), "pub": list(PUB_KEYS),
-                      "sub": list(SUB_KEYS), "sub_end": list(SUB_END_KEYS)},
+                      "sub": list(SUB_KEYS), "sub_end": list(SUB_END_KEYS), "sub_mark": list(SUB_MARK_KEYS)},
+        "stream_transports": list(STREAM_TRANSPORTS), "drain_s": DRAIN_S, "mark_wait_s": MARK_WAIT_S,
         "foreign_limit": FOREIGN_LIMIT, "max_runs": MAX_RUNS, "settle_s": SETTLE_S, "pub_tail_s": PUB_TAIL_S,
         "ready_s": READY_S, "group": GROUP, "schema_of_result": SCHEMA,
     }
     out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"perf-matrix: the plan of a run on Windows: arm W {name} on the {plan['wz_engine']} engine, arm P "
+    print(f"perf-matrix: the plan of a run on Windows: arm W {name} on the {plan['wz_engine']} engine, "
+          f"{plan['wz_stdlib']}, arm P "
           f"zenoh-pico {doc['reference_pin'][:12]} with {len(plan['reference_switches'])} switches set; {out}",
           flush=True)
     return 0
@@ -1446,6 +1702,13 @@ def cmd_selftest() -> int:
         try:
             call()
         except Lost:
+            return True
+        return False
+
+    def refused_call(call) -> bool:
+        try:
+            call()
+        except Refused:
             return True
         return False
 
@@ -1489,6 +1752,33 @@ def cmd_selftest() -> int:
            lost(lambda: thr_figures(dict(pub, end_ns="29"), sub, client, server)))
     expect("nothing delivered is a lost cell",
            lost(lambda: thr_figures(pub, dict(sub, received="0"), client, server)))
+    # Delivery: the publisher's count against what the subscriber had been handed at its end marker.
+    whole = {"pub_sent": "1000", "received_before_end": "1000"}
+    expect("every put delivered on a reliable stream is no loss, and the figure says none was missed",
+           delivery("tcp", pub, whole) == 0 and delivery("program", pub, whole) == 0)
+    expect("a put that answered success and was not delivered loses a cell of a reliable stream",
+           lost(lambda: delivery("tcp", pub, dict(whole, received_before_end="900")))
+           and lost(lambda: delivery("program", pub, dict(whole, received_before_end="900"))))
+    expect("more delivered than put loses a cell of a reliable stream too",
+           lost(lambda: delivery("tcp", pub, dict(whole, received_before_end="1001"))))
+    expect("an end marker that never came loses a cell of a reliable stream, and is no figure on datagrams",
+           lost(lambda: delivery("tcp", pub, None)) and delivery("udp", pub, None) is None
+           and delivery("multicast", pub, None) is None)
+    expect("on datagrams what did not arrive is a figure, not a loss",
+           delivery("multicast", pub, dict(whole, received_before_end="900")) == 100
+           and delivery("udp", pub, dict(whole, received_before_end="990")) == 10)
+    expect("a marker that carries another count than the publisher's is a lost cell on any transport",
+           lost(lambda: delivery("multicast", pub, dict(whole, pub_sent="999")))
+           and lost(lambda: delivery("tcp", pub, dict(whole, pub_sent="999"))))
+    expect("the reliable streams are transports of the matrix, and the drain outlasts the datagrams' wait",
+           set(STREAM_TRANSPORTS) <= set(TRANSPORTS) and "multicast" not in STREAM_TRANSPORTS
+           and "udp" not in STREAM_TRANSPORTS and DRAIN_S > MARK_WAIT_S > 0)
+    expect("the subscriber's end-marker line is told apart from its window line and its last line",
+           fields("perf_probe sub end pub_sent=5 received_before_end=5\n", "sub", SUB_KEYS) is None
+           and fields("perf_probe sub end pub_sent=5 received_before_end=5\n", "sub", SUB_END_KEYS) is None
+           and (fields("perf_probe sub end pub_sent=5 received_before_end=4\n", "sub", SUB_MARK_KEYS) or {})
+           .get("received_before_end") == "4"
+           and fields(sub_text, "sub", SUB_MARK_KEYS) is None)
     expect("every figure a cell carries says which way is better",
            set(numbers(figs)) | set(numbers(tfigs)) <= set(METRICS)
            and set(METRICS.values()) == {"lower", "higher"})
@@ -1580,6 +1870,52 @@ def cmd_selftest() -> int:
            all(callable(getattr(cost, name, None))
                for name in ("pico_reference_tree", "refused_switches", "build_env"))
            and "env" in inspect.signature(cost.pico_reference_tree).parameters)
+    # Arm W is built by the plan of the size case of its form, and the reference by the gate's rule for it.
+    expect("the cost gate still plans a case's build and the reference of its linker arguments",
+           all(callable(getattr(cost, name, None)) for name in ("case_build", "reference_build"))
+           and {"link", "cflags"} <= set(inspect.signature(cost.pico_reference_tree).parameters))
+    cases = {case.id: case for case in cost.CASES}
+    expect("each form of arm W is built as a size case of the pico ABI of that form",
+           all(SHAPE_CASES[key] in cases and cases[SHAPE_CASES[key]].package == "wz-capi-pico"
+               for key in SHAPE_CASES)
+           and cases[SHAPE_CASES[("coop", "nostd")]].profile == "capi-nostd"
+           and cost.NOSTD_CONFIG in cases[SHAPE_CASES[("coop", "nostd")]].cargo_configs
+           and cost.DISCARD_UNWIND_CONFIG in cases[SHAPE_CASES[("coop", "nostd")]].cargo_configs
+           and all(cost.NOSTD_CONFIG not in cases[SHAPE_CASES[(engine, "std")]].cargo_configs
+                   for engine in ENGINES)
+           and set(SHAPE_CASES) == {(e, s) for e in ENGINES for s in STDLIBS} - {("tokio", "nostd")})
+    bare = bench_case("W", "coop", "nostd", ["os-posix", "link-udp"])
+    expect("arm W's case is its form's case with the bench's features, and on the tokio engine over the defaults",
+           bare.features == "os-posix,link-udp" and bare.profile == "capi-nostd"
+           and bare.cargo_configs == cases["pico-client-coop-nostd"].cargo_configs and bare.id == "perf-W"
+           and bench_case("Wapp", "tokio", "std", ["app-transport"]).features == "default,app-transport"
+           and bench_case("W", "tokio", "std", []).features == "default")
+    expect("a form no size case builds is refused", refused_call(lambda: bench_case("W", "tokio", "nostd", [])))
+    nostd_reference = cost.reference_build(cost.case_build(bare, {}, "x86_64-unknown-linux-gnu",
+                                                           {"unix", 'target_os="linux"', 'target_env="gnu"',
+                                                            'target_family="unix"'}).link_args)
+    expect("the reference of arm W without std is compiled without unwind tables and linked as arm W is",
+           set(cost.NO_UNWIND_CFLAGS) <= set(nostd_reference[1])
+           and cost.PACKED_RELOCS_LINK in nostd_reference[0] and cost.GNU_LD in nostd_reference[0])
+    # -- the standard library ---------------------------------------------------------------------------
+    expect("a run builds the standard library it is told, else the one form the release ships",
+           bench_stdlib("std", ("nostd",)) == "std" and bench_stdlib("", ("nostd",)) == "nostd"
+           and bench_stdlib("", ("std",)) == "std")
+    expect("a name that is no standard library, or a release of two forms with none named, is refused",
+           refused_call(lambda: bench_stdlib("alloc", ("nostd",)))
+           and refused_call(lambda: bench_stdlib("", ("std", "nostd")))
+           and refused_call(lambda: bench_stdlib("", ())))
+    expect("a run's standard library is the one its build's record states, and nothing else",
+           run_stdlib({"wz_stdlib": "nostd"}) == "nostd" and run_stdlib({}) is None
+           and run_stdlib({"wz_stdlib": "alloc"}) is None)
+    expect("a reading that names no standard library is of a library with std; one that names another is refused",
+           stdlib_named({}, "r") == "std" and stdlib_named({"stdlib": "nostd"}, "r") == "nostd"
+           and refused_call(lambda: stdlib_named({"stdlib": "alloc"}, "r")))
+    import pico_windows_package as pwp
+    import wz_config
+    expect("the standard libraries a run names are the ones a bench builds and a package states",
+           STDLIBS == wz_config.PICO_STDLIBS and set(pwp.STDLIBS) == set(STDLIBS)
+           and set(pwp.RELEASE_STDLIBS) <= set(STDLIBS))
     # -- arm X ------------------------------------------------------------------------------------------
     expect("arm X runs every transport but the program's, from a probe of its own",
            binary_name("X", "udp") == "perf_probe_X" and binary_name("X", "tcp") == "perf_probe_X"
@@ -1702,12 +2038,14 @@ def cmd_selftest() -> int:
            and exit_status(["PASS", "PASS"]) == 0 and outcome_of([]) == "NOT-MEASURED")
     expect("a value rounds up to three decimals for its ratchet", ceil3(0.9301) == 0.931 and ceil3(0.93) == 0.93)
 
-    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio", platform=None):
+    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio", platform=None, stdlib="std"):
         doc = {"schema": schema, "pair": pair, "tolerance": tolerance, "rows": rows}
         if engine is not None:
             doc["engine"] = engine
         if platform is not None:
             doc["platform"] = platform
+        if stdlib is not None:
+            doc["stdlib"] = stdlib
         return json.dumps(doc)
 
     def refused(text, pair="W/P"):
@@ -1749,18 +2087,18 @@ def cmd_selftest() -> int:
     locked = {key: {"locked": True} for key in keys}
 
     def gate(cells, record, table_rows, external_table="", without=False, x_rows=None, schema=SCHEMA,
-             table_engine_="tokio", table_platform_=None):
+             table_engine_="tokio", table_platform_=None, table_stdlib_="std", x_stdlib="std"):
         with tempfile.TemporaryDirectory() as scratch:
             base = pathlib.Path(scratch)
             (base / "perf.json").write_text(json.dumps({"schema": schema, "record": record, "cells": cells}),
                                             encoding="utf-8")
             if external_table == "absent":
                 external_table = str(base / "no-such-table.json")
-            (base / "table.json").write_text(table(table_rows, engine=table_engine_, platform=table_platform_),
-                                             encoding="utf-8")
+            (base / "table.json").write_text(table(table_rows, engine=table_engine_, platform=table_platform_,
+                                                   stdlib=table_stdlib_), encoding="utf-8")
             if x_rows is not None:
                 where = base / "x.json"
-                where.write_text(table(x_rows, pair="W/X"), encoding="utf-8")
+                where.write_text(table(x_rows, pair="W/X", stdlib=x_stdlib), encoding="utf-8")
                 external_table = str(where)
             args = argparse.Namespace(result=str(base / "perf.json"), table=str(base / "table.json"),
                                       external_table=external_table, without_external=without)
@@ -1828,10 +2166,31 @@ def cmd_selftest() -> int:
     expect("each platform's runs are judged by default against its own committed table",
            PLATFORMS[DEFAULT_PLATFORM] == CEILING and PLATFORMS[WINDOWS_PLATFORM] == CEILING_WINDOWS
            and set(PLATFORMS) == {DEFAULT_PLATFORM, WINDOWS_PLATFORM})
+    # The standard library: a run states the one arm W was built with and a table the one its rows were filled
+    # from, and a run is judged only against rows of its own form; a reading that names none was built with std.
+    bare_run = dict(no_x, engine="coop", stdlib="nostd")
+    expect("a run without std is judged against a table filled without std",
+           gate(run_cells, bare_run, locked, without=True, table_engine_="coop", table_stdlib_="nostd") == 0)
+    expect("a run of the other standard library than its table's is refused, either way",
+           gate(run_cells, bare_run, locked, without=True, table_engine_="coop") == 2
+           and gate(run_cells, dict(bare_run, stdlib="std"), locked, without=True, table_engine_="coop",
+                    table_stdlib_="nostd") == 2)
+    expect("a reading that names no standard library is one with std, and is judged against a table of std",
+           gate(run_cells, no_x, locked, without=True) == 0
+           and gate(run_cells, no_x, locked, without=True, table_stdlib_="nostd") == 2)
+    expect("a table of W/P that does not say its standard library is refused, and one of W/X need not",
+           gate(run_cells, no_x, locked, without=True, table_stdlib_=None) == 2
+           and gate(x_cells, built_x, locked, x_rows=locked, x_stdlib=None) == 0
+           and gate(x_cells, built_x, locked, x_rows=locked, x_stdlib="nostd") == 2)
+    expect("a reading or a table that names what is no standard library is refused",
+           gate(run_cells, dict(no_x, stdlib="alloc"), locked, without=True) == 2
+           and gate(run_cells, no_x, locked, without=True, table_stdlib_="alloc") == 2)
+    expect("a table written for a run states the standard library it was filled from",
+           json.loads(table_document("W/P", {}, 0.05, "coop", "linux", "nostd"))["stdlib"] == "nostd")
 
     # -- the plan of a run on Windows ------------------------------------------------------------------------
-    feature_table = {"default": ["engine-tokio"], "engine-tokio": [], "engine-coop": [], "advanced": [],
-                     "app-transport": ["advanced"]}
+    feature_table = {"default": ["engine-tokio"], "std": [], "engine-tokio": ["std"], "engine-coop": ["std"],
+                     "os-windows": [], "advanced": [], "app-transport": ["advanced"]}
     switch_rows = {"switches": [
         {"original": "zenoh-pico", "switch": "Z_FEATURE_ADVANCED_PUBLICATION", "class": "maps",
          "anchor": "wz-capi-pico/advanced"},
@@ -1840,12 +2199,18 @@ def cmd_selftest() -> int:
         {"original": "zenoh-pico", "switch": "BATCH_UNICAST_SIZE", "class": "maps", "anchor": "wz-capi-pico/x"},
         {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
     x64 = "x86_64-pc-windows-msvc"
-    package_manifest = {"target": x64, "features": ["engine-coop", "app-transport"]}
+    package_manifest = {"target": x64, "features": ["engine-coop", "app-transport"], "stdlib": "std"}
     planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
     expect("a plan pairs the package's library with pico built with the switches its features answer",
            planned["reference_switches"] == {"Z_FEATURE_ADVANCED_PUBLICATION": 1, "Z_FEATURE_MATCHING": 1,
                                              "Z_FEATURE_RAWETH_TRANSPORT": 0}
-           and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "engine-coop"])
+           and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "engine-coop"]
+           and planned["wz_stdlib"] == "std")
+    bare_manifest = {"target": x64, "features": ["os-windows", "app-transport"], "stdlib": "nostd"}
+    bare_plan = windows_plan(bare_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
+    expect("a package without std is planned on the cooperative engine, its reference the same build",
+           bare_plan["wz_stdlib"] == "nostd" and bare_plan["wz_engine"] == "coop"
+           and bare_plan["reference_switches"] == planned["reference_switches"])
 
     def plan_refused(manifest, statement):
         try:
@@ -1863,6 +2228,11 @@ def cmd_selftest() -> int:
            plan_refused(package_manifest, {"engine": "tokio"})
            and plan_refused(dict(package_manifest, features=["engine-tokio"]), {"engine": "coop"})
            and plan_refused(package_manifest, {}))
+    expect("a package whose manifest states no standard library, or one its features do not build, is refused",
+           plan_refused({k: v for k, v in package_manifest.items() if k != "stdlib"}, {"engine": "coop"})
+           and plan_refused(dict(package_manifest, stdlib="nostd"), {"engine": "coop"})
+           and plan_refused(dict(bare_manifest, stdlib="std"), {"engine": "coop"})
+           and plan_refused(dict(package_manifest, stdlib="alloc"), {"engine": "coop"}))
     expect("a run on Windows leaves out only the transport perf_probe.c does not build there",
            set(WINDOWS_NOT_RUN) == {"program"})
     # The plan reads the package by the packager's own names, called from `cmd_windows_plan` alone, so a
@@ -1909,11 +2279,27 @@ def main(argv: list[str]) -> int:
             print(f"perf-matrix: {why}", file=sys.stderr)
             return 1
         return 0
-    if len(argv) == 6 and argv[1] == "reference" and argv[2] == "--out" and argv[4] == "--engine":
-        if argv[5] not in ENGINES:
-            print(f"perf-matrix: --engine is one of {', '.join(ENGINES)}", file=sys.stderr)
-            return 64
-        return cmd_reference(pathlib.Path(argv[3]), argv[5])
+    if len(argv) in (2, 3) and argv[1] == "bench-stdlib":
+        import pico_windows_package as pwp
+        try:
+            print(bench_stdlib(argv[2] if len(argv) == 3 else "", tuple(pwp.RELEASE_STDLIBS)))
+        except Refused as why:
+            print(f"perf-matrix: {why}", file=sys.stderr)
+            return 2
+        return 0
+    if len(argv) >= 2 and argv[1] in ("reference", "wz-arm"):
+        build = argparse.ArgumentParser(prog=f"perf_matrix.py {argv[1]}")
+        build.add_argument("--out", required=True)
+        build.add_argument("--engine", required=True, choices=ENGINES)
+        build.add_argument("--stdlib", required=True, choices=STDLIBS)
+        if argv[1] == "wz-arm":
+            build.add_argument("--arm", required=True)
+            build.add_argument("--features", default="")
+        asked = build.parse_args(argv[2:])
+        if argv[1] == "reference":
+            return cmd_reference(pathlib.Path(asked.out), asked.engine, asked.stdlib)
+        return cmd_wz_arm(pathlib.Path(asked.out), asked.arm, asked.engine, asked.stdlib,
+                          [f for f in asked.features.split(",") if f])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
         try:
             seconds = float(argv[2]) if len(argv) > 2 else 5.0

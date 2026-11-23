@@ -2359,6 +2359,14 @@ def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
 PACKAGE_PICO_PROFILE = PROFILES / "host-peer-ext.conf"
 #: The engines a pico build runs its sessions on, by the names a bench and a statement use.
 PICO_ENGINES = ("tokio", "coop")
+#: The standard library a bench builds the pico ABI with: `std`, the host's, or `nostd`, the library
+#: without it on a POSIX host (docs/c-abi-engine-and-memory.md, E4 and phase P4), a form of the
+#: cooperative engine alone. Which one a run measures is the bench's to say
+#: (`scripts/host-bench/perf_matrix.py bench-stdlib`); this is the one place its features are made.
+PICO_STDLIBS = ("std", "nostd")
+#: The feature that builds the pico ABI without `std` on the POSIX host a bench runs on, named in the
+#: place of `engine-coop`.
+BENCH_NOSTD_FEATURE = "os-posix"
 
 
 def bench_engine(stated: str, kconf=None) -> str:
@@ -2375,16 +2383,25 @@ def bench_engine(stated: str, kconf=None) -> str:
     return statement_engine("pico", set(resolved_features(load_decl(), "pico", kconf)))
 
 
-def bench_named_features(engine: str, asked: list[str], table: dict) -> list[str]:
-    """The features a bench's cargo build of wz-capi-pico names on `engine`, `table` the crate's feature
-    table: `asked` over the default build on the tokio engine; on the cooperative one, without the
-    default features, the default build's list with what selects the tokio engine left out and
-    `engine-coop` named (`coop_features`), as the package's profile resolves its own, and `asked`.
-    A capability asked that the cooperative engine does not run is refused by name rather than
-    built into a library on the tokio engine."""
+def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> list[str]:
+    """The features a bench's cargo build of wz-capi-pico names on `engine` with the standard library
+    `stdlib`, `table` the crate's feature table: `asked` over the default build on the tokio engine;
+    on the cooperative one, without the default features, the default build's list with what selects
+    the tokio engine left out and `engine-coop` named (`coop_features`), as the package's profile
+    resolves its own, and `asked`; without `std`, that list with `BENCH_NOSTD_FEATURE` in the place of
+    `engine-coop` and `std` left out, as the Windows package without `std` is made from its profile's
+    list. A capability asked that the cooperative engine does not run is refused by name rather than
+    built into a library on the tokio engine, and so is one that turns `std` on, asked of the library
+    without it, rather than built into a library with `std` after all (the crate refuses that build)."""
     asked = [f for f in asked if f]
     if engine not in PICO_ENGINES:
         raise PresetError(f"`{engine}` is no engine of the pico ABI; one of {', '.join(PICO_ENGINES)}")
+    if stdlib not in PICO_STDLIBS:
+        raise PresetError(f"`{stdlib}` is no standard library a pico build is made with; one of "
+                          f"{', '.join(PICO_STDLIBS)}")
+    if stdlib == "nostd" and engine != "coop":
+        raise PresetError("the library without `std` is a form of the cooperative engine: measure it on "
+                          "the coop engine")
     if engine == "tokio":
         return asked
     named = coop_features(list(table["default"]) + asked, table)
@@ -2392,13 +2409,22 @@ def bench_named_features(engine: str, asked: list[str], table: dict) -> list[str
     if lost:
         raise PresetError(f"the cooperative engine does not run {', '.join(lost)}: measure "
                           f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
-    return named
+    if stdlib == "std":
+        return named
+    bare = [BENCH_NOSTD_FEATURE] + [f for f in named if f not in ("engine-coop", "std")]
+    with_std = [f for f in bare if "std" in enabled_features(table, [f])]
+    if with_std:
+        raise PresetError(f"{', '.join(with_std)} turn{'s' if len(with_std) == 1 else ''} `std` on, so the "
+                          "library without it does not carry "
+                          f"{'it' if len(with_std) == 1 else 'them'}: measure "
+                          f"{'it' if len(with_std) == 1 else 'them'} with `std`")
+    return bare
 
 
-def bench_features(engine: str, asked: list[str], table: dict) -> set[str]:
-    """The wz-capi-pico features a bench's build on `engine` turns on, as cargo resolves them: what the
-    reference zenoh-pico and the header a probe compiles against are derived from."""
-    named = bench_named_features(engine, asked, table)
+def bench_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> set[str]:
+    """The wz-capi-pico features a bench's build on `engine` with `stdlib` turns on, as cargo resolves
+    them: what the reference zenoh-pico and the header a probe compiles against are derived from."""
+    named = bench_named_features(engine, asked, table, stdlib)
     return enabled_features(table, (["default"] if engine == "tokio" else []) + named)
 
 
@@ -5305,6 +5331,20 @@ def cmd_selftest() -> int:
                "--no-default-features --features wz-capi-pico/engine-coop,"))
     expect("a capability asked of a bench that only the tokio engine runs is refused by name",
            "raweth-transport" in refusal_text(lambda: bench_named_features("coop", ["raweth-transport"], good)))
+    # Without std: the same capabilities with the POSIX host's form in the place of the engine
+    # feature, so a table read from it compares the libraries alike but for the standard library.
+    on_nostd = bench_features("coop", [], good, "nostd")
+    expect("a bench without std builds the cooperative engine's capabilities on the host's form without it",
+           BENCH_NOSTD_FEATURE in on_nostd and not {"std", "engine-coop", "engine-tokio"} & on_nostd
+           and on_nostd - {BENCH_NOSTD_FEATURE} == on_coop - {"engine-coop", "std"}
+           and bench_named_features("coop", [], good, "nostd")[0] == BENCH_NOSTD_FEATURE
+           and "app-transport" in bench_features("coop", ["app-transport"], good, "nostd"))
+    expect("the library without std is the cooperative engine's form, and a standard library is one of two",
+           "cooperative" in refusal_text(lambda: bench_named_features("tokio", [], good, "nostd"))
+           and "alloc" in refusal_text(lambda: bench_named_features("coop", [], good, "alloc"))
+           and bench_named_features("coop", [], good, "std") == bench_named_features("coop", [], good))
+    expect("a capability that turns std on is refused of a bench without it, by name",
+           "clock-source" in refusal_text(lambda: bench_named_features("coop", ["clock-source"], good, "nostd")))
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",

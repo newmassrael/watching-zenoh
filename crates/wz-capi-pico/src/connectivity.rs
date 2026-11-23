@@ -1160,10 +1160,10 @@ unsafe fn copy_text(text: &ConnText, out: *mut z_owned_string_t) -> ZResult {
         return Z_ERR_NULL;
     }
     *out = z_owned_string_t::null_value();
-    if !text.is_null() {
-        store_owned_string(out, text.as_bytes());
+    if text.is_null() {
+        return Z_OK;
     }
-    Z_OK
+    store_owned_string(out, text.as_bytes())
 }
 
 /// This end's locator (pico `z_link_src`).

@@ -218,8 +218,10 @@ pub unsafe extern "C" fn z_bytes_writer_write_all(
         if src.is_null() {
             return Z_ERR_NULL;
         }
-        buf.write_all(core::slice::from_raw_parts(src, len));
-        Z_OK
+        match buf.write_all(core::slice::from_raw_parts(src, len)) {
+            Ok(()) => Z_OK,
+            Err(no_room) => no_room.code(),
+        }
     })
 }
 
@@ -246,14 +248,15 @@ pub unsafe extern "C" fn z_bytes_writer_append(
             None => return Z_ERR_NULL,
         };
         match taken {
-            Some(payload) => {
-                // APPEND, not write: pico moves the source payload in as its
-                // own slice(s), and `z_bytes.c` walks the result expecting to
-                // see them back.
-                buf.append_segments(&payload);
-                Z_OK
-            }
-            None => Z_ERR_NULL,
+            // APPEND, not write: pico moves the source payload in as its
+            // own slice(s), and `z_bytes.c` walks the result expecting to
+            // see them back.
+            Ok(Some(payload)) => match buf.append_segments(&payload) {
+                Ok(()) => Z_OK,
+                Err(no_room) => no_room.code(),
+            },
+            Ok(None) => Z_ERR_NULL,
+            Err(no_room) => no_room.code(),
         }
     })
 }
@@ -270,7 +273,7 @@ pub unsafe extern "C" fn z_bytes_writer_finish(
             return Z_ERR_NULL;
         }
         let collected = take_writer_handle(writer as *mut c_void).unwrap_or_default();
-        store_owned_bytes(bytes, collected)
+        store_owned_bytes(bytes, Ok(collected))
     });
 }
 
@@ -320,7 +323,7 @@ pub unsafe extern "C" fn ze_serializer_finish(
             return Z_ERR_NULL;
         }
         let collected = take_writer_handle(serializer as *mut c_void).unwrap_or_default();
-        store_owned_bytes(bytes, collected)
+        store_owned_bytes(bytes, Ok(collected))
     });
 }
 
@@ -341,8 +344,10 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
         };
         let mut vle = [0u8; VLE_LEN];
         let n = encode_zint(&mut vle, len as u64);
-        buf.write_all(&vle[..n]);
-        Z_OK
+        match buf.write_all(&vle[..n]) {
+            Ok(()) => Z_OK,
+            Err(no_room) => no_room.code(),
+        }
     })
 }
 
@@ -365,10 +370,13 @@ pub unsafe extern "C" fn ze_serializer_serialize_buf(
             Some(b) => b,
             None => return Z_ERR_NULL,
         };
-        if len != 0 {
-            buf.write_all(core::slice::from_raw_parts(val, len));
+        if len == 0 {
+            return Z_OK;
         }
-        Z_OK
+        match buf.write_all(core::slice::from_raw_parts(val, len)) {
+            Ok(()) => Z_OK,
+            Err(no_room) => no_room.code(),
+        }
     })
 }
 
@@ -619,10 +627,13 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_slice(
         if val.is_null() {
             return Z_ERR_NULL;
         }
-        match take_length_prefixed(deserializer) {
-            Some(bytes) => {
-                store_owned_slice(val, bytes);
-                Z_OK
+        match length_prefixed(deserializer) {
+            Some((body, end)) => {
+                let rc = store_owned_slice(val, ByteBuf::copy_of(body));
+                if rc == Z_OK {
+                    (*deserializer)._reader.pos += end;
+                }
+                rc
             }
             None => Z_ERR_GENERIC,
         }
@@ -640,18 +651,22 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
         if val.is_null() {
             return Z_ERR_NULL;
         }
-        match take_length_prefixed(deserializer) {
-            Some(bytes) => {
-                store_owned_string(val, &bytes);
-                Z_OK
+        match length_prefixed(deserializer) {
+            Some((body, end)) => {
+                let rc = store_owned_string(val, body);
+                if rc == Z_OK {
+                    (*deserializer)._reader.pos += end;
+                }
+                rc
             }
             None => Z_ERR_GENERIC,
         }
     })
 }
 
-/// Read one `<vle len><len bytes>` record, advancing the reader only when the
-/// WHOLE record is present.
+/// One `<vle len><len bytes>` record at the reader's position: its bytes, and the bytes of the
+/// whole record, which the caller advances the reader by only once it has kept them, so the
+/// reader moves only when the WHOLE record is present and taken.
 ///
 /// The all-or-nothing advance matters: pico's deserializer reports
 /// `_Z_ERR_DID_NOT_READ` and leaves the position alone, so a program that
@@ -663,18 +678,15 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
 ///
 /// # Safety
 /// `deserializer` must be null or valid.
-unsafe fn take_length_prefixed(deserializer: *mut ze_deserializer_t) -> Option<ByteBuf> {
+unsafe fn length_prefixed<'a>(deserializer: *mut ze_deserializer_t) -> Option<(&'a [u8], usize)> {
     if deserializer.is_null() {
         return None;
     }
-    let reader = &mut (*deserializer)._reader;
-    let remaining = reader.remaining();
+    let remaining = (*deserializer)._reader.remaining();
     let (len, used) = decode_zint(remaining)?;
     let end = used.checked_add(usize::try_from(len).ok()?)?;
     let body = remaining.get(used..end)?;
-    let out = ByteBuf::from(body);
-    reader.pos += end;
-    Some(out)
+    Some((body, end))
 }
 
 // --- arithmetic ------------------------------------------------------------
@@ -723,7 +735,7 @@ unsafe fn serialize_fixed(bytes: *mut z_owned_bytes_t, le: &[u8]) -> ZResult {
         if bytes.is_null() {
             return Z_ERR_NULL;
         }
-        store_owned_bytes(bytes, ByteBuf::from(le))
+        store_owned_bytes(bytes, ByteBuf::copy_of(le))
     })
 }
 
@@ -1145,7 +1157,7 @@ mod tests {
         unsafe {
             // `<len=9>` followed by only 2 bytes.
             let mut bytes = core::mem::zeroed();
-            store_owned_bytes(&mut bytes, ByteBuf::from(vec![9u8, 0xAA, 0xBB]));
+            store_owned_bytes(&mut bytes, ByteBuf::copy_of(&[9u8, 0xAA, 0xBB]));
             let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
             let before = d._reader.pos;
             let mut s = core::mem::zeroed();
@@ -1172,7 +1184,7 @@ mod tests {
         payload.push(0xAB);
         unsafe {
             let mut bytes = core::mem::zeroed();
-            store_owned_bytes(&mut bytes, ByteBuf::from(payload));
+            store_owned_bytes(&mut bytes, ByteBuf::copy_of(&payload));
             let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
             let mut s = core::mem::zeroed();
             assert_ne!(
@@ -1219,7 +1231,7 @@ mod tests {
             assert_eq!(out, 0x0403_0201);
 
             let mut longer = core::mem::zeroed();
-            store_owned_bytes(&mut longer, ByteBuf::from(vec![1u8, 2, 3, 4, 5]));
+            store_owned_bytes(&mut longer, ByteBuf::copy_of(&[1u8, 2, 3, 4, 5]));
             assert_ne!(
                 ze_deserialize_uint32(crate::bytes::z_bytes_loan(&longer), &mut out),
                 Z_OK,
@@ -1236,7 +1248,7 @@ mod tests {
     fn every_width_shares_one_body_and_its_refusals() {
         unsafe fn payload(raw: &[u8]) -> z_owned_bytes_t {
             let mut bytes = core::mem::zeroed();
-            store_owned_bytes(&mut bytes, ByteBuf::from(raw));
+            store_owned_bytes(&mut bytes, ByteBuf::copy_of(raw));
             bytes
         }
         unsafe fn written(bytes: &z_owned_bytes_t) -> &[u8] {

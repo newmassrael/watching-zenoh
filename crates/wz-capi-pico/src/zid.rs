@@ -338,8 +338,7 @@ pub unsafe extern "C" fn z_id_to_string(id: *const z_id_t, out: *mut z_owned_str
         if id.is_null() || out.is_null() {
             return Z_ERR_NULL;
         }
-        store_owned_string(out, &zid_hex(&(*id).id));
-        Z_OK
+        store_owned_string(out, &zid_hex(&(*id).id))
     })
 }
 

@@ -404,6 +404,18 @@ function Start-ProbeProcess([string]$binary, [string]$role, [string[]]$words, [s
 
 function Wait-Probe($probe, [double]$seconds) { return [WzPerfNative]::Wait($probe.Child, $seconds) }
 
+# await_line of perf_matrix.py: the line of $role that carries $keys once the probe printed it, waited for up to
+# $seconds; $null when it was not printed by then, or the process ended without it.
+function Wait-Line($probe, [string]$role, $keys, [double]$seconds) {
+    $until = [DateTime]::UtcNow.AddSeconds($seconds)
+    while ($true) {
+        $over = [WzPerfNative]::Ended($probe.Child)
+        $found = Get-Fields (Read-Text $probe.Out) $role $keys
+        if ($null -ne $found -or $over -or [DateTime]::UtcNow -ge $until) { return $found }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Stop-Probe($probe) {
     if ($probe.Ended) { return }
     [void][WzPerfNative]::Stop($probe.Child, "Local\perf_probe_stop_$($probe.Child.Pid)", 5000)
@@ -494,6 +506,28 @@ function Get-ThrFigures($pub, $sub, $client, $server) {
 function Get-Or($words, [string]$key, [string]$default) {
     if ($words.ContainsKey($key)) { return $words[$key] }
     return $default
+}
+
+# delivery of perf_matrix.py: a string (why the cell is lost), $null (no end marker came, on a transport of
+# datagrams), or the puts that answered success and had not reached the subscriber by the publisher's end marker.
+function Get-Delivery([string]$transport, $pub, $mark) {
+    $sent = [long]$pub['sent']
+    $stream = @($script:PlanDoc.stream_transports) -contains $transport
+    if ($null -eq $mark) {
+        if ($stream) {
+            return ("the publisher's end marker ({0} put(s) of it answered success) did not reach the subscriber in {1} s, " +
+                    "on a reliable stream under congestion control block") -f (Get-Or $pub 'end_marks' '?'), $script:PlanDoc.drain_s
+        }
+        return $null
+    }
+    if ([long]$mark['pub_sent'] -ne $sent) { return "the end marker carried $($mark['pub_sent']) puts and the publisher said $sent" }
+    $missing = $sent - [long]$mark['received_before_end']
+    if ($stream -and $missing -ne 0) {
+        $tail = if ($missing -gt 0) { "$missing answered success and were never delivered" } else { "$(-$missing) more were delivered than were put" }
+        return ("$sent puts answered success and $($mark['received_before_end']) reached the subscriber before the " +
+                "publisher's end marker, on a reliable stream under congestion control block: $tail")
+    }
+    return $missing
 }
 
 # stall_note of perf_matrix.py: which side stopped, in a throughput cell that delivered nothing.
@@ -615,34 +649,47 @@ function Invoke-CellOnce([string]$binary, [string]$transport, [bool]$batching, [
         $pubSeconds = [int]([math]::Ceiling($WarmupMs / 1e3 + $WindowS)) + [int]$script:PlanDoc.pub_tail_s
         $server = Start-ProbeProcess $binary 'sub' (@('-m', 'peer') + $endpoints.Server +
             @('-w', "$WarmupMs", '-t', "$WindowS")) 'server' $tag
+        $ended = $false
         try {
             Start-Sleep -Milliseconds $settleMs
             $client = Start-ProbeProcess $binary 'pub' (@('-m', 'peer') + $endpoints.Client +
                 @('-s', "$size", '-t', "$pubSeconds") + $flags) 'client' $tag
-            $done = Wait-Probe $client ($pubSeconds + [double]$script:PlanDoc.ready_s + 30)
+            # The publisher keeps its session after its result, so what it sent is not cut off by its close while
+            # the subscriber still reads it; both are stopped once the subscriber said what reached it.
+            $said = Wait-Line $client 'pub' $script:PlanDoc.line_keys.pub ($pubSeconds + [double]$script:PlanDoc.ready_s + 30)
+            if ($null -ne $said) {
+                $drain = if (@($script:PlanDoc.stream_transports) -contains $transport) { [double]$script:PlanDoc.drain_s } else { [double]$script:PlanDoc.mark_wait_s }
+                [void](Wait-Line $server 'sub' $script:PlanDoc.line_keys.sub_mark $drain)
+            } else {
+                $ended = [WzPerfNative]::Ended($client.Child)
+            }
         } finally {
             if ($null -ne $client) { Stop-Probe $client }
             Stop-Probe $server
         }
         $clientText = Read-Text $client.Out
         $serverText = Read-Text $server.Out
-        if (-not $done) {
-            $result = @{ Lost = 'pub did not finish in time' }
-        } else {
-            $put = Get-Fields $clientText 'pub' $script:PlanDoc.line_keys.pub
-            $got = Get-Fields $serverText 'sub' $script:PlanDoc.line_keys.sub
-            if ($null -eq $put) {
+        $put = Get-Fields $clientText 'pub' $script:PlanDoc.line_keys.pub
+        $got = Get-Fields $serverText 'sub' $script:PlanDoc.line_keys.sub
+        if ($null -eq $put) {
+            if ($ended) {
                 $result = @{ Lost = "pub gave no result; it said: $(Get-LastWords $clientText)" }
-            } elseif ($null -eq $got) {
-                $result = @{ Lost = "sub gave no window; it said: $(Get-LastWords $serverText)" }
             } else {
-                $figures = Get-ThrFigures $put $got (Get-Usage $client) (Get-Usage $server)
-                if ($figures -is [string]) {
-                    $note = Get-StallNote $put (Get-Fields $serverText 'sub' $script:PlanDoc.line_keys.sub_end)
-                    $result = @{ Lost = "$figures; $note" }
-                } else {
-                    $result = @{ Figures = $figures }
-                }
+                $result = @{ Lost = 'pub did not finish in time' }
+            }
+        } elseif ($null -eq $got) {
+            $result = @{ Lost = "sub gave no window; it said: $(Get-LastWords $serverText)" }
+        } else {
+            $figures = Get-ThrFigures $put $got (Get-Usage $client) (Get-Usage $server)
+            if ($figures -isnot [string]) {
+                $missing = Get-Delivery $transport $put (Get-Fields $serverText 'sub' $script:PlanDoc.line_keys.sub_mark)
+                if ($missing -is [string]) { $figures = $missing } elseif ($null -ne $missing) { $figures['undelivered'] = $missing }
+            }
+            if ($figures -is [string]) {
+                $note = Get-StallNote $put (Get-Fields $serverText 'sub' $script:PlanDoc.line_keys.sub_end)
+                $result = @{ Lost = "$figures; $note" }
+            } else {
+                $result = @{ Figures = $figures }
             }
         }
     }
@@ -969,6 +1016,7 @@ function Invoke-Build {
         probe_compile = "$cl ws2_32.lib psapi.lib"
         wz_features = $script:PlanDoc.wz_features
         wz_engine = $script:PlanDoc.wz_engine
+        wz_stdlib = $script:PlanDoc.wz_stdlib
         wz_package = $script:PlanDoc.package
     }
     Write-Text (Join-Path $script:WorkDir 'reference.json') ($record | ConvertTo-Json -Depth 12)
@@ -978,7 +1026,7 @@ function Invoke-Build {
     if ($refused.Count -gt 0) {
         Say "pico built $($refused -join ', ') otherwise than asked, so the two builds differ there (reference.json says so)"
     }
-    Say "arm W: $($script:PlanDoc.package.name) on the $($script:PlanDoc.wz_engine) engine"
+    Say "arm W: $($script:PlanDoc.package.name) on the $($script:PlanDoc.wz_engine) engine, $($script:PlanDoc.wz_stdlib)"
 }
 
 # -- the run ---------------------------------------------------------------------------------------------
@@ -1131,6 +1179,7 @@ $sizeList = @(foreach ($w in (Get-Words $Sizes)) { [int]$w })
             platform = $script:PlanDoc.platform
             builds = $builds
             engine = $builds.wz_engine
+            stdlib = $builds.wz_stdlib
             external = [ordered]@{ status = 'not-measured'; why = 'arm X, an external library of the pico API, is run by the Linux runner alone' }
             not_measured = $notMeasured
             group_interface = $groupRecord
@@ -1150,9 +1199,9 @@ $sizeList = @(foreach ($w in (Get-Words $Sizes)) { [int]$w })
                 }
             } } }
         }
-        Say ('{0} repetition(s) of {1} x batching {2} x {3} x {4} B, arms P, W; client side on {5}, server side on {6}; arm W on the {7} engine' -f
+        Say ('{0} repetition(s) of {1} x batching {2} x {3} x {4} B, arms P, W; client side on {5}, server side on {6}; arm W on the {7} engine, {8}' -f
              $Reps, ($transportList -join ', '), ($batchings -join ', '), ($workloadList -join ', '), ($sizeList -join ', '),
-             $ClientCpus, $ServerCpus, $record.engine)
+             $ClientCpus, $ServerCpus, $record.engine, $record.stdlib)
         $log = Join-Path $script:RunDir 'cells.jsonl'
         Write-Text $log ''
         $cells = New-Object System.Collections.ArrayList
@@ -1229,7 +1278,7 @@ if ($Mode -eq 'idle-cpus') {
 if (-not $Plan -or -not (Test-Path -LiteralPath $Plan)) { Fail "-Plan names no plan ('$Plan'); make one with perf_matrix.py windows-plan" }
 if (-not $Work) { Fail '-Work names no directory' }
 $script:PlanDoc = Get-Content -Raw -LiteralPath $Plan | ConvertFrom-Json
-if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/1') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/1" }
+if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/2') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/2; make it again with perf_matrix.py windows-plan" }
 if (-not (Test-Path -LiteralPath $Work)) { [void](New-Item -ItemType Directory -Path $Work) }
 $script:WorkDir = (Resolve-Path -LiteralPath $Work).Path
 $script:BinDir = Join-Path $script:WorkDir 'bin'

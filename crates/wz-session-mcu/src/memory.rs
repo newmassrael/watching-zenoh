@@ -17,21 +17,29 @@
 //! dropped without an error; a port is bound by one end at a time and is free
 //! again when that end is dropped (the admin node binds its listen port anew when
 //! an accepted session ends).
+//!
+//! It lends its session the outbound storage a frame is encoded into, as every link of the
+//! cooperative runtime does (`wz_runtime_coop::link_storage`): a session built to send only from
+//! memory its link lends (`wz-session-core`'s `tx-lend-only`, the C library's build) has no other
+//! way to send, so an end that lent nothing could not carry a handshake for it.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::{Cell, OnceCell, RefCell};
+use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use core::net::{IpAddr, SocketAddr};
 
+use wz_runtime_coop::link_storage::{TxLender, TxStore};
 use wz_runtime_coop::session_drive::{
     LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
 };
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame,
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame, TxSlot, TxSlotGrant,
+    DEFAULT_LINK_MTU,
 };
+use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
 /// One datagram waiting at an end: who sent it and what it carries.
@@ -45,6 +53,44 @@ const FIRST_EPHEMERAL_PORT: u16 = 49152;
 
 /// The datagrams waiting at each bound end, by the address and port it is bound on.
 type Queues = BTreeMap<SocketAddr, VecDeque<Waiting>>;
+
+/// How many outbound slots an end lends: a batching session holds one open while it encodes the
+/// next message that does not join it into another.
+const TX_SLOTS: usize = 2;
+
+/// An end's outbound storage: [`TX_SLOTS`] slots of the default link bound, allocated with the end.
+/// Each slot is the whole frame the end advertises it carries (`link_mtu`), so no frame the session
+/// may build is refused for want of room.
+struct MemoryTx(Vec<UnsafeCell<u8>>);
+
+impl MemoryTx {
+    fn new() -> Self {
+        Self(
+            (0..TX_SLOTS * DEFAULT_LINK_MTU)
+                .map(|_| UnsafeCell::new(0))
+                .collect(),
+        )
+    }
+}
+
+impl TxStore for MemoryTx {
+    fn slots(&self) -> usize {
+        TX_SLOTS
+    }
+
+    fn slot_len(&self) -> usize {
+        DEFAULT_LINK_MTU
+    }
+
+    fn slot_base(&self, slot: usize) -> *mut u8 {
+        // `UnsafeCell<u8>` is a `u8`, and a pointer to a cell may be written through.
+        self.0
+            .as_ptr()
+            .cast::<u8>()
+            .cast_mut()
+            .wrapping_add(slot * DEFAULT_LINK_MTU)
+    }
+}
 
 /// A network of in-memory ends. Shared by `Rc`: every end holds the network it
 /// was bound on.
@@ -110,6 +156,7 @@ impl MemoryNetwork {
                 None => PeerBinding::accepting(),
             },
             endpoints: OnceCell::new(),
+            tx: TxLender::new(MemoryTx::new()),
         };
         end.note_endpoints();
         Rc::new(end)
@@ -147,6 +194,7 @@ pub struct MemoryEnd {
     local: SocketAddr,
     binding: PeerBinding<SocketAddr>,
     endpoints: OnceCell<LinkEndpoints>,
+    tx: TxLender<MemoryTx>,
 }
 
 impl MemoryEnd {
@@ -198,6 +246,33 @@ impl BoxedLinkDriver for MemoryEnd {
             });
         }
         LinkSendOutcome::Sent
+    }
+
+    fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        // A datagram carries no framing of the link's own, so the frame starts at the slot's front.
+        self.tx.acquire(0)
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        self.tx.storage(slot)
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        _priority: Priority,
+    ) -> LinkSendOutcome {
+        match self.tx.take(slot, start, len) {
+            Some(frame) => self.send_blocking(frame, reliability),
+            None => LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+        }
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        self.tx.release(slot);
     }
 
     fn open_blocking(&self) {}
@@ -338,6 +413,64 @@ mod tests {
             frame_bytes(dialling.pump.try_recv()),
             Some(b"world".to_vec())
         );
+    }
+
+    /// An end lends its slots for a frame to be encoded into: a lent frame reaches the peer as the
+    /// bytes the session wrote, a slot given back is lent again, and with every slot out the end
+    /// lends none, which a lend-only session counts as a refusal.
+    #[test]
+    fn a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded() {
+        let net = MemoryNetwork::new();
+        let accepting = MemoryLinks::new(net.clone(), HOST_A)
+            .open_acceptor(7447)
+            .expect("bind");
+        let dialling = MemoryLinks::new(net.clone(), HOST_B)
+            .open_initiator(Locator::udp(SocketAddr::from((HOST_A, 7447))))
+            .expect("open");
+
+        let grant = dialling
+            .sink
+            .tx_slot_acquire(SYN.len(), Priority::Data)
+            .expect("an end lends a slot");
+        std::assert_eq!(grant.headroom, 0, "a datagram has no framing of its own");
+        let (base, len) = dialling.sink.tx_slot_storage(grant.slot);
+        std::assert_eq!(len, DEFAULT_LINK_MTU);
+        // SAFETY: the slot was granted to this test alone and is `len` bytes long, past `SYN`.
+        unsafe { core::ptr::copy_nonoverlapping(SYN.as_ptr(), base, SYN.len()) };
+        std::assert!(matches!(
+            dialling.sink.tx_slot_send(
+                grant.slot,
+                0,
+                SYN.len(),
+                Reliability::Reliable,
+                Priority::Data
+            ),
+            LinkSendOutcome::Sent
+        ));
+        std::assert_eq!(frame_bytes(accepting.pump.try_recv()), Some(SYN.to_vec()));
+
+        let first = dialling.sink.tx_slot_acquire(1, Priority::Data);
+        let second = dialling.sink.tx_slot_acquire(1, Priority::Data);
+        std::assert!(first.is_some() && second.is_some(), "two slots are lent");
+        std::assert!(
+            dialling.sink.tx_slot_acquire(1, Priority::Data).is_none(),
+            "with every slot out none is lent"
+        );
+        dialling.sink.tx_slot_abort(first.expect("lent").slot);
+        std::assert!(
+            dialling.sink.tx_slot_acquire(1, Priority::Data).is_some(),
+            "a slot given back is lent again"
+        );
+        std::assert!(matches!(
+            dialling.sink.tx_slot_send(
+                second.expect("lent").slot,
+                DEFAULT_LINK_MTU,
+                1,
+                Reliability::Reliable,
+                Priority::Data
+            ),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+        ));
     }
 
     /// The rule a real link keeps: once bound, the acceptor's session reads its
