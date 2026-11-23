@@ -99,7 +99,10 @@ fn encoded(header: u8, body: &[u8]) -> Option<Vec<u8>> {
         payload: Bounded::new(body)?,
     };
     let mut out = Vec::with_capacity(CompressedBatchWire::measure(&batch).len());
-    let Ok(()) = CompressedBatchWire::encode_source(&batch, &mut VecSink::new(&mut out));
+    match CompressedBatchWire::encode_source(&batch, &mut VecSink::new(&mut out)) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     Some(out)
 }
 

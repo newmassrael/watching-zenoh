@@ -464,7 +464,10 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> O
         extensions: None,
     };
     let mut datagram = Vec::with_capacity(ScoutingHelloWire::measure(&message).len());
-    let Ok(()) = ScoutingHelloWire::encode_source(&message, &mut VecSink::new(&mut datagram));
+    match ScoutingHelloWire::encode_source(&message, &mut VecSink::new(&mut datagram)) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     Some(datagram)
 }
 

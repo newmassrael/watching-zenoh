@@ -137,7 +137,10 @@ impl<'a> LeafPush<'a> {
                     | FLAG_PUSH_M
                     | chained,
             );
-            let Ok(()) = WireexprLocalWire::encode_source(local, &mut VecSink::new(&mut bytes));
+            match WireexprLocalWire::encode_source(local, &mut VecSink::new(&mut bytes)) {
+                Ok(()) => {}
+                Err(never) => match never {},
+            }
         }
         {
             let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
@@ -263,7 +266,10 @@ impl EncodedPush {
             | if m { FLAG_PUSH_M } else { 0 };
         let mut bytes = Vec::with_capacity(1 + WireexprWire::measure(key).len());
         bytes.push(header);
-        let Ok(()) = WireexprWire::encode_source(key, &mut VecSink::new(&mut bytes));
+        match WireexprWire::encode_source(key, &mut VecSink::new(&mut bytes)) {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
         PushHead { bytes }
     }
 
@@ -336,7 +342,10 @@ impl SplicedPush<'_> {
     /// The bytes the Push is framed as, in a vector of their own.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.encoded_len());
-        let Ok(()) = self.write(&mut VecSink::new(&mut bytes));
+        match self.write(&mut VecSink::new(&mut bytes)) {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
         bytes
     }
 }
