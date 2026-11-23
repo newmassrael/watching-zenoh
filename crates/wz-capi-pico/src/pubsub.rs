@@ -1713,6 +1713,9 @@ pub(crate) unsafe fn take_moved_bytes(
 ///
 /// # Safety
 /// As [`take_moved_bytes`].
+// Only a Del reply's options carry bytes the wire does not, so only a build that answers queries
+// has a caller.
+#[cfg(feature = "queryable")]
 pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
     if payload.is_null() {
         return;
