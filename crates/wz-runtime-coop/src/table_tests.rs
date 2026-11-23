@@ -771,3 +771,161 @@ fn a_waker_kept_past_the_runtime_still_points_at_a_cell() {
     waker.wake_by_ref();
     drop(waker);
 }
+
+/// A task no handle waits for is over in the pass that polls it: its cell is free when the pass
+/// returns, whether its output had something to drop (dropped once, then freed) or nothing (freed
+/// in the section that settles it).
+#[test]
+fn a_pass_frees_the_cells_of_tasks_no_handle_waits_for_and_drops_their_output_once() {
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    let runtime = CoopRuntime::reserved(
+        Still,
+        RuntimeRows {
+            tasks: 2,
+            task_bytes: 256,
+            timers: 0,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    drop(local.spawn_local(async { Counted(&DROPS) }));
+    drop(local.spawn_local(async { 7u32 }));
+    assert_eq!(runtime.live_task_count(), 2);
+    local.run_until_idle();
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        1,
+        "the output no handle reads is dropped, once"
+    );
+    assert_eq!(runtime.live_task_count(), 0, "both cells are free");
+}
+
+/// The cell of a task that ended with no handle is free before the pass polls the next cell: a
+/// task there that spawns finds it, on a table with no other.
+#[test]
+fn a_cell_the_pass_freed_is_free_for_a_task_the_next_cell_spawns() {
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    let runtime = CoopRuntime::reserved(
+        Still,
+        RuntimeRows {
+            tasks: 2,
+            task_bytes: 256,
+            timers: 0,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    drop(local.spawn_local(async { Counted(&DROPS) }));
+    let inner = local.clone();
+    let spawner = local.spawn_local(async move { inner.try_spawn_local(async { 5u8 }).is_ok() });
+    local.run_until_idle();
+    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    assert!(
+        local.block_on_local(spawner).expect("not cancelled"),
+        "the first task's cell was free when the second task spawned"
+    );
+    assert_eq!(runtime.task_refusals(), Refusals::default());
+}
+
+/// A task waiting on the handle of the task in the cell before it is woken by the section that
+/// settles that task, after the section looked at its own cell: it is looked at again and polled
+/// in the same pass, and reads the output.
+#[test]
+fn a_task_waiting_on_the_cell_before_it_reads_the_output_in_the_same_pass() {
+    let runtime = CoopRuntime::new(Still);
+    let local = CoopLocalSet::new(&runtime);
+    let go = Rc::new(Cell::new(false));
+    let parked: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
+    let (gate, stash) = (Rc::clone(&go), Rc::clone(&parked));
+    let first = local.spawn_local(core::future::poll_fn(move |cx| {
+        if gate.get() {
+            Poll::Ready(20u32)
+        } else {
+            *stash.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }));
+    let waiter = local.spawn_local(async move { first.await.expect("not cancelled") + 1 });
+    local.run_until_idle();
+    assert!(!waiter.is_finished(), "the first task waits for its gate");
+    go.set(true);
+    parked
+        .borrow_mut()
+        .take()
+        .expect("the first task parked its waker")
+        .wake();
+    local.run_until_idle();
+    assert!(
+        waiter.is_finished(),
+        "the waiter was polled in the pass that ended the task it waits on"
+    );
+    assert_eq!(local.block_on_local(waiter).expect("not cancelled"), 21);
+}
+
+/// A handle let go after its task ended frees the cell: at once for an output with nothing to
+/// drop, after dropping it once for one that has.
+#[test]
+fn a_handle_let_go_after_its_task_ended_frees_the_cell() {
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    let runtime = CoopRuntime::new(Still);
+    let local = CoopLocalSet::new(&runtime);
+    let plain = local.spawn_local(async { 3u32 });
+    let owning = local.spawn_local(async { Counted(&DROPS) });
+    local.run_until_idle();
+    assert!(plain.is_finished() && owning.is_finished());
+    assert_eq!(
+        runtime.live_task_count(),
+        2,
+        "each result waits for its handle"
+    );
+    drop(plain);
+    assert_eq!(runtime.live_task_count(), 1);
+    drop(owning);
+    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.live_task_count(), 0);
+}
+
+/// A waker that writes its number into a shared list when it is woken.
+struct Recorder {
+    id: u32,
+    woken: std::sync::Arc<std::sync::Mutex<std::vec::Vec<u32>>>,
+}
+
+impl std::task::Wake for Recorder {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.woken.lock().expect("not poisoned").push(self.id);
+    }
+}
+
+/// More entries due than one section takes: every one is woken, earliest first and ties in the
+/// order they were registered, and an entry not yet due stays.
+#[test]
+fn every_due_timer_is_woken_earliest_first_past_one_batch() {
+    let runtime = CoopRuntime::new(Still);
+    let woken = std::sync::Arc::new(std::sync::Mutex::new(std::vec::Vec::new()));
+    let entries = [
+        (1u32, 50u64),
+        (2, 10),
+        (3, 30),
+        (4, 10),
+        (5, 20),
+        (6, 40),
+        (7, 500),
+    ];
+    for (id, deadline_us) in entries {
+        let waker = Waker::from(std::sync::Arc::new(Recorder {
+            id,
+            woken: std::sync::Arc::clone(&woken),
+        }));
+        assert!(runtime.timers().register(deadline_us, waker));
+    }
+    runtime.timers().pop_expired(100);
+    assert_eq!(
+        *woken.lock().expect("not poisoned"),
+        [2u32, 4, 5, 3, 6, 1],
+        "every due entry, earliest first, ties in registration order"
+    );
+    assert_eq!(
+        runtime.timers().pending_count(),
+        1,
+        "the entry not yet due stays"
+    );
+}

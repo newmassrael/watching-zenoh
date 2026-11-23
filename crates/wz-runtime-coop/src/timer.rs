@@ -36,6 +36,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use critical_section::{CriticalSection, Mutex};
 
+/// The due wakers [`TimerQueue::pop_expired`] takes out in one section: a few, because they are
+/// on the stack of the pass, and enough that a pass rarely needs a second section.
+const WAKE_BATCH: usize = 4;
+
 struct TimerEntry {
     deadline_us: u64,
     seq: u64,
@@ -200,17 +204,36 @@ impl TimerQueue {
 
     /// Wake every entry whose `deadline_us <= now_us`, earliest first. Wakers fire
     /// outside the critical section.
+    ///
+    /// The due entries are taken out `WAKE_BATCH` at a time, earliest first, in one section
+    /// each, so a pass that finds none or a few due takes one section. An entry a waker registers
+    /// while this wakes, already due, is woken no later than the next pass. Out of line: the batch is on this
+    /// call's frame, which is gone before the executor polls the tasks it woke.
+    #[inline(never)]
     pub fn pop_expired(&self, now_us: u64) {
         loop {
-            let due = crate::cs::with(|cs| {
+            let mut due: [Option<Waker>; WAKE_BATCH] = [const { None }; WAKE_BATCH];
+            let taken = crate::cs::with(|cs| {
                 self.with_slots(cs, |slots| {
-                    let (index, _) = earliest(slots, now_us)?;
-                    slots.get_mut(index)?.0.take()
+                    let mut taken: usize = 0;
+                    for place in due.iter_mut() {
+                        let Some((index, _)) = earliest(slots, now_us) else {
+                            break;
+                        };
+                        *place = slots
+                            .get_mut(index)
+                            .and_then(|slot| slot.0.take())
+                            .map(|entry| entry.waker);
+                        taken = taken.saturating_add(1);
+                    }
+                    taken
                 })
             });
-            match due {
-                Some(entry) => entry.waker.wake(),
-                None => return,
+            for waker in due.into_iter().flatten() {
+                waker.wake();
+            }
+            if taken < WAKE_BATCH {
+                return;
             }
         }
     }

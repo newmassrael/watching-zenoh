@@ -2530,6 +2530,12 @@ pub mod declaration_sync;
 )]
 pub mod drive;
 
+/// The unicast session's own timers (handshake, lease, keep-alive, the application layer's wake),
+/// which every drive loop asks when it may wait and tells the time. Gated like [`drive`], whose
+/// comparators it sequences.
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod transport_timers;
+
 /// The words of the session lifecycle that need no allocator: the open verdict, the
 /// refusals, the open key and the capability document. Unconditional, so a node of the
 /// fixed-memory profile answers an open in the words the heap profile does;
