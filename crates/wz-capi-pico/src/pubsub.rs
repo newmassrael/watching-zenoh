@@ -1704,6 +1704,52 @@ pub(crate) unsafe fn take_moved_bytes(
     }
 }
 
+/// A moved payload as a call that only reads it holds it, for the length of that call: the
+/// marshal's own payload read where it lies, or the caller's, taken out of its place.
+pub(crate) enum MovedBytes<'a> {
+    /// A BORROW of a delivered sample's payload, which its marshal holds past the call.
+    Lent(&'a ByteBuf),
+    /// The caller's payload, consumed: its storage goes back when this is dropped.
+    Owned(ByteBuf),
+}
+
+impl core::ops::Deref for MovedBytes<'_> {
+    type Target = ByteBuf;
+    fn deref(&self) -> &ByteBuf {
+        match self {
+            Self::Lent(buf) => buf,
+            Self::Owned(buf) => buf,
+        }
+    }
+}
+
+/// Take a moved payload for a call that reads it and keeps nothing of it (a put), nulling the
+/// source: `None` for a null one. Unlike [`take_moved_bytes`], a BORROW is not cloned: the call
+/// reads the bytes where the marshal that lent them holds them, which it outlives, so a put of a
+/// delivered sample's payload copies nothing and cannot be refused for want of room.
+///
+/// Every arm nulls the source, as [`take_moved_bytes`] does.
+///
+/// # Safety
+/// As [`take_moved_bytes`].
+#[inline(never)]
+pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Option<MovedBytes<'a>> {
+    if payload.is_null() {
+        return None;
+    }
+    let handle = (*payload)._this.handle;
+    if handle.is_null() {
+        return None;
+    }
+    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
+    (*payload)._this = z_owned_bytes_t::null_value();
+    Some(if borrowed {
+        MovedBytes::Lent(&*(handle as *const ByteBuf))
+    } else {
+        MovedBytes::Owned(crate::bytes::unbox_bytes(handle as *mut ByteBuf))
+    })
+}
+
 /// Consume a moved payload without reading it, nulling the source: what an option whose bytes the
 /// wire does not carry is owed. A borrowed payload is its marshal's, and is left to it.
 ///
@@ -1981,6 +2027,47 @@ mod put_options_tests {
             );
             assert_eq!(rc, Z_ERR_NULL, "no payload");
             assert!(attachment._this.handle.is_null(), "the attachment is spent");
+        }
+    }
+
+    /// A put reads the payload it is moved where it lies: a borrow of a delivered sample's payload
+    /// is read in the bytes its marshal holds and not copied, a payload of the caller's own is
+    /// taken out of its place, a null one is none, and each leaves the caller's slot spent.
+    #[test]
+    fn a_put_reads_its_moved_payload_where_it_lies() {
+        use super::{read_moved_bytes, MovedBytes};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::bytes::ByteBuf;
+        let lent_bytes = *b"lent";
+        // SAFETY: `lent_bytes` outlives `held`, and every pointer handed over is null or points
+        // at a live value of its type that outlives the call.
+        unsafe {
+            let held = ByteBuf::lent(&lent_bytes);
+            let mut lent = z_moved_bytes_t {
+                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+            };
+            match read_moved_bytes(&mut lent) {
+                Some(MovedBytes::Lent(buf)) => {
+                    assert_eq!(buf.as_slice().as_ptr(), lent_bytes.as_ptr(), "not copied");
+                }
+                _ => panic!("a borrow is read where its marshal holds it"),
+            }
+            assert!(lent._this.handle.is_null(), "the borrow is spent");
+
+            let mut owned = z_owned_bytes_t::null_value();
+            let copied = crate::bytes::z_bytes_copy_from_buf(&mut owned, b"own".as_ptr(), 3);
+            assert_eq!(copied, crate::result::Z_OK);
+            let mut moved = z_moved_bytes_t { _this: owned };
+            let taken = read_moved_bytes(&mut moved).expect("an owned payload is taken");
+            assert!(matches!(taken, MovedBytes::Owned(_)));
+            assert_eq!(taken.as_slice(), &b"own"[..]);
+            assert!(moved._this.handle.is_null(), "the payload is spent");
+
+            assert!(read_moved_bytes(core::ptr::null_mut()).is_none());
+            let mut empty = z_moved_bytes_t {
+                _this: z_owned_bytes_t::null_value(),
+            };
+            assert!(read_moved_bytes(&mut empty).is_none());
         }
     }
 
@@ -2505,10 +2592,8 @@ pub unsafe extern "C" fn z_put(
 ) -> ZResult {
     guarded(|| {
         let resolved = session_put_options(options);
-        let buf = match take_moved_bytes(payload) {
-            Ok(Some(buf)) => buf,
-            Ok(None) => return Z_ERR_NULL,
-            Err(no_room) => return no_room.code(),
+        let Some(buf) = read_moved_bytes(payload) else {
+            return Z_ERR_NULL;
         };
         session_publish(zs, keyexpr, &buf, &resolved)
     })
@@ -2696,10 +2781,8 @@ pub unsafe extern "C" fn z_publisher_put(
     guarded(|| {
         // Consume the moved payload first (pico consume-on-all-paths contract):
         // dropped + source nulled even if the publisher handle is invalid.
-        let buf = match take_moved_bytes(payload) {
-            Ok(Some(b)) => b,
-            Ok(None) => return Z_ERR_NULL,
-            Err(no_room) => return no_room.code(),
+        let Some(buf) = read_moved_bytes(payload) else {
+            return Z_ERR_NULL;
         };
         let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
             Some(s) => s,
