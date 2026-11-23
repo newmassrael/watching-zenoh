@@ -661,8 +661,6 @@ pub mod scout_static;
 // static synth) flow through before a link dial. Pure core::net + alloc;
 // distinct from wz-codecs::locator (the wire codec).
 #[cfg(feature = "alloc")]
-// Totality debt TD-080 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod locator;
 // What an open of a configuration asks of the operating system, for every reader of one
 // (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
