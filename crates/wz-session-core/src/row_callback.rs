@@ -392,7 +392,7 @@ mod tests {
     /// is let go of.
     #[test]
     fn a_c_closure_is_called_with_its_context_and_dropped_once() {
-        use core::sync::atomic::AtomicUsize;
+        use core::sync::atomic::{AtomicUsize, Ordering};
         static DROPS: AtomicUsize = AtomicUsize::new(0);
         unsafe extern "C" fn count(_context: *mut c_void) {
             DROPS.fetch_add(1, Ordering::SeqCst);
