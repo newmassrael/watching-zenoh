@@ -1339,7 +1339,10 @@ mod tests {
         };
 
         let mut dialling = held_as(1, own_spans, true);
-        dialling.registry.add_face(5);
+        dialling
+            .registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
         assert_eq!(
             declared(&mut dialling, 5),
             (false, false),
@@ -1356,7 +1359,10 @@ mod tests {
                 .has_room(),
             "the dial face's set has no rows"
         );
-        listening.registry.add_face(5);
+        listening
+            .registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
         assert_eq!(listening.registry.held_at(5), Some(1));
         assert_eq!(
             declared(&mut listening, 5),
