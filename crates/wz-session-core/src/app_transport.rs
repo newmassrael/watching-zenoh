@@ -297,6 +297,67 @@ mod tests {
         (calls, transport)
     }
 
+    /// An open stream link of `transport` holding `held` for the program.
+    fn holding(transport: &AppTransport, held: &[u8]) -> LinkHandle {
+        let link = transport.begin_open(
+            AppLinkKind::StreamDial,
+            "tcp/192.0.2.1:7447",
+            Quota::at_most(64),
+        );
+        transport
+            .with(|table| table.hold_remainder(link, held))
+            .expect("an open link holds a remainder");
+        link
+    }
+
+    /// The bytes offered by an offer that takes nothing.
+    fn offered(transport: &AppTransport, link: LinkHandle) -> Option<Vec<u8>> {
+        let mut seen = None;
+        let _ = transport.offer_remainder(link, |bytes| {
+            seen = Some(bytes.to_vec());
+            0
+        });
+        seen
+    }
+
+    /// An offer lends the front run in place and takes what the program took from it; an offer
+    /// made while another is out is lent nothing, and the run comes back to the next. Turned red
+    /// by a run lent twice at once, or one not given back.
+    #[test]
+    fn an_offer_lends_the_front_run_to_one_writer_and_takes_what_was_taken() {
+        let (_, transport) = transport();
+        let link = holding(&transport, b"abcdef");
+        let nested = transport.offer_remainder(link, |bytes| {
+            assert_eq!(bytes, b"abcdef");
+            assert_eq!(
+                transport.offer_remainder(link, |_| 0),
+                None,
+                "a second writer is lent nothing while the run is out"
+            );
+            // Appended around the lent run, which stays as it was.
+            transport
+                .with(|table| table.hold_remainder(link, b"gh"))
+                .expect("room in the ring");
+            assert_eq!(bytes, b"abcdef");
+            4
+        });
+        assert_eq!(nested, Some((4, 6)));
+        assert_eq!(offered(&transport, link).as_deref(), Some(&b"efgh"[..]));
+    }
+
+    /// A writer that unwinds out of its offer still gives the run back, with nothing taken: the
+    /// next offer is lent it again. Turned red by a run that stays lent after an unwind.
+    #[test]
+    fn an_offer_that_unwinds_gives_the_run_back() {
+        let (_, transport) = transport();
+        let link = holding(&transport, b"abc");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transport.offer_remainder(link, |_| panic!("the writer fails mid-offer"))
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(offered(&transport, link).as_deref(), Some(&b"abc"[..]));
+    }
+
     #[test]
     fn an_open_the_program_answers_up_is_open_and_its_release_closes_it_on_the_program() {
         let (calls, transport) = transport();
