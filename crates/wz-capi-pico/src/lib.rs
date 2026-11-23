@@ -622,8 +622,6 @@ pub mod matching;
 // unstable surface, over the reader of `wz-app-frame`.
 #[cfg(feature = "message-catalog")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-177 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod message_catalog;
 // A catalog message's payload set and read field by field under the program's `.proto` files:
 // wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
