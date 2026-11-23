@@ -106,9 +106,9 @@ impl Script {
     /// Feed a reply to leg `leg` of get `get`, if it is still there.
     fn reply(&self, get: usize, leg: usize, reply: &InboundReply) {
         let slot = Arc::clone(&self.gets.lock().unwrap()[get].legs[leg]);
-        let mut guard = slot.lock().unwrap();
-        if let Some(callback) = guard.as_mut() {
-            callback(reply);
+        let guard = slot.lock().unwrap();
+        if let Some(callback) = guard.as_ref() {
+            callback.call(reply);
         }
     }
 

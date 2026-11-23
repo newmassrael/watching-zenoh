@@ -467,7 +467,8 @@ impl SessionEngine for SharedSession {
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
     ) -> Option<usize> {
         // The walk is the registry's own, for a get that states no links.
-        Some(self.liveliness_get_on_links(keyexpr, timeout_ms, LinkRestriction::Any, fan, leg))
+        let mut leg = || crate::faces::face_reply(leg());
+        Some(self.liveliness_get_on_links(keyexpr, timeout_ms, LinkRestriction::Any, fan, &mut leg))
     }
 
     // The runtime's token names in its retraction the key it was declared on, which is the key
@@ -547,7 +548,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_on_wire(keyexpr, wire, opts.clone(), leg())
+                    .query_on_wire(keyexpr, wire, opts.clone(), crate::faces::face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -578,7 +579,12 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_shm(keyexpr, opts.clone(), &value, leg())
+                    .query_shm(
+                        keyexpr,
+                        opts.clone(),
+                        &value,
+                        crate::faces::face_reply(leg()),
+                    )
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -684,8 +690,9 @@ impl SessionEngine for SharedSession {
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
     ) -> Result<Option<usize>, LinksNotHonoured> {
+        let mut leg = || crate::faces::face_reply(leg());
         Ok(Some(self.liveliness_get_on_links(
-            keyexpr, timeout_ms, links, fan, leg,
+            keyexpr, timeout_ms, links, fan, &mut leg,
         )))
     }
 

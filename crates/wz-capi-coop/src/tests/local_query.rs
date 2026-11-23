@@ -479,7 +479,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
             None,
             &mut || {
                 counting.fetch_add(1, Ordering::SeqCst);
-                Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+                ReplyCallback::shared(|_view: &dyn ReplyView| {})
             },
         )
     });

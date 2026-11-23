@@ -137,13 +137,13 @@ fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
             minted.set(index + 1);
             let end = End(index, legs.clone());
             let seen = legs.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 seen.lock()
                     .unwrap()
                     .replies
                     .push((index, view.payload().to_vec()));
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Some(2), "one leg for each face");

@@ -825,7 +825,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         assert_eq!(
             engine.get_stated(key, &WireKey::literal(), &stated, None, &mut || {
                 legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
+                wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {})
             }),
             Err(named),
             "a get that states {named:?}, through the door that names the refusal"
@@ -833,7 +833,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         assert_eq!(
             engine.get_on_wire(key, &WireKey::literal(), &stated, None, &mut || {
                 legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
+                wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {})
             }),
             Some(0),
             "a get that states {named:?}, handed to the door of no statement, asks no link"
@@ -846,7 +846,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             &WireKey::literal(),
             &QueryOptions::default(),
             None,
-            &mut || Box::new(|_: &dyn ReplyView| {})
+            &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {})
         ),
         Ok(Some(1)),
         "a get that states no set is the node's one leg"
@@ -1117,7 +1117,7 @@ mod shared_memory {
                     &QueryOptions::default(),
                     value.send_handle(),
                     None,
-                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                    &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {}),
                 ),
                 Some(1),
                 "a node asks with a chunk on one leg"
@@ -1169,7 +1169,7 @@ mod shared_memory {
                 &QueryOptions::default(),
                 value.send_handle(),
                 None,
-                &mut || Box::new(|_: &dyn ReplyView| {}),
+                &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {}),
             );
         });
         until_each_is_told(&[&told], || {

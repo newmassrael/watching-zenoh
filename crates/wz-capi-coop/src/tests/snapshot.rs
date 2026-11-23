@@ -47,14 +47,14 @@ fn ask(
         engine.liveliness_get_on_wire(keyexpr, &WireKey::literal(), timeout_ms, fan, &mut || {
             let ends = Ends(seen.clone());
             let registration = registration.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &registration;
                 ends.0.lock().unwrap().replies.push((
                     view.kind(),
                     view.keyexpr().to_owned(),
                     view.payload().to_vec(),
                 ));
-            }) as ReplyCallback
+            })
         });
     (issued, leg)
 }

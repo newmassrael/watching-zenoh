@@ -177,10 +177,10 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock().unwrap().push(view.payload().to_vec());
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Some(2), "one leg for each face the listener holds");

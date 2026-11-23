@@ -103,14 +103,14 @@ fn a_get_sees_the_reply_timestamp_as_the_policy_says_unless_it_chooses() {
             let issued =
                 engine.get_on_wire("demo/ts/a", &WireKey::literal(), &opts, None, &mut || {
                     let into = into.clone();
-                    Box::new(move |reply: &dyn ReplyView| {
+                    ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         // Read as the pico ABI reads it (`wz-capi-pico`'s `get.rs`): where the
                         // view holds it first, since a reply of the delivery lane carries its
                         // timestamp as parts and no hint.
                         let stamped =
                             reply.timestamp_parts().is_some() || reply.timestamp().is_some();
                         into.lock().unwrap().push(stamped);
-                    }) as ReplyCallback
+                    })
                 });
             assert_eq!(issued, Some(1), "one leg, to the router");
             until(&engine, "the stamped reply", || {

@@ -516,13 +516,13 @@ impl SessionEngine for RouterState {
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered(
                 keyexpr,
                 opts,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
             .ok()?;
@@ -550,14 +550,14 @@ impl SessionEngine for RouterState {
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered_shm(
                 keyexpr,
                 opts,
                 value,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
             .ok()?;
@@ -590,9 +590,9 @@ impl SessionEngine for RouterState {
         let ended = Arc::clone(&callback);
         let face = Arc::clone(&self.liveliness);
         let on_key: KeyHandler = Box::new(move |key: &str| {
-            let mut held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(callback) = held.as_mut() {
-                callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
+            let held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(callback) = held.as_ref() {
+                callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
                     rid: 0,
                     keyexpr: key,
                     kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,

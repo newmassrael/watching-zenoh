@@ -297,12 +297,12 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock()
                     .unwrap()
                     .push((view.keyexpr().to_owned(), view.payload().to_vec()));
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Some(1), "one leg for the one face");
@@ -649,7 +649,7 @@ fn alive_by(engine: &Engine, declared: ExprId) {
         &WireKey::aliased(declared, None),
         5_000,
         None,
-        &mut || Box::new(|_: &dyn ReplyView| {}) as ReplyCallback,
+        &mut || ReplyCallback::shared(|_: &dyn ReplyView| {}),
     );
     assert_eq!(issued, Some(1), "one leg for the one face");
 }

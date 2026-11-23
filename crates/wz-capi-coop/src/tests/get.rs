@@ -69,7 +69,7 @@ pub(super) fn ask(
         let ends = Ends::mint(&seen);
         let registration = registration.clone();
         let step = step.clone();
-        Box::new(move |view: &dyn ReplyView| {
+        ReplyCallback::shared(move |view: &dyn ReplyView| {
             let _held = &registration;
             if let Some(engine) = &step {
                 // A step from inside the callback: the session's lock is free.
@@ -80,7 +80,7 @@ pub(super) fn ask(
                 view.keyexpr().to_owned(),
                 view.payload().to_vec(),
             ));
-        }) as ReplyCallback
+        })
     });
     (issued, leg)
 }
@@ -211,7 +211,7 @@ fn a_get_past_its_table_is_refused_and_sends_nothing() {
         None,
         &mut || {
             *counting.lock().unwrap() += 1;
-            Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+            ReplyCallback::shared(|_view: &dyn ReplyView| {})
         },
     );
     assert_eq!(refused, Err(NoRoomToHold));

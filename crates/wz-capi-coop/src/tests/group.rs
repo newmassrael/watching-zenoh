@@ -493,13 +493,13 @@ mod asked {
         let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, None, &mut || {
             into.lock().unwrap().open += 1;
             let ends = Ends(Arc::clone(&into));
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 ends.0.lock().unwrap().replies.push((
                     view.kind(),
                     view.keyexpr().to_owned(),
                     view.payload().to_vec(),
                 ));
-            }) as ReplyCallback
+            })
         });
         (issued, seen)
     }
@@ -847,7 +847,7 @@ mod mapped {
             &WireKey::aliased(id, None),
             &opts,
             None,
-            &mut || Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback,
+            &mut || ReplyCallback::shared(|_view: &dyn ReplyView| {}),
         );
         assert!(issued.is_some(), "the get was asked");
         // The query is the first datagram after the clear that is not a beacon.

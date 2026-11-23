@@ -168,6 +168,15 @@ pub use wz_capi_port::{
 pub type LivelinessSink =
     Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
+/// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
+
+/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
+pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
+}
+
 /// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
 pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
     let sink = Arc::new(sink);
@@ -5371,7 +5380,7 @@ impl SharedSession {
         timeout_ms: u32,
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
-        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+        leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> usize {
         let opts =
             crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
@@ -10186,7 +10195,7 @@ mod face_up_order_tests {
         let asked = |links: LinkRestriction| {
             let own = Arc::new(AtomicUsize::new(0));
             let counted = own.clone();
-            let mut mint = move || -> wz_capi_port::ReplyCallback {
+            let mut mint = move || -> ReplyCallback {
                 let counted = counted.clone();
                 Box::new(move |_view: &dyn ReplyView| {
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -10242,8 +10251,7 @@ mod face_up_order_tests {
         let engine = shared.engine_ref();
 
         let asked = |links: LinkRestriction| {
-            let mut mint =
-                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            let mut mint = || wz_capi_port::ReplyCallback::shared(|_view: &dyn ReplyView| {});
             SessionEngine::liveliness_get_on_link_set(
                 engine,
                 "wz/link/live",

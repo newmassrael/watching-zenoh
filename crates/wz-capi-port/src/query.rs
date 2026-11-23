@@ -49,8 +49,80 @@ pub type QueryCallback = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send
 pub type QueryableSink = Arc<dyn Fn(Arc<dyn QueryHolder>) -> QueryCallback + Send + Sync>;
 
 /// One leg of a get: it reads each reply that leg delivers, and dropping it is that leg's end
-/// (its final, its timeout, the loss of its face, its cancellation), whichever comes first.
-pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
+/// (its final, its timeout, the loss of its face, its cancellation), whichever comes first. Called
+/// through a shared borrow, from any thread and at any depth, as a subscriber's callback is
+/// ([`crate::SubscriberSink`]).
+pub enum ReplyCallback {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawReplyCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedReplyFn>),
+}
+
+/// A Rust program's reply callback, as [`ReplyCallback::Shared`] shares it.
+pub type SharedReplyFn = dyn Fn(&dyn ReplyView) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`ReplyCallback::Raw`]).
+#[derive(Clone, Copy)]
+pub struct RawReplyCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, reply: &dyn ReplyView),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `ReplyCallback::raw`, whose
+// caller promises what the marker traits ask of it.
+unsafe impl Send for ReplyCallback {}
+// SAFETY: as `Send`.
+unsafe impl Sync for ReplyCallback {}
+
+impl ReplyCallback {
+    /// A C program's closure: `call` with `context` for each reply, and `drop` with `context`
+    /// once, at the leg's end.
+    ///
+    /// # Safety
+    /// As [`crate::SubscriberSink::raw`]'s.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, reply: &dyn ReplyView),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawReplyCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl Fn(&dyn ReplyView) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `reply` to the callback.
+    pub fn call(&self, reply: &dyn ReplyView) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, reply) },
+            Self::Shared(call) => call(reply),
+        }
+    }
+}
+
+impl Drop for ReplyCallback {
+    fn drop(&mut self) {
+        if let Self::Raw(RawReplyCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, at the leg's end.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// A get refused whole ([`crate::SessionEngine::get_held`]): it issued no leg and sent nothing,
 /// and a peer or queryable it had to ask found no room to hold it pending. The bound is the

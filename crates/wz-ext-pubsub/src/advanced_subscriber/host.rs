@@ -706,7 +706,7 @@ fn issue_get(
     });
     let mut leg = || -> ReplyCallback {
         let end = Arc::clone(&end);
-        Box::new(move |reply: &dyn ReplyView| {
+        ReplyCallback::shared(move |reply: &dyn ReplyView| {
             let shared = &end.shared;
             if shared.is_closing() {
                 return;

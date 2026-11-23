@@ -1253,7 +1253,7 @@ enum Target {
     Queryable(QueryableCallback),
     /// One leg of a get, locked while it runs.
     #[cfg(feature = "query")]
-    Reply(Arc<Mutex<ReplyCallback>>),
+    Reply(Arc<ReplyCallback>),
     #[cfg(feature = "liveliness")]
     Liveliness(LivelinessCallback),
 }
@@ -1920,11 +1920,11 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
 /// A get's leg `callback`, shown each reply's timestamp when `expose` and none otherwise
 /// (`entity-timestamp-opt-in`): the one place a reply is handed to a get's callback.
 #[cfg(feature = "query")]
-fn reply_shown(expose: bool, mut callback: ReplyCallback) -> ReplyCallback {
+fn reply_shown(expose: bool, callback: ReplyCallback) -> ReplyCallback {
     if expose {
         return callback;
     }
-    Box::new(move |reply: &dyn ReplyView| callback(&HiddenReplyTimestamp(reply)))
+    ReplyCallback::shared(move |reply: &dyn ReplyView| callback.call(&HiddenReplyTimestamp(reply)))
 }
 
 /// The `on_event` of a link's session: the registry's dispatch for the face the link serves. A
@@ -4383,7 +4383,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     LaneItem::Reply(reply) => {
                         let leg = reply.leg();
                         if let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) {
-                            (lock(&callback))(&reply);
+                            callback.call(&reply);
                         }
                     }
                     #[cfg(feature = "liveliness")]
@@ -4861,10 +4861,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Hold `callback` as what the replies of leg `leg` are handed to, until the leg ends.
     #[cfg(feature = "query")]
     fn hold_leg(&self, leg: u64, callback: ReplyCallback) {
-        lock(&self.targets).push((
-            TargetKey::Reply(leg),
-            Target::Reply(Arc::new(Mutex::new(callback))),
-        ));
+        lock(&self.targets).push((TargetKey::Reply(leg), Target::Reply(Arc::new(callback))));
     }
 
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto

@@ -136,7 +136,7 @@ fn a_stated_get_is_refused_by_name_and_asks_no_link() {
                 None,
                 &mut || -> ReplyCallback {
                     legs += 1;
-                    Box::new(|_: &dyn ReplyView| {})
+                    ReplyCallback::shared(|_: &dyn ReplyView| {})
                 }
             ),
             Err(named)
@@ -149,7 +149,7 @@ fn a_stated_get_is_refused_by_name_and_asks_no_link() {
                 None,
                 &mut || -> ReplyCallback {
                     legs += 1;
-                    Box::new(|_: &dyn ReplyView| {})
+                    ReplyCallback::shared(|_: &dyn ReplyView| {})
                 }
             ),
             Some(0)
@@ -207,7 +207,7 @@ fn a_limited_liveliness_get_is_refused_by_name() {
             None,
             &mut || -> ReplyCallback {
                 legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
+                ReplyCallback::shared(|_: &dyn ReplyView| {})
             }
         ),
         Err(LinksNotHonoured)
