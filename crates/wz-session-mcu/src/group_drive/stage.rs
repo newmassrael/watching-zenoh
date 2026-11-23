@@ -54,8 +54,9 @@ use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 use wz_session_core::multicast_tx::{
-    multicast_tx_conduit, multicast_tx_push, multicast_tx_push_batched, MulticastBatch,
-    MulticastTxDatagram, MulticastTxItem, MulticastTxLanes, MulticastTxQueue,
+    multicast_tx_conduit, multicast_tx_encoded_conduit, multicast_tx_push,
+    multicast_tx_push_batched, multicast_tx_push_encoded, MulticastBatch, MulticastTxDatagram,
+    MulticastTxEncoded, MulticastTxItem, MulticastTxLanes, MulticastTxQueue,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
@@ -199,6 +200,37 @@ impl GroupTxStage {
         outcome
     }
 
+    /// Push `message`, a message of the session lent for the call (its body written by its encoder
+    /// where the frame is built), as [`Self::push`] pushes an owned one. A message lent for the
+    /// call cannot be kept for the release of the conduits another push holds, as an owned one is:
+    /// pushed while they are held (from inside that push's wait for room), it is a congestion drop,
+    /// counted on its lane.
+    pub fn push_encoded(
+        &self,
+        message: &MulticastTxEncoded<'_>,
+        pace: &dyn GroupTxPace,
+    ) -> PushOutcome {
+        let inner = &*self.inner;
+        let conduit = multicast_tx_encoded_conduit(message, &inner.params);
+        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
+            inner.lanes.borrow_mut().bound.dropped(conduit);
+            return PushOutcome::Congested;
+        };
+        let params = &inner.params;
+        let outcome = self.push_on(
+            &mut conduits,
+            conduit,
+            Some(pace),
+            false,
+            |minted, queue, window| {
+                multicast_tx_push_encoded(message, minted, params, &params.tx_queue, queue, window)
+            },
+        );
+        drop(conduits);
+        self.push_deferred();
+        outcome
+    }
+
     /// Put `item`, a reply, on the stage without waiting, whatever its lane holds, counted on the
     /// lane: a reply the group's own dispatch stages runs inside the pump it would wait for. It
     /// takes a reply slot, or is dropped and counted ([`Self::dropped`]) when none is free.
@@ -230,7 +262,40 @@ impl GroupTxStage {
             return PushOutcome::Pushed;
         };
         let conduit = multicast_tx_conduit(&item, &inner.params);
-        let Conduits { minted, windows } = &mut *conduits;
+        let params = &inner.params;
+        self.push_on(
+            &mut conduits,
+            conduit,
+            pace,
+            reply,
+            |minted, queue, window| match window {
+                Some(window) => {
+                    multicast_tx_push_batched(item, minted, params, &params.tx_queue, queue, window)
+                }
+                None => multicast_tx_push(item, minted, params, &params.tx_queue, queue),
+            },
+        )
+    }
+
+    /// One push onto `conduit`, whose conduits the caller holds: what `push` frames, owned or lent,
+    /// put on the lanes the way every message of the stage goes onto them. `push` is handed the
+    /// minter, the lanes and, inside a batch window, the conduit's open frame. `pace` is `None`
+    /// for a push that does not wait; `reply` is a reply whose slot is taken already, which its
+    /// first datagram holds.
+    fn push_on(
+        &self,
+        conduits: &mut Conduits,
+        conduit: Priority,
+        pace: Option<&dyn GroupTxPace>,
+        reply: bool,
+        push: impl FnOnce(
+            &mut MulticastTxConduits,
+            &mut StageQueue<'_>,
+            Option<&mut MulticastBatch>,
+        ) -> PushOutcome,
+    ) -> PushOutcome {
+        let inner = &*self.inner;
+        let Conduits { minted, windows } = conduits;
         let window = &mut windows[conduit as usize];
         let windowed = inner.window_open.get();
         if !windowed {
@@ -251,25 +316,7 @@ impl GroupTxStage {
             pace,
             reply,
         };
-        let outcome = if windowed {
-            multicast_tx_push_batched(
-                item,
-                minted,
-                &inner.params,
-                &inner.params.tx_queue,
-                &mut queue,
-                window,
-            )
-        } else {
-            multicast_tx_push(
-                item,
-                minted,
-                &inner.params,
-                &inner.params.tx_queue,
-                &mut queue,
-            )
-        };
-        drop(conduits);
+        let outcome = push(minted, &mut queue, windowed.then_some(window));
         // A reply that put no datagram on a lane (one its codec could not frame) holds no slot.
         if queue.reply {
             inner.replies.set(inner.replies.get() - 1);
@@ -660,7 +707,8 @@ mod tests {
     };
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
-        multicast_put_literal, MulticastTxDatagram, MulticastTxItem,
+        multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxDatagram,
+        MulticastTxEncoded, MulticastTxItem,
     };
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::qos::Priority;
@@ -855,6 +903,36 @@ mod tests {
             host.passes.get(),
             0,
             "a lane with room is waited on by nothing"
+        );
+    }
+
+    /// A message lent for the call is put on its lane as an owned one is; one pushed while another
+    /// push holds the conduits, which cannot be kept for their release, is a congestion drop
+    /// counted on its lane, and leaves nothing on it.
+    #[test]
+    fn a_lent_message_is_queued_and_one_pushed_inside_another_push_is_dropped() {
+        let params = params();
+        let stage = GroupTxStage::new(&params);
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        let push = wz_session_core::lent_push::literal_put("demo/stage", b"first").expect("a put");
+        let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| push.encode(sink);
+        let lent = MulticastTxEncoded {
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
+            reliable: true,
+            size: 64,
+            body: &body,
+        };
+        assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Pushed);
+        let held = stage.inner.conduits.borrow_mut();
+        assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Congested);
+        drop(held);
+        assert_eq!(stage.drops(multicast_tx_encoded_conduit(&lent, &params)), 1);
+        let datagram = stage.take().expect("the lent message is on its lane");
+        assert!(datagram.bytes.ends_with(b"first"));
+        assert!(
+            stage.take().is_none(),
+            "the one pushed inside another push left nothing"
         );
     }
 
