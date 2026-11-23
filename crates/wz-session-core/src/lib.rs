@@ -1714,8 +1714,6 @@ pub mod oldest_instant;
     feature = "codec-close",
     feature = "codec-frame"
 ))]
-// Totality debt TD-061 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable, clippy::arithmetic_side_effects)]
 pub mod byte_log;
 
 // R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
