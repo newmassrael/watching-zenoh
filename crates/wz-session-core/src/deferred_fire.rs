@@ -457,9 +457,7 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
                 // exit, outside the cell lock.
                 return None;
             }
-            let Some(call) = pending.take() else {
-                return None;
-            };
+            let call = pending.take()?;
             s.parked.insert(number, call);
             if s.parked.contains_key(&s.next) {
                 s.callback.take()
