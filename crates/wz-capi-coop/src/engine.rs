@@ -122,7 +122,7 @@ use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms,
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
-use wz_session_core::unicast_rx::SharedReassembly;
+use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 use wz_session_core::WhatAmI;
@@ -1463,10 +1463,14 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's delivery lane, which every link's gate asks before it reads a batch
     /// (`crate::lane::LaneGate`).
     lane: Arc<SharedLane>,
-    /// The one reassembly Router the session's links share, each link's receive holding a handle:
-    /// its chains are keyed by their peers, and staged in the session's buffers for them, each
-    /// claimed by a chain while it is open, lent from the arena (`ArenaPlan::reassembly`).
-    router: SharedReassembly<SessionReassembly>,
+    /// The one reassembly Router of the session, which its links share: its chains are keyed by
+    /// their peers, and staged in the session's buffers for them, each claimed by a chain while it
+    /// is open, lent from the arena (`ArenaPlan::reassembly`). The session sweeps it and ends a
+    /// lost peer's chains; its links' receives reach it only while [`Core::run_tasks`] lends it.
+    router: SessionReassembly,
+    /// Where the session lends its Router to its links' receives, each link's task holding the
+    /// place: lent for the length of a pass of the tasks and at no other time.
+    lend: RouterLend<SessionReassembly>,
     /// The time the session measures on: each link's actions and task are given it, so what one
     /// link sets a deadline by and another reads it by (the Router's chains among them) are on one
     /// epoch, whenever each link came up.
@@ -2014,15 +2018,15 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
-/// link's gates, a handle on the session's one reassembly Router and `FaceDispatch`. What each
-/// cell the open reserves for a link holds, so a link's session is never refused a cell for its
-/// size.
+/// link's gates, the place the session lends its one reassembly Router in and `FaceDispatch`.
+/// What each cell the open reserves for a link holds, so a link's session is never refused a cell
+/// for its size.
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
         Rc<dyn SessionDatagramLink>,
-        SharedReassembly<SessionReassembly>,
-        SharedReassembly<SessionReassembly>,
+        RouterLend<SessionReassembly>,
+        RouterLend<SessionReassembly>,
         FaceDispatch<C>,
     >()
 }
@@ -2223,7 +2227,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         endpoint: Option<&DialEndpoint>,
     ) -> Result<Wire<C>, OpenError> {
         let wire = self.start_wire(face, opened, role, endpoint)?;
-        self.local.run_until_idle();
+        self.run_tasks();
         Ok(wire)
     }
 
@@ -2365,7 +2369,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The link's fragmented messages are staged by the session's one Router, which its links
         // share, keyed by their peers, in buffers of the session's one table: a chain claims one
         // when its first fragment arrives and gives it back when it ends, and a chain that finds
-        // none free is refused and counted. The link's task holds a handle on it.
+        // none free is refused and counted. The link's task holds the place it is lent in.
         let spawned = spawn_session_with_router(
             &self.local,
             link.clone(),
@@ -2376,7 +2380,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 role,
                 max_iters: None,
             },
-            self.router.clone(),
+            self.lend.clone(),
             dispatch,
         );
         // The runtime's cells were reserved at the open, one for each link the config admits: a
@@ -2576,7 +2580,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(actions) = up {
             if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
                 self.abort_link(at);
-                self.local.run_until_idle();
+                self.run_tasks();
             }
         }
         let polled = match self.links.advance(at, now_us) {
@@ -2592,7 +2596,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 // The peer's chains end with its link: the Router the session's links share would
                 // otherwise splice its next link's fragments onto them.
                 if let Some(zid) = lost.and_then(|wire| wire.actions.peer_zid()) {
-                    self.router.with(|router| router.abort_peer(&zid));
+                    self.router.abort_peer(&zid);
                 }
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
                 self.lose_link(id);
@@ -2630,7 +2634,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .wire()
                     .and_then(|wire| wire.node());
                 self.abort_link(at);
-                self.local.run_until_idle();
+                self.run_tasks();
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
                 if id != DIAL_FACE {
                     self.remove_face(at);
@@ -2922,7 +2926,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             dispatch,
         )
         .map_err(OpenError::NoTask)?;
-        self.local.run_until_idle();
+        self.run_tasks();
         if face.has_ended() {
             return Err(OpenError::Group(EndpointRefusal::new(
                 &endpoint,
@@ -3323,6 +3327,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         ended_by_clock_moves(wait, self.config.clock_moves.as_ref())
     }
 
+    /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
+    /// its links' receives for as long ([`RouterLend::lend_for`]). Every pass of the session's
+    /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
+    /// a group's wait makes lends nothing, and a link's receive takes no input in it.
+    fn run_tasks(&mut self) {
+        let Self {
+            local,
+            router,
+            lend,
+            ..
+        } = self;
+        lend.lend_for(router, || local.run_until_idle());
+    }
+
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
     /// role's face stays, with no link and no redial; the others go.
     fn end_links(&mut self) {
@@ -3336,7 +3354,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             for group in &self.groups {
                 group.stop();
             }
-            self.local.run_until_idle();
+            self.run_tasks();
             let mut registry = self.registry.borrow_mut();
             for group in self.groups.drain(..) {
                 registry.remove_face(group.id());
@@ -3344,7 +3362,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         self.links.end_faces(|face| face.replay.discard());
         self.registry.borrow_mut().remove_accepted_faces();
-        self.local.run_until_idle();
+        self.run_tasks();
     }
 }
 
@@ -3660,6 +3678,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
             router,
+            lend: RouterLend::new(),
             session_time,
             arena,
         };
@@ -3746,7 +3765,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 let mut wait = core.idle_wait();
                 wait.wait(sleep_ms);
                 core.links.waited(wait);
-                core.local.run_until_idle();
+                core.run_tasks();
                 let now_us = core.now_us();
                 core.poll_links(None, now_us)?;
             }
@@ -3946,14 +3965,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
-    /// A handle on the session's one reassembly Router, and the time now on the epoch its chains
-    /// are staged on: what a test of the chains the session's step ends stages its chain in. Taken
-    /// under the lock, uncounted as a take and as a reading of the session's clock.
+    /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
+    /// are staged on: what a test of the chains the session's step ends stages its chain in and
+    /// reads them by. Under the lock, uncounted as a take and as a reading of the session's clock.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn chain_router(&self) -> (SharedReassembly<SessionReassembly>, u64) {
-        let core = self.core.lock();
+    pub(crate) fn with_chain_router<T>(
+        &self,
+        f: impl FnOnce(&mut SessionReassembly, u64) -> T,
+    ) -> T {
+        let mut core = self.core.lock();
         let now_ms = core.0.session_time.ms_at(core.0.clock.now_us());
-        (core.0.router.clone(), now_ms)
+        f(&mut core.0.router, now_ms)
     }
 
     /// How many subscribers the session core's table holds, each one row: what a test of a
@@ -5077,13 +5099,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
     /// does by that reading, which it returns; `None` once the session ended.
     fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
-        core.local.run_until_idle();
+        core.run_tasks();
         let now_us = core.now_us();
-        // A link's handle on the one reassembly Router sweeps nothing, so the session ends the
-        // chains past their deadline here, once a step and by its reading, whichever link's task
+        // A link's receive sweeps nothing, so the session ends the chains of its one reassembly
+        // Router past their deadline here, once a step and by its reading, whichever link's task
         // ran; on the epoch its links staged them on, which is not the clock's own.
         let chain_ms = core.session_time.ms_at(now_us);
-        core.router.with(|router| router.sweep(chain_ms));
+        core.router.sweep(chain_ms);
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
@@ -5539,7 +5561,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if asked == 0 {
             return Ok(0);
         }
-        core.local.run_until_idle();
+        core.run_tasks();
         drop(guard);
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();

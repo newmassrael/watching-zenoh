@@ -964,8 +964,7 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let (chains, now_ms) = engine.chain_router();
-    let begun = chains.with(|reassembly| {
+    let begun = engine.with_chain_router(|reassembly, now_ms| {
         reassembly.ingest(
             Fragment {
                 peer_key: &[0x5a; 16],
@@ -981,21 +980,16 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
             |_| {},
         )
     });
-    assert_eq!(begun, Some(IngestOutcome::Begun));
-    assert_eq!(
-        chains.with(|reassembly| reassembly.active_chains()),
-        Some(1),
-        "CONTROL: the chain is open"
-    );
+    assert_eq!(begun, IngestOutcome::Begun);
+    let open_chains = || engine.with_chain_router(|reassembly, _| reassembly.active_chains());
+    assert_eq!(open_chains(), 1, "CONTROL: the chain is open");
     let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
-        chains.with(|reassembly| reassembly.active_chains()),
-        Some(1),
+        open_chains(),
+        1,
         "a step before the deadline leaves the chain open"
     );
-    until(&engine, "the step to end the chain", || {
-        chains.with(|reassembly| reassembly.active_chains()) == Some(0)
-    });
+    until(&engine, "the step to end the chain", || open_chains() == 0);
 }
 
 /// The samples a link lends are handed the callback their subscriber's row holds, copied out of the

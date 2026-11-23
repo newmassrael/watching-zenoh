@@ -1508,6 +1508,12 @@ impl<
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
         self.rx.sweep(now_ms, &mut *on_event);
 
+        // A Router lent to the receive only for its session's step (`RxReassembly::ready`): outside
+        // the lend the step takes no input, which the link keeps for a step that can stage it.
+        if !self.rx.ready() {
+            return None;
+        }
+
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
         // message until the peer sends again.
@@ -1681,20 +1687,20 @@ pub trait MakeRouter<R> {
     fn make_in(self, place: &mut MaybeUninit<R>) -> &mut R;
 }
 
-/// A handle on the one Router a session's links share is its own maker: the pump holds the handle,
-/// and the Router stays the session's.
+/// The place a session lends its one Router in is its own maker: the pump holds the place, and
+/// the Router stays the session's, lent to the pump for the length of the session's step.
 #[cfg(all(
     feature = "reassembly",
     feature = "alloc",
     not(feature = "session-slot")
 ))]
-impl<D> MakeRouter<wz_session_core::unicast_rx::SharedReassembly<D>>
-    for wz_session_core::unicast_rx::SharedReassembly<D>
+impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
+    for wz_session_core::unicast_rx::RouterLend<D>
 {
     fn make_in(
         self,
-        place: &mut MaybeUninit<wz_session_core::unicast_rx::SharedReassembly<D>>,
-    ) -> &mut wz_session_core::unicast_rx::SharedReassembly<D> {
+        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D>>,
+    ) -> &mut wz_session_core::unicast_rx::RouterLend<D> {
         place.write(self)
     }
 }
@@ -2465,6 +2471,8 @@ mod wake_budget_tests {
         gone: core::cell::Cell<Option<LostCause>>,
         /// Whether the link's owner holds its input back.
         holding: core::cell::Cell<bool>,
+        /// How many times the link was asked for a datagram.
+        reads: core::cell::Cell<u32>,
     }
 
     impl SessionDatagramLink for Recording {
@@ -2476,6 +2484,7 @@ mod wake_budget_tests {
             true
         }
         fn try_recv(&self) -> Option<RxFrame> {
+            self.reads.set(self.reads.get() + 1);
             None
         }
         fn lost(&self) -> Option<LostCause> {
@@ -2738,6 +2747,55 @@ mod wake_budget_tests {
             Rc::strong_count(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
+    }
+
+    /// A session over the Router its session lends it reads its link inside the lend alone: a
+    /// pass of its task outside the lend steps the link and asks it for nothing, which leaves the
+    /// link's input with the link, and a pass inside the lend asks it. The CONTROL is the step of
+    /// the link in the pass outside the lend.
+    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    #[test]
+    fn a_session_over_a_lent_router_reads_its_link_inside_the_lend_alone() {
+        use wz_session_core::unicast_rx::RouterLend;
+        type Router = crate::reassembly_rx::CoopReassembly;
+        let runtime = CoopRuntime::new(Stopped);
+        let local = CoopLocalSet::new(&runtime);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let link = Rc::new(Recording::default());
+        let lend = RouterLend::<Router>::new();
+        let mut router = crate::reassembly_rx::mcu_reassembly(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        );
+        let task = spawn_session_with_router(
+            &local,
+            Rc::clone(&link),
+            actions,
+            clock,
+            SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+            lend.clone(),
+            ignore as fn(IterationEvent<'_, '_>),
+        )
+        .expect("a grown table takes every task");
+        local.run_until_idle();
+        assert!(
+            !link.budgets.borrow().is_empty(),
+            "CONTROL: the pass stepped the link"
+        );
+        assert_eq!(
+            link.reads.get(),
+            0,
+            "outside the lend the link is asked nothing"
+        );
+        lend.lend_for(&mut router, || local.run_until_idle());
+        assert!(link.reads.get() > 0, "inside the lend the link is asked");
+        task.abort();
+        local.run_until_idle();
     }
 
     /// The bytes of a session's task are a constant of its types: a runtime reserved with cells of

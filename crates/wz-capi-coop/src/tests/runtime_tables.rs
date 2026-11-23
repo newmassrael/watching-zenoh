@@ -144,14 +144,14 @@ fn print_the_parts_of_a_link_tasks_cell() {
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::RecordBuf;
     use wz_session_core::transport_timers::TransportTimers;
-    use wz_session_core::unicast_rx::SharedReassembly;
+    use wz_session_core::unicast_rx::RouterLend;
     use wz_session_core::unicast_rx::UnicastRx;
 
     use crate::engine::FaceDispatch;
 
     type C = PosixClock;
     type Link = Rc<dyn SessionDatagramLink>;
-    type Router = SharedReassembly<SessionReassembly>;
+    type Router = RouterLend<SessionReassembly>;
     let cell = link_task_bytes::<C>();
     let pump = size_of::<SessionPump<C, Link, dyn BoxedLinkDriver, Router>>();
     let parts: [(&str, usize); 13] = [
@@ -161,7 +161,7 @@ fn print_the_parts_of_a_link_tasks_cell() {
             size_of::<SessionEngine<CoopRuntime<C>, CoopTime<C>>>(),
         ),
         ("  rx (receive)", size_of::<UnicastRx<Router>>()),
-        ("    router handle (reassembly)", size_of::<Router>()),
+        ("    router lend (reassembly)", size_of::<Router>()),
         ("  the session's one router", size_of::<SessionReassembly>()),
         ("    record buffer", size_of::<RecordBuf>()),
         ("  timers", size_of::<TransportTimers>()),
