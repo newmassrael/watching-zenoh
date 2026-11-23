@@ -1705,9 +1705,11 @@ const fn least<const A: usize, const B: usize>() -> usize {
     }
 }
 
-/// The bytes of the keys the pending table writes: a key the session resolved from an alias lies
-/// in a frame of the dispatch, gone when the callbacks run.
-const PENDING_KEY_BYTES: usize = 2 * caps::MAX_KEYEXPR_BYTES;
+/// The bytes of the keys the pending table writes, for a key of `KEY` bytes at most: a key the
+/// session resolved from an alias lies in a frame of the dispatch, gone when the callbacks run.
+const fn pending_key_bytes<const KEY: usize>() -> usize {
+    KEY.saturating_mul(2)
+}
 
 /// The pending table holds nothing; the session may write it.
 const EMPTY: u8 = 0;
@@ -1735,7 +1737,7 @@ struct PendingTable {
     entries: BoundedVec<PendingEntry, { caps::DELIVERY_LANE_EVENTS }, Static>,
     /// The callbacks the samples owe at most, one for each subscriber each of them reaches.
     callbacks: BoundedVec<(SubId, SubscriberCallback), { caps::DELIVERY_LANE_CALLBACKS }, Static>,
-    keys: BoundedVec<u8, PENDING_KEY_BYTES, Static>,
+    keys: BoundedVec<u8, { pending_key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Static>,
     /// The key written last, which the samples on it that follow share.
     key: Option<Span>,
 }
