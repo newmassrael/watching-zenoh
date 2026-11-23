@@ -238,7 +238,9 @@ struct RouterLog {
     puts: RefCell<Vec<Vec<u8>>>,
 }
 
-type Actions = Rc<SessionLinkActions<CoopRuntime<StepClock>, CoopTime<StepClock>>>;
+type Actions = wz_runtime_coop::link_cells::CellRc<
+    SessionLinkActions<CoopRuntime<StepClock>, CoopTime<StepClock>>,
+>;
 
 /// The two sessions under test and the router fixture, all on one local set.
 struct TwoSessions {

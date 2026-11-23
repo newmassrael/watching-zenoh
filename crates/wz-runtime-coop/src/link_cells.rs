@@ -178,6 +178,17 @@ impl<T: ?Sized> CellRc<T> {
         }
     }
 
+    /// How many handles name the value `this` names, `this` among them.
+    pub fn handles(this: &Self) -> usize {
+        this.head().handles.get()
+    }
+
+    /// The value `this` names, as an address: two live handles name one value exactly when
+    /// theirs are equal. A released cell's address can name the next value placed in it.
+    pub fn as_ptr(this: &Self) -> *const T {
+        this.value.as_ptr()
+    }
+
     /// The cell's head.
     fn head(&self) -> &CellHead {
         // SAFETY: a handle keeps its cell, so the head is live for as long as the handle is.

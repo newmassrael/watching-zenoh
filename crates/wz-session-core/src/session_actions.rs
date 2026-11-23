@@ -4469,7 +4469,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
     /// refcount-1 pointers, behavior-identical to the pre-split struct.
     #[cfg(not(feature = "session-slot"))]
-    pub(crate) fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
+    pub fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
         let seed = LinkSeed::open::<R>(&driver);
         let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
         let mut core = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();

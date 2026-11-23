@@ -33,12 +33,12 @@
 //! `SessionLinkActions<CoopRuntime<C>, CoopTime<C>>` is consequently
 //! `!Send`; that is correct, not a limitation — the bundle lives on the
 //! drive loop's stack and is never spawned. `new_generic` wraps it in the
-//! profile [`SessionRuntime::ActionsHandle`] — `Rc` here (R311ja), not
-//! `Arc` — for shared read access within that one task: the FSM action
-//! binding and the drive loop read the same bundle, but never across
-//! threads, so an atomic refcount would be pure waste *and* would wall the
-//! session off ARMv6-M (`alloc::sync::Arc` needs `target_has_atomic =
-//! "ptr"`, absent on Cortex-M0/M0+). The single-task `Rc` is exactly what
+//! profile [`SessionRuntime::ActionsHandle`] — a counted cell handle here
+//! ([`crate::link_cells::CellRc`]), not `Arc` — for shared read access
+//! within that one task: the FSM action binding and the drive loop read the
+//! same bundle, but never across threads, so an atomic refcount would be
+//! pure waste *and* would wall the session off ARMv6-M (`alloc::sync::Arc`
+//! needs `target_has_atomic = "ptr"`, absent on Cortex-M0/M0+). The single-task count is exactly what
 //! lets the MCU session stack — handshake + reassembly consumer — reach
 //! ARMv6-M, the no-alloc M0 session reach the AP `Arc` blocked.
 
@@ -146,14 +146,14 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
         panic!("session-slot holds no shared pointer: the bundle owns its kernel and link")
     }
 
-    // R311ja — the MCU action handle is `Rc`, not `Arc`: the single-task
-    // sync drive loop shares the bundle only with its own FSM binding, never
-    // across threads, so the refcount needs no atomics. This is the seam
-    // that unblocks the no-alloc M0+ session reach — `alloc::sync::Arc`
-    // requires `target_has_atomic = "ptr"`, which ARMv6-M lacks; `Rc` lowers
-    // to plain loads / stores and cross-compiles on every Phase W target.
+    // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
+    // the single-task sync drive loop shares the bundle only with its own FSM
+    // binding, never across threads (`alloc::sync::Arc` requires
+    // `target_has_atomic = "ptr"`, which ARMv6-M lacks). It is a cell handle so
+    // an engine that lent a table of cells places the bundle in one of them
+    // (`CellRc::place`) and the same type names a bundle on the heap.
     #[cfg(not(feature = "session-slot"))]
-    type ActionsHandle<T: TimeSource> = Rc<SessionLinkActions<Self, T>>;
+    type ActionsHandle<T: TimeSource> = crate::link_cells::CellRc<SessionLinkActions<Self, T>>;
 
     // Fixed-memory step S5 — under `session-slot` the handle is a counted
     // reference to the session in its slot, which the slot table hands out and
@@ -163,7 +163,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
 
     #[cfg(not(feature = "session-slot"))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        Rc::new(actions)
+        crate::link_cells::CellRc::boxed(actions)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {
@@ -182,7 +182,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     }
 }
 
-/// The handle to a session, as this profile holds it: an `Rc` of the bundle, or
+/// The handle to a session, as this profile holds it: a counted handle on the bundle, or
 /// under `session-slot` a counted reference to the slot that holds it. The type
 /// the drive loop, the FSM's action binding and the application layer each take,
 /// written once so the two spellings are one name.
@@ -208,63 +208,6 @@ pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
 fn _session_link_actions_composes_on_lwip<C: ClockSource>(
     _actions: &wz_session_core::session_actions::SessionLinkActions<CoopRuntime<C>, CoopTime<C>>,
 ) {
-}
-
-/// R311y742 (N50) — install this session's OWN keyexpr id space into an
-/// application registry, on the MCU profile.
-///
-/// The AP does this inside `Session::new` (R311y739) for the reason R236 moved
-/// the zid install there: the fact is authoritative at construction, so making
-/// the application ask for it only creates a way to forget. The MCU has no such
-/// single owner — `run_session` takes the actions bundle and hands decoded
-/// batches to an `on_event` closure, and the registry belongs to the
-/// application — so this is the named place to do it, one line, at bring-up:
-///
-/// ```ignore
-/// install_own_mapping_space(&mut observer.subscribers, &actions);
-/// ```
-///
-/// Without it an MCU node that calls `send_declare_keyexpr` drops every Push
-/// the peer names with that alias, because zenoh PREFERS the receiver's own
-/// expr id and stamps it `Mapping::Receiver` (`dispatcher/resource.rs:625`).
-/// That is the defect R311y739 closed on the AP side and R311y740 unwalled here.
-///
-/// ## Why this is gated to targets WITHOUT atomic pointers
-///
-/// R311y742 measured the shape and found a real limit, stated rather than
-/// hidden. `CoopRuntime::ActionsHandle` is `Rc<SessionLinkActions<..>>` on
-/// EVERY MCU target, but
-/// [`SharedOwnMappingSpace`](wz_session_core::wireexpr_resolve::SharedOwnMappingSpace)
-/// is keyed on `target_has_atomic = "ptr"` — so it is `Rc` on thumbv6m and
-/// `Arc` on the other six (M3 / M4F / M7 / M23 / M33 / RISC-V IMAC). An `Rc`
-/// cannot become an `Arc` to the same allocation, so on those six the coop
-/// profile has no install path at all, and this function correctly does not
-/// exist there rather than pretending to.
-///
-/// Closing that needs the alias keyed on the CONCURRENCY MODEL (does this build
-/// share the registry across tasks?) instead of on the target's atomics, which
-/// means a named feature rather than a `cfg` — a change that moves the declared
-/// cargo-feature surface the A3 / A5 inventory gates count, so it is its own
-/// round. Carry N52.
-///
-/// Absent under `session-slot` as well: the registry takes the bundle as an
-/// `Rc<dyn OwnMappingSpace>`, and a session in a slot is not an `Rc`. A node on
-/// that profile that declares keyexprs of its own reaches the registry through
-/// its slot handle when the registry takes one (carried).
-#[cfg(all(not(target_has_atomic = "ptr"), not(feature = "session-slot")))]
-pub fn install_own_mapping_space<C, T, S>(
-    registry: &mut wz_session_core::pubsub::SubscriberRegistry<S>,
-    actions: &Rc<SessionLinkActions<CoopRuntime<C>, T>>,
-) where
-    // `'static` on both parameters is not incidental: `dyn OwnMappingSpace`
-    // carries an implicit `+ 'static`, so the erased handle must outlive any
-    // borrow the registry could hand out. Stated here rather than left to the
-    // caller to discover from an E0310 at the call site.
-    C: ClockSource + 'static,
-    T: wz_runtime_core::TimeSource + 'static,
-    S: wz_session_core::sink::SampleSink,
-{
-    registry.set_own_mapping_space(actions.clone());
 }
 
 /// R311y819 — the MCU profile's SESSION-BUNDLE CONSTRUCTION SEAM, the exact
@@ -318,7 +261,7 @@ pub fn new_session_actions<C, E>(
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
     entropy: E,
-) -> Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>
+) -> SessionHandle<C>
 where
     C: ClockSource,
     E: wz_session_core::entropy::EntropySource + Send + 'static,
@@ -457,9 +400,7 @@ mod cookie_nonce_draw_tests {
         }
     }
 
-    fn build<E: EntropySource + Send + 'static>(
-        entropy: E,
-    ) -> Rc<SessionLinkActions<CoopRuntime<StoppedClock>, CoopTime<StoppedClock>>> {
+    fn build<E: EntropySource + Send + 'static>(entropy: E) -> SessionHandle<StoppedClock> {
         let runtime = CoopRuntime::new(StoppedClock);
         let clock = CoopTime::new(&runtime);
         let driver = crate::link_cells::heap_sink(NullDriver);

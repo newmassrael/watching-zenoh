@@ -330,7 +330,9 @@ struct Pair {
     frame_exts: Rc<Cell<FrameExts>>,
     /// The initiator's session: whose transmit SN each measured frame takes,
     /// so the acceptor's SN gate admits it as the initiator's next frame.
-    initiator: Rc<SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>>,
+    initiator: wz_runtime_coop::link_cells::CellRc<
+        SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>,
+    >,
     /// The initiator's socket: what the measured frames are sent from.
     initiator_sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver>,
     /// Every Put the subscriber was handed, in order. Its capacity is reserved

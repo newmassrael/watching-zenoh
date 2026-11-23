@@ -221,7 +221,7 @@ type Binding = SessionActionsBinding<CoopRuntime<Frozen>, CoopTime<Frozen>>;
 /// One end of a session: its actions bundle, the socket driver those send
 /// through, and the pump that reads what the other end sent.
 struct Side {
-    actions: Rc<Actions>,
+    actions: wz_runtime_coop::link_cells::CellRc<Actions>,
     /// The socket driver the actions send through, which the refusal tests take
     /// every slot from.
     #[cfg(feature = "tx-lend-only")]
