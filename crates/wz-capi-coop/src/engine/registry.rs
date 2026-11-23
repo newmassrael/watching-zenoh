@@ -1321,10 +1321,10 @@ mod tests {
         };
 
         let mut dialling = held_as(1, own_spans, true);
-        dialling
-            .registry
-            .add_face(5)
-            .expect("the open lent a set for the face");
+        assert!(
+            dialling.registry.add_face(5).is_err(),
+            "the one set is the dial face's: none is left for the face that comes"
+        );
         assert_eq!(
             declared(&mut dialling, 5),
             (false, false),

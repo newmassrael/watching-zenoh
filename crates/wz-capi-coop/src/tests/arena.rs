@@ -430,8 +430,11 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         0
     };
     for asked in [groups, groups + 2] {
+        // A session that dials as well as joining, so its dial role's face is counted whatever
+        // the groups it joins.
         let plan = ArenaPlan::of(
             &CoopConfig {
+                endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
                 max_faces: most,
                 groups: vec![join.clone(); asked],
                 ..client_config()
