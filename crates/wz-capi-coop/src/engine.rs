@@ -2107,20 +2107,20 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`Core::gate_cells`): the delivery lane's, and
 /// with `listen` the admission's under it, which carries the clock.
-trait Gated {
+trait LinkGates {
     /// The gates.
     type Gate;
 }
 
-impl<C: ClockSource + 'static> Gated for C {
+impl<C: ClockSource + 'static> LinkGates for C {
     #[cfg(feature = "listen")]
     type Gate = LaneGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C>>;
     #[cfg(not(feature = "listen"))]
     type Gate = LaneGate<CellRc<dyn SessionDatagramLink>>;
 }
 
-/// The gates of a link of a session on the clock `C` ([`Gated`]).
-type LinkGate<C> = <C as Gated>::Gate;
+/// The gates of a link of a session on the clock `C` ([`LinkGates`]).
+type LinkGate<C> = <C as LinkGates>::Gate;
 
 /// The arena a session over `links` opens `config` with: the rows its limits size, a cell for
 /// each link's driver as large as the largest the links open, and a cell for each link's gates.
