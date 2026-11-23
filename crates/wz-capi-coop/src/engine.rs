@@ -4811,11 +4811,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Ok(())
     }
 
-    /// The answer to the query `rid` on the link of `generation` is over for now, its replies
-    /// sent as they were made ([`Self::send_reply`]): with `release`, let go of one hold on its
-    /// Final, sending the Final when it was owed and this was the last hold. Nothing is sent on a
-    /// link that is no longer the session's. On a group, what the replies staged there is written by
-    /// this call, on the calling thread.
+    /// One turn of the answer to the query `rid` on the link of `generation` has ended, its
+    /// replies sent as they were made ([`Self::send_reply`]): with `release`, let go of one hold
+    /// on its Final, sending the Final when it was owed and this was the last hold. Nothing is sent
+    /// on a link that is no longer the session's. On a group, what the replies staged there is
+    /// written by this call, on the calling thread.
     #[cfg(feature = "queryable")]
     fn answer(&self, generation: u64, rid: wz_session_core::wire_id::RequestId, release: bool) {
         let Some(core) = self.live() else {
