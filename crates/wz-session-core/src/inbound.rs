@@ -1951,6 +1951,73 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
     Ok((read, bytes.len() - cursor.remaining()))
 }
 
+/// Where the Close, the KeepAlive or the transport OAM at the front of `bytes` ends, read by its
+/// document's view with the refusals [`parse_inbound_consuming`] answers for it, and none of it
+/// decoded into an owned message: the walk of a group datagram asks only how far to step past a
+/// message it has already dispatched. `None` for every other message, whose extent the caller
+/// reads itself.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "codec-frame",
+    feature = "codec-close",
+    feature = "storage-profile"
+))]
+pub(crate) fn control_extent(bytes: &[u8]) -> Option<Result<usize, InboundParseError>> {
+    let mid = bytes.first().map(|header| header & 0x1F)?;
+    let read = match mid {
+        wire_const::T_MID_CLOSE => extent_of(bytes, |cursor| {
+            let view = TransportCloseView::decode(cursor)?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_CLOSE,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )
+        }),
+        #[cfg(feature = "codec-keep-alive")]
+        wire_const::T_MID_KEEP_ALIVE => extent_of(bytes, |cursor| {
+            let view = TransportKeepAliveView::decode(cursor)?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_KEEP_ALIVE,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )
+        }),
+        // The owned decode of an OAM is the heap profile's (`parse_unit_into`): a build without
+        // one reads the id as no message, and so does the caller's fallback.
+        #[cfg(feature = "alloc")]
+        wire_const::T_MID_OAM => extent_of(bytes, |cursor| {
+            use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
+            let view = TransportOamView::decode(cursor)?;
+            if matches!(view.body, TransportOamViewVariant::Default { .. }) {
+                return Err(InboundParseError::ReservedEncoding);
+            }
+            crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))
+        }),
+        _ => return None,
+    };
+    Some(read)
+}
+
+/// How many bytes of `bytes` `read` went through, once it read its message without a refusal.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "codec-frame",
+    feature = "codec-close",
+    feature = "storage-profile"
+))]
+fn extent_of<'a>(
+    bytes: &'a [u8],
+    read: impl FnOnce(&mut SceCursor<'a>) -> Result<(), InboundParseError>,
+) -> Result<usize, InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    read(&mut cursor)?;
+    Ok(bytes.len().saturating_sub(cursor.remaining()))
+}
+
 /// The KEEP_ALIVE message (`T_MID_KEEP_ALIVE`, 0x04): its body is empty, so the
 /// only thing to read past the header is the Z-gated ext chain behind it. The
 /// whole message is read by its document (`sources/codecs/transport_keep_alive.scxml`)
