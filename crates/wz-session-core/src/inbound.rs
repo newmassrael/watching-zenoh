@@ -366,45 +366,37 @@ impl InboundFrame {
         // Each arm names its own MID constant rather than deriving one from a
         // stored header byte: the variants do not carry the header, and the
         // MID is what SELECTED the variant, so the constant is the fact.
-        // The union is the arms below that call it: the Frame, Fragment and Join
-        // variants exist only with `alloc`, so a slot profile with their codecs on
-        // carries no caller for it.
-        #[cfg(any(
-            feature = "codec-init-body",
-            feature = "codec-open-body",
-            feature = "codec-close",
-            feature = "codec-keep-alive",
-            all(feature = "alloc", feature = "codec-frame"),
-            all(feature = "alloc", feature = "reassembly"),
-            all(feature = "alloc", feature = "codec-join")
-        ))]
-        fn judge<C: crate::ext_chain::ChainHeaders + ?Sized>(mid: u8, chain: &C) -> ExtAdmission {
-            crate::ext_admit::judge_ext_chain(
-                crate::ext_admit::ExtCarrier::Transport(mid),
-                chain.chain_headers(),
-            )
-        }
         match self {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init { extensions, .. } => judge(wire_const::T_MID_INIT, extensions),
+            InboundFrame::Init { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_INIT, extensions)
+            }
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open { extensions, .. } => judge(wire_const::T_MID_OPEN, extensions),
+            InboundFrame::Open { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_OPEN, extensions)
+            }
             #[cfg(feature = "codec-close")]
-            InboundFrame::Close { extensions, .. } => judge(wire_const::T_MID_CLOSE, extensions),
+            InboundFrame::Close { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_CLOSE, extensions)
+            }
             #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { extensions, .. } => {
-                judge(wire_const::T_MID_KEEP_ALIVE, extensions)
+                judge_transport_chain(wire_const::T_MID_KEEP_ALIVE, extensions)
             }
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-            InboundFrame::Frame { extensions, .. } => judge(wire_const::T_MID_FRAME, extensions),
+            InboundFrame::Frame { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_FRAME, extensions)
+            }
             #[cfg(all(feature = "alloc", feature = "reassembly"))]
             InboundFrame::Fragment { extensions, .. } => {
-                judge(wire_const::T_MID_FRAGMENT, extensions)
+                judge_transport_chain(wire_const::T_MID_FRAGMENT, extensions)
             }
             #[cfg(all(feature = "alloc", feature = "codec-join"))]
-            InboundFrame::Join { extensions, .. } => judge(wire_const::T_MID_JOIN, extensions),
-            // Its own `judge_ext_chain` call rather than the local `judge`
-            // helper: that helper folds under the `codec-*` union above and
+            InboundFrame::Join { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_JOIN, extensions)
+            }
+            // Its own `judge_ext_chain` call rather than `judge_transport_chain`:
+            // that helper folds under the `codec-*` union above and
             // this arm carries no gate, so it would vanish in a build that
             // still has this variant.
             #[cfg(feature = "alloc")]
@@ -569,6 +561,186 @@ impl InboundFrame {
             _ => None,
         }
     }
+}
+
+/// What the session's judgement of one received transport message reads of it: the facts of
+/// an Init, an Open, a Close or a KeepAlive, and for any other message only what kind it is.
+///
+/// Borrowed from wherever the message was read, so the one judgement (the projection to the
+/// session machine's event, the record of a handshake's facts, the checks a handshake message
+/// passes before the engine takes it) serves a message decoded into an [`InboundFrame`] and one
+/// read where it lies in the receive buffer alike, and neither read is judged by a copy of the
+/// other's rules.
+#[derive(Debug, Clone, Copy)]
+pub enum ControlFacts<'f> {
+    /// An Init (`T_MID_INIT`).
+    #[cfg(feature = "codec-init-body")]
+    Init(InitFacts<'f>),
+    /// An Open (`T_MID_OPEN`).
+    #[cfg(feature = "codec-open-body")]
+    Open(OpenFacts<'f>),
+    /// A Close (`T_MID_CLOSE`): its reason byte, and whether it closes the whole session
+    /// (`_Z_FLAG_T_CLOSE_S`) or only the link it arrived on.
+    #[cfg(feature = "codec-close")]
+    Close {
+        /// The reason byte.
+        reason: u8,
+        /// The scope bit.
+        session: bool,
+    },
+    /// A KeepAlive (`T_MID_KEEP_ALIVE`).
+    #[cfg(feature = "codec-keep-alive")]
+    KeepAlive,
+    /// A Frame or a Fragment: data, which the session machine takes no event from.
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "codec-frame", feature = "reassembly")
+    ))]
+    Data,
+    /// A message a unicast participant refuses whatever it says, read to its end: a JOIN, a
+    /// transport OAM, the observer's network envelope.
+    Refused,
+    /// A message this read does not take: an id this build has no reader for. It is refused as
+    /// [`Self::Refused`] is, and it is no sign of the peer's life, since it was not read.
+    ///
+    /// It carries the borrow of the facts' lifetime because a build with no handshake reader has
+    /// no other variant that does, and a lifetime parameter nothing names is refused.
+    Unread(core::marker::PhantomData<&'f ()>),
+}
+
+/// The facts of an Init the judgement reads ([`ControlFacts::Init`]).
+#[cfg(feature = "codec-init-body")]
+#[derive(Debug, Clone, Copy)]
+pub struct InitFacts<'f> {
+    /// `_Z_FLAG_T_INIT_A`: an InitAck, where clear an InitSyn.
+    pub is_ack: bool,
+    /// The protocol version.
+    pub version: u8,
+    /// The peer's role, in its 2-bit wire form.
+    pub whatami: u8,
+    /// The peer's zid as the wire carries it.
+    pub zid: &'f [u8],
+    /// The sizing pair the S flag announces.
+    pub s: Option<wz_codecs::init_body::InitBodyS>,
+    /// The cookie an InitAck carries.
+    pub cookie: Option<&'f [u8]>,
+    /// The extension chain, as the message keeps it.
+    pub extensions: &'f [crate::transport_profile::ExtEntryOwned],
+}
+
+/// The facts of an Open the judgement reads ([`ControlFacts::Open`]).
+#[cfg(feature = "codec-open-body")]
+#[derive(Debug, Clone, Copy)]
+pub struct OpenFacts<'f> {
+    /// `_Z_FLAG_T_OPEN_A`: an OpenAck, where clear an OpenSyn.
+    pub is_ack: bool,
+    /// The lease, in milliseconds whatever unit the wire wrote it in.
+    pub lease: u64,
+    /// The sender's initial sequence number.
+    pub initial_sn: u64,
+    /// The cookie an OpenSyn echoes.
+    pub cookie: Option<&'f [u8]>,
+    /// The extension chain, as the message keeps it.
+    pub extensions: &'f [crate::transport_profile::ExtEntryOwned],
+}
+
+impl ControlFacts<'_> {
+    /// The establishment message these facts are of, if they are of one.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    pub fn handshake_message(&self) -> Option<crate::handshake_stray::HandshakeMessage> {
+        use crate::handshake_stray::HandshakeMessage as M;
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            ControlFacts::Init(InitFacts { is_ack: false, .. }) => Some(M::InitSyn),
+            #[cfg(feature = "codec-init-body")]
+            ControlFacts::Init(InitFacts { is_ack: true, .. }) => Some(M::InitAck),
+            #[cfg(feature = "codec-open-body")]
+            ControlFacts::Open(OpenFacts { is_ack: false, .. }) => Some(M::OpenSyn),
+            #[cfg(feature = "codec-open-body")]
+            ControlFacts::Open(OpenFacts { is_ack: true, .. }) => Some(M::OpenAck),
+            _ => None,
+        }
+    }
+}
+
+impl InboundFrame {
+    /// What the session's judgement reads of this message ([`ControlFacts`]).
+    pub fn control_facts(&self) -> ControlFacts<'_> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init {
+                is_ack,
+                body,
+                extensions,
+                ..
+            } => ControlFacts::Init(InitFacts {
+                is_ack: *is_ack,
+                version: body.version,
+                whatami: body.whatami(),
+                zid: body.zid.as_slice(),
+                s: body.s,
+                cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
+                extensions,
+            }),
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open {
+                is_ack,
+                body,
+                extensions,
+                ..
+            } => ControlFacts::Open(OpenFacts {
+                is_ack: *is_ack,
+                lease: body.lease,
+                initial_sn: body.initial_sn,
+                cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
+                extensions,
+            }),
+            #[cfg(feature = "codec-close")]
+            InboundFrame::Close {
+                reason, session, ..
+            } => ControlFacts::Close {
+                reason: *reason,
+                session: *session,
+            },
+            #[cfg(feature = "codec-keep-alive")]
+            InboundFrame::KeepAlive { .. } => ControlFacts::KeepAlive,
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
+            InboundFrame::Frame { .. } => ControlFacts::Data,
+            #[cfg(all(feature = "alloc", feature = "reassembly"))]
+            InboundFrame::Fragment { .. } => ControlFacts::Data,
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
+            InboundFrame::Join { .. } => ControlFacts::Refused,
+            #[cfg(feature = "alloc")]
+            InboundFrame::Oam { .. } => ControlFacts::Refused,
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
+            InboundFrame::Network { .. } => ControlFacts::Refused,
+            InboundFrame::Unknown { .. } => ControlFacts::Unread(core::marker::PhantomData),
+        }
+    }
+}
+
+/// The admission rule ([`crate::ext_admit::judge_ext_chain`]) over the chain of a transport
+/// message of id `mid`, as each reader of a received message keeps it.
+// The union of the readers that call it: the decoded message's arms (the Frame, Fragment and
+// Join variants exist only with `alloc`, so a slot profile with their codecs on carries no caller
+// for it) and the in-place reader of a control message.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    all(feature = "alloc", feature = "codec-frame"),
+    all(feature = "alloc", feature = "reassembly"),
+    all(feature = "alloc", feature = "codec-join")
+))]
+fn judge_transport_chain<C: crate::ext_chain::ChainHeaders + ?Sized>(
+    mid: u8,
+    chain: &C,
+) -> crate::ext_admit::ExtAdmission {
+    crate::ext_admit::judge_ext_chain(
+        crate::ext_admit::ExtCarrier::Transport(mid),
+        chain.chain_headers(),
+    )
 }
 
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
@@ -828,27 +1000,9 @@ pub fn parse_inbound_consuming_into(
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
     #[cfg(feature = "alloc")]
-    let used = parse_unit_into::<true>(bytes, None, out)?;
+    let used = parse_unit_into(bytes, None, out)?;
     #[cfg(not(feature = "alloc"))]
-    let used = parse_unit_into::<true>(bytes, out)?;
-    refuse_unnamed_zid(out)?;
-    Ok(used)
-}
-
-/// [`parse_inbound_consuming_into`] for the reader of the transport messages that carry no data:
-/// a `Frame` or a `Fragment` is not decoded and reads as a message it does not take
-/// ([`InboundFrame::Unknown`]). The receive that reads its data units where they lie hands this
-/// reader every other unit, so it links no owned decode of a `Frame` or a `Fragment` through it.
-#[cfg(all(
-    feature = "alloc",
-    feature = "codec-frame",
-    feature = "session-unicast"
-))]
-pub(crate) fn parse_control_consuming_into(
-    bytes: &[u8],
-    out: &mut InboundFrame,
-) -> Result<usize, InboundParseError> {
-    let used = parse_unit_into::<false>(bytes, None, out)?;
+    let used = parse_unit_into(bytes, out)?;
     refuse_unnamed_zid(out)?;
     Ok(used)
 }
@@ -860,7 +1014,7 @@ pub fn parse_inbound_consuming_in_into(
     unit: &RxBytes,
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
-    let used = parse_unit_into::<true>(unit.as_slice(), Some(unit), out)?;
+    let used = parse_unit_into(unit.as_slice(), Some(unit), out)?;
     refuse_unnamed_zid(out)?;
     Ok(used)
 }
@@ -1226,10 +1380,6 @@ pub(crate) fn parse_fragment_in_place(
 /// they add to the deepest point of the stack; as a function of its own they are gone when it
 /// returns, and only the 720 bytes of its result stay.
 ///
-/// `DATA` says whether a `Frame` and a `Fragment` are decoded: the reader of a unit that carries
-/// no data (`parse_control_consuming_into`) is never handed one to read, and without it each
-/// reads as a message this decoder does not take, as a build with no allocator reads them.
-///
 /// The message is written into `out`, where the caller keeps it, and what is returned is where
 /// it ended: a message of 720 bytes handed back by value is a copy of it in every frame it passes
 /// through (the arm that builds it, this function, the one that decodes the unit, the one that
@@ -1237,7 +1387,7 @@ pub(crate) fn parse_fragment_in_place(
 /// `out` is left as it was when the unit does not decode and as far decoded as it got when a
 /// chain is not kept (a handshake chain past the bound, or a heap chain that does not decode).
 #[inline(never)]
-fn parse_unit_into<const DATA: bool>(
+fn parse_unit_into(
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
     out: &mut InboundFrame,
@@ -1266,7 +1416,7 @@ fn parse_unit_into<const DATA: bool>(
         #[cfg(feature = "codec-close")]
         wire_const::T_MID_CLOSE => parse_close(bytes, out),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-        wire_const::T_MID_FRAME if DATA => {
+        wire_const::T_MID_FRAME => {
             let (head, payload_at) = decode_frame_head::<Vec<ExtEntryOwned>>(bytes)?;
             // The payload is the tail of the unit. With an origin it is a range
             // of it (a second reference to the storage when the unit is lent);
@@ -1295,7 +1445,7 @@ fn parse_unit_into<const DATA: bool>(
             Ok(bytes.len())
         }
         #[cfg(all(feature = "alloc", feature = "reassembly"))]
-        wire_const::T_MID_FRAGMENT if DATA => {
+        wire_const::T_MID_FRAGMENT => {
             // The head mirrors a Frame's: the SN and the Z-gated chain after the
             // header, whose R (reliable) and M (more) bits are the flags; the
             // payload is the tail of the unit.
@@ -1331,35 +1481,13 @@ fn parse_unit_into<const DATA: bool>(
         }
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(bytes, out),
-        // R311y605 — the MULTICAST peer announcement. Self-contained rather
-        // than riding the shared `cursor`: the generated `Join` codec has no
-        // ext awareness, so the chain starts wherever the base body stopped
-        // and `join_base_len` derives that from the codec's own consumption.
-        // `decode_join` is the SSOT shared with the multicast participant path
-        // (`crate::join_decode`), which is what keeps the S bit's two optional
-        // fields and the T bit's lease UNIT projected in exactly one place.
+        // R311y605 — the MULTICAST peer announcement, read by [`decode_join_message`] as the
+        // transport OAM is read by [`decode_oam`].
         #[cfg(all(feature = "alloc", feature = "codec-join"))]
         wire_const::T_MID_JOIN => {
-            // The whole message is read by its document
-            // (`sources/codecs/transport_join.scxml`); the lease is projected to
-            // milliseconds as every Join reader here projects it.
-            let mut cursor = SceCursor::new(bytes);
-            let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor)?;
-            let join_has_ext = (view.header & wire_const::FLAG_T_Z) != 0;
-            let mut body = view.body.try_into_owned()?;
-            body.lease = crate::lease::lease_from_wire(
-                (view.header & wire_const::FLAG_T_JOIN_T) != 0,
-                body.lease,
-            );
-            let extensions = crate::ext_chain::collect_ext_chain(crate::ext_view::walked(
-                view.extensions.as_ref(),
-            ))?;
-            *out = InboundFrame::Join {
-                has_ext: join_has_ext,
-                body,
-                extensions,
-            };
-            Ok(bytes.len() - cursor.remaining())
+            let (frame, used) = decode_join_message(bytes)?;
+            *out = frame;
+            Ok(used)
         }
         // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
         // out here — see [`decode_oam`] for the second, measured reason. A heap
@@ -1388,9 +1516,9 @@ fn parse_unit(
 ) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut frame = InboundFrame::Unknown { mid: 0 };
     #[cfg(feature = "alloc")]
-    let used = parse_unit_into::<true>(bytes, origin, &mut frame)?;
+    let used = parse_unit_into(bytes, origin, &mut frame)?;
     #[cfg(not(feature = "alloc"))]
-    let used = parse_unit_into::<true>(bytes, &mut frame)?;
+    let used = parse_unit_into(bytes, &mut frame)?;
     Ok((frame, used))
 }
 
@@ -1523,6 +1651,16 @@ fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPar
 pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
+    control_event(frame.ext_admission(), &frame.control_facts())
+}
+
+/// [`inbound_to_fsm_event`] over the facts of a message, whichever read them, and the
+/// admission of its extension chain: the one projection both reads are judged by.
+#[cfg(feature = "session-unicast")]
+pub(crate) fn control_event(
+    admission: crate::ext_admit::ExtAdmission,
+    facts: &ControlFacts<'_>,
+) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // R311y630 (§14.1) — THE MANDATORY-EXTENSION RULE, ahead of every
     // per-variant projection because it applies to all of them and because the
@@ -1534,58 +1672,278 @@ pub fn inbound_to_fsm_event(
     // wire-correct answer. Measured against the real `libzenohpico.so` — the
     // driving oracle's first run disagreed with pico on eighteen generated
     // strings and every one of them was this.
-    if frame.ext_admission().is_refusal() {
+    if admission.is_refusal() {
         return Some(E::FramingError);
     }
-    match frame {
+    match facts {
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
-        InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
+        ControlFacts::Init(InitFacts { is_ack: false, .. }) => Some(E::InitSynReceived),
         // A build without the accepting role has no event for a peer's InitSyn or OpenSyn (the
         // session machine states that gate): they are not triggers of its machine, and the drive
         // loop drops them silently, as it drops any frame it will not admit.
         #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
-        InboundFrame::Init { is_ack: false, .. } => None,
+        ControlFacts::Init(InitFacts { is_ack: false, .. }) => None,
         #[cfg(feature = "codec-init-body")]
-        InboundFrame::Init { is_ack: true, .. } => Some(E::InitAckReceived),
+        ControlFacts::Init(InitFacts { is_ack: true, .. }) => Some(E::InitAckReceived),
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
-        InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
+        ControlFacts::Open(OpenFacts { is_ack: false, .. }) => Some(E::OpenSynReceived),
         #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
-        InboundFrame::Open { is_ack: false, .. } => None,
+        ControlFacts::Open(OpenFacts { is_ack: false, .. }) => None,
         #[cfg(feature = "codec-open-body")]
-        InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
+        ControlFacts::Open(OpenFacts { is_ack: true, .. }) => Some(E::OpenAckReceived),
         #[cfg(feature = "codec-close")]
-        InboundFrame::Close { .. } => Some(E::PeerClose),
+        ControlFacts::Close { .. } => Some(E::PeerClose),
+        // KeepAlive is not a state-transition trigger: its receipt resets the lease, a side
+        // effect orthogonal to the state graph. Frame and Fragment carry data, which the
+        // drive loop routes past the machine.
         #[cfg(feature = "codec-keep-alive")]
-        InboundFrame::KeepAlive { .. } => None,
-        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-        InboundFrame::Frame { .. } => None,
-        // R311im — Fragment is not a session-state trigger (like Frame);
-        // the drive loop routes it to the ReassemblyDispatcher and, on
-        // chain completion, the reassembled message re-enters the Frame
-        // payload dispatch path.
-        #[cfg(all(feature = "alloc", feature = "reassembly"))]
-        InboundFrame::Fragment { .. } => None,
-        // R311y605 — a JOIN is a MULTICAST message and has no place on a
-        // unicast session, so it stays a framing error here. Deliberately
-        // identical to the pre-R311y605 outcome, when it fell through to
-        // `Unknown` and hit the arm below: gaining the ability to DECODE a
-        // message must not change what the session FSM does with it.
-        #[cfg(all(feature = "alloc", feature = "codec-join"))]
-        InboundFrame::Join { .. } => Some(E::FramingError),
-        // Transport OAM, on the same rule the JOIN arm above states: gaining
-        // the ability to DECODE a message must not change what the session FSM
-        // does with it. wz's unicast FSM has no operations-and-maintenance
-        // transition, so a peer that sends one is sending a message this side
-        // cannot act on — byte-for-byte the outcome it had while it fell
-        // through to `Unknown`. What changed is the OBSERVER's reach, which is
-        // where the defect was.
-        #[cfg(feature = "alloc")]
-        InboundFrame::Oam { .. } => Some(E::FramingError),
-        // This observer envelope does not extend the participant's protocol.
-        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-        InboundFrame::Network { .. } => Some(E::FramingError),
-        InboundFrame::Unknown { .. } => Some(E::FramingError),
+        ControlFacts::KeepAlive => None,
+        #[cfg(all(
+            feature = "alloc",
+            any(feature = "codec-frame", feature = "reassembly")
+        ))]
+        ControlFacts::Data => None,
+        // R311y605 — a JOIN is a MULTICAST message and a transport OAM has no
+        // transition in wz's unicast machine: gaining the ability to DECODE a
+        // message must not change what the session FSM does with it, so they stay
+        // the framing error an unknown MID is.
+        ControlFacts::Refused | ControlFacts::Unread(_) => Some(E::FramingError),
     }
+}
+
+/// One transport message that carries no data, read where it lies in the receive buffer: the
+/// session's in-place receive hands every unit that is not a `Frame` or a `Fragment` it read
+/// itself to [`read_control`]. A handshake body is the document's view of the bytes, so its
+/// zid and cookie are ranges of the unit and nothing is copied out of it; only the extension
+/// chain is kept, in the form the readers of each extension take.
+///
+/// Its life is the unit's: it is judged and dropped before the receive goes on to the next
+/// message of the unit.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+pub(crate) enum ControlRead<'a> {
+    /// An Init: its header, its body as the document's view, its chain.
+    #[cfg(feature = "codec-init-body")]
+    Init {
+        header: u8,
+        body: wz_codecs::init_body::InitBodyView<'a>,
+        extensions: ExtChainOwned,
+    },
+    /// An Open: its header, its body as the document's view, its chain.
+    #[cfg(feature = "codec-open-body")]
+    Open {
+        header: u8,
+        body: wz_codecs::open_body::OpenBodyView<'a>,
+        extensions: ExtChainOwned,
+    },
+    /// A Close: its reason, its scope bit, its chain.
+    #[cfg(feature = "codec-close")]
+    Close {
+        reason: u8,
+        session: bool,
+        extensions: ExtChainOwned,
+    },
+    /// A KeepAlive: its chain.
+    #[cfg(feature = "codec-keep-alive")]
+    KeepAlive { extensions: ExtChainOwned },
+    /// A message a unicast participant refuses whatever it says, read to its end
+    /// ([`ControlFacts::Refused`]): a JOIN, a transport OAM.
+    Refused,
+    /// A message this reader does not take ([`ControlFacts::Unread`]): a `Frame` or a
+    /// `Fragment` that reaches it, or an id this build has no reader for.
+    ///
+    /// It carries the unit's lifetime for the reason [`ControlFacts::Unread`] carries the facts'.
+    Unread(core::marker::PhantomData<&'a ()>),
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl ControlRead<'_> {
+    /// What the session's judgement reads of this message ([`ControlFacts`]).
+    pub(crate) fn facts(&self) -> ControlFacts<'_> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            ControlRead::Init {
+                header,
+                body,
+                extensions,
+            } => ControlFacts::Init(InitFacts {
+                is_ack: (header & wire_const::FLAG_T_INIT_A) != 0,
+                version: body.version,
+                whatami: body.whatami(),
+                zid: body.zid.inner(),
+                s: body.s,
+                cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
+                extensions,
+            }),
+            #[cfg(feature = "codec-open-body")]
+            ControlRead::Open {
+                header,
+                body,
+                extensions,
+            } => ControlFacts::Open(OpenFacts {
+                is_ack: (header & wire_const::FLAG_T_OPEN_A) != 0,
+                // R311ku — the seconds form is projected back to milliseconds at the wire
+                // boundary, as the decoded Open's lease is.
+                lease: crate::lease::lease_from_wire(
+                    (header & wire_const::FLAG_T_OPEN_T) != 0,
+                    body.lease,
+                ),
+                initial_sn: body.initial_sn,
+                cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
+                extensions,
+            }),
+            #[cfg(feature = "codec-close")]
+            ControlRead::Close {
+                reason, session, ..
+            } => ControlFacts::Close {
+                reason: *reason,
+                session: *session,
+            },
+            #[cfg(feature = "codec-keep-alive")]
+            ControlRead::KeepAlive { .. } => ControlFacts::KeepAlive,
+            ControlRead::Refused => ControlFacts::Refused,
+            ControlRead::Unread(_) => ControlFacts::Unread(core::marker::PhantomData),
+        }
+    }
+
+    /// What a conforming participant must do with this message's extension chain, by the rule
+    /// [`InboundFrame::ext_admission`] applies to the decoded message.
+    pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            ControlRead::Init { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_INIT, extensions)
+            }
+            #[cfg(feature = "codec-open-body")]
+            ControlRead::Open { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_OPEN, extensions)
+            }
+            #[cfg(feature = "codec-close")]
+            ControlRead::Close { extensions, .. } => {
+                judge_transport_chain(wire_const::T_MID_CLOSE, extensions)
+            }
+            #[cfg(feature = "codec-keep-alive")]
+            ControlRead::KeepAlive { extensions } => {
+                judge_transport_chain(wire_const::T_MID_KEEP_ALIVE, extensions)
+            }
+            ControlRead::Refused | ControlRead::Unread(_) => {
+                crate::ext_admit::ExtAdmission::Unjudged
+            }
+        }
+    }
+}
+
+/// Read the transport message at the front of `bytes`, which carries no data, where it lies
+/// ([`ControlRead`]), and where it ended: the reading
+/// [`parse_inbound_consuming_into`] gives the same bytes, refusals and extents included, with
+/// no handshake body copied out of the unit. `0` is an extent this reader cannot know (a
+/// `Frame` or a `Fragment`, which it is not handed to read, or a message this build does not
+/// read), as it is for the decoder.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), InboundParseError> {
+    let header = *bytes.first().ok_or(InboundParseError::Empty)?;
+    let mut cursor = SceCursor::new(bytes);
+    let read = match header & 0x1F {
+        #[cfg(feature = "codec-init-body")]
+        wire_const::T_MID_INIT => {
+            let view = TransportInitView::decode(&mut cursor)?;
+            // The fixed profile refuses a body its storage cannot hold, the cookie past its
+            // capacity; the view holds any, so the decoder's storing is asked for its verdict.
+            #[cfg(feature = "session-slot")]
+            view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_INIT,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )?;
+            // A zid that is no zid is refused, after the chain as the decoder refuses it
+            // (`refuse_unnamed_zid`).
+            if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.inner()) {
+                return Err(InboundParseError::InvalidZid(refused));
+            }
+            ControlRead::Init {
+                header: view.header,
+                body: view.body,
+                extensions,
+            }
+        }
+        #[cfg(feature = "codec-open-body")]
+        wire_const::T_MID_OPEN => {
+            let view = TransportOpenView::decode(&mut cursor)?;
+            #[cfg(feature = "session-slot")]
+            view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_OPEN,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )?;
+            ControlRead::Open {
+                header: view.header,
+                body: view.body,
+                extensions,
+            }
+        }
+        #[cfg(feature = "codec-close")]
+        wire_const::T_MID_CLOSE => {
+            let view = TransportCloseView::decode(&mut cursor)?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_CLOSE,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )?;
+            ControlRead::Close {
+                reason: view.body.reason,
+                session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
+                extensions,
+            }
+        }
+        #[cfg(feature = "codec-keep-alive")]
+        wire_const::T_MID_KEEP_ALIVE => {
+            let view = TransportKeepAliveView::decode(&mut cursor)?;
+            let mut extensions = ExtChainOwned::new();
+            collect_handshake_ext_chain(
+                wire_const::T_MID_KEEP_ALIVE,
+                crate::ext_view::walked(view.extensions.as_ref()),
+                &mut extensions,
+            )?;
+            ControlRead::KeepAlive { extensions }
+        }
+        // A JOIN is refused whatever it says, but it is read to its end with the decoder's
+        // refusals, so the walk of the unit steps over it as the decoder's reading does.
+        #[cfg(feature = "codec-join")]
+        wire_const::T_MID_JOIN => {
+            let (frame, used) = decode_join_message(bytes)?;
+            refuse_unnamed_zid(&frame)?;
+            return Ok((ControlRead::Refused, used));
+        }
+        // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
+        // them, and nothing of it is kept.
+        wire_const::T_MID_OAM => {
+            use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
+            let view = TransportOamView::decode(&mut cursor)?;
+            if matches!(view.body, TransportOamViewVariant::Default { .. }) {
+                return Err(InboundParseError::ReservedEncoding);
+            }
+            crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+            ControlRead::Refused
+        }
+        _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
+    };
+    Ok((read, bytes.len() - cursor.remaining()))
 }
 
 /// The KEEP_ALIVE message (`T_MID_KEEP_ALIVE`, 0x04): its body is empty, so the
@@ -1627,6 +1985,33 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
         )?;
     }
     Ok(bytes.len() - cursor.remaining())
+}
+
+/// The JOIN (`T_MID_JOIN`, 0x07), read whole by its document
+/// (`sources/codecs/transport_join.scxml`) off its own cursor: the generated `Join` codec has
+/// no ext awareness, so the chain starts wherever the base body stopped. The lease is projected
+/// to milliseconds as every Join reader here projects it (`crate::join_decode` is the SSOT the
+/// multicast participant shares, which keeps the S bit's two optional fields and the T bit's
+/// lease UNIT projected in one place). A function of its own so the decoder and the in-place
+/// reader of a control message (`read_control`) read it the same way.
+#[cfg(all(feature = "alloc", feature = "codec-join"))]
+fn decode_join_message(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor)?;
+    let join_has_ext = (view.header & wire_const::FLAG_T_Z) != 0;
+    let mut body = view.body.try_into_owned()?;
+    body.lease =
+        crate::lease::lease_from_wire((view.header & wire_const::FLAG_T_JOIN_T) != 0, body.lease);
+    let extensions =
+        crate::ext_chain::collect_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+    Ok((
+        InboundFrame::Join {
+            has_ext: join_has_ext,
+            body,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
 }
 
 /// The transport OAM (`T_MID_OAM`, 0x00), read whole by its document
@@ -2462,5 +2847,265 @@ mod init_zid_tests {
             parse_inbound(&init_syn(&[0xAA])),
             Ok(InboundFrame::Init { is_ack: false, .. })
         ));
+    }
+}
+
+/// The in-place reader of a control message is held to the decoder: on every wire, and on every
+/// prefix of it, the two read the same facts, the same extent, the same chain verdict and the
+/// same event, or refuse with the same error.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+mod control_read_tests {
+    use super::*;
+    use alloc::{format, vec, vec::Vec};
+
+    // `vec![]` cannot express this: elements are `#[cfg]`-gated.
+    #[allow(clippy::vec_init_then_push)]
+    fn wires() -> Vec<Vec<u8>> {
+        use wire_const::*;
+        let mut wires: Vec<Vec<u8>> = Vec::new();
+        #[cfg(feature = "codec-init-body")]
+        {
+            // version, cbyte (zid length - 1 in the high nibble, the role below), the zid.
+            wires.push(vec![T_MID_INIT, 0x09, 0x01, 0xAA]);
+            // A zid of one zero byte names no node.
+            wires.push(vec![T_MID_INIT, 0x09, 0x01, 0x00]);
+            // The S pair: sn_res, then batch_size little-endian.
+            wires.push(vec![
+                T_MID_INIT | FLAG_T_INIT_S,
+                0x09,
+                0x01,
+                0xAA,
+                0x00,
+                0x00,
+                0x10,
+            ]);
+            // An InitAck with a cookie, and with the S pair and a cookie.
+            wires.push(vec![
+                T_MID_INIT | FLAG_T_INIT_A,
+                0x09,
+                0x12,
+                0xAA,
+                0xBB,
+                0x03,
+                0x01,
+                0x02,
+                0x03,
+            ]);
+            wires.push(vec![
+                T_MID_INIT | FLAG_T_INIT_A | FLAG_T_INIT_S,
+                0x09,
+                0x12,
+                0xAA,
+                0xBB,
+                0x00,
+                0x00,
+                0x08,
+                0x02,
+                0xC0,
+                0xC1,
+            ]);
+            // A chain: a z64 at id 0x7, then a mandatory unit extension of an id no Init defines.
+            wires.push(vec![T_MID_INIT | FLAG_T_Z, 0x09, 0x01, 0xAA, 0x27, 0x01]);
+            wires.push(vec![T_MID_INIT | FLAG_T_Z, 0x09, 0x01, 0xAA, 0x1F]);
+            wires.push(vec![
+                T_MID_INIT | FLAG_T_Z,
+                0x09,
+                0x01,
+                0xAA,
+                0xA7,
+                0x01,
+                0x1F,
+            ]);
+            // Another version.
+            wires.push(vec![T_MID_INIT, 0x08, 0x01, 0xAA]);
+        }
+        #[cfg(feature = "codec-open-body")]
+        {
+            // lease, initial_sn; the T flag writes the lease in seconds.
+            wires.push(vec![T_MID_OPEN | FLAG_T_OPEN_A, 0x0A, 0x01]);
+            wires.push(vec![T_MID_OPEN | FLAG_T_OPEN_A | FLAG_T_OPEN_T, 0x0A, 0x01]);
+            // An OpenSyn echoes a cookie.
+            wires.push(vec![T_MID_OPEN, 0x0A, 0x01, 0x02, 0xC1, 0xC2]);
+            wires.push(vec![T_MID_OPEN | FLAG_T_Z, 0x0A, 0x01, 0x00, 0x27, 0x01]);
+        }
+        #[cfg(feature = "codec-close")]
+        {
+            wires.push(vec![T_MID_CLOSE, 0x00]);
+            wires.push(vec![T_MID_CLOSE | FLAG_T_CLOSE_S, 0x07]);
+        }
+        #[cfg(feature = "codec-keep-alive")]
+        {
+            wires.push(vec![T_MID_KEEP_ALIVE]);
+            wires.push(vec![T_MID_KEEP_ALIVE | FLAG_T_Z, 0x1F]);
+        }
+        wires.push(vec![T_MID_FRAME | FLAG_T_FRAME_R, 0x07, 0xEE]);
+        wires.push(vec![T_MID_FRAGMENT | FLAG_T_FRAGMENT_R, 0x09, b'h']);
+        // The OAM's four encodings, the last reserved.
+        wires.push(vec![T_MID_OAM, 0x01]);
+        wires.push(vec![T_MID_OAM | 0x20, 0x01, 0x05]);
+        wires.push(vec![T_MID_OAM | 0x40, 0x01, 0x02, 0xAB, 0xCD]);
+        wires.push(vec![T_MID_OAM | 0x60, 0x01]);
+        wires.push(vec![T_MID_OAM | FLAG_T_Z, 0x01, 0x27, 0x01]);
+        #[cfg(feature = "codec-join")]
+        {
+            let join = wz_codecs::join::Join {
+                version: 0x09,
+                cbyte: (3 << 4) | 0x01,
+                zid: wz_codecs::Bounded::new(&[0xA0u8, 0xA1, 0xA2, 0xA3] as &[u8]).unwrap(),
+                s: Some(wz_codecs::join::JoinS {
+                    sn_res: 0x00,
+                    batch_size: 0x1000,
+                }),
+                lease: 10_000,
+                next_sn_reliable: 7,
+                next_sn_best_effort: 9,
+            };
+            let mut wire = vec![T_MID_JOIN | FLAG_T_JOIN_S];
+            wire.extend_from_slice(&join.encode_to_vec());
+            wires.push(wire);
+        }
+        wires.push(vec![0x1F]);
+        wires
+    }
+
+    /// The reader against the decoder on one wire.
+    fn agree_on(wire: &[u8]) {
+        let mid = wire.first().map(|header| header & 0x1F);
+        let read = read_control(wire);
+        // A Frame or a Fragment is the in-place receive's to read; handed here it is a message
+        // this reader does not take, of an extent it does not know.
+        if matches!(
+            mid,
+            Some(wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT)
+        ) {
+            let (message, used) = read.unwrap_or_else(|err| panic!("{wire:02x?}: {err:?}"));
+            assert!(
+                matches!(message.facts(), ControlFacts::Unread(_)),
+                "{wire:02x?}"
+            );
+            assert_eq!(used, 0, "{wire:02x?}");
+            return;
+        }
+        let decoded = parse_inbound_consuming(wire);
+        match (read, decoded) {
+            (Ok((message, used)), Ok((frame, decoded_used))) => {
+                let facts = message.facts();
+                let frame_facts = frame.control_facts();
+                assert_eq!(
+                    format!("{facts:?}"),
+                    format!("{frame_facts:?}"),
+                    "{wire:02x?}"
+                );
+                assert_eq!(used, decoded_used, "{wire:02x?}");
+                assert_eq!(
+                    format!("{:?}", control_event(message.ext_admission(), &facts)),
+                    format!("{:?}", inbound_to_fsm_event(&frame)),
+                    "{wire:02x?}"
+                );
+                if !matches!(facts, ControlFacts::Refused | ControlFacts::Unread(_)) {
+                    assert_eq!(
+                        format!("{:?}", message.ext_admission()),
+                        format!("{:?}", frame.ext_admission()),
+                        "{wire:02x?}"
+                    );
+                }
+            }
+            (Err(read), Err(decoded)) => {
+                assert_eq!(format!("{read:?}"), format!("{decoded:?}"), "{wire:02x?}");
+            }
+            (read, decoded) => panic!(
+                "{wire:02x?}: read {:?}, decoded {:?}",
+                read.map(|(message, used)| (format!("{:?}", message.facts()), used)),
+                decoded.map(|(frame, used)| (frame.kind_name(), used))
+            ),
+        }
+    }
+
+    #[test]
+    fn the_in_place_reader_agrees_with_the_decoder_on_every_wire_and_prefix() {
+        for wire in wires() {
+            for end in 0..=wire.len() {
+                agree_on(&wire[..end]);
+            }
+        }
+    }
+
+    /// The wires the decoder is known to read are read by the in-place reader too, so the
+    /// agreement above is not an agreement of two refusals.
+    #[test]
+    fn the_in_place_reader_reads_the_handshake_facts() {
+        #[cfg(feature = "codec-init-body")]
+        {
+            let wire = [
+                wire_const::T_MID_INIT | wire_const::FLAG_T_INIT_A,
+                0x09,
+                0x12,
+                0xAA,
+                0xBB,
+                0x03,
+                0x01,
+                0x02,
+                0x03,
+            ];
+            let (message, used) = read_control(&wire).expect("an InitAck");
+            assert_eq!(used, wire.len());
+            match message.facts() {
+                ControlFacts::Init(init) => {
+                    assert!(init.is_ack);
+                    assert_eq!(init.version, 0x09);
+                    assert_eq!(init.whatami, 0x02);
+                    assert_eq!(init.zid, &[0xAA, 0xBB]);
+                    assert_eq!(init.cookie, Some(&[0x01u8, 0x02, 0x03][..]));
+                    assert!(init.s.is_none());
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(matches!(
+                read_control(&[wire_const::T_MID_INIT, 0x09, 0x01, 0x00]),
+                Err(InboundParseError::InvalidZid(_))
+            ));
+        }
+        #[cfg(feature = "codec-open-body")]
+        {
+            let wire = [
+                wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_A | wire_const::FLAG_T_OPEN_T,
+                0x0A,
+                0x01,
+            ];
+            let (message, _) = read_control(&wire).expect("an OpenAck");
+            match message.facts() {
+                ControlFacts::Open(open) => {
+                    assert!(open.is_ack);
+                    assert_eq!(open.lease, 10_000, "seconds on the wire, milliseconds read");
+                    assert_eq!(open.initial_sn, 1);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        #[cfg(feature = "codec-close")]
+        {
+            let (message, _) =
+                read_control(&[wire_const::T_MID_CLOSE | wire_const::FLAG_T_CLOSE_S, 0x07])
+                    .expect("a Close");
+            assert!(matches!(
+                message.facts(),
+                ControlFacts::Close {
+                    reason: 0x07,
+                    session: true
+                }
+            ));
+        }
+        // An OAM is read to its end and refused; an id no reader takes is not read.
+        let (message, used) = read_control(&[wire_const::T_MID_OAM, 0x01]).expect("an OAM");
+        assert!(matches!(message.facts(), ControlFacts::Refused));
+        assert_eq!(used, 2);
+        let (message, used) = read_control(&[0x1F]).expect("an unread id");
+        assert!(matches!(message.facts(), ControlFacts::Unread(_)));
+        assert_eq!(used, 0);
     }
 }

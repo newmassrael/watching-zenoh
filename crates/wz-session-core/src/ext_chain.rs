@@ -435,6 +435,23 @@ pub(crate) fn collect_ext_chain<'a>(
     walked.map(|entry| received_entry(&entry)).collect()
 }
 
+/// The verdict [`collect_ext_chain`] gives the chain `walked` yields, entry by entry, with
+/// nothing kept: for a reader that refuses the message whatever its chain says and needs only
+/// the refusals the decoder would have answered with (the in-place reader of a transport OAM).
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+pub(crate) fn check_ext_chain<'a>(
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    for entry in walked {
+        received_entry(&entry)?;
+    }
+    Ok(())
+}
+
 /// One entry of a received transport chain, from the view the document read it as to the
 /// lifetime-free owned form the message keeps.
 #[cfg(any(

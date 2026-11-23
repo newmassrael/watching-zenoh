@@ -19,7 +19,7 @@
 //! The grammar it enforces is byte-level:
 //!
 //! 1. **Singleify**: runs of `$*$*$*...` collapse to one `$*`
-//!    (`collapse_dsl_runs`).
+//!    (read as one token where the text holds them and written once).
 //! 2. **Chunk-level canon**: per-chunk validation + rewriting:
 //!    - lone `$*` chunk → `*` chunk
 //!    - a wild RUN is reordered: every `*` first, then at most one
@@ -61,7 +61,7 @@
 
 use core::fmt;
 
-use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
+use crate::bounded::{BoundedString, Profile, Storage};
 use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
@@ -155,12 +155,11 @@ enum ChunkShape {
 /// The output is a fresh [`BoundedString`] even when the input was
 /// already canonical — callers that want to skip re-storing on the
 /// already-canonical hot path can wrap with an equality check
-/// (`canonize_keyexpr(s)? == s`). The two-pass implementation uses one
-/// intermediate [`BoundedString`] for the `$*` run-collapse step and
-/// one [`BoundedVec`] of chunk slices for the chunk walk; since canon
-/// only ever shrinks or preserves length (collapsing runs, dropping
-/// redundant `*`/`**` chunks), the output is bounded by the input
-/// size. On the no-alloc backing an input longer than
+/// (`canonize_keyexpr(s)? == s`). The text is read once, byte by byte,
+/// and the canonical form is written as it is read, with no buffer in
+/// between; since canon only ever shrinks or preserves length (collapsing
+/// runs, dropping redundant `*`/`**` chunks), the output is bounded by
+/// the input size. On the no-alloc backing an input longer than
 /// [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) (or deeper than
 /// [`MAX_KEYEXPR_CHUNKS`]) surfaces as [`KeyexprCanonError::ExceedsCapacity`].
 ///
@@ -232,94 +231,111 @@ pub fn canonize_keyexpr_in(
     canonize_keyexpr_as::<Profile>(input, dialect)
 }
 
-/// [`canonize_keyexpr_in`] over a storage policy `P`: the two passes' scratch buffers
-/// and the OUTPUT are all held by `P`, so what a table of that policy stores a keyexpr
-/// pattern in is written once where it is made and not copied into place afterwards,
-/// and the bound that refuses an over-long input is the policy's own: it is refused as
-/// [`KeyexprCanonError::ExceedsCapacity`] where `P` enforces
-/// [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) (or [`MAX_KEYEXPR_CHUNKS`]), and taken where
-/// it does not.
+/// [`canonize_keyexpr_in`] over a storage policy `P`: the OUTPUT is held by `P`, so what a
+/// table of that policy stores a keyexpr pattern in is written once where it is made and not
+/// copied into place afterwards, and the bound that refuses an over-long input is the policy's
+/// own: it is refused as [`KeyexprCanonError::ExceedsCapacity`] where `P` enforces
+/// [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) (or its working policy enforces
+/// [`MAX_KEYEXPR_CHUNKS`]), and taken where it does not.
 pub fn canonize_keyexpr_as<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
 ) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    // A text with no `$` and no `*` has no wild chunk: there is no `$*` run to collapse and no wild
-    // run to reorder, so its canonical form is the text itself once every chunk has been judged.
-    // This is the shape of nearly every key a program names (`demo/doc`), and it is made in one
-    // copy where the two passes below make three. The refusals are the passes' own, in their order:
-    // the capacity of the first pass, then each chunk's verdict and the chunk count the second.
-    if !input.bytes().any(|b| b == b'$' || b == b'*') {
-        let mut out = BoundedString::default();
-        out.push_str(input)
-            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-        for (n, chunk) in input.split('/').enumerate() {
-            analyze_chunk(chunk)?;
-            if P::ENFORCES_CAPACITY && n >= MAX_KEYEXPR_CHUNKS {
-                return Err(KeyexprCanonError::ExceedsCapacity);
-            }
-        }
-        return Ok(out);
+    if exceeds_byte_bound::<P>(input) {
+        return Err(KeyexprCanonError::ExceedsCapacity);
     }
-    canonize_in_two_passes::<P>(input, dialect)
-}
-
-/// The canonizer's two passes, for any text: collapse the `$*` runs, then walk the chunks. The
-/// fast path of [`canonize_keyexpr_as`] answers what these answer for a text with neither `$` nor
-/// `*`, and a test holds the two to each other.
-fn canonize_in_two_passes<P: Storage>(
-    input: &str,
-    dialect: KeyexprDialect,
-) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    let collapsed = collapse_dsl_runs::<P>(input)?;
-    canonize_chunks::<P>(&collapsed, dialect)
-}
-
-/// Collapse runs of consecutive `$*` tokens into a single `$*`.
-///
-/// Mirrors zenoh-pico's `__zp_singleify(start, len, "$*")`
-/// (`vendor/zenoh-pico/src/session/keyexpr.c` lines 220-259). The
-/// transform is purely substring-level — it does not understand
-/// chunk boundaries — so a chunk like `$*$*$*foo` collapses to
-/// `$*foo` and `pre$*$*post` collapses to `pre$*post`. The
-/// transform is idempotent; running it twice yields the same
-/// result as once.
-fn collapse_dsl_runs<P: Storage>(
-    input: &str,
-) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    const DSL: &str = "$*";
     let mut out = BoundedString::default();
-    // The walk holds the unread text itself rather than an offset into it, so no step slices the
-    // input at a computed position and none can panic on a character boundary.
-    let mut rest = input;
-    loop {
-        if let Some(after) = rest.strip_prefix(DSL) {
-            out.push_str(DSL)
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-            rest = after;
-            while let Some(after) = rest.strip_prefix(DSL) {
-                rest = after;
-            }
-            continue;
-        }
-        let mut chars = rest.chars();
-        let Some(next_char) = chars.next() else {
-            break;
-        };
-        out.push(next_char)
-            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-        rest = chars.as_str();
-    }
+    walk_canonical(
+        input,
+        dialect,
+        <P::Scratch as Storage>::ENFORCES_CAPACITY,
+        &mut |piece: &str| {
+            out.push_str(piece)
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)
+        },
+    )?;
     Ok(out)
 }
 
-/// Walk `/`-separated chunks, validating each via
-/// [`analyze_chunk`] and applying the chunk-level canon rules
-/// (`$*` → `*`; a wild RUN is reordered to all its `*` first, then
-/// at most one `**`).
+/// The verdict [`canonize_keyexpr_in`] gives `input`, without the canonical form: the same
+/// refusal, of the same kind, for the same text, and `Ok` where it would canonize. Nothing is
+/// written, so a caller that needs only the verdict (an outbound declaration's check) holds no
+/// buffer and allocates nothing on any profile.
+pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), KeyexprCanonError> {
+    if exceeds_byte_bound::<Profile>(input) {
+        return Err(KeyexprCanonError::ExceedsCapacity);
+    }
+    walk_canonical(
+        input,
+        dialect,
+        <<Profile as Storage>::Scratch as Storage>::ENFORCES_CAPACITY,
+        &mut |_: &str| Ok(()),
+    )
+}
+
+/// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
+/// text with every run of `$*` written once, which is the longest the canonical form can be,
+/// past [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) on a policy that enforces it. Judged
+/// first, as a text too long for the output is refused whatever its chunks say.
+fn exceeds_byte_bound<P: Storage>(input: &str) -> bool {
+    P::ENFORCES_CAPACITY
+        && input.len() > caps::MAX_KEYEXPR_BYTES
+        && collapsed_len(input) > caps::MAX_KEYEXPR_BYTES
+}
+
+/// The length of `input` with every run of consecutive `$*` tokens written as one, as
+/// zenoh-pico's `__zp_singleify(start, len, "$*")` writes it
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` lines 220-259). The collapse is
+/// substring-level and does not see chunk boundaries, but a `$*` holds no `/`, so a run is
+/// always inside one chunk.
+fn collapsed_len(input: &str) -> usize {
+    let bytes = input.as_bytes();
+    let mut len = 0;
+    let mut i = 0;
+    let mut after_token = false;
+    while i < bytes.len() {
+        if is_dollar_star_at(bytes, i) {
+            if !after_token {
+                len += 2;
+            }
+            after_token = true;
+            i += 2;
+        } else {
+            len += 1;
+            after_token = false;
+            i += 1;
+        }
+    }
+    len
+}
+
+/// Whether a `$*` token starts at byte `i` of `bytes`.
+fn is_dollar_star_at(bytes: &[u8], i: usize) -> bool {
+    bytes.get(i) == Some(&b'$') && bytes.get(i + 1) == Some(&b'*')
+}
+
+/// Whether `chunk` is one or more `$*` tokens and nothing else: the chunk whose collapsed
+/// form is a lone `$*`.
+fn is_dollar_star_run(chunk: &str) -> bool {
+    let bytes = chunk.as_bytes();
+    let mut pairs = bytes.chunks_exact(2);
+    !bytes.is_empty() && pairs.remainder().is_empty() && pairs.all(|pair| pair == b"$*")
+}
+
+/// The canonical form of `input`, handed to `sink` a piece at a time as the text is read:
+/// every `/`-separated chunk is judged by [`analyze_chunk`] and written in its canonical
+/// form (a `$*` run written once, a lone `$*` as `*`), and a wild RUN of `*` / `**` chunks
+/// is held as two counts and written, when the run ends, as every `*` first and then at most
+/// one `**`. `chunk_bound` refuses an output of more than [`MAX_KEYEXPR_CHUNKS`] chunks, at
+/// the chunk that would pass it.
+///
+/// One walk serves the canonizer, whose sink writes the output, and the verdict, whose sink
+/// writes nothing, so the two cannot disagree on a text. It is not generic over the sink: one
+/// copy of the walk serves every policy.
 ///
 /// # R311y564 — the run rule REPLACES an absorb rule that was wrong
 ///
-/// This function used to drop any `*` that followed a `**`, and
+/// This walk used to drop any `*` that followed a `**`, and
 /// said so: "`*` after `**` is absorbed". That is a different
 /// LANGUAGE, not a different spelling. `a/**/b` matches `a/b`,
 /// while `a/**/*/b` requires at least one chunk between them — so
@@ -337,36 +353,17 @@ fn collapse_dsl_runs<P: Storage>(
 /// `home/**/*/temp` and each answered `home/*/**/temp`, where wz
 /// answered `home/**/temp`. The two ABIs' pure-function oracles
 /// now drive that comparison on every run.
-fn canonize_chunks<P: Storage>(
+fn walk_canonical(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    // A working buffer of its own, not one of the key's policy: a policy whose rows are only lent
-    // makes none for itself (`Storage::Scratch`).
-    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P::Scratch> = BoundedVec::default();
+    chunk_bound: bool,
+    sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
+) -> Result<(), KeyexprCanonError> {
+    let mut written = 0usize;
     // The wild run being accumulated: how many `*` chunks it has
     // contained so far, and whether any of them was a `**`.
-    let mut run_single_stars: usize = 0;
+    let mut run_single_stars = 0usize;
     let mut run_has_double_star = false;
-
-    // Emit the pending wild run in canonical order: every `*`, then
-    // at most one `**`.
-    fn flush_run<P: Storage>(
-        out: &mut BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P>,
-        singles: usize,
-        has_double: bool,
-    ) -> Result<(), KeyexprCanonError> {
-        for _ in 0..singles {
-            out.push("*")
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-        }
-        if has_double {
-            out.push("**")
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-        }
-        Ok(())
-    }
-
     for chunk in input.split('/') {
         let shape = analyze_chunk(chunk)?;
         // The ONE case the two dialects split on — see [`KeyexprDialect`].
@@ -381,43 +378,97 @@ fn canonize_chunks<P: Storage>(
             run_single_stars += 1;
             continue;
         }
-        match shape {
-            ChunkShape::DoubleStar => run_has_double_star = true,
-            // A pico-dialect `$*`, or an ordinary literal chunk: flush
-            // the pending run, then emit this chunk's canonical form.
-            _ => {
-                flush_run(&mut out_chunks, run_single_stars, run_has_double_star)?;
-                run_single_stars = 0;
-                run_has_double_star = false;
-                let literal = if shape == ChunkShape::LoneDollarStar {
-                    "*"
-                } else {
-                    chunk
-                };
-                out_chunks
-                    .push(literal)
-                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-            }
+        if shape == ChunkShape::DoubleStar {
+            run_has_double_star = true;
+            continue;
         }
+        // A pico-dialect `$*`, or an ordinary literal chunk: write the
+        // pending run, then this chunk's canonical form.
+        write_run(
+            sink,
+            &mut written,
+            chunk_bound,
+            run_single_stars,
+            run_has_double_star,
+        )?;
+        run_single_stars = 0;
+        run_has_double_star = false;
+        let literal = if shape == ChunkShape::LoneDollarStar {
+            "*"
+        } else {
+            chunk
+        };
+        write_chunk(sink, &mut written, chunk_bound, literal)?;
     }
-    // A keyexpr may END in a wild run, so the flush cannot live only
+    // A keyexpr may END in a wild run, so the run cannot be written only
     // at the literal-chunk boundary.
-    flush_run(&mut out_chunks, run_single_stars, run_has_double_star)?;
-
-    // Join by '/' into a fresh bounded buffer (replaces `Vec::join`).
-    let mut out = BoundedString::default();
-    for (i, c) in out_chunks.iter().enumerate() {
-        if i > 0 {
-            out.push('/')
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-        }
-        out.push_str(c)
-            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-    }
-    Ok(out)
+    write_run(
+        sink,
+        &mut written,
+        chunk_bound,
+        run_single_stars,
+        run_has_double_star,
+    )
 }
 
-/// Per-chunk validation + shape classification.
+/// Write a wild run in canonical order: every `*`, then at most one `**`.
+fn write_run(
+    sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
+    written: &mut usize,
+    chunk_bound: bool,
+    singles: usize,
+    has_double: bool,
+) -> Result<(), KeyexprCanonError> {
+    for _ in 0..singles {
+        write_chunk(sink, written, chunk_bound, "*")?;
+    }
+    if has_double {
+        write_chunk(sink, written, chunk_bound, "**")?;
+    }
+    Ok(())
+}
+
+/// Write one output chunk, `/`-separated from the one before it, with every run of `$*` in
+/// it written once. `written` counts the chunks written so far.
+fn write_chunk(
+    sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
+    written: &mut usize,
+    chunk_bound: bool,
+    chunk: &str,
+) -> Result<(), KeyexprCanonError> {
+    if chunk_bound && *written >= MAX_KEYEXPR_CHUNKS {
+        return Err(KeyexprCanonError::ExceedsCapacity);
+    }
+    if *written > 0 {
+        sink("/")?;
+    }
+    *written += 1;
+    let bytes = chunk.as_bytes();
+    // `from` is where the text not yet written starts; a run of `$*` is written up to its
+    // first token and the rest of the run is stepped over.
+    let mut from = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_dollar_star_at(bytes, i) {
+            let mut end = i + 2;
+            while is_dollar_star_at(bytes, end) {
+                end += 2;
+            }
+            if end > i + 2 {
+                sink(&chunk[from..i + 2])?;
+                from = end;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    sink(&chunk[from..])
+}
+
+/// Per-chunk validation + shape classification, of the chunk as the text holds it: a `$*`
+/// right after a `$*` is read as the one token the canonical form collapses the run to, so
+/// the verdict and the shape are those of the collapsed chunk.
 ///
 /// Mirrors zenoh-pico's per-chunk state machine in
 /// `__zp_canon_prefix` (`vendor/zenoh-pico/src/session/keyexpr.c`
@@ -432,12 +483,21 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
     match chunk {
         "*" => return Ok(ChunkShape::SingleStar),
         "**" => return Ok(ChunkShape::DoubleStar),
-        "$*" => return Ok(ChunkShape::LoneDollarStar),
         _ => {}
     }
+    if is_dollar_star_run(chunk) {
+        return Ok(ChunkShape::LoneDollarStar);
+    }
+    let bytes = chunk.as_bytes();
     let mut state: u8 = 0;
-    for &b in chunk.as_bytes() {
-        match b {
+    let mut i = 0;
+    while i < bytes.len() {
+        // The rest of a `$*` run, which the canonical form writes once.
+        if state == 3 && is_dollar_star_at(bytes, i) {
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
             b'#' | b'?' => return Err(KeyexprCanonError::ContainsSharpOrQmark),
             b'$' => {
                 if state != 0 {
@@ -458,6 +518,7 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
                 state = 0;
             }
         }
+        i += 1;
     }
     if state == 1 {
         return Err(KeyexprCanonError::ContainsUnboundDollar);
@@ -908,11 +969,11 @@ impl core::error::Error for OutboundKeyexprError {
 #[cfg(feature = "storage-profile")]
 pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
     // Structural canon (empty chunks, reserved chars, unbound `$`,
-    // bare `*` mid-chunk, …). We discard the canonized output and
-    // only consume its pass/fail signal: the wire emit path uses the
+    // bare `*` mid-chunk, …), as a verdict: the wire emit path uses the
     // raw suffix verbatim (R300 NARROW scope; pre-emit canonization
-    // is the R299 carry #3 architectural decision).
-    canonize_keyexpr(input).map_err(OutboundKeyexprError::NotCanonical)?;
+    // is the R299 carry #3 architectural decision), so no canonical form
+    // is built and the check allocates nothing.
+    canon_verdict(input, KeyexprDialect::Pico).map_err(OutboundKeyexprError::NotCanonical)?;
 
     // Bug #3 family walk — a direct model of pico's `__zp_canon_prefix`
     // chunk loop (`vendor/zenoh-pico/src/session/keyexpr.c:121-209`),
@@ -995,45 +1056,121 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
 /// Mixed chunks (literal + `$*` + literal) canonize verbatim and do
 /// not trigger pico's case-1 `in_big_wild` confusion, so they are
 /// excluded.
-///
-/// Distinct from [`analyze_chunk`]'s `ChunkShape::LoneDollarStar`
-/// because this helper walks the RAW (pre-singleify) chunk — the
-/// caller of [`check_outbound_keyexpr_pico_safe`] does not run
-/// `collapse_dsl_runs` first; doing so would have to handle chunk
-/// boundary effects (`$*$*` straddling `/` is not a single chunk).
 #[cfg(feature = "storage-profile")]
 fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
-    if chunk == "*" || chunk == "**" {
-        return true;
-    }
-    if chunk.is_empty() {
-        return false;
-    }
-    let mut rest = chunk;
-    while let Some(after) = rest.strip_prefix("$*") {
-        rest = after;
-    }
-    rest.is_empty()
+    chunk == "*" || chunk == "**" || is_dollar_star_run(chunk)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── The fast path for a text with no `$` and no `*` answers what the two passes answer ──
+    // ── The one walk answers what the canonizer written as two passes answered ──
 
     #[cfg(feature = "alloc")]
     use alloc::string::String;
     #[cfg(feature = "alloc")]
     use alloc::{borrow::ToOwned, format, vec, vec::Vec};
 
-    /// One corpus, both policies, both dialects: the answer of [`canonize_keyexpr_as`] is the
-    /// answer of the two passes, the refusal and its kind included. The corpus holds the texts the
-    /// fast path takes (literals, empty chunks, `?` and `#`, a text past the byte bound, and chunk
-    /// counts at, past and far past the chunk bound with a bad chunk behind the bound) and the ones
-    /// it leaves to the passes, so a text that moved between the two would show.
+    /// The canonizer as it was written before it read the text once: every `$*` run collapsed
+    /// into a buffer of the policy, that buffer's chunks walked into a list of the working
+    /// policy, and the list joined. Kept as the oracle the one walk is held to, refusals and
+    /// their kinds included.
     #[cfg(feature = "alloc")]
-    fn fast_path_corpus() -> Vec<String> {
+    fn reference_canonize<P: Storage>(
+        input: &str,
+        dialect: KeyexprDialect,
+    ) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
+        use crate::bounded::BoundedVec;
+
+        fn flush<S: Storage>(
+            out: &mut BoundedVec<&str, MAX_KEYEXPR_CHUNKS, S>,
+            singles: usize,
+            has_double: bool,
+        ) -> Result<(), KeyexprCanonError> {
+            for _ in 0..singles {
+                out.push("*")
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+            }
+            if has_double {
+                out.push("**")
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+            }
+            Ok(())
+        }
+
+        const DSL: &str = "$*";
+        let mut collapsed: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
+        let mut cursor = 0;
+        while cursor < input.len() {
+            let rest = &input[cursor..];
+            if rest.starts_with(DSL) {
+                collapsed
+                    .push_str(DSL)
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+                cursor += DSL.len();
+                while input[cursor..].starts_with(DSL) {
+                    cursor += DSL.len();
+                }
+            } else {
+                let next_char = rest.chars().next().expect("non-empty remainder");
+                collapsed
+                    .push(next_char)
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+                cursor += next_char.len_utf8();
+            }
+        }
+        let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P::Scratch> = BoundedVec::default();
+        let mut singles = 0usize;
+        let mut has_double = false;
+        for chunk in collapsed.as_str().split('/') {
+            let shape = analyze_chunk(chunk)?;
+            let folds_into_run = match shape {
+                ChunkShape::SingleStar => true,
+                ChunkShape::LoneDollarStar => dialect == KeyexprDialect::ZenohC,
+                _ => false,
+            };
+            if folds_into_run {
+                singles += 1;
+                continue;
+            }
+            match shape {
+                ChunkShape::DoubleStar => has_double = true,
+                _ => {
+                    flush(&mut chunks, singles, has_double)?;
+                    singles = 0;
+                    has_double = false;
+                    let literal = if shape == ChunkShape::LoneDollarStar {
+                        "*"
+                    } else {
+                        chunk
+                    };
+                    chunks
+                        .push(literal)
+                        .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+                }
+            }
+        }
+        flush(&mut chunks, singles, has_double)?;
+        let mut out = BoundedString::default();
+        for (i, c) in chunks.iter().enumerate() {
+            if i > 0 {
+                out.push('/')
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+            }
+            out.push_str(c)
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        }
+        Ok(out)
+    }
+
+    /// The texts the walk is held to the reference on beyond the alphabet walk: literals, empty
+    /// chunks, `?` and `#`, `$*` runs inside and across chunks, a text past the byte bound
+    /// whose collapsed form fits and one whose collapsed form does not, a bad chunk ahead of a
+    /// text past the byte bound, chunk counts at, past and far past the chunk bound, a bad chunk
+    /// behind the chunk bound, and characters of more than one byte.
+    #[cfg(feature = "alloc")]
+    fn canon_corpus() -> Vec<String> {
         let mut texts: Vec<String> = [
             "demo/doc",
             "a",
@@ -1055,18 +1192,33 @@ mod tests {
             "a$b",
             "$",
             "a/**/**",
+            "$*$*",
+            "$*$*/$*",
+            "$*$",
+            "$*$*$",
+            "a$*$*$*b/**/**/*",
+            "**/$*$*/a",
+            "x$*$*/y$*$*z/**",
+            "\u{e9}/$*$*\u{e9}",
+            "a\u{e9}$*$*b/\u{e9}$",
         ]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
         texts.push("x".repeat(caps::MAX_KEYEXPR_BYTES));
         texts.push("x".repeat(caps::MAX_KEYEXPR_BYTES + 1));
+        texts.push("$*".repeat(caps::MAX_KEYEXPR_BYTES));
+        texts.push(format!("a{}", "$*".repeat(caps::MAX_KEYEXPR_BYTES)));
+        texts.push("ab$*$*".repeat(caps::MAX_KEYEXPR_BYTES / 2));
+        texts.push(format!("a?/{}", "x".repeat(caps::MAX_KEYEXPR_BYTES)));
         for chunks in [
             MAX_KEYEXPR_CHUNKS - 1,
             MAX_KEYEXPR_CHUNKS,
             MAX_KEYEXPR_CHUNKS + 1,
         ] {
             texts.push(vec!["a"; chunks].join("/"));
+            texts.push(vec!["*"; chunks].join("/"));
+            texts.push(vec!["$*$*"; chunks].join("/"));
         }
         // A bad chunk behind the chunk bound: the bound is reached first on a policy that
         // enforces it, the bad chunk first where it does not.
@@ -1079,42 +1231,97 @@ mod tests {
         texts
     }
 
+    /// Every text of up to six bytes over the alphabet that reaches every arm of the walk
+    /// (`a`, `*`, `$`, `/`, `#`, `?`), handed to `each` in turn.
     #[cfg(feature = "alloc")]
-    fn fast_path_agrees_with_the_passes<P: Storage>() {
-        for text in fast_path_corpus() {
-            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
-                let fast = canonize_keyexpr_as::<P>(&text, dialect).map(|o| o.as_str().to_owned());
-                let passes =
-                    canonize_in_two_passes::<P>(&text, dialect).map(|o| o.as_str().to_owned());
-                assert_eq!(
-                    format!("{fast:?}"),
-                    format!("{passes:?}"),
-                    "{} bytes, {} chunks, {dialect:?}",
-                    text.len(),
-                    text.split('/').count()
-                );
+    fn walk_alphabet(mut each: impl FnMut(&str)) {
+        const ALPHABET: [u8; 6] = *b"a*$/#?";
+        let mut buf = [0u8; 6];
+        for len in 0..=buf.len() {
+            let mut counter = [0usize; 6];
+            loop {
+                for (slot, digit) in buf[..len].iter_mut().zip(counter) {
+                    *slot = ALPHABET[digit];
+                }
+                each(core::str::from_utf8(&buf[..len]).expect("ASCII"));
+                let mut at = 0;
+                while at < len {
+                    counter[at] += 1;
+                    if counter[at] < ALPHABET.len() {
+                        break;
+                    }
+                    counter[at] = 0;
+                    at += 1;
+                }
+                if at == len {
+                    break;
+                }
             }
         }
     }
 
+    /// The one walk's answer is the reference's on `text`, in both dialects, on the policy `P`.
     #[cfg(feature = "alloc")]
-    #[test]
-    fn the_fast_path_agrees_with_the_passes_on_a_heap_policy() {
-        fast_path_agrees_with_the_passes::<crate::bounded::Heap>();
+    fn walk_agrees_with_the_reference_on<P: Storage>(text: &str) {
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            let walked = canonize_keyexpr_as::<P>(text, dialect).map(|o| o.as_str().to_owned());
+            let reference = reference_canonize::<P>(text, dialect).map(|o| o.as_str().to_owned());
+            assert_eq!(
+                format!("{walked:?}"),
+                format!("{reference:?}"),
+                "{text:?}: {} bytes, {} chunks, {dialect:?}",
+                text.len(),
+                text.split('/').count()
+            );
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn walk_agrees_with_the_reference<P: Storage>() {
+        for text in canon_corpus() {
+            walk_agrees_with_the_reference_on::<P>(&text);
+        }
+        walk_alphabet(walk_agrees_with_the_reference_on::<P>);
     }
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn the_fast_path_agrees_with_the_passes_on_a_static_policy() {
-        fast_path_agrees_with_the_passes::<crate::bounded::Static>();
+    fn the_walk_agrees_with_the_reference_on_a_heap_policy() {
+        walk_agrees_with_the_reference::<crate::bounded::Heap>();
     }
 
-    /// The policy a session lends its tables from at open: the passes' chunk walk keeps its
-    /// chunks in a buffer of its own, so a wild key canonizes as it does on the static policy.
     #[cfg(feature = "alloc")]
     #[test]
-    fn the_fast_path_agrees_with_the_passes_on_a_lent_policy() {
-        fast_path_agrees_with_the_passes::<crate::bounded::Lent>();
+    fn the_walk_agrees_with_the_reference_on_a_static_policy() {
+        walk_agrees_with_the_reference::<crate::bounded::Static>();
+    }
+
+    /// The policy a session lends its tables from at open: the walk keeps no buffer of its own,
+    /// so a wild key canonizes as it does on the static policy.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_walk_agrees_with_the_reference_on_a_lent_policy() {
+        walk_agrees_with_the_reference::<crate::bounded::Lent>();
+    }
+
+    /// The verdict is the canonizer's, refusal kind included, on every text the walk is held to,
+    /// in both dialects: the outbound check that asks it refuses exactly what a canonize refuses.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_verdict_is_the_canonizers_without_the_output() {
+        let agree = |text: &str| {
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                assert_eq!(
+                    canon_verdict(text, dialect),
+                    canonize_keyexpr_in(text, dialect).map(|_| ()),
+                    "{text:?}, {dialect:?}"
+                );
+            }
+        };
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(agree);
     }
 
     /// A wild key, which only the passes canonize, is taken whole into a key of the lent policy.
@@ -1157,18 +1364,6 @@ mod tests {
             "home/foo$*bar"
         );
         assert_eq!(canonize_keyexpr("home/$*$*").unwrap(), "home/*");
-    }
-
-    /// The collapse walks characters, not bytes: a run beside a character of two bytes collapses
-    /// as one beside an ASCII byte does, and the character is copied whole.
-    #[test]
-    fn canon_singleify_keeps_a_multibyte_character_beside_a_run() {
-        assert_eq!(
-            canonize_keyexpr("home/\u{e9}$*$*\u{fc}").unwrap(),
-            "home/\u{e9}$*\u{fc}"
-        );
-        assert_eq!(canonize_keyexpr("$*$*\u{e9}/a").unwrap(), "$*\u{e9}/a");
-        assert_eq!(canonize_keyexpr("a/\u{e9}$*$*").unwrap(), "a/\u{e9}$*");
     }
 
     // ── Lone $* chunk → * chunk ──
@@ -1320,13 +1515,69 @@ mod tests {
         assert_eq!(analyze_chunk("pre$*suf").unwrap(), ChunkShape::Mixed);
     }
 
+    /// A chunk is judged as the canonical form will hold it: a `$*` run is one token, so a
+    /// chunk of nothing but `$*` tokens is a lone `$*`, a run followed by a literal is mixed,
+    /// and a `$` after a run is unbound to the same rule as after one token.
     #[test]
-    fn collapse_dsl_runs_idempotent_on_canonical_input() {
-        let canonical = "home/foo$*bar";
-        let once = collapse_dsl_runs::<Profile>(canonical).unwrap();
-        assert_eq!(once, canonical);
-        let twice = collapse_dsl_runs::<Profile>(once.as_str()).unwrap();
-        assert_eq!(twice, canonical);
+    fn analyze_chunk_reads_a_dollar_star_run_as_one_token() {
+        assert_eq!(analyze_chunk("$*$*").unwrap(), ChunkShape::LoneDollarStar);
+        assert_eq!(analyze_chunk("$*$*$*").unwrap(), ChunkShape::LoneDollarStar);
+        assert_eq!(analyze_chunk("$*$*a").unwrap(), ChunkShape::Mixed);
+        assert_eq!(analyze_chunk("a$*$*b").unwrap(), ChunkShape::Mixed);
+        assert_eq!(
+            analyze_chunk("$*$*$"),
+            Err(KeyexprCanonError::DollarAfterDollarOrStar)
+        );
+        assert_eq!(
+            analyze_chunk("$*$"),
+            Err(KeyexprCanonError::DollarAfterDollarOrStar)
+        );
+        assert_eq!(
+            analyze_chunk("$$*"),
+            Err(KeyexprCanonError::DollarAfterDollarOrStar)
+        );
+        assert_eq!(
+            analyze_chunk("a$"),
+            Err(KeyexprCanonError::ContainsUnboundDollar)
+        );
+    }
+
+    /// The zenoh-c form canonizes to itself, a collapsed `$*` run included: its walk folds a
+    /// lone `$*` into the wild run, so the run it writes is already in order.
+    #[test]
+    fn the_zenoh_c_form_is_idempotent() {
+        for text in [
+            "home/foo$*bar",
+            "a$*$*$*b/**/*/$*$*",
+            "**/*/a",
+            "$*$*/x",
+            "**/$*/temp",
+        ] {
+            let once = canonize_keyexpr_in(text, KeyexprDialect::ZenohC).unwrap();
+            let twice = canonize_keyexpr_in(once.as_str(), KeyexprDialect::ZenohC).unwrap();
+            assert_eq!(twice.as_str(), once.as_str(), "{text}");
+        }
+        assert_eq!(
+            canonize_keyexpr_in("a$*$*$*b/**/*/$*$*", KeyexprDialect::ZenohC).unwrap(),
+            "a$*b/*/*/**"
+        );
+    }
+
+    /// The pico form is not always its own canonical form, and wz writes it as pico does: a lone
+    /// `$*` ends the wild run and is written `*` after it, so a `**` that preceded it stays in
+    /// front of a `*`, which a second pass reorders. The one-pass walk and the two-pass
+    /// reference write the same first form (`the_pico_dialect_does_not_fold_a_dollar_star_into_the_run`
+    /// is the shape pico was measured on); a form with no lone `$*` after a run is idempotent.
+    #[test]
+    fn the_pico_form_after_a_lone_dollar_star_is_reordered_by_a_second_pass() {
+        let once = canonize_keyexpr("a$*$*$*b/**/*/$*$*").unwrap();
+        assert_eq!(once.as_str(), "a$*b/*/**/*");
+        assert_eq!(canonize_keyexpr(once.as_str()).unwrap(), "a$*b/*/*/**");
+        for text in ["home/foo$*bar", "**/*/a", "$*$*/x", "a/**/*/*/b"] {
+            let once = canonize_keyexpr(text).unwrap();
+            let twice = canonize_keyexpr(once.as_str()).unwrap();
+            assert_eq!(twice.as_str(), once.as_str(), "{text}");
+        }
     }
 
     // ── R300 — check_outbound_keyexpr_pico_safe ────────────────

@@ -720,7 +720,9 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     // result that held it, would be a slot of this frame the size of the message.
     match parsed {
         Ok(_) => match inbound_to_fsm_event(frame) {
-            Some(event) => decide_admitted(event, frame, to_engine, actions, engine),
+            Some(event) => {
+                decide_admitted(event, &frame.control_facts(), to_engine, actions, engine)
+            }
             None => match take_decoded(frame) {
                 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
                 InboundFrame::Frame {
@@ -931,7 +933,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
 #[cfg_attr(not(feature = "codec-init-body"), allow(unused_variables))]
 fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     event: crate::session_fsm_unicast::SessionFsmUnicastEvent,
-    frame: &mut InboundFrame,
+    facts: &crate::inbound::ControlFacts<'_>,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
     engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
@@ -940,7 +942,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // A handshake message out of its step is judged first, before any admission,
     // check or merge below can take anything from it.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-    if let Some(outcome) = judge_handshake_step(frame, to_engine, actions, engine) {
+    if let Some(outcome) = judge_handshake_step(facts, to_engine, actions, engine) {
         return outcome;
     }
     // R311kc — initiator InitAck params validation (zenoh-pico
@@ -983,18 +985,16 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // (zenoh's `state.patch = other_ext` likewise sits after
     // its bail).
     #[cfg(feature = "codec-init-body")]
-    if let InboundFrame::Init {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
         is_ack: true,
-        body,
+        s,
         extensions,
         ..
-    } = &frame
+    }) = facts
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
         if engine.get_current_state() == S::SentInitSyn {
-            if !actions
-                .init_ack_caps_acceptable(body.s.map(|s| s.sn_res), body.s.map(|s| s.batch_size))
-            {
+            if !actions.init_ack_caps_acceptable(s.map(|s| s.sn_res), s.map(|s| s.batch_size)) {
                 *to_engine = Some(E::FramingError);
                 return DriverLoopOutcome::InitAckCapsRejected;
             }
@@ -1055,20 +1055,18 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // an InitSyn, as the InitAck checks above are scoped to the one
     // that awaits an InitAck.
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
-    if let InboundFrame::Init {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
         is_ack: false,
-        body,
+        version,
         ..
-    } = &frame
+    }) = facts
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
         if engine.get_current_state() == S::AwaitingInitSyn
-            && body.version != wz_codecs::wire_const::PROTOCOL_VERSION
+            && *version != wz_codecs::wire_const::PROTOCOL_VERSION
         {
             *to_engine = Some(E::FramingError);
-            return DriverLoopOutcome::InitSynVersionRejected {
-                version: body.version,
-            };
+            return DriverLoopOutcome::InitSynVersionRejected { version: *version };
         }
     }
     // R2772 — REBUILD the acceptor's negotiated state from the
@@ -1110,27 +1108,32 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // the region name below. Placed BEFORE the admissions so a
     // refused Open seeds no SN and adopts no lease.
     #[cfg(feature = "codec-open-body")]
-    if let InboundFrame::Open { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { extensions, .. }) = facts
+    {
         if !actions.admit_peer_remote_bound(extensions) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
     }
     #[cfg(feature = "codec-open-body")]
-    if let InboundFrame::Open {
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
         is_ack: false,
-        body,
+        lease,
+        initial_sn,
         ..
-    } = &frame
+    }) = facts
     {
-        actions.admit_open_syn(body.lease, body.initial_sn);
+        actions.admit_open_syn(*lease, *initial_sn);
     }
     #[cfg(feature = "codec-open-body")]
-    if let InboundFrame::Open {
-        is_ack: true, body, ..
-    } = &frame
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+        is_ack: true,
+        lease,
+        initial_sn,
+        ..
+    }) = facts
     {
-        actions.admit_open_ack(body.lease, body.initial_sn);
+        actions.admit_open_ack(*lease, *initial_sn);
     }
     // R311y578 — take the `min(local, peer)` protocol PATCH
     // level off every admitted Init frame (zenoh-pico
@@ -1155,14 +1158,16 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // one sits after its own reject: a refused Init must not have
     // its other extensions merged into the session first.
     #[cfg(feature = "codec-init-body")]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         if !actions.admit_peer_region(extensions) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::InitRegionRejected;
         }
     }
     #[cfg(feature = "codec-init-body")]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         actions.negotiate_patch_against_peer(crate::extpatch::peer_patch(extensions));
     }
     // transport-lowlatency — AND the peer's lowlatency offer into
@@ -1176,7 +1181,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // InitAck (is_ack=true) — both are negotiation points, so the
     // arm matches any Init frame.
     #[cfg(all(feature = "transport-lowlatency", feature = "codec-init-body"))]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         actions.negotiate_lowlatency_against_peer(crate::extlowlatency::peer_offered_lowlatency(
             extensions,
         ));
@@ -1189,7 +1195,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // QoSLink by its body: a body of 0 is NoQoS, as upstream
     // reads it.
     #[cfg(all(feature = "transport-qos", feature = "codec-init-body"))]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         actions.negotiate_qos_against_peer(crate::extqos::peer_offered_qos(extensions));
     }
     // session-extqos — the z64 `QoSLink` half: merge the
@@ -1203,9 +1210,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // `FramingError` — the `InitAckCapsRejected` pattern —
     // instead of degrading to a band neither side agreed to.
     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
-    if let InboundFrame::Init {
-        is_ack, extensions, ..
-    } = &frame
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+        is_ack,
+        extensions,
+        ..
+    }) = facts
     {
         if let Err(err) = actions.negotiate_qos_link_against_peer(*is_ack, extensions) {
             *to_engine = Some(E::EstablishmentExtRejected);
@@ -1218,7 +1227,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // recv_init_syn and recv_init_ack), BEFORE the InitAck
     // send reflects it.
     #[cfg(all(feature = "session-extcompression", feature = "codec-init-body"))]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         actions.negotiate_compression_against_peer(
             crate::extcompression::peer_offered_compression(extensions),
         );
@@ -1227,7 +1237,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // capability (the scoped unit-ext negotiation) on every
     // admitted Init frame, BEFORE the InitAck reflect.
     #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
-    if let InboundFrame::Init { extensions, .. } = &frame {
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
+    {
         actions.negotiate_shm_against_peer(actions.shm_peer_offered(extensions));
     }
     // session-extshm (R311y507) — the CHALLENGE-RESPONSE,
@@ -1244,9 +1255,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // A malformed challenge answered by silence costs the peer
     // shared memory and nothing else.
     #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
-    if let InboundFrame::Init {
-        is_ack, extensions, ..
-    } = &frame
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+        is_ack,
+        extensions,
+        ..
+    }) = facts
     {
         if *is_ack {
             actions.shm_recv_init_ack(extensions);
@@ -1267,9 +1280,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // than run with shared memory on one side only: the
     // establishment fails, as for a rejected InitSyn challenge.
     #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
-    if let InboundFrame::Open {
-        is_ack, extensions, ..
-    } = &frame
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+        is_ack,
+        extensions,
+        ..
+    }) = facts
     {
         let refused = if *is_ack {
             actions.shm_recv_open_ack(extensions)
@@ -1294,25 +1309,25 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // pair an event with its frame variant.
     #[cfg(feature = "session-extauth")]
     {
-        let auth: Option<Result<(), crate::auth_dispatch::AuthError>> = match &frame {
+        let auth: Option<Result<(), crate::auth_dispatch::AuthError>> = match facts {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: false,
                 extensions,
                 ..
-            } => Some(actions.with_auth(|d| d.accept_recv_init_syn(extensions))),
+            }) => Some(actions.with_auth(|d| d.accept_recv_init_syn(extensions))),
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: true,
                 extensions,
                 ..
-            } => Some(actions.with_auth(|d| d.open_recv_init_ack(extensions))),
+            }) => Some(actions.with_auth(|d| d.open_recv_init_ack(extensions))),
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false,
                 extensions,
                 ..
-            } => Some(
+            }) => Some(
                 // R2566 — the accept stage's OUTPUT is an identity,
                 // and this is the seam that lands it. Assigned
                 // unconditionally (including `None`) so a
@@ -1323,11 +1338,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
                     .map(|id| actions.set_peer_auth_id(id)),
             ),
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: true,
                 extensions,
                 ..
-            } => Some(actions.with_auth(|d| d.open_recv_open_ack(extensions))),
+            }) => Some(actions.with_auth(|d| d.open_recv_open_ack(extensions))),
             _ => None,
         };
         if let Some(Err(e)) = auth {
@@ -1346,31 +1361,31 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // captured ephemeral pubkey (the join gate's identity key).
     #[cfg(feature = "transport-multilink")]
     {
-        let ml: Option<Result<(), crate::auth_dispatch::AuthError>> = match &frame {
+        let ml: Option<Result<(), crate::auth_dispatch::AuthError>> = match facts {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: false,
                 extensions,
                 ..
-            } => actions.with_multilink(|d| d.accept_recv_init_syn(extensions)),
+            }) => actions.with_multilink(|d| d.accept_recv_init_syn(extensions)),
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: true,
                 extensions,
                 ..
-            } => actions.with_multilink(|d| d.open_recv_init_ack(extensions)),
+            }) => actions.with_multilink(|d| d.open_recv_init_ack(extensions)),
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false,
                 extensions,
                 ..
-            } => actions.with_multilink(|d| d.accept_recv_open_syn(extensions)),
+            }) => actions.with_multilink(|d| d.accept_recv_open_syn(extensions)),
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: true,
                 extensions,
                 ..
-            } => actions.with_multilink(|d| d.open_recv_open_ack(extensions)),
+            }) => actions.with_multilink(|d| d.open_recv_open_ack(extensions)),
             _ => None,
         };
         if let Some(Err(e)) = ml {
@@ -1389,14 +1404,12 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // `io/zenoh-transport/src/unicast/establishment/open.rs` @
     // `// Check if the expected_zid matches the peer's ZID`
     #[cfg(feature = "codec-init-body")]
-    if let InboundFrame::Init {
-        is_ack: true, body, ..
-    } = &frame
+    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+        is_ack: true, zid, ..
+    }) = facts
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-        if engine.get_current_state() == S::SentInitSyn
-            && !actions.init_ack_zid_acceptable(body.zid.as_slice())
-        {
+        if engine.get_current_state() == S::SentInitSyn && !actions.init_ack_zid_acceptable(zid) {
             *to_engine = Some(E::FramingError);
             return DriverLoopOutcome::InitAckPeerMismatch;
         }
@@ -1417,19 +1430,22 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     {
-        let admitted = match &frame {
+        let admitted = match facts {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
-                is_ack: true, body, ..
-            } if engine.get_current_state()
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+                is_ack: true,
+                zid,
+                ..
+            }) if engine.get_current_state()
                 == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitSyn =>
             {
-                actions.link_admitted(body.zid.as_slice())
+                actions.link_admitted(zid)
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
-            InboundFrame::Open { is_ack: false, .. }
-                if engine.get_current_state()
-                    == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitAck =>
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+                is_ack: false, ..
+            }) if engine.get_current_state()
+                == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitAck =>
             {
                 // The zid is the one the InitSyn named. It is read by the
                 // method, not here with `peer_zid()`: that copies it into a
@@ -1438,7 +1454,9 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
                 actions.link_admitted_for_remote()
             }
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open { is_ack: true, .. } => actions.link_confirmed(),
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+                is_ack: true, ..
+            }) => actions.link_confirmed(),
             _ => true,
         };
         if !admitted {
@@ -1456,9 +1474,13 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     #[cfg(all(feature = "codec-init-body", feature = "codec-open-body"))]
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-        let sends_an_open = match &frame {
-            InboundFrame::Init { is_ack: true, .. } => engine.get_current_state() == S::SentInitSyn,
-            InboundFrame::Open { is_ack: false, .. } => true,
+        let sends_an_open = match facts {
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+                is_ack: true, ..
+            }) => engine.get_current_state() == S::SentInitSyn,
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+                is_ack: false, ..
+            }) => true,
             _ => false,
         };
         if sends_an_open {
@@ -1478,8 +1500,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // the other end refused is told apart from one that failed.
     #[cfg(all(feature = "alloc", feature = "codec-close"))]
     if matches!(
-        &frame,
-        InboundFrame::Close { reason, .. }
+        facts,
+        crate::inbound::ControlFacts::Close { reason, .. }
             if *reason == crate::close_reason::CloseReason::MaxLinks as u8
     ) && !actions.is_established()
     {
@@ -1490,7 +1512,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource>(
     // this link takes it as a peer Close, and the links beside it are told through the
     // session (see `SessionLinkActions::peer_deleted_transport`).
     #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
-    if matches!(&frame, InboundFrame::Close { session: true, .. }) && actions.is_established() {
+    if matches!(
+        facts,
+        crate::inbound::ControlFacts::Close { session: true, .. }
+    ) && actions.is_established()
+    {
         actions.peer_deleted_transport();
     }
     *to_engine = Some(event);
@@ -1554,7 +1580,7 @@ pub fn dispatch_parked_in_place<R: SessionRuntime, T: TimeSource>(
     any(feature = "codec-init-body", feature = "codec-open-body")
 ))]
 fn judge_handshake_step<R: SessionRuntime, T: TimeSource>(
-    frame: &InboundFrame,
+    facts: &crate::inbound::ControlFacts<'_>,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
     engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
@@ -1562,7 +1588,7 @@ fn judge_handshake_step<R: SessionRuntime, T: TimeSource>(
     use crate::handshake_stray::{established_drops_silently, judge, StrayVerdict};
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-    let message = handshake_message_of(frame)?;
+    let message = facts.handshake_message()?;
     let policy = actions.params.policy.handshake_stray_message();
     let state = engine.get_current_state();
     if state == S::Established && established_drops_silently(policy) {
@@ -1597,26 +1623,6 @@ fn replay_held_answer<R: SessionRuntime, T: TimeSource>(
     #[cfg(not(any(feature = "session-unicast-open", feature = "session-unicast-accept")))]
     let _ = actions;
     DriverLoopOutcome::HandshakeStrayNotReplayed
-}
-
-/// The establishment message `frame` is, if it is one.
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-pub(crate) fn handshake_message_of(
-    frame: &crate::inbound::InboundFrame,
-) -> Option<crate::handshake_stray::HandshakeMessage> {
-    use crate::handshake_stray::HandshakeMessage as M;
-    use crate::inbound::InboundFrame as F;
-    match frame {
-        #[cfg(feature = "codec-init-body")]
-        F::Init { is_ack: false, .. } => Some(M::InitSyn),
-        #[cfg(feature = "codec-init-body")]
-        F::Init { is_ack: true, .. } => Some(M::InitAck),
-        #[cfg(feature = "codec-open-body")]
-        F::Open { is_ack: false, .. } => Some(M::OpenSyn),
-        #[cfg(feature = "codec-open-body")]
-        F::Open { is_ack: true, .. } => Some(M::OpenAck),
-        _ => None,
-    }
 }
 
 /// The establishment message the machine's `state` reads next, or `None` outside the
@@ -2382,8 +2388,8 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
 }
 
 /// [`dispatch_copied`]'s read of a unit on a build with an allocator: the transport message at
-/// its front decoded where the link holds it (`SessionLinkActions::handle_control_consuming_into`,
-/// the decode the copying path makes of every message that carries no data), judged by
+/// its front read where the link holds it (`inbound::read_control`, which judges a handshake
+/// body by the document's view of the unit and copies none of it out), judged by
 /// [`decide_admitted`] when it is an event of the session's machine, and the engine given what the
 /// judgement decided once the reading's frame is gone. Answered with where the message ended: all
 /// of the unit when its extent is unknown or it does not decode, as the copying path reads such a
@@ -2391,8 +2397,9 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
 ///
 /// What it does not have is the copying path's decode of a `Frame` or a `Fragment`: the one the
 /// in-place reader refused is answered before this ([`refused_data_unit`]), and one that still
-/// reaches it reads as a message the decode does not take, a framing error, as on a build with no
-/// allocator. So a build whose receive is in place links no owned decode of either through it.
+/// reaches it reads as a message the reader does not take, a framing error, as on a build with no
+/// allocator. So a build whose receive is in place links no owned decode of any transport message
+/// through it.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[inline(never)]
 fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
@@ -2407,8 +2414,11 @@ fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
     (outcome, used)
 }
 
-/// The reading half of [`dispatch_control_in_place`], out of line so the decoded message (the
-/// slot it is decoded into) is gone before the engine takes the event the judgement decided.
+/// The reading half of [`dispatch_control_in_place`], out of line so the message it read (the
+/// views of the unit it judged by) is gone before the engine takes the event the judgement
+/// decided. The message is read where it lies (`inbound::read_control`): a handshake body is
+/// judged by the document's view of the unit, and nothing of it is copied out but the
+/// extension chain its readers take.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[inline(never)]
 fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
@@ -2421,41 +2431,48 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
     usize,
 ) {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let mut frame = InboundFrame::Unknown { mid: 0 };
-    let parsed = actions.handle_control_consuming_into(unit, &mut frame);
-    // R2825 — one transport message decoded off the front of the unit.
+    let (message, used) = match crate::inbound::read_control(unit) {
+        Ok(read) => read,
+        Err(err) => {
+            return (
+                DriverLoopOutcome::ParseError(err),
+                Some(E::FramingError),
+                unit.len(),
+            )
+        }
+    };
+    let facts = message.facts();
+    actions.observe_control(&facts);
+    // R2825 — one transport message read off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
-    if parsed.is_ok() {
-        note_rx_transport_message(actions);
-    }
-    let used = match parsed {
-        Ok(used) if used > 0 => used.min(unit.len()),
-        _ => unit.len(),
+    note_rx_transport_message(actions);
+    let used = if used > 0 {
+        used.min(unit.len())
+    } else {
+        unit.len()
     };
     let mut decided = None;
-    let outcome = match parsed {
-        Ok(_) => match inbound_to_fsm_event(&frame) {
-            Some(event) => decide_admitted(event, &mut frame, &mut decided, actions, engine),
-            None => match &frame {
-                #[cfg(feature = "codec-keep-alive")]
-                InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
-                // A build with no accepting role drops a peer's InitSyn or OpenSyn silently, as
-                // the copying path does.
-                #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
-                InboundFrame::Init { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
-                InboundFrame::Open { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                // A `Frame` or a `Fragment` the in-place reader did not read is read no further.
-                _ => {
-                    decided = Some(E::FramingError);
-                    DriverLoopOutcome::AdvancedFsm
-                }
-            },
+    let outcome = match crate::inbound::control_event(message.ext_admission(), &facts) {
+        Some(event) => decide_admitted(event, &facts, &mut decided, actions, engine),
+        None => match facts {
+            #[cfg(feature = "codec-keep-alive")]
+            crate::inbound::ControlFacts::KeepAlive => DriverLoopOutcome::SideEffectOnly,
+            // A build with no accepting role drops a peer's InitSyn or OpenSyn silently, as
+            // the copying path does.
+            #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
+            crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
+                is_ack: false, ..
+            }) => DriverLoopOutcome::SideEffectOnly,
+            #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+                is_ack: false, ..
+            }) => DriverLoopOutcome::SideEffectOnly,
+            // A `Frame` or a `Fragment` the in-place reader did not read is read no further.
+            _ => {
+                decided = Some(E::FramingError);
+                DriverLoopOutcome::AdvancedFsm
+            }
         },
-        Err(err) => {
-            decided = Some(E::FramingError);
-            DriverLoopOutcome::ParseError(err)
-        }
     };
     (outcome, decided, used)
 }
