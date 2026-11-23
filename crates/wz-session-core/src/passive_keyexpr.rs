@@ -149,7 +149,7 @@ impl KeyexprTables {
         match self.table(owner).get(&crate::wire_id::peer_key(id)) {
             Some(base) => Resolved::Literal(match suffix {
                 Some(s) if !s.is_empty() => {
-                    let mut out = String::with_capacity(base.len() + s.len());
+                    let mut out = String::with_capacity(base.len().saturating_add(s.len()));
                     out.push_str(base);
                     out.push_str(s);
                     out

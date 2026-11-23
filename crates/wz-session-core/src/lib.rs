@@ -1865,8 +1865,6 @@ pub mod wire_noise;
 // dissect surface, whose consumers are the ones that need a path rather than
 // a number.
 #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-// Totality debt TD-143 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod passive_keyexpr;
 
 // R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
