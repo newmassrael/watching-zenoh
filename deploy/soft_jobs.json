@@ -96,6 +96,19 @@
       "note": "added on 2026-11-22 with no main run read yet"
     },
     {
+      "workflow": ".github/workflows/platform.yml",
+      "job": "pico-upstream-windows",
+      "step": "zenoh-pico's own programs on the release DLL (observed)",
+      "kind": "continue-on-error",
+      "why_soft": "zenoh-pico's own API tests and example programs compiled against the release package without std of each width and run beside a stock zenohd and zenoh-pico's own counterparts, with zenoh-pico itself as the control; a new lane whose first reading is its first main run, and it builds the router in the step",
+      "gate_when": "every verdict line of both widths reads PASS on two consecutive main runs; then the step drops continue-on-error and the release proof's rows it runs read proven",
+      "promote_after_green": 2,
+      "allowed_consecutive_red": 2,
+      "declared": "2026-11-23",
+      "expires": "2027-01-22",
+      "note": "added before any hosted run of it; the scenarios were never run on either host when it was declared"
+    },
+    {
       "workflow": ".github/workflows/release.yml",
       "job": "release",
       "step": "cargo publish --dry-run (zenoh-pico-sys)",
