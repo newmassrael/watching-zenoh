@@ -2664,12 +2664,6 @@ pub mod multicast_dispatch;
 /// The rows of a multicast group's member table: fixed, and grown past them on a heap build whose
 /// host lets the table grow. Crate-private; the dispatcher's own storage.
 #[cfg(feature = "session-multicast")]
-// Totality debt TD-083 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
 mod multicast_peer_rows;
 
 /// Open-debt item 913 — each multicast member's declarations kept apart for the session's
