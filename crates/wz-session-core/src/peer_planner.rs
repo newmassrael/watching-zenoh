@@ -159,8 +159,8 @@ fn row<'a, K: PartialEq, V, const M: usize>(rows: &'a Vec<(K, V), M>, key: &K) -
 /// Set `key`'s row to `value`, replacing the one it had. `false` when the vector has
 /// no room for a new row.
 fn set_row<K: PartialEq, V, const M: usize>(rows: &mut Vec<(K, V), M>, key: K, value: V) -> bool {
-    if let Some(at) = rows.iter().position(|(k, _)| *k == key) {
-        rows[at].1 = value;
+    if let Some((_, held)) = rows.iter_mut().find(|(k, _)| *k == key) {
+        *held = value;
         return true;
     }
     rows.push((key, value)).is_ok()
@@ -537,7 +537,7 @@ where
             if duties.arm_retry() {
                 let after_ms = ports.retry_wait_ms(&key);
                 let generation = self.next_generation;
-                self.next_generation += 1;
+                self.next_generation = self.next_generation.saturating_add(1);
                 // One row per peer, bounded by the table.
                 let _ = set_row(&mut self.armed, key.clone(), generation);
                 emit(PeerAction::Retry {
@@ -566,7 +566,7 @@ where
                             .push((id, DialState::Running(key.clone())))
                             .is_ok()
                         {
-                            *next_id += 1;
+                            *next_id = next_id.saturating_add(1);
                             emit(PeerAction::Dial {
                                 id,
                                 key: key.clone(),

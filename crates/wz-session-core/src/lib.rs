@@ -2614,8 +2614,6 @@ pub mod peer_table;
 /// peer's, in fixed-capacity tables, with what differs between profiles answered
 /// through a port. Gated as `peer_table` is.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-107 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod peer_planner;
 
 /// SCE-generated session-slot table config (Round 3278): how many sessions a
