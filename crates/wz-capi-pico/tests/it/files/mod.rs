@@ -17,6 +17,7 @@ mod connectivity_events;
 mod coop_tcp_teardown;
 mod decl_watch_doors;
 mod e2e_doors;
+mod ext_handles_across_threads;
 mod fragmentation_roundtrip;
 mod get_roundtrip;
 mod get_to_peer_door;
