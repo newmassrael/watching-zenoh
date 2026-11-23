@@ -1530,6 +1530,16 @@ round_fed_gates=(
     # captures/upstream/ holds real captures outside the calibration corpus, under
     # the same anonymiser and the same fixed-point rule.
     "capture_anonymise.py --verify-corpus captures/upstream"
+    # The verification lanes' plan and the coverage floor's table (Layers Vcov, Vtsan, Vasan,
+    # Vmiri). Round-fed: the plan names the C library's profile and the kit images' manifests,
+    # and the floor's table names the crates and modules it holds. What a round can make false
+    # without a build is read here: the plan's own rules (its selftest), and the table against
+    # the coverage lane's crates and their sources (--declared). The resolved feature sets and
+    # the measured figures need cargo over the shipped builds and an instrumented run, which the
+    # lanes own. ESTIMATED under a second: fixtures and a parse of one table, no build.
+    "verify_plan.py --selftest"
+    "coverage_floor_gate.py --selftest"
+    "coverage_floor_gate.py --declared"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
