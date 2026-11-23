@@ -1279,7 +1279,9 @@ mod tests {
         let outcome = frame(vec![NetworkMessage::Declare(Box::new(
             fx::declare_envelope_decl_kexpr(fx::decl_kexpr(7, "theirs/x")),
         ))]);
-        observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::Poll(&outcome));
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut peers, &mut requesters, event)
+        });
 
         let mut record = |literal: &str| {
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1331,11 +1333,10 @@ mod tests {
     fn an_own_space_alias_resolves_through_the_slot_fan_on_both_planes() {
         let mut f = fixture(true);
         let outcome = own_alias_frame();
-        f.observer.dispatch_event(
-            &mut f.peers,
-            &mut f.requesters,
-            IterationEvent::Poll(&outcome),
-        );
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            f.observer
+                .dispatch_event(&mut f.peers, &mut f.requesters, event)
+        });
         assert_eq!(
             *f.ours.lock().unwrap(),
             vec!["ours/x".to_string()],
@@ -1359,11 +1360,10 @@ mod tests {
     fn without_an_own_space_the_slot_fan_refuses_the_same_frame_on_both_planes() {
         let mut f = fixture(false);
         let outcome = own_alias_frame();
-        f.observer.dispatch_event(
-            &mut f.peers,
-            &mut f.requesters,
-            IterationEvent::Poll(&outcome),
-        );
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            f.observer
+                .dispatch_event(&mut f.peers, &mut f.requesters, event)
+        });
         assert!(
             f.ours.lock().unwrap().is_empty() && f.theirs.lock().unwrap().is_empty(),
             "an M=0 alias must refuse with no own space, never fall back to the peer's table"

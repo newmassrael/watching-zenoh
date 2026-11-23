@@ -41,7 +41,10 @@ test reached are written to `target/verify/coverage/uncovered.txt` (the hosted j
 `summary.json` as the artifact `coverage`): each is a test to write.
 
 Proves: the share of each crate's lines, branches and functions the tests of all five crates
-execute, in the shipped feature sets, and that the share does not fall unnoticed.
+execute, in the shipped feature sets, and that the share does not fall unnoticed. A test of a
+table hands its frame on through one stand-in for the receive (`driver_loop::deliver_frame` in
+`wz-session-core`), so in the build that lends every record (the C library's and the MCU kit's)
+the share counts the lent receive those builds ship, and not an owned path they do not link.
 
 Does not prove: that an executed line was checked by an assertion (Layer Cmut measures that, by
 mutation, `docs/mutation-testing.md`); anything about code only another feature set compiles;
@@ -101,6 +104,7 @@ Each finding is named by the lane that found it, with where it was repaired.
 | Vtsan | A data race on a key's reference count in the cooperative engine: `z_undeclare_subscriber` drops the subscriber's entry outside the session lock (`crates/wz-capi-coop/src/engine.rs`, the undeclare's `drop((entry, callback))`) while the read task takes a declaration that names the same key (`absorb_declare_view`, `crates/wz-session-core/src/pubsub.rs`). | Open: repaired by a change of its own. Until it lands the hosted step of Layer Vtsan is soft (`deploy/soft_jobs.json`), and it becomes a gate once it reads green on two consecutive main runs. |
 | Vcov | The in-memory link the engine's tests run sessions over (`wz-session-mcu`'s `memory`) lent no outbound slot, so a session of the C library's build, which sends only from storage its link lends, could not send its handshake, and a test of the admission gate never opened. | The memory link lends two slots, as every link of the cooperative runtime does. |
 | Vcov | The tests of the lent control records fed the build that lends every record (the MCU kit's) owned frames, which that build asserts it never raises, and one walk test named a record kind the kit's build does not lend. | The tests feed such a build the one form it has and pin the lent result; the walk test is gated on the kinds it walks. |
+| Vcov, Vasan | `wz-session-core`'s tests of the tables (the limits each table enforces, the observer's fan and its interest answers, the slot fan, the subscribers, a group's keyexpr answers) handed the build that lends every record owned frames, which it asserts it never raises (`driver_loop::owned_records`): 35 failed in the library's set and 29 in the kit's. | One stand-in for the receive (`driver_loop::deliver_frame`) hands a test's frame to a table as the build delivers it: the outcome itself where the tables read owned records, and in the build that lends every record the frame's batch walked where it lies, each record lent as that build's receive lends it. The plain-put lane's two tests compare that lent delivery there, the build having no such lane. No test is gated off: each checks its claim in the form the build ships. |
 
 ## Running them
 

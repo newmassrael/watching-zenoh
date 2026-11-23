@@ -883,7 +883,7 @@ mod enforcement {
                 }
             })
             .expect("no quota is stated on the queryables");
-        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+        crate::driver_loop::deliver_frame(&queries(0..1), |event| observer.dispatch_event(event));
         let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
         assert_eq!(
             observer.pending_reply_count(),
@@ -921,7 +921,9 @@ mod enforcement {
                         }
                     })
                     .expect("no quota is stated on the queryables");
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+                crate::driver_loop::deliver_frame(&queries(0..1), |event| {
+                    observer.dispatch_event(event)
+                });
                 assert_eq!(
                     *answers.lock().expect("not poisoned"),
                     [Ok(()), Ok(()), Err(ReplyError::StagingFull)]
@@ -937,7 +939,9 @@ mod enforcement {
                 let mut owed = crate::owed_replies::OwedReplies::new();
                 observer.take_owed_reply_bodies(&mut owed);
                 assert_eq!(observer.pending_reply_count(), 0);
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(1..2)));
+                crate::driver_loop::deliver_frame(&queries(1..2), |event| {
+                    observer.dispatch_event(event)
+                });
                 assert_eq!(
                     observer.pending_reply_count(),
                     2,
@@ -1407,7 +1411,9 @@ mod enforcement {
             .register("bound/reply", |_, _| {})
             .expect("no quota is stated on the queryables");
         let past = u32::try_from(caps::MAX_PENDING_FINALS + 1).expect("a test count");
-        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..past)));
+        crate::driver_loop::deliver_frame(&queries(0..past), |event| {
+            observer.dispatch_event(event)
+        });
         let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
         assert_eq!(
             observer.pending_final_count(),
@@ -1443,7 +1449,9 @@ mod enforcement {
                         responder.reply(b"r");
                     })
                     .expect("no quota is stated on the queryables");
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..3)));
+                crate::driver_loop::deliver_frame(&queries(0..3), |event| {
+                    observer.dispatch_event(event)
+                });
                 assert_eq!(
                     ran.load(Ordering::Relaxed),
                     2,
@@ -1455,7 +1463,9 @@ mod enforcement {
 
                 assert_eq!(observer.take_pending_final_rids().len(), 2);
                 assert_eq!(observer.pending_final_count(), 0);
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(3..6)));
+                crate::driver_loop::deliver_frame(&queries(3..6), |event| {
+                    observer.dispatch_event(event)
+                });
                 assert_eq!(ran.load(Ordering::Relaxed), 4);
                 assert_eq!(
                     observer.pending_final_count(),
@@ -1519,7 +1529,7 @@ mod enforcement {
                 told.lock().expect("not poisoned").push(answer);
             })
             .expect("no quota is stated on the queryables");
-        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+        crate::driver_loop::deliver_frame(&queries(0..1), |event| observer.dispatch_event(event));
         let fixed = crate::bounded::ENFORCES_CAPACITY;
         let answer = if fixed {
             Err(ReplyError::PayloadTooLarge)
@@ -1560,7 +1570,9 @@ mod enforcement {
                         seen.push(responder.try_reply(b"ab"));
                     })
                     .expect("no quota is stated on the queryables");
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+                crate::driver_loop::deliver_frame(&queries(0..1), |event| {
+                    observer.dispatch_event(event)
+                });
                 assert_eq!(
                     *answers.lock().expect("not poisoned"),
                     [Err(ReplyError::PayloadTooLarge), Ok(())]
@@ -1700,9 +1712,9 @@ mod enforcement {
         let (mut observer, ran) = counting_queryable(&SessionLimits::defaults());
         let (length, refused) = past_the_build(caps::QUERY_PARAMETERS_MAX_BYTES);
         let long = std::vec![b'x'; length];
-        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(&[
-            (0, Some(&long[..]), None),
-        ])));
+        crate::driver_loop::deliver_frame(&sized_queries(&[(0, Some(&long[..]), None)]), |event| {
+            observer.dispatch_event(event)
+        });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
         assert_eq!(
@@ -1724,9 +1736,10 @@ mod enforcement {
             QueryParametersMaxBytes::DOMAIN.is_singleton(),
             |limits| {
                 let (mut observer, ran) = counting_queryable(limits);
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(
-                    &[(0, Some(&b"abc"[..]), None), (1, Some(&b"ab"[..]), None)],
-                )));
+                crate::driver_loop::deliver_frame(
+                    &sized_queries(&[(0, Some(&b"abc"[..]), None), (1, Some(&b"ab"[..]), None)]),
+                    |event| observer.dispatch_event(event),
+                );
                 assert_eq!(
                     ran.load(Ordering::Relaxed),
                     1,
@@ -1753,9 +1766,9 @@ mod enforcement {
         let (mut observer, ran) = counting_queryable(&SessionLimits::defaults());
         let (length, refused) = past_the_build(caps::QUERY_ATTACHMENT_MAX_BYTES);
         let long = std::vec![b'x'; length];
-        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(&[
-            (0, None, Some(&long[..])),
-        ])));
+        crate::driver_loop::deliver_frame(&sized_queries(&[(0, None, Some(&long[..]))]), |event| {
+            observer.dispatch_event(event)
+        });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
         assert_eq!(
@@ -1777,9 +1790,10 @@ mod enforcement {
             QueryAttachmentMaxBytes::DOMAIN.is_singleton(),
             |limits| {
                 let (mut observer, ran) = counting_queryable(limits);
-                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(
-                    &[(0, None, Some(&b"abc"[..])), (1, None, Some(&b"ab"[..]))],
-                )));
+                crate::driver_loop::deliver_frame(
+                    &sized_queries(&[(0, None, Some(&b"abc"[..])), (1, None, Some(&b"ab"[..]))]),
+                    |event| observer.dispatch_event(event),
+                );
                 assert_eq!(
                     ran.load(Ordering::Relaxed),
                     1,

@@ -4411,7 +4411,6 @@ mod tests {
 
     #[test]
     fn dispatch_iteration_event_projects_frame_reliable_bool_to_sample() {
-        use crate::driver_loop::IterationEvent;
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
@@ -4429,7 +4428,9 @@ mod tests {
             has_ext: false,
             extensions: Vec::new(),
         };
-        registry.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            registry.dispatch_iteration_event(event)
+        });
         assert_eq!(
             *captured.lock().unwrap(),
             Some(Reliability::BestEffort),
@@ -5954,9 +5955,12 @@ mod tests {
     /// frame: the same keys (an alias, an alias with a suffix, a literal), payloads, QoS and
     /// reliability, in the same order, with a key nobody declared dropped by both and a key
     /// no subscriber matches delivered to nobody by both.
+    ///
+    /// The build that lends every record has no plain-put lane: its receive lends the same frame's
+    /// records where they lie, and that delivery is the one compared there
+    /// (`crate::driver_loop::deliver_frame`).
     #[test]
     fn a_frame_of_plain_puts_is_delivered_as_the_owned_path_delivers_it() {
-        use crate::driver_loop::IterationEvent;
         let long = vec![5u8; 300];
         let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8], u8); 7] = [
             (7, None, b"alias", 0x05),
@@ -6008,7 +6012,9 @@ mod tests {
                 payload: frame,
                 puts: read,
             };
-            lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                lane.dispatch_iteration_event(event)
+            });
 
             let (want, got) = (
                 seen_owned.lock().unwrap().clone(),
@@ -6030,10 +6036,10 @@ mod tests {
     /// alias). A repeated key rests on the record before it having been delivered, so a
     /// dropped record between two equal ones, an alias that changes meaning and a key that
     /// returns after another are all in the frame, and the reader's own flag is checked to
-    /// have been set where it should and only there.
+    /// have been set where it should and only there. The build that lends every record compares
+    /// the frame lent where it lies, as the test above does.
     #[test]
     fn a_frame_of_repeated_keys_is_delivered_as_the_owned_path_delivers_it() {
-        use crate::driver_loop::IterationEvent;
         let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 16] = [
             (0, Some("demo/x"), b"1"),
             (0, Some("demo/x"), b"2"),
@@ -6106,7 +6112,7 @@ mod tests {
             payload: frame,
             puts: read,
         };
-        lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        crate::driver_loop::deliver_frame(&outcome, |event| lane.dispatch_iteration_event(event));
         for (index, pattern) in patterns.iter().enumerate() {
             let (want, got) = (
                 seen_owned[index].lock().unwrap().clone(),
