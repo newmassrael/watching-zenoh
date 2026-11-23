@@ -1465,3 +1465,59 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         "a peer at the preset reserves less than a listener at the build's defaults"
     );
 }
+
+/// The rows of the arena a session reserves at its open, item by item, for a client and a peer at
+/// the build's limits and at the pico preset's: what each row holds, the limit that counts it, how
+/// many items, the bytes of one and of the row, and the reservation. What the measurement of a
+/// release library's memory against zenoh-pico's is read row by row from.
+///
+/// A MEASUREMENT: it asserts only that each plan lays out.
+#[test]
+#[ignore = "a measurement of a session's arena by row; run with --ignored --nocapture"]
+fn the_arena_of_a_session_by_row_measured() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    let print = |name: &str, plan: &ArenaPlan| {
+        println!("arena-rows: {name}");
+        for row in plan.rows() {
+            println!(
+                "arena-rows:   {:<36} {:<52} {:>6} x {:>7} = {:>9}",
+                row.part,
+                row.basis,
+                row.count,
+                row.entry_bytes,
+                row.bytes().unwrap_or(usize::MAX),
+            );
+        }
+        println!(
+            "arena-rows:   reserved {}",
+            plan.reserved_bytes().unwrap_or(usize::MAX)
+        );
+    };
+    let defaults = SessionLimits::defaults();
+    let preset = pico_preset_limits();
+    for (name, limits) in [("build limits", defaults), ("pico preset", preset)] {
+        let faces = admitted_faces(&limits).expect("the limits are under the build");
+        let handshakes = admitted_handshakes(&limits).expect("the limits are under the build");
+        let client = ArenaPlan::of(
+            &CoopConfig {
+                accept_pending: handshakes,
+                ..preset_client()
+            },
+            &limits,
+        )
+        .expect("a client's plan lays out");
+        print(&format!("client at the {name}"), &client);
+        let peer = ArenaPlan::of(
+            &CoopConfig {
+                listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                max_faces: faces,
+                accept_pending: handshakes,
+                ..client_config()
+            },
+            &limits,
+        )
+        .expect("a peer's plan lays out");
+        print(&format!("peer of {faces} faces at the {name}"), &peer);
+    }
+}
