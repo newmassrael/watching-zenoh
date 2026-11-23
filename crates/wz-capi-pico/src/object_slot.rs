@@ -232,7 +232,7 @@ mod tests {
         let drops = core::cell::Cell::new(0);
         // SAFETY: the closure writes a whole `Counted` at the place it is handed.
         let object = unsafe {
-            Slot::take(Kind::Sample)
+            Slot::<Counted<'_>>::take(Kind::Sample)
                 .expect("a sample has a place")
                 .fill_in_place(|at| at.write(Counted(&drops)))
         };

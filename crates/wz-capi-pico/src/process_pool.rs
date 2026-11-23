@@ -544,6 +544,7 @@ impl Blocks {
     /// The block is one [`Self::take`] handed out, given back once.
     unsafe fn give_back(&mut self, base: NonNull<u8>, offset: usize, bytes: usize) {
         debug_assert!(bytes.is_power_of_two() && bytes >= MIN_BLOCK);
+        debug_assert!(self.held > 0, "a block given back was taken");
         let mut order = order_for(bytes).unwrap_or(0);
         let mut offset = offset;
         self.held -= 1;
