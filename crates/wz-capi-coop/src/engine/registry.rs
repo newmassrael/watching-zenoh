@@ -167,6 +167,15 @@ struct HeldSet {
     id: FaceId,
 }
 
+/// Where a liveliness subscriber's history stands ([`Registry::next_history_token`]): the face
+/// whose peer's tokens it reads now, by id, and the last token handed from them.
+#[cfg(feature = "liveliness")]
+#[derive(Clone, Copy, Default)]
+pub(super) struct HistoryCursor {
+    face: Option<FaceId>,
+    after: Option<u64>,
+}
+
 /// The sets faces hold, to write, in set order: each is split off what lies past the one before
 /// it, so the walk takes the held sets alone.
 #[cfg(feature = "query")]
@@ -889,8 +898,9 @@ impl Registry {
             });
     }
 
-    /// Register a liveliness subscriber, which with `history` is handed the tokens every face's
-    /// peer already holds, before the peers answer with the rest.
+    /// Register a liveliness subscriber, with `history` marked as one owed the tokens every face's
+    /// peer already holds, which its declaration hands it after this, with no lock of the session
+    /// held, one at a time ([`Self::next_history_token`]), before the peers are asked for the rest.
     #[cfg(feature = "liveliness")]
     pub(super) fn register_liveliness_subscriber(
         &mut self,
@@ -899,36 +909,54 @@ impl Registry {
         history: bool,
         sink: wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
     ) -> Result<bool, RegisterError> {
-        let Self {
-            app, sets, held, ..
-        } = self;
-        let registered = app.liveliness_subscribers.register(
-            &sets[0].peer.tokens,
-            id,
-            keyexpr,
-            history,
-            sink,
-        )?;
-        // The dial role's face holds the first set and is the first entry, told above.
-        if registered && history {
-            for face in &held[1..] {
-                app.liveliness_subscribers
-                    .replay_known_tokens(&sets[face.at].peer.tokens, id);
-            }
-        }
-        Ok(registered)
+        self.app
+            .liveliness_subscribers
+            .register_unreplayed(id, keyexpr, history, sink)
     }
 
-    /// Hand liveliness subscriber `id` the tokens every face's peer holds now, as its
-    /// registration with `history` does.
+    /// The token liveliness subscriber `id` is owed next by its history, from where `cursor`
+    /// stands: the faces in ascending id, and on each the token of the lowest id above the last one
+    /// handed that its peer holds and the subscriber's pattern matches. With it, the cursor to ask
+    /// for the one after; `None` once every face is read. A face that came up since is read in its
+    /// turn, and one that went down is passed over.
     #[cfg(feature = "liveliness")]
-    pub(super) fn replay_liveliness_tokens(&mut self, id: u64) {
-        let Self {
-            app, sets, held, ..
-        } = self;
-        for face in held.iter() {
-            app.liveliness_subscribers
-                .replay_known_tokens(&sets[face.at].peer.tokens, id);
+    pub(super) fn next_history_token(
+        &self,
+        id: u64,
+        cursor: HistoryCursor,
+    ) -> Option<(HistoryCursor, u64, &str)> {
+        let mut face = match cursor.face {
+            Some(face) => face,
+            None => self.held.iter().map(|held| held.id).min()?,
+        };
+        let mut after = cursor.after;
+        loop {
+            let tokens = self
+                .held
+                .iter()
+                .find(|held| held.id == face)
+                .and_then(|held| self.sets.get(held.at))
+                .map(|set| &set.peer.tokens);
+            if let Some(tokens) = tokens {
+                if let Some((token, key)) = self
+                    .app
+                    .liveliness_subscribers
+                    .next_known_token(tokens, id, after)
+                {
+                    let next = HistoryCursor {
+                        face: Some(face),
+                        after: Some(token),
+                    };
+                    return Some((next, token, key));
+                }
+            }
+            face = self
+                .held
+                .iter()
+                .map(|held| held.id)
+                .filter(|held| *held > face)
+                .min()?;
+            after = None;
         }
     }
 }

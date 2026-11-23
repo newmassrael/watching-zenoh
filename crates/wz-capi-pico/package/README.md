@@ -132,10 +132,10 @@ held, so it may run on two threads at once, and a put made inside a subscriber's
 reaches that same subscriber calls the callback again from inside itself, before the put returns,
 as zenoh-pico's recursion does. The order of the callbacks is `wz_ext.h`'s section "callbacks".
 
-A liveliness subscriber declared with history is handed the tokens the session already knows by
-the end of the declaration, as zenoh-pico's is; declared inside a callback, once that callback has
-returned. When the delivery lane has no room to hold them all until then, the declaration fails
-and the subscriber is not declared.
+A liveliness subscriber declared with history is handed the tokens the session already knows
+inside the declaration, before its peers are asked for the rest, as zenoh-pico's is: on the
+declaring thread, one at a time with no lock of the library held, every one of them whatever their
+number, and from inside a callback as well.
 
 ## wz's own doors in this build
 

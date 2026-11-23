@@ -1620,6 +1620,10 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *                before the put returns, at any depth, as zenoh-pico's
  *                recursion does; every other subscriber it reaches is
  *                handed it inside the put as well.
+ *   a liveliness subscriber declared with history is handed the tokens the
+ *                session already knows inside the declaration, on the
+ *                declaring thread, one at a time with no lock held, before
+ *                its peers are asked for the rest, as zenoh-pico's is.
  *
  * The library lets go of a callback once, after its last call has returned:
  * then its drop runs, and z_undeclare_subscriber returns after it, as

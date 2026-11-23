@@ -200,7 +200,9 @@ mod liveliness;
 #[cfg(feature = "liveliness")]
 use {
     liveliness::{LiveSubEntry, LivelinessCallback, TokenEntry},
+    registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
+    wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
 };
 
 #[cfg(feature = "query")]
@@ -4937,6 +4939,55 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.0.write_answers(generation);
     }
 
+    /// Hand liveliness subscriber `id` the tokens the session already knows, which its declaration
+    /// with history is owed, on this thread with no lock held while each is handed: under the
+    /// session's lock the next token's key is copied into a buffer on this stack
+    /// ([`Registry::next_history_token`]), the lock is let go, the callback is called, and the next
+    /// is looked for from where the last stood. A session closed meanwhile hands no more.
+    #[cfg(feature = "liveliness")]
+    fn hand_history(&self, id: SubId) {
+        let Some(Target::Liveliness(callback)) = self.target(TargetKey::Liveliness(id)) else {
+            return;
+        };
+        // A callback that steps the session from inside its history hands out nothing itself, as
+        // one inside a delivery does.
+        let _delivering = self.deliveries.enter();
+        let mut cursor = HistoryCursor::default();
+        let mut key = [0u8; caps::MAX_KEYEXPR_BYTES];
+        loop {
+            let next = {
+                let Some(core) = self.live() else {
+                    return;
+                };
+                let registry = core.0.registry.borrow();
+                let found = registry.next_history_token(u64::from(id), cursor).and_then(
+                    |(at, token, text)| {
+                        let bytes = text.as_bytes();
+                        key.get_mut(..bytes.len())?.copy_from_slice(bytes);
+                        Some((at, token, bytes.len()))
+                    },
+                );
+                found
+            };
+            let Some((at, token_id, len)) = next else {
+                return;
+            };
+            cursor = at;
+            // The key was a `&str` the registry held, copied whole.
+            let Some(keyexpr) = key
+                .get(..len)
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            else {
+                return;
+            };
+            (lock(&callback))(LivelinessSample {
+                kind: LivelinessSampleKind::Put,
+                keyexpr,
+                token_id,
+            });
+        }
+    }
+
     /// The callback `key` names, while its owner holds it: the one look in the table every
     /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
     fn target(&self, key: TargetKey) -> Option<Target> {
@@ -6742,40 +6793,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             TargetKey::Liveliness(id),
             Target::Liveliness(Arc::new(Mutex::new(sink()))),
         ));
-        // With `history`, the registration hands the sink the tokens the session already knows,
-        // before the peer answers with the rest, as zenoh-pico's does
-        // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`).
-        // They are rehearsed first: the declaration is refused when the lane cannot hold every one
-        // of them until they are handed, at the end of this call or, declared from inside a
-        // callback, once that callback returns.
-        // SAFETY (both holds): the session's lock is held (`core`).
-        unsafe { self.samples.held() }.rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );
-        let held = unsafe { self.samples.held() }.rehearsed();
-        if registered.is_ok() && !held {
-            core.registry
-                .borrow_mut()
-                .app
-                .liveliness_subscribers
-                .unregister(u64::from(id));
-        }
-        // Refused by the observer, or with no room for its history, the declaration is refused,
-        // as a subscriber's is.
-        if registered.is_err() || !held {
+        // Refused by the observer, the declaration is refused, as a subscriber's is.
+        if registered.is_err() {
             drop(guard);
             drop(self.take_target(TargetKey::Liveliness(id)));
             return None;
         }
+        // With `history`, the subscriber is handed the tokens the session already knows before
+        // the peers are asked for the rest, as zenoh-pico's is
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`):
+        // on this thread, one at a time, with the session let go of while each is handed. A token
+        // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
-            core.registry
-                .borrow_mut()
-                .replay_liveliness_tokens(u64::from(id));
+            drop(guard);
+            self.hand_history(id);
+            guard = match self.live() {
+                Some(guard) => guard,
+                None => {
+                    drop(self.take_target(TargetKey::Liveliness(id)));
+                    return None;
+                }
+            };
         }
+        let core = &mut guard.0;
         let entry = LiveSubEntry {
             id,
             keyexpr: key,
