@@ -53,7 +53,28 @@ default = [
     "keyexpr-dollar-star",
     "keyexpr-includes",
     "request-put-del",
+    "log",
+    "south-subregions",
 ]
+
+# `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
+# what the session refuses or a bound is too small, handed to the `log` facade. Without it each
+# diagnostic compiles to nothing: no record is built, no argument formatted and no logger called,
+# so a library that installs no logger (the C ABI's cooperative forms, which take this crate without
+# its defaults) links neither the facade nor the formatting the records name, as zenoh-pico leaves
+# its log calls out unless a level is chosen when it is built. On by default, for the runtimes that
+# install a logger; a build that takes the crate without its defaults and wants the records names it.
+log = []
+
+# `south-subregions`: a node whose south is a list of subregions a remote is placed in by rule (the
+# pin's `gateway/south` given as a list): `region_partition::SouthPartition::Custom`, its filters,
+# and the bound a session decides from them and announces on its Open. Without it the one partition
+# is `Auto`, which places no remote by a rule, so a session announces no bound, as zenoh-pico's never
+# does; the peer's region name and the bound it announces are still read and refused when malformed.
+# It needs the heap profile, a rule being owned text and zids. On by default; named by the runtime
+# and the C ABI engine that read a partition from a config.
+south-subregions = ["alloc"]
+
 # The Put and Del bodies of a Request, which zenoh-pico's decoder takes and zenoh 1.10.1's does not
 # (its `RequestBody` has the Query alone): the arms of `wz-codecs/request-put-del` and the code that
 # judges their extension chains. On by default and named by every dependent that must stay
@@ -1298,11 +1319,10 @@ sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", d
 # `alloc`) holds its tables in `bounded::BoundedVec` / `id_map::IdMap`'s fixed arm and
 # must not name this crate at all.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"], optional = true }
-# R311du — log facade for the SubscriberRegistry keyexpr-resolution warn
-# path (register_with_locality emits log::warn! when a registered keyexpr
-# fails canonicalization). no_std-compatible facade; mirrors the
-# wz-runtime-tokio log dep so the migrated production code resolves
-# `log::warn!` without a new transitive assumption.
+# The log facade the diagnostics are handed to (`diag`) where the `log` feature is on. Not
+# optional: a build that holds a session machine has it through the statechart runtime, which names
+# it unconditionally, so an optional edge would compile nothing less there; what the feature decides
+# is whether a diagnostic calls it.
 log = "0.4"
 # R311ei — HMAC-SHA256 anti-amplification cookie primitive (the
 # signing_key module). default-features = false keeps the RustCrypto

@@ -3615,7 +3615,7 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         use sce_rust_runtime::StatePolicy;
         type P<R2, T2> = SessionFsmUnicastPolicy<SessionActionsBinding<R2, T2>>;
         if <P<R, T> as StatePolicy>::get_event_from_name(event_name) == Some(E::SessionClose) {
-            log::warn!(
+            crate::diag_warn!(
                 "SessionLifecycleInjector: a session-close event arrived on the SIGNAL \
                  path, which carries no keyexpr and so cannot be authorised; the row is \
                  ignored. Register it with `SwitchboardRegistry::register_command`."
@@ -3646,7 +3646,7 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         // arriving key a lifecycle key; and an authority handed one it cannot
         // parse would be answering about a target it never read.
         let Some(key) = LifecycleKey::parse(keyexpr) else {
-            log::warn!(
+            crate::diag_warn!(
                 "SessionLifecycleInjector: a lifecycle row matched a key that is \
                  not `@/<zid>/<whatami>/session/<verb>/<peer-zid>`; refusing, because \
                  an authority cannot name a target it cannot read."
@@ -3662,7 +3662,7 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         // for both verbs, and said, for the reason the misregistration arm
         // above is said: from outside a refusal looks like nothing happening.
         if !self.actions.peer_identity_verified() {
-            log::warn!(
+            crate::diag_warn!(
                 "SessionLifecycleInjector: a lifecycle command arrived from a peer \
                  whose zid no secure channel proved; refusing. Lifecycle verbs \
                  need a TLS or QUIC link whose peer certificate's key hashes to \
@@ -3689,7 +3689,7 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
             // indistinguishable from one that refused it on policy — the
             // distinction an operator needs and the observable this port
             // cannot carry.
-            log::warn!(
+            crate::diag_warn!(
                 "SessionLifecycleInjector: an open command arrived and this host bound \
                  no opener, so nothing can create a session here; refusing. A profile \
                  that drives one session with its role fixed at construction has no \

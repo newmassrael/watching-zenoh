@@ -260,6 +260,12 @@ STD_RUNTIME = r"std::backtrace_rs::|rustc_demangle::|addr2line::"
 # which the tokio engine announces by and the cooperative pico client does not
 # (`wz-session-core`'s `initial-sn-compact`, zenoh-pico drawing that origin at random).
 KECCAK = r"keccak::"
+# The `log` facade's logger call, which a diagnostic of the session core links where its `log`
+# feature is on (`wz-session-core`'s `diag`): the tokio engine's runtime takes the crate with its
+# defaults and so has it, and the cooperative library without `std` takes it without them and
+# installs no logger, so it has none, as zenoh-pico built without a log level has no log call. A
+# module whose name ends in `log` (`event_log::`) is not the facade.
+LOG_FACADE = r"(?<![\w])log::"
 # The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -583,7 +589,7 @@ CASES: tuple[Case, ...] = (
          # 2,007,557 hosted, +9,344 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
-         require=(SINGLE_THREADED, TOKIO_ENGINE, KECCAK),
+         require=(SINGLE_THREADED, TOKIO_ENGINE, KECCAK, LOG_FACADE),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane. Hosted reads run higher than "
@@ -835,7 +841,7 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",
          1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
@@ -2668,7 +2674,13 @@ def cmd_selftest() -> int:
                (COOP_ENGINE, "wz_capi_coop::engine::CoopEngine<L,C>::open"),
                (ACCEPT_HANDSHAKE, "wz_session_core::accept_cookie::encode_accept_cookie"),
                (CONFIG_VERDICT, "wz_capi_c_config_validate_topology_rows"),
-               (CONFIG_VERDICT, "wz_capi_c_config_device_requires"))))
+               (CONFIG_VERDICT, "wz_capi_c_config_device_requires"),
+               (LOG_FACADE, "<log::__private_api::GlobalLogger as log::Log>::log"),
+               (LOG_FACADE, "log::__private_api::log_impl"))))
+    expect("a module whose name ends in log is not the log facade",
+           not any(re.search(LOG_FACADE, s) for s in (
+               "wz_capi_pico::event_log::wz_ext_event_emit",
+               "wz_session_core::action_log::count")))
     expect("the doors an open reads its config through are not the verdict's",
            not any(re.search(CONFIG_VERDICT, s) for s in (
                "wz_capi_c_config_honoured", "wz_capi_c_config_disposition",

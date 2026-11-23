@@ -102,6 +102,10 @@ pub use wz_codecs::wire_const;
 // callers of those param bundles name the role from this crate's surface.
 pub use wz_codecs::whatami::WhatAmI;
 
+/// The session core's diagnostics, compiled in with the `log` feature and out without it
+/// (`diag_warn!`, `diag_debug!`).
+pub mod diag;
+
 // R221 — zenoh keyexpr structural canonicalization mirror.
 //
 // R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the

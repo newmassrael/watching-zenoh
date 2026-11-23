@@ -2163,7 +2163,9 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # AP has no image-size budget the dyn-buffer encoders could break.
 # `action-trace`: the session machine's action counters, which this crate's
 # tests and the runners built on it read (`trace_snapshot`).
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace"] }
+# `south-subregions`: the partitioned south a node reads from `gateway/south`
+# (`zenoh_config`, `RouterForwarder::with_south_partition`).
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.

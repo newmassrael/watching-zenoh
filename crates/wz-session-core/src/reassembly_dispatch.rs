@@ -901,7 +901,7 @@ where
     /// its echo.
     fn note_capacity_overflow(&mut self, attempted: usize) {
         if self.capacity_refusals == 0 {
-            log::warn!(
+            crate::diag_warn!(
                 "reassembly: a fragmented message reached {attempted} bytes, past this \
                  node's bound of {} (transport/link/rx/max_message_size, capped by the \
                  reassembly slot of {CAP}); the message is dropped, and later ones past \
@@ -1398,7 +1398,7 @@ where
         match self.config.pool_overflow {
             PoolOverflow::Reject => None,
             PoolOverflow::DiagnosticEvent => {
-                log::warn!(
+                crate::diag_warn!(
                     "reassembly/slot-pool-full: all {SLOTS} reassembly slots hold an open \
                      chain, so a new chain is refused (pool overflow policy diagnostic-event)"
                 );

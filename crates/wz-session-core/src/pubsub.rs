@@ -1140,7 +1140,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// byte-for-byte with what a peer's `Declare(DeclKexpr)` would
     /// carry on the wire (lone `$*` chunk → `*`, `**/*` → `**`,
     /// etc.). If the pattern is structurally invalid the raw form
-    /// is stored unchanged and a `log::warn!` is emitted — this is
+    /// is stored unchanged and a warning is emitted (`diag_warn!`) — this is
     /// non-breaking with prior callers; promotion to a Result-
     /// returning signature is deferred to the cluster API rewrite.
     ///
@@ -1168,7 +1168,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                     return Err(RegisterError::KeyexprTooLong);
                 }
                 Err(err) => {
-                    log::warn!(
+                    crate::diag_warn!(
                         "SubscriberRegistry::register: keyexpr `{keyexpr_pattern}` is not \
                          canonical ({err}); storing raw form. The matcher still operates but \
                          the stored chunks may drift from the canonical form a peer emits."
@@ -5031,7 +5031,7 @@ mod tests {
     fn register_falls_back_to_raw_on_invalid_pattern() {
         // Structurally invalid pattern (`?` is reserved) — the
         // registry should not panic; it should store the raw form
-        // and emit a log::warn (not asserted here). The matcher will
+        // and emit a warning (not asserted here). The matcher will
         // simply never fire since no canonical wire keyexpr
         // contains `?`.
         let mut registry = SubscriberRegistry::new();

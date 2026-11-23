@@ -8583,23 +8583,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn decide_local_remote_bound(
         &self,
     ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
+        #[cfg(feature = "south-subregions")]
+        let decided = self.place_by_south_partition();
+        // Without subregions the one partition is `Auto`, whose rule places no remote, so
+        // the decision is to announce none, whatever the peer told us.
+        #[cfg(not(feature = "south-subregions"))]
+        let decided: Result<
+            Option<crate::extbound::Bound>,
+            crate::region_partition::RegionError,
+        > = Ok(None);
+        R::with_mutex_mut(&self.local_remote_bound, |slot| {
+            *slot = decided.ok().flatten();
+        });
+        decided
+    }
+
+    /// The pin's `compute_transient_bound_of` over this session's south partition and
+    /// what the handshake has told it of the peer (`decide_local_remote_bound`).
+    #[cfg(feature = "south-subregions")]
+    fn place_by_south_partition(
+        &self,
+    ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
         // The slot's own form, copied: the public `peer_zid` hands out a
         // vector, which this decision (run on every handshake) must not need.
         let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot);
         let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
         let region = self.peer_region();
-        #[cfg(feature = "alloc")]
         let interfaces: Vec<&str> = self
             .link_subject()
             .and_then(|subject| subject.interfaces.as_deref())
             .map(|names| names.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        // The interfaces are read only by a custom partition's filters, which are the
-        // heap profile's; the one partition a build with no allocator states is `Auto`,
-        // which asks nothing of them.
-        #[cfg(not(feature = "alloc"))]
-        let interfaces: [&str; 0] = [];
-        let decided = match whatami {
+        match whatami {
             Some(whatami) => {
                 let facts = crate::region_partition::RemoteFacts {
                     zid: zid.as_deref().unwrap_or(&[]),
@@ -8619,11 +8634,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // role, so this is a session driven without one, which a test can
             // do. With no role there is no rule to apply and nothing to say.
             None => Ok(None),
-        };
-        R::with_mutex_mut(&self.local_remote_bound, |slot| {
-            *slot = decided.ok().flatten();
-        });
-        decided
+        }
     }
 
     /// Item 751 — the bound this session announces for its peer, as last decided.

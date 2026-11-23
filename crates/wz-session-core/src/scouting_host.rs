@@ -714,19 +714,23 @@ impl<R: Runtime> ScoutingActions<R> {
     fn record_ignored(&self, why: ScoutRxIgnored) {
         match &why {
             ScoutRxIgnored::Undecodable => {
-                log::warn!("scouting window: received malformed message; ignored")
+                crate::diag_warn!("scouting window: received malformed message; ignored")
             }
             ScoutRxIgnored::UnknownMid { mid } => {
-                log::warn!("scouting window: received unexpected message (mid {mid:#04x}); ignored")
+                crate::diag_warn!(
+                    "scouting window: received unexpected message (mid {mid:#04x}); ignored"
+                )
             }
             ScoutRxIgnored::SelfEcho => {
-                log::debug!("scouting window: our own Scout, looped back; ignored")
+                crate::diag_debug!("scouting window: our own Scout, looped back; ignored")
             }
             ScoutRxIgnored::ForeignScout => {
-                log::debug!("scouting window: another node's Scout; ignored")
+                crate::diag_debug!("scouting window: another node's Scout; ignored")
             }
             ScoutRxIgnored::LocatorlessHello => {
-                log::debug!("scouting window: a Hello advertising no locator; still searching")
+                crate::diag_debug!(
+                    "scouting window: a Hello advertising no locator; still searching"
+                )
             }
         }
         R::with_mutex_mut(&self.ignored_counts, |counts| counts.count(&why));

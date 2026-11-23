@@ -2432,7 +2432,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// into the bounded pattern buffer, so the stored form agrees
     /// byte-for-byte with the canonical wire form. Structurally
     /// invalid patterns fall back to the raw form (non-breaking)
-    /// with a `log::warn!` notice.
+    /// with a warning (`diag_warn!`).
     ///
     /// R311gb (Track 2) — fallible on the no-alloc backing: an over-
     /// capacity canonical form is rejected with
@@ -2468,7 +2468,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
                     return Err(RegisterError::KeyexprTooLong);
                 }
                 Err(err) => {
-                    log::warn!(
+                    crate::diag_warn!(
                         "QueryableRegistry::register: keyexpr `{keyexpr_pattern}` is not \
                          canonical ({err}); storing raw form. The matcher still operates \
                          but the stored chunks may drift from the canonical form a peer emits."
