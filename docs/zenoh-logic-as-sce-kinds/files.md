@@ -699,6 +699,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/declare_ext_qos.rs` | S2 | |
 | `crates/wz-session-core/src/declare_form.rs` | S2 | |
 | `crates/wz-session-core/src/declare_routing_context.rs` | S2 | |
+| `crates/wz-session-core/src/declared_keyexprs.rs` | S1 | |
 | `crates/wz-session-core/src/deferred_fire.rs` | S2 | |
 | `crates/wz-session-core/src/delivery_lane.rs` | S1 | |
 | `crates/wz-session-core/src/diag.rs` | S3 | |
@@ -876,6 +877,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/serde_codec.rs` | S3 | |
 | `crates/wz-session-core/src/serial_link.rs` | S1 | |
 | `crates/wz-session-core/src/session_actions.rs` | S1 | |
+| `crates/wz-session-core/src/session_actions/bundle_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/session_init_params.rs` | S1 | |
 | `crates/wz-session-core/src/session_memory.rs` | S10 | |
 | `crates/wz-session-core/src/session_slot.rs` | S1 | |
@@ -905,6 +907,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/transport_mode.rs` | S1 | |
 | `crates/wz-session-core/src/transport_profile.rs` | S1 | |
 | `crates/wz-session-core/src/transport_profile/owned.rs` | S1 | |
+| `crates/wz-session-core/src/transport_timers.rs` | S1 | |
 | `crates/wz-session-core/src/ts_stack.rs` | S2 | |
 | `crates/wz-session-core/src/tx_buf.rs` | S1 | |
 | `crates/wz-session-core/src/tx_deadline.rs` | S1 | |
