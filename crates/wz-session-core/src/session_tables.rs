@@ -1779,11 +1779,25 @@ where
         }
     }
 
+    fn any_subscription(&self, f: &mut dyn FnMut(u64, &str, Locality) -> bool) -> bool {
+        self.subscribers
+            .iter()
+            .any(|(_, row)| f(u64::from(row.id), text(&row.key.key), row.origin))
+    }
+
     fn pattern_of(&self, id: u64) -> Option<&str> {
         self.subscribers
             .iter()
             .find(|(_, row)| u64::from(row.id) == id)
             .map(|(_, row)| text(&row.key.key))
+    }
+
+    fn next_entity_id(&self) -> Option<u32> {
+        self.next_entity
+    }
+
+    fn consume_entity_id(&mut self) {
+        let _ = self.take_entity_id();
     }
 
     fn has_local_matching(&self, key: &str) -> bool {

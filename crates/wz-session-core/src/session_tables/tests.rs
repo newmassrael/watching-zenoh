@@ -804,3 +804,59 @@ fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
         .is_err());
     assert_eq!(tables.epoch(), 0);
 }
+
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
+    use crate::pubsub::{SubInterestReply, SubscriberPeer};
+    let mut tables = SessionTables::<Sinks>::new();
+    let sub = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    tables
+        .declare_subscriber("c", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let mut peer: SubscriberPeer = SubscriberPeer::default();
+    // A CURRENT interest on a/**: one subscription answers it, then the Final.
+    assert_eq!(
+        peer.answer_subscriber_interest(&mut tables, 7, Some("a/**"), false, true, false),
+        1
+    );
+    let staged = peer.take_staged_sub_interest_replies();
+    assert_eq!(staged.len(), 2);
+    let concrete = staged.first().unwrap();
+    assert!(matches!(
+        concrete,
+        SubInterestReply::Concrete { interest_id: 7, .. }
+    ));
+    assert_eq!(
+        peer.sub_interest_reply(&tables, concrete),
+        Some((u64::from(sub.id), "a/b"))
+    );
+    assert!(matches!(
+        staged.last(),
+        Some(SubInterestReply::Final { interest_id: 7 })
+    ));
+    // The remembered row took the next entity id from the tables' one space.
+    let after = tables.next_entity_id();
+    assert_eq!(after, Some(sub.id + 3));
+    // A FUTURE interest is told of a subscription registered after it.
+    assert_eq!(
+        peer.answer_subscriber_interest(&mut tables, 8, Some("d/*"), false, false, true),
+        0
+    );
+    let _ = peer.take_staged_sub_interest_replies();
+    let later = tables
+        .declare_subscriber("d/e", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    peer.stage_registered(&tables, u64::from(later.id));
+    let pushed = peer.take_staged_sub_interest_replies();
+    assert!(pushed.iter().any(|item| matches!(
+        item,
+        SubInterestReply::Concrete { interest_id: 8, subscription_id } if *subscription_id == u64::from(later.id)
+    )));
+    assert_eq!(
+        peer.sub_interest_reply(&tables, &SubInterestReply::Final { interest_id: 8 }),
+        None
+    );
+}

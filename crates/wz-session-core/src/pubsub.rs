@@ -554,6 +554,10 @@ struct InterestSide<P: Storage = Profile> {
     /// value until it does.
     #[cfg(feature = "declare-subscriber")]
     reply_quota: crate::limits::MaxPendingDeclaresHeld,
+    /// The longest key an interest is remembered under (`MAX_KEYEXPR_BYTES`): what the session's
+    /// creator resolved ([`SubscriberPeer::limit_keys_to`]), the build's value until it does.
+    #[cfg(feature = "declare-subscriber")]
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
     /// policy ([`SubscriberPeer::keep_keys_in`]). An interest whose key finds no room there is
     /// answered by its `Final` alone, as one whose key is past the bound is.
@@ -654,6 +658,14 @@ fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool 
         Some(interest) => keyexpr_intersects(pattern, interest),
         None => true,
     }
+}
+
+/// Whether any subscription of `subs` intersects the interest `pattern` (`None` = match-all).
+#[cfg(feature = "declare-subscriber")]
+fn any_matches<L: LocalSubscribers + ?Sized>(subs: &L, pattern: Option<&str>) -> bool {
+    subs.any_subscription(&mut |_, sub_pattern, _| {
+        subscription_matches_interest(sub_pattern, pattern)
+    })
 }
 
 /// R311y530 — one remembered inbound SUBSCRIBER `Interest`.
@@ -1614,155 +1626,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         current: bool,
         future: bool,
     ) -> usize {
-        if !current && !future {
-            // Interest FINAL — a cancellation, not a solicitation.
-            interests.retire(interest_id);
-            return 0;
-        }
-        // Register (or refresh) the row FIRST: the CURRENT dump's aggregate
-        // reply resolves its keyexpr and its decl id THROUGH this row at drain,
-        // so a CURRENT-only interest needs it too. Refreshing rather than
-        // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
-        let row_held = if interests
-            .rows
-            .iter()
-            .any(|row| row.interest_id == interest_id)
-        {
-            true
-        } else {
-            // Of the interest side's own policy: the row it is kept in is that side's, and so is
-            // where the row keeps its key.
-            let text = pattern.unwrap_or("**");
-            let keyexpr = if self.key_quota.admits(text.len()) {
-                interests.keys.key(text).ok()
-            } else {
-                None
-            };
-            let Some(keyexpr) = keyexpr else {
-                // A keyexpr past the bounded field, or with no room where the side keeps its
-                // keys, cannot be replied with anyway; terminate the chain honestly instead of
-                // half-answering it. The terminator is a chain of one, staged whole or counted.
-                interests.stage_final_only(interest_id);
-                return 0;
-            };
-            // R2292 (open-debt item 627) — ONE id space per session, drawn
-            // from the SAME counter `register_sink` uses for a
-            // `SubscriptionId`. It used to be a second counter that also
-            // started at 1, so a session announced an aggregate reply and
-            // a routed subscriber under the SAME `DeclSubscriber.id`; the
-            // peer's registry is keyed by that id with same-id-replaces,
-            // so it saw one declaration where two were sent. Harmless
-            // while nothing retracted an aggregate id and NOT harmless
-            // once something does — an `UndeclSubscriber(1)` would be
-            // ambiguous. Upstream has no such second counter: zenoh draws
-            // the simple AND the aggregated resource id from one
-            // per-face `next_id`
-            // (`zenoh/src/net/routing/hat/broker/interests.rs`
-            // @ `local_subs.insert_aggregated_resource`, 1.10.0).
-            //
-            // The id is consumed only when the row is stored, the same rule
-            // `register_sink` keeps, so a refused row leaves no gap. A table
-            // that has handed out every id stores no row, as a full one does,
-            // and so does a side at the quota the creator stated.
-            //
-            // A subscription registered from here on is the FUTURE half of this
-            // interest: its id is at least the counter AFTER the id the row
-            // took. `watermark` is that boundary, for a table that learns of
-            // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
-            let stored = interests.quota.admits(interests.rows.len() + 1)
-                && self.next_entity_id().is_some_and(|decl_id| {
-                    interests
-                        .rows
-                        .push(InboundSubInterest {
-                            interest_id,
-                            keyexpr,
-                            aggregate,
-                            aggregate_decl_id: decl_id,
-                            watermark: u64::from(decl_id) + 1,
-                            #[cfg(feature = "declare-undeclare")]
-                            announced: false,
-                        })
-                        .is_ok()
-                });
-            if stored {
-                self.consume_entity_id();
-            } else if future {
-                // A full table loses the FUTURE half for this publisher: a
-                // subscription declared later is not pushed to it.
-                interests.refusals.future_interests =
-                    interests.refusals.future_interests.saturating_add(1);
-            }
-            stored
-        };
-        if !current {
-            return 0;
-        }
-        // The CURRENT dump is one chain -- its replies, then its `Final` -- and
-        // it is staged WHOLE or not at all. Truncating it under a `Final` would
-        // tell the peer that the subscriptions it lacks do not exist, which for
-        // a pico publisher keeps its write filter shut on a subscriber that is
-        // there. So the chain is sized first and refused, counted, if the
-        // staging buffer cannot take all of it, by its storage or by the
-        // quota the creator stated. On the growable backing with no quota
-        // stated the room is unbounded and nothing below refuses.
-        let replies = if aggregate {
-            if !self.any_subscription_matches(pattern) {
-                0
-            } else if !row_held {
-                // The aggregate reply resolves its keyexpr and decl id THROUGH
-                // the row at drain. With no row it would resolve to nothing and
-                // the chain would leave as a bare `Final`, the false "nothing
-                // matches" the paragraph above refuses to send.
-                interests.count_refused_chain();
-                return 0;
-            } else {
-                1
-            }
-        } else {
-            self.subscribers
-                .iter()
-                .filter(|sub| subscription_matches_interest(&sub.pattern, pattern))
-                .count()
-        };
-        if !interests.has_room(replies.saturating_add(1)) {
-            interests.count_refused_chain();
-            return 0;
-        }
-        const RESERVED: &str = "room for the whole chain was checked above";
-        if aggregate {
-            if replies == 1 {
-                interests
-                    .staged
-                    .push(SubInterestReply::Aggregate { interest_id })
-                    .expect(RESERVED);
-            }
-        } else {
-            for sub in self.subscribers.iter() {
-                if subscription_matches_interest(&sub.pattern, pattern) {
-                    interests
-                        .staged
-                        .push(SubInterestReply::Concrete {
-                            interest_id,
-                            subscription_id: sub.id.as_u64(),
-                        })
-                        .expect(RESERVED);
-                }
-            }
-        }
-        interests
-            .staged
-            .push(SubInterestReply::Final { interest_id })
-            .expect(RESERVED);
-        replies
-    }
-
-    /// R311y530 — whether ANY session-local subscription intersects the
-    /// interest `pattern` (`None` = match-all).
-    #[cfg(feature = "declare-subscriber")]
-    fn any_subscription_matches(&self, pattern: Option<&str>) -> bool {
-        self.subscribers
-            .iter()
-            .any(|sub| subscription_matches_interest(&sub.pattern, pattern))
+        interests.answer(self, interest_id, pattern, aggregate, current, future)
     }
 
     /// R311y530 — stage an unsolicited `DeclSubscriber` for a subscription
@@ -1781,49 +1645,13 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         interests: &mut InterestSide<Q>,
         new_id: SubscriptionId,
     ) {
-        // As many rows as the interest table can hold, in a buffer of its own: a policy whose rows
-        // are only lent makes none for itself (`Storage::Scratch`).
-        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, Q::Scratch> =
-            BoundedVec::default();
-        {
-            // The new subscription's pattern is read back out of the table
-            // rather than passed in: `register_sink` has already MOVED it into
-            // the row, and `BoundedString` is deliberately not `Clone` (the
-            // no-alloc backing is an inline buffer). Both borrows are immutable
-            // and end with this block, before the staging push below.
-            let Some(sub) = self.subscribers.iter().find(|s| s.id == new_id) else {
-                return;
-            };
-            let new_pattern: &str = &sub.pattern;
-            for row in interests.rows.iter() {
-                if subscription_matches_interest(new_pattern, Some(&*row.keyexpr))
-                    && hits.push((row.interest_id, row.aggregate)).is_err()
-                {
-                    break;
-                }
-            }
-        }
-        for (interest_id, aggregate) in hits.iter().copied() {
-            let item = if aggregate {
-                SubInterestReply::Aggregate { interest_id }
-            } else {
-                SubInterestReply::Concrete {
-                    interest_id,
-                    subscription_id: new_id.as_u64(),
-                }
-            };
-            // NO terminating `Final` here: this is an unsolicited FUTURE push,
-            // not a CURRENT dump, and the peer's CURRENT solicitation was
-            // already resolved when the interest arrived. A second `Final`
-            // would close an interest that is still live.
-            interests.stage_announcement(item);
-        }
+        interests.push_registered(self, new_id.as_u64());
     }
 
     /// R2292 (open-debt item 627) — stage a retraction for every ANNOUNCED
     /// aggregate declaration that no local subscription stands for any more.
     ///
-    /// Called after a subscription was retired, so `any_subscription_matches`
+    /// Called after a subscription was retired, so `any_matches`
     /// already reads the post-removal table: the `1 -> 0` transition is the whole
     /// trigger, exactly as upstream's `Some -> None` on the aggregated resource's
     /// info is.
@@ -1832,7 +1660,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// declare-rollback path silent — it unregisters a subscription whose
     /// reply was staged and then dropped, so no peer was ever told an id.
     ///
-    /// ⚠ MEASURED, R2292: the `any_subscription_matches` test here is a
+    /// ⚠ MEASURED, R2292: the `any_matches` test here is a
     /// PRESSURE FILTER, not the correctness guard. Deleting it leaves every
     /// wire assertion green, because `take_aggregate_retract` re-checks the
     /// same predicate at DRAIN time and that is the one a retraction's
@@ -1843,23 +1671,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// the red that keeps this line honest; the wire tests are not.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn stage_emptied_aggregate_retracts<Q: Storage>(&self, interests: &mut InterestSide<Q>) {
-        // A buffer of its own, as in `stage_future_subscriber_pushes`.
-        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, Q::Scratch> =
-            BoundedVec::default();
-        for row in interests.rows.iter() {
-            if row.aggregate
-                && row.announced
-                && !self.any_subscription_matches(Some(&*row.keyexpr))
-                && hits.push(row.interest_id).is_err()
-            {
-                break;
-            }
-        }
-        for interest_id in hits.iter().copied() {
-            // A refused retraction leaves the row `announced`, so it is still
-            // owed; what is lost is THIS staging of it, and that is counted.
-            interests.stage_announcement(SubInterestReply::AggregateRetract { interest_id });
-        }
+        interests.retract_emptied(self);
     }
 
     /// R2292 (open-debt item 627) — resolve a staged
@@ -1878,16 +1690,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         peer: &mut SubscriberPeer<Q>,
         interest_id: u64,
     ) -> Option<u64> {
-        let row = peer
-            .interests
-            .rows
-            .iter_mut()
-            .find(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
-        if self.any_subscription_matches(Some(&*row.keyexpr)) {
-            return None;
-        }
-        row.announced = false;
-        Some(u64::from(row.aggregate_decl_id))
+        peer.take_aggregate_retract(self, interest_id)
     }
 
     /// R311y530 — resolve one staged reply item to the `(subscriber_id,
@@ -1911,7 +1714,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// contract.
     ///
     /// The re-check is the SAME predicate the staging used
-    /// (`any_subscription_matches` over the interest's keyexpr — a code span,
+    /// (`any_matches` over the interest's keyexpr — a code span,
     /// not a link: it is private, and a doc link to it is a BROKEN one this
     /// crate's Layer C1bz budget counts), for the
     /// same reason the `Concrete` arm re-resolves through `subscribers`:
@@ -1937,29 +1740,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         peer: &'a SubscriberPeer<Q>,
         item: &SubInterestReply,
     ) -> Option<(u64, &'a str)> {
-        match item {
-            SubInterestReply::Aggregate { interest_id } => peer
-                .interests
-                .rows
-                .iter()
-                .find(|row| row.interest_id == *interest_id)
-                .filter(|row| self.any_subscription_matches(Some(&*row.keyexpr)))
-                .map(|row| (u64::from(row.aggregate_decl_id), &*row.keyexpr)),
-            SubInterestReply::Concrete {
-                subscription_id, ..
-            } => self
-                .subscribers
-                .iter()
-                .find(|sub| sub.id.as_u64() == *subscription_id)
-                .map(|sub| (sub.id.as_u64(), &*sub.pattern)),
-            SubInterestReply::Final { .. } => None,
-            // R2292 — a retraction is not a reply: it resolves through
-            // `take_aggregate_retract`, which needs `&mut self` to clear the
-            // announced flag. Answering `None` here is the honest projection,
-            // not a skip.
-            #[cfg(feature = "declare-undeclare")]
-            SubInterestReply::AggregateRetract { .. } => None,
-        }
+        peer.sub_interest_reply(self, item)
     }
 
     /// Project a wire-decoded `Push` into a [`Sample`] and route it
@@ -3261,6 +3042,10 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
         self.naming.key_quota = quota;
+        #[cfg(feature = "declare-subscriber")]
+        {
+            self.interests.key_quota = quota;
+        }
     }
 
     /// The quota the peer's alias keyexprs are held to (`MAX_KEYEXPR_BYTES`): what the creator
@@ -3566,6 +3351,7 @@ impl<P: Storage> Default for InterestSide<P> {
             reconciled_epoch: 0,
             quota: crate::limit_binding::Limited::build_default(),
             reply_quota: crate::limit_binding::Limited::build_default(),
+            key_quota: crate::limit_binding::Limited::build_default(),
             keys: Default::default(),
         }
     }
@@ -3635,6 +3421,7 @@ impl InterestSide<crate::bounded::Static> {
             reconciled_epoch: 0,
             quota: crate::limit_binding::Limited::build_default(),
             reply_quota: crate::limit_binding::Limited::build_default(),
+            key_quota: crate::limit_binding::Limited::build_default(),
             keys: crate::bounded::InlineKeys,
         }
     }
@@ -3642,6 +3429,226 @@ impl InterestSide<crate::bounded::Static> {
 
 #[cfg(feature = "declare-subscriber")]
 impl<P: Storage> InterestSide<P> {
+    /// Answer subscriber interest `interest_id` on `pattern` out of `subs`, the session's own
+    /// subscribers: remember it for its FUTURE half and stage the CURRENT dump, as
+    /// [`SubscriberTable::respond_to_subscriber_interest_borrowed`] documents. How many
+    /// declarations the dump stages.
+    fn answer<L: LocalSubscribers + ?Sized>(
+        &mut self,
+        subs: &mut L,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        current: bool,
+        future: bool,
+    ) -> usize {
+        if !current && !future {
+            // Interest FINAL — a cancellation, not a solicitation.
+            self.retire(interest_id);
+            return 0;
+        }
+        // Register (or refresh) the row FIRST: the CURRENT dump's aggregate
+        // reply resolves its keyexpr and its decl id THROUGH this row at drain,
+        // so a CURRENT-only interest needs it too. Refreshing rather than
+        // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
+        let row_held = if self.rows.iter().any(|row| row.interest_id == interest_id) {
+            true
+        } else {
+            // Of the interest side's own policy: the row it is kept in is that side's, and so is
+            // where the row keeps its key.
+            let text = pattern.unwrap_or("**");
+            let keyexpr = if self.key_quota.admits(text.len()) {
+                self.keys.key(text).ok()
+            } else {
+                None
+            };
+            let Some(keyexpr) = keyexpr else {
+                // A keyexpr past the bounded field, or with no room where the side keeps its
+                // keys, cannot be replied with anyway; terminate the chain honestly instead of
+                // half-answering it. The terminator is a chain of one, staged whole or counted.
+                self.stage_final_only(interest_id);
+                return 0;
+            };
+            // R2292 (open-debt item 627) — ONE id space per session, drawn
+            // from the SAME counter `register_sink` uses for a
+            // `SubscriptionId`. It used to be a second counter that also
+            // started at 1, so a session announced an aggregate reply and
+            // a routed subscriber under the SAME `DeclSubscriber.id`; the
+            // peer's registry is keyed by that id with same-id-replaces,
+            // so it saw one declaration where two were sent. Harmless
+            // while nothing retracted an aggregate id and NOT harmless
+            // once something does — an `UndeclSubscriber(1)` would be
+            // ambiguous. Upstream has no such second counter: zenoh draws
+            // the simple AND the aggregated resource id from one
+            // per-face `next_id`
+            // (`zenoh/src/net/routing/hat/broker/interests.rs`
+            // @ `local_subs.insert_aggregated_resource`, 1.10.0).
+            //
+            // The id is consumed only when the row is stored, the same rule
+            // `register_sink` keeps, so a refused row leaves no gap. A table
+            // that has handed out every id stores no row, as a full one does,
+            // and so does a side at the quota the creator stated.
+            //
+            // A subscription registered from here on is the FUTURE half of this
+            // interest: its id is at least the counter AFTER the id the row
+            // took. `watermark` is that boundary, for a table that learns of
+            // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
+            let stored = self.quota.admits(self.rows.len() + 1)
+                && subs.next_entity_id().is_some_and(|decl_id| {
+                    self.rows
+                        .push(InboundSubInterest {
+                            interest_id,
+                            keyexpr,
+                            aggregate,
+                            aggregate_decl_id: decl_id,
+                            watermark: u64::from(decl_id) + 1,
+                            #[cfg(feature = "declare-undeclare")]
+                            announced: false,
+                        })
+                        .is_ok()
+                });
+            if stored {
+                subs.consume_entity_id();
+            } else if future {
+                // A full table loses the FUTURE half for this publisher: a
+                // subscription declared later is not pushed to it.
+                self.refusals.future_interests = self.refusals.future_interests.saturating_add(1);
+            }
+            stored
+        };
+        if !current {
+            return 0;
+        }
+        // The CURRENT dump is one chain -- its replies, then its `Final` -- and
+        // it is staged WHOLE or not at all. Truncating it under a `Final` would
+        // tell the peer that the subscriptions it lacks do not exist, which for
+        // a pico publisher keeps its write filter shut on a subscriber that is
+        // there. So the chain is sized first and refused, counted, if the
+        // staging buffer cannot take all of it, by its storage or by the
+        // quota the creator stated. On the growable backing with no quota
+        // stated the room is unbounded and nothing below refuses.
+        let replies = if aggregate {
+            if !any_matches(&*subs, pattern) {
+                0
+            } else if !row_held {
+                // The aggregate reply resolves its keyexpr and decl id THROUGH
+                // the row at drain. With no row it would resolve to nothing and
+                // the chain would leave as a bare `Final`, the false "nothing
+                // matches" the paragraph above refuses to send.
+                self.count_refused_chain();
+                return 0;
+            } else {
+                1
+            }
+        } else {
+            let mut matching = 0usize;
+            subs.for_each_subscription(&mut |_, sub_pattern, _| {
+                if subscription_matches_interest(sub_pattern, pattern) {
+                    matching = matching.saturating_add(1);
+                }
+            });
+            matching
+        };
+        if !self.has_room(replies.saturating_add(1)) {
+            self.count_refused_chain();
+            return 0;
+        }
+        const RESERVED: &str = "room for the whole chain was checked above";
+        if aggregate {
+            if replies == 1 {
+                self.staged
+                    .push(SubInterestReply::Aggregate { interest_id })
+                    .expect(RESERVED);
+            }
+        } else {
+            let staged = &mut self.staged;
+            subs.for_each_subscription(&mut |subscription_id, sub_pattern, _| {
+                if subscription_matches_interest(sub_pattern, pattern) {
+                    staged
+                        .push(SubInterestReply::Concrete {
+                            interest_id,
+                            subscription_id,
+                        })
+                        .expect(RESERVED);
+                }
+            });
+        }
+        self.staged
+            .push(SubInterestReply::Final { interest_id })
+            .expect(RESERVED);
+        replies
+    }
+
+    /// Stage the FUTURE half of every interest subscription `new_id` of `subs`, just registered,
+    /// matches: the pub-before-sub half of the write-filter release. Without it the ordering
+    /// decides whether a publisher ever sees the subscriber, which is exactly the kind of race
+    /// that reads as a flaky interop test.
+    fn push_registered<L: LocalSubscribers + ?Sized>(&mut self, subs: &L, new_id: u64) {
+        // As many rows as the interest table can hold, in a buffer of its own: a policy whose rows
+        // are only lent makes none for itself (`Storage::Scratch`).
+        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, P::Scratch> =
+            BoundedVec::default();
+        {
+            let Some(new_pattern) = subs.pattern_of(new_id) else {
+                return;
+            };
+            for row in self.rows.iter() {
+                if subscription_matches_interest(new_pattern, Some(&*row.keyexpr))
+                    && hits.push((row.interest_id, row.aggregate)).is_err()
+                {
+                    break;
+                }
+            }
+        }
+        for (interest_id, aggregate) in hits.iter().copied() {
+            let item = if aggregate {
+                SubInterestReply::Aggregate { interest_id }
+            } else {
+                SubInterestReply::Concrete {
+                    interest_id,
+                    subscription_id: new_id,
+                }
+            };
+            // NO terminating `Final` here: this is an unsolicited FUTURE push,
+            // not a CURRENT dump, and the peer's CURRENT solicitation was
+            // already resolved when the interest arrived. A second `Final`
+            // would close an interest that is still live.
+            self.stage_announcement(item);
+        }
+    }
+
+    /// R2292 (open-debt item 627) — stage a retraction for every ANNOUNCED aggregate
+    /// declaration that no subscription of `subs` stands for any more. Called after a
+    /// subscription was retired, so the `1 -> 0` transition is the whole trigger, as
+    /// upstream's `Some -> None` on the aggregated resource's info is. A row never
+    /// announced stages nothing, which keeps the declare-rollback path silent.
+    ///
+    /// ⚠ MEASURED, R2292: the match test here is a PRESSURE FILTER, not the correctness
+    /// guard: `SubscriberPeer::take_aggregate_retract` re-checks the same predicate at DRAIN
+    /// time. What deleting it costs is the staging buffer, one item per announced aggregate
+    /// for every unregister. `an_unrelated_unregister_stages_no_aggregate_retraction` is the
+    /// red that keeps this line honest.
+    #[cfg(feature = "declare-undeclare")]
+    fn retract_emptied<L: LocalSubscribers + ?Sized>(&mut self, subs: &L) {
+        // A buffer of its own, as in `push_registered`.
+        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, P::Scratch> =
+            BoundedVec::default();
+        for row in self.rows.iter() {
+            if row.aggregate
+                && row.announced
+                && !any_matches(subs, Some(&*row.keyexpr))
+                && hits.push(row.interest_id).is_err()
+            {
+                break;
+            }
+        }
+        for interest_id in hits.iter().copied() {
+            // A refused retraction leaves the row `announced`, so it is still
+            // owed; what is lost is THIS staging of it, and that is counted.
+            self.stage_announcement(SubInterestReply::AggregateRetract { interest_id });
+        }
+    }
+
     /// Retire the row of `interest_id`: the peer cancelled it, or a recycled id
     /// must not inherit a dead publisher's keyexpr.
     fn retire(&mut self, interest_id: u64) {
@@ -3812,11 +3819,13 @@ impl<P: Storage> SubscriberPeer<P> {
     ///
     /// A no-op when the table did not move. Staging that does not fit is counted
     /// and refused, as everywhere else.
-    pub fn reconcile<C: SampleSink, R: Storage>(&mut self, table: &SubscriberTable<C, R>) {
-        if self.interests.reconciled_epoch == table.epoch {
+    pub fn reconcile<L: LocalSubscribers + ?Sized>(&mut self, subs: &L) {
+        let epoch = subs.epoch();
+        if self.interests.reconciled_epoch == epoch {
             return;
         }
-        self.interests.reconciled_epoch = table.epoch;
+        self.interests.reconciled_epoch = epoch;
+        let next = subs.next_subscription_id();
         // FUTURE pushes. An aggregate interest is told ONCE that something
         // matches, however many matching subscriptions arrived; any other is
         // told of each, under that subscription's own keyexpr. Staged straight
@@ -3833,34 +3842,123 @@ impl<P: Storage> SubscriberPeer<P> {
             let (interest_id, aggregate, watermark) =
                 (row.interest_id, row.aggregate, row.watermark);
             let mut told = false;
-            for sub in table
-                .subscribers
-                .iter()
-                .filter(|s| s.id.as_u64() >= watermark)
-            {
-                if !subscription_matches_interest(&sub.pattern, Some(&*row.keyexpr)) {
-                    continue;
+            subs.for_each_subscription(&mut |subscription_id, pattern, _| {
+                if subscription_id < watermark
+                    || !subscription_matches_interest(pattern, Some(&*row.keyexpr))
+                {
+                    return;
                 }
                 let item = if aggregate {
                     if told {
-                        continue;
+                        return;
                     }
                     told = true;
                     SubInterestReply::Aggregate { interest_id }
                 } else {
                     SubInterestReply::Concrete {
                         interest_id,
-                        subscription_id: sub.id.as_u64(),
+                        subscription_id,
                     }
                 };
                 // No terminating `Final`: an unsolicited FUTURE push, not a
-                // CURRENT dump (see `stage_future_subscriber_pushes`).
+                // CURRENT dump (see `InterestSide::push_registered`).
                 InterestSide::<P>::stage_announcement_in(staged, refusals, *reply_quota, item);
-            }
-            row.watermark = table.next_id;
+            });
+            row.watermark = next;
         }
         #[cfg(feature = "declare-undeclare")]
-        table.stage_emptied_aggregate_retracts(&mut self.interests);
+        self.interests.retract_emptied(subs);
+    }
+
+    /// Answer subscriber interest `interest_id` on `pattern` (`None` for every key) out of
+    /// `subs`, the session's own subscribers, as
+    /// [`SubscriberTable::respond_to_subscriber_interest_borrowed`] does out of its table: how
+    /// many declarations the CURRENT dump staged.
+    pub fn answer_subscriber_interest<L: LocalSubscribers + ?Sized>(
+        &mut self,
+        subs: &mut L,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        current: bool,
+        future: bool,
+    ) -> usize {
+        self.interests
+            .answer(subs, interest_id, pattern, aggregate, current, future)
+    }
+
+    /// What subscription `id`, just registered in `subs`, owes this side: the FUTURE half of every
+    /// interest it matches, staged now, and the epoch it was staged at.
+    pub fn stage_registered<L: LocalSubscribers + ?Sized>(&mut self, subs: &L, id: u64) {
+        self.interests.push_registered(subs, id);
+        self.interests.reconciled_epoch = subs.epoch();
+    }
+
+    /// What a subscription just retired from `subs` owes this side: the retraction of every
+    /// announced aggregate no subscription stands for any more, and the epoch it was staged at.
+    pub fn stage_retired<L: LocalSubscribers + ?Sized>(&mut self, subs: &L) {
+        #[cfg(feature = "declare-undeclare")]
+        self.interests.retract_emptied(subs);
+        self.interests.reconciled_epoch = subs.epoch();
+    }
+
+    /// R2292 (open-debt item 627) — resolve a staged
+    /// [`SubInterestReply::AggregateRetract`] to the `UndeclSubscriber.id` the
+    /// sink should emit, or `None` when it must not be emitted after all.
+    ///
+    /// The re-check mirrors the AGGREGATE declare arm's (R2290): a subscription
+    /// declared in `subs` between the stage and the drain makes the aggregate TRUE
+    /// again, and a retraction announcing otherwise would be a lie at the moment it
+    /// is sent. Clearing `announced` here rather than at stage time is what makes
+    /// the pair idempotent — two staged retractions for one interest emit once.
+    #[cfg(feature = "declare-undeclare")]
+    pub fn take_aggregate_retract<L: LocalSubscribers + ?Sized>(
+        &mut self,
+        subs: &L,
+        interest_id: u64,
+    ) -> Option<u64> {
+        let row = self
+            .interests
+            .rows
+            .iter_mut()
+            .find(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
+        if any_matches(subs, Some(&*row.keyexpr)) {
+            return None;
+        }
+        row.announced = false;
+        Some(u64::from(row.aggregate_decl_id))
+    }
+
+    /// Resolve one staged reply item to the `(subscriber_id, keyexpr)` pair the sink
+    /// encodes, out of this side's interest rows and `subs`, or `None` when what it
+    /// announces is not true any more (see
+    /// [`SubscriberTable::sub_interest_reply`], which is this over its table).
+    pub fn sub_interest_reply<'a, L: LocalSubscribers + ?Sized>(
+        &'a self,
+        subs: &'a L,
+        item: &SubInterestReply,
+    ) -> Option<(u64, &'a str)> {
+        match item {
+            SubInterestReply::Aggregate { interest_id } => self
+                .interests
+                .rows
+                .iter()
+                .find(|row| row.interest_id == *interest_id)
+                .filter(|row| any_matches(subs, Some(&*row.keyexpr)))
+                .map(|row| (u64::from(row.aggregate_decl_id), &*row.keyexpr)),
+            SubInterestReply::Concrete {
+                subscription_id, ..
+            } => subs
+                .pattern_of(*subscription_id)
+                .map(|pattern| (*subscription_id, pattern)),
+            SubInterestReply::Final { .. } => None,
+            // R2292 — a retraction is not a reply: it resolves through
+            // `take_aggregate_retract`, which needs `&mut self` to clear the
+            // announced flag. Answering `None` here is the honest projection,
+            // not a skip.
+            #[cfg(feature = "declare-undeclare")]
+            SubInterestReply::AggregateRetract { .. } => None,
+        }
     }
 
     /// Forget this peer's interests and what was staged to it, because its
@@ -3941,8 +4039,22 @@ pub trait LocalSubscribers {
     /// Hand `f` each subscription: its id, its pattern and the origins it hears.
     fn for_each_subscription(&self, f: &mut dyn FnMut(u64, &str, crate::locality::Locality));
 
+    /// Whether `f` holds for any subscription, asked in registration order until it does.
+    fn any_subscription(
+        &self,
+        f: &mut dyn FnMut(u64, &str, crate::locality::Locality) -> bool,
+    ) -> bool;
+
     /// The pattern of subscription `id`.
     fn pattern_of(&self, id: u64) -> Option<&str>;
+
+    /// The entity id the next declaration of the session takes (a subscription, or the aggregate
+    /// declaration an interest is answered with), `None` once every one has been handed out. Not
+    /// taken until [`Self::consume_entity_id`].
+    fn next_entity_id(&self) -> Option<u32>;
+
+    /// Take the id [`Self::next_entity_id`] returned. Called only after it returned one.
+    fn consume_entity_id(&mut self);
 
     /// Whether a subscription that hears what the session itself publishes intersects `key`.
     fn has_local_matching(&self, key: &str) -> bool;
@@ -3986,11 +4098,32 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
         }
     }
 
+    fn any_subscription(
+        &self,
+        f: &mut dyn FnMut(u64, &str, crate::locality::Locality) -> bool,
+    ) -> bool {
+        self.subscribers.iter().any(|subscriber| {
+            f(
+                subscriber.id.as_u64(),
+                &subscriber.pattern,
+                subscriber.allowed_origin,
+            )
+        })
+    }
+
     fn pattern_of(&self, id: u64) -> Option<&str> {
         self.subscribers
             .iter()
             .find(|subscriber| subscriber.id.as_u64() == id)
             .map(|subscriber| &*subscriber.pattern)
+    }
+
+    fn next_entity_id(&self) -> Option<u32> {
+        SubscriberTable::next_entity_id(self)
+    }
+
+    fn consume_entity_id(&mut self) {
+        SubscriberTable::consume_entity_id(self)
     }
 
     fn has_local_matching(&self, key: &str) -> bool {
