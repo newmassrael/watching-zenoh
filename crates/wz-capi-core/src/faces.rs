@@ -1388,6 +1388,7 @@ impl RowCallbacks for CoreRows {
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
+    type WriteFilter = ();
 }
 
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face

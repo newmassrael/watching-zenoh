@@ -1990,6 +1990,7 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type WriteFilter = ();
     }
 
     /// The callbacks of a table set whose queryables hold no callback.
@@ -2003,6 +2004,7 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type WriteFilter = ();
     }
 
     /// A delivery context that records the handle of each queryable row it is asked through and
@@ -2172,6 +2174,7 @@ mod tests {
         type LivelinessSubscriber = AskedRow;
         type Matching = NoSink;
         type Reply = NoSink;
+        type WriteFilter = ();
     }
 
     /// A delivery context that records the handle of each liveliness subscriber's row it is told
@@ -2507,6 +2510,7 @@ mod lent_tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type WriteFilter = ();
     }
 
     /// An observer whose subscriptions are kept in the session's one table set.
