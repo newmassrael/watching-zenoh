@@ -146,27 +146,28 @@ impl SessionMemory {
     pub fn push(&mut self, row: MemoryRow) -> Result<(), MemoryRowsFull> {
         let slot = self.rows.get_mut(self.len).ok_or(MemoryRowsFull)?;
         *slot = row;
-        self.len += 1;
+        self.len = self.len.saturating_add(1);
         Ok(())
     }
 
     /// Add a row of [`session_tables`], which gives fewer than [`MEMORY_ROWS`] (asserted above).
     fn put(&mut self, row: MemoryRow) {
-        self.rows[self.len] = row;
-        self.len += 1;
+        // The assertion above leaves room for every table's rows.
+        let _ = self.push(row);
     }
 
     /// Add the two rows of `table`.
     fn put_table(&mut self, table: Table) {
+        let [first_part, beside_part] = table.parts;
         self.put(MemoryRow {
-            part: table.parts[0],
+            part: first_part,
             basis: table.basis,
             count: table.entries.map(storage_rows),
             entry_bytes: table.row_bytes,
             enforced: table.entries.is_some(),
         });
         self.put(MemoryRow {
-            part: table.parts[1],
+            part: beside_part,
             basis: table.basis,
             count: table.beside.and(table.entries),
             entry_bytes: table.beside.unwrap_or(0),
@@ -176,7 +177,7 @@ impl SessionMemory {
 
     /// The rows, in the order they were added.
     pub fn rows(&self) -> &[MemoryRow] {
-        &self.rows[..self.len]
+        self.rows.get(..self.len).unwrap_or_default()
     }
 
     /// The sum of every row: the most the session holds. `None` when a row has no count, or the

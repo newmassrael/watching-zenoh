@@ -2170,8 +2170,6 @@ pub mod observer;
 // C ABI reports through its door and adds its own to. Over the observer's tables, so gated as the
 // observer is. Documented from inside.
 #[cfg(feature = "alloc")]
-// Totality debt TD-087 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session_memory;
 
 /// Fixed-memory step S9a — the observer of the fixed-memory profile: what the
