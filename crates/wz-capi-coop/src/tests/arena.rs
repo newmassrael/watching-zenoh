@@ -1228,6 +1228,10 @@ fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
         .map(|(_, value)| *value)
 }
 
+/// The limits of entity tables the pico preset leaves at the build's default: zenoh-pico's own
+/// client test holds a hundred of each on one session, as many as the default admits.
+const HELD_AT_THE_DEFAULT: [&str; 3] = ["MAX_SUBSCRIPTIONS", "MAX_QUERYABLES", "MAX_PUBLISHERS"];
+
 /// The value a session of the pico preset holds of `id`, as the generated Kconfig states it: the
 /// preset's where it states one, and the limit's default where it does not, as for a limit
 /// zenoh-pico's own tests need the whole default of.
@@ -1287,7 +1291,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         {
             continue;
         }
-        if let Some(value) = preset_of(&presets, row.basis) {
+        // A table of a limit the preset leaves at its default, as many as zenoh-pico's own tests
+        // hold, is as many rows as that default; any other limit is counted where it has a preset.
+        let value = preset_of(&presets, row.basis).or_else(|| {
+            HELD_AT_THE_DEFAULT
+                .contains(&row.basis)
+                .then(|| pico_value(row.basis))
+        });
+        if let Some(value) = value {
             // A pool the links share holds no more than the links: the client's one.
             let value = if row.basis == "RX_POOL_BUFFERS" || row.basis == "TX_POOL_SLOTS" {
                 value.min(1)

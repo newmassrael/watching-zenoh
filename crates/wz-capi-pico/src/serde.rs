@@ -399,7 +399,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_substr(
     start: *const c_char,
     len: usize,
 ) -> ZResult {
-    ze_serializer_serialize_buf(serializer, start as *const u8, len)
+    ze_serializer_serialize_buf(serializer, start.cast::<u8>(), len)
 }
 
 /// Write a length-prefixed NUL-terminated string (pico
@@ -434,7 +434,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_string(
 ) -> ZResult {
     let data = crate::bytes::z_string_data(val);
     let len = crate::bytes::z_string_len(val);
-    ze_serializer_serialize_buf(serializer, data as *const u8, len)
+    ze_serializer_serialize_buf(serializer, data.cast::<u8>(), len)
 }
 
 // --- reader ----------------------------------------------------------------
@@ -883,7 +883,7 @@ pub unsafe extern "C" fn ze_serialize_substr(
     start: *const core::ffi::c_char,
     len: usize,
 ) -> ZResult {
-    one_shot(bytes, start as *const u8, len)
+    one_shot(bytes, start.cast::<u8>(), len)
 }
 
 /// Serialize a loaned string as a whole payload (pico `ze_serialize_string`).
@@ -898,7 +898,7 @@ pub unsafe extern "C" fn ze_serialize_string(
 ) -> ZResult {
     one_shot(
         bytes,
-        crate::bytes::z_string_data(s) as *const u8,
+        crate::bytes::z_string_data(s).cast::<u8>(),
         crate::bytes::z_string_len(s),
     )
 }
