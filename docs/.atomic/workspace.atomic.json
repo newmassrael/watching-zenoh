@@ -7093,6 +7093,35 @@
         "Tell the no-heap C ABI track (watching-zenoh-1e, not reachable this round): the C ABI node path (z_publisher_put on a node -> node_publish) had the same Ok-on-refusal hop and now reports WZ_CAPI_C_E_VALUE_TOO_LARGE; the registry path already did; wz_capi_c_session_max_message_bytes now answers SIZE_MAX.",
         "Two-host fan-in (pc2, pc4), TTFM, the kernel-segment split and the lane's rows in scripts/host-bench/ap_matrix.py."
       ]
+    },
+    "Round 4619": {
+      "decision_summary": "The pico C ABI's release form moves to no_std with no heap after open, and the library is restructured toward one owner per fact. Owner, 2026-11-23: the 2026-12-01 release, the Windows DLL included, ships no_std and no-heap (docs/c-abi-engine-and-memory.md E7 rewritten), it must lose to zenoh-pico in no cell, every zenoh-pico feature must be proven on it and every extra door must be production level; and the structure is to be the textbook one at any cost. docs/c-abi-architecture.md states that structure (P1 one fact one owner, P2 sans-I/O, P3 session region, P4 views, P5 static composition, P6 total functions, P7 a thin facade, P8 specification first, P9 a per-area size ledger) after measuring the excess by area: codec and language support at parity, the excess in four layers that each re-held what session-core holds. This round lands the no-heap units (key arena, row pools, runtime tables, OS objects in fixed pools, process pools for payloads and objects, watcher lists, scouting window, time base), the first structural phases (transport control judged from views, one declared-key table, one door body per check, the shared session rows for subscribers, a thinner driver), the gates that hold them (size ledger by area, totality lints with a debt register, release-proof ledger, verification lanes, combination legs), and the release-form defects zenoh-pico's own programs found.",
+      "changes_bullets": [
+        "docs/c-abi-architecture.md (new): target structure, migration phases, totality debt register.",
+        "scripts/lib/size_ledger_gate.py + deploy/size_ledger.json (new): per-area ratio ratchets against zenoh-pico, Layer C1cs.",
+        "scripts/lib/totality_debt_gate.py (new): totality lints denied on four core crates, 206 register rows, cells ratchet.",
+        "scripts/lib/release_proof_ledger_gate.py + docs/release-proof-pico-windows.md (new): every zenoh-pico name, switch, example and test with its proving lane.",
+        "scripts/lib/pico_upstream_programs.py (new): zenoh-pico's own tests and examples run on the release library with zenoh-pico as control.",
+        "wz-session-core: key arena by text, row pools in one untyped core, declared-key table, control facts read as views, one-pass keyexpr canon, transport timers, lent-only test feeding.",
+        "wz-capi-coop / wz-runtime-coop / wz-runtime-posix / wz-host-sync: runtime tables reserved at open, OS records in static pools, subscriber rows in the session core, pending samples handed from their rows.",
+        "wz-capi-pico: process pools apart from their doors, payload buddy area, endpoint reader as pico's, matching listener release, has_transport, preset of two liveliness subscribers, the Windows DLL released without std."
+      ],
+      "verification_bullets": [
+        "Crate tests on the merged tree (int8): wz-session-core 1313 and slot profile 858, wz-runtime-coop 138, wz-runtime-posix 71, wz-runtime-tokio 782, wz-capi-coop 166 and 275 with its features, wz-capi-pico 241 coop and 261 tokio, open_in_turn and matching_listener_release 3, no_heap_after_open 1, wz-session-mcu release build; clippy -D warnings per crate including the capi-nostd form; cargo fmt.",
+        "Python gates: wz_config, totality_debt, release_proof_ledger, nondefault_feature_legs, size_ledger selftest, round_fed_gate_reach, limit_read, policy_read, logic_census_coverage, completeness, upstream_citation_anchor, reason_review_pin, soft_job.",
+        "zenoh-pico's own programs on the release library (Linux, os-posix, no std), zenoh-pico as control: matching, batching, advanced_sub repaired and passing.",
+        "Size: pico-client-coop-nostd text 440,471 B against zenoh-pico 329,664 B (1.34; 1.37 at the start of the day). feature_gate_diagnostic 143 probes told the missing feature after the multi-line attribute fix; feature_public_surface_census --check."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Size to 1.0 by area: sessions 3.4x, doors 3.9x, transport 4.1x, driver 2.1x (ledger rows); phases 4 to 7 of docs/c-abi-architecture.md in flight on branches arch-session, arch-doors-2, arch-transport-2, arch-driver-2.",
+        "SCE codegen totality (peek_array, byte_at) on SCE branch sce-panic-site awaiting an SCE session's review, then a pin move.",
+        "Windows: size gate rows unfilled until the first hosted run; perf matrix rows on pc3-win; zenoh-pico programs on the release DLL (L22) observed, to be gated.",
+        "Totality register 378 cells to pay largest first; coverage floor rows to fill from Vcov."
+      ]
     }
   },
   "inventory_entries": {
