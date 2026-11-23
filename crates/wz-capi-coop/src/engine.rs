@@ -65,15 +65,21 @@ use wz_capi_port::{
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
-use wz_runtime_coop::reassembly_rx::{lent_reassembly_in, LentChains, LENT_CHAINS};
+use wz_runtime_coop::executor::SpawnRefusal;
+use wz_runtime_coop::reassembly_rx::{
+    LentChains, LentReassembly, LentReassemblyMaker, LENT_CHAINS,
+};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::session_drive::LinkListener;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::{
-    spawn_session_with_router, wait_any, AndRoom, LinkReadiness, LinkWritability, OpenedLink,
-    PendingDial, RxLease, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    router_session_task_bytes, spawn_session_with_router, wait_any, AndRoom, LinkReadiness,
+    LinkWritability, OpenedLink, PendingDial, RxLease, SessionDatagramLink, SessionDriveConfig,
+    SessionLinks, SessionRole,
 };
-use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_runtime_coop::{
+    ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows,
+};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare::matching::BoxedMatchingSink;
@@ -81,7 +87,7 @@ use wz_session_core::declare::matching::BoxedMatchingSink;
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
-use wz_session_core::driver_loop::DriverOutcome;
+use wz_session_core::driver_loop::{DriverOutcome, EventSink, IterationEvent};
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
@@ -467,6 +473,11 @@ pub enum OpenError {
     /// The session's arena could not be reserved (see [`ArenaRefused`]), so nothing was bound,
     /// joined or dialled.
     Arena(ArenaRefused),
+    /// The session's runtime had no task for a link's session or a group's: its task cells are
+    /// reserved when the session opens, one for each link and group the config admits and in all
+    /// at most the build's `MAX_TASKS`, and every one was taken, or none fits the task. Nothing of
+    /// the link or the group stays.
+    NoTask(SpawnRefusal),
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -1684,59 +1695,6 @@ impl Drop for Gated<'_> {
     }
 }
 
-/// The `on_event` of a link whose session answers queries outside its lock: the registry's
-/// dispatch, with the `ResponseFinal`s it owes held back for the queries a callback is still to
-/// answer (`query`). Everything else the dispatch staged (the replies of a queryable that answers
-/// in place, declare replies, get prunes) goes out at once, as [`dispatch_all`] sends it.
-#[cfg(feature = "queryable")]
-fn dispatch_holding_finals<C: ClockSource + 'static>(
-    registry: Rc<RefCell<Registry>>,
-    face: FaceId,
-    actions: Rc<McuActions<C>>,
-    plane: Arc<QueryPlane>,
-    generation: u64,
-    lane: Arc<SharedLane>,
-) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
-    #[cfg(not(debug_assertions))]
-    let _ = lane;
-    move |event| {
-        #[cfg(debug_assertions)]
-        let _gated = Gated::over(&lane);
-        let mut registry = registry.borrow_mut();
-        // A Push is no query and no declaration: it is handed to the subscribers alone, and what
-        // follows every record (the drains, the Finals owed) under the one lookup of the face.
-        let owed = if lent_push(&event) {
-            registry.dispatch_push(face, event, &*actions)
-        } else {
-            // The queries this frame carries arrive on this face's link, whichever was dialled
-            // last.
-            plane.arriving.store(generation, Ordering::Release);
-            // The application's queryables serve every face, so this face's session states its
-            // own answer to a query it cannot resolve before its frame is dispatched.
-            registry
-                .app
-                .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
-            // A query by an id of the shared dictionary is kept, so its replies mirror its key
-            // form.
-            #[cfg(feature = "shared-key-ids")]
-            actions.note_requests(&event);
-            registry.dispatch_event(face, event);
-            #[cfg(any(
-                feature = "remote-declaration-watch",
-                feature = "declarations-synced-event"
-            ))]
-            registry.settle_decl_events(|| actions.peer_zid());
-            registry.flush_pending_replies(face, &*actions);
-            registry.take_pending_final_rids(face)
-        };
-        for (rid, qos) in owed {
-            if lock(&plane.holds).owe(generation, rid, qos) {
-                actions.send_response_final(rid, qos);
-            }
-        }
-    }
-}
-
 /// Whether `event` is a Push lent where its frame lies: what the subscribers' plane alone reads, so
 /// a link's dispatch hands it there and to no other plane (`Registry::dispatch_push`).
 fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
@@ -1765,24 +1723,83 @@ fn reply_shown(expose: bool, mut callback: ReplyCallback) -> ReplyCallback {
     Box::new(move |reply: &dyn ReplyView| callback(&HiddenReplyTimestamp(reply)))
 }
 
-/// The `on_event` of a link whose session has no queryable: the registry's dispatch, with
-/// everything it staged sent at once.
-#[cfg(not(feature = "queryable"))]
-fn dispatch_all<C: ClockSource + 'static>(
+/// The `on_event` of a link's session: the registry's dispatch for the face the link serves. A
+/// value of a type that can be named, so the task the link's session runs as can be
+/// (`RouterSessionTask`), and the runtime reserves its cells at the open in the bytes that task
+/// takes (`link_task_bytes`).
+///
+/// With `queryable` the session answers queries outside its lock: the `ResponseFinal`s the
+/// dispatch owes are held back for the queries a callback is still to answer, and everything else
+/// it staged (the replies of a queryable that answers in place, declare replies, get prunes) goes
+/// out at once. Without it everything the dispatch staged goes out at once.
+pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
     actions: Rc<McuActions<C>>,
+    #[cfg(feature = "queryable")]
+    plane: Arc<QueryPlane>,
+    /// The link's generation, which the queries it carries are answered under.
+    #[cfg(feature = "queryable")]
+    generation: u64,
+    /// What a debug build tells, while a record is dispatched, that what is offered waited for
+    /// room (`Gated`).
+    #[cfg(debug_assertions)]
     lane: Arc<SharedLane>,
-) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
-    #[cfg(not(debug_assertions))]
-    let _ = lane;
-    move |event| {
+}
+
+impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
+    #[cfg(feature = "queryable")]
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
         #[cfg(debug_assertions)]
-        let _gated = Gated::over(&lane);
-        let mut registry = registry.borrow_mut();
+        let _gated = Gated::over(&self.lane);
+        let face = self.face;
+        let actions = &*self.actions;
+        let mut registry = self.registry.borrow_mut();
+        // A Push is no query and no declaration: it is handed to the subscribers alone, and what
+        // follows every record (the drains, the Finals owed) under the one lookup of the face.
+        let owed = if lent_push(&event) {
+            registry.dispatch_push(face, event, actions)
+        } else {
+            // The queries this frame carries arrive on this face's link, whichever was dialled
+            // last.
+            self.plane
+                .arriving
+                .store(self.generation, Ordering::Release);
+            // The application's queryables serve every face, so this face's session states its
+            // own answer to a query it cannot resolve before its frame is dispatched.
+            registry
+                .app
+                .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
+            // A query by an id of the shared dictionary is kept, so its replies mirror its key
+            // form.
+            #[cfg(feature = "shared-key-ids")]
+            actions.note_requests(&event);
+            registry.dispatch_event(face, event);
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            registry.settle_decl_events(|| actions.peer_zid());
+            registry.flush_pending_replies(face, actions);
+            registry.take_pending_final_rids(face)
+        };
+        for (rid, qos) in owed {
+            if lock(&self.plane.holds).owe(self.generation, rid, qos) {
+                actions.send_response_final(rid, qos);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "queryable"))]
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
+        #[cfg(debug_assertions)]
+        let _gated = Gated::over(&self.lane);
+        let face = self.face;
+        let actions = &*self.actions;
+        let mut registry = self.registry.borrow_mut();
         // A Push is no query and no declaration: it is handed to the subscribers alone.
         if lent_push(&event) {
-            registry.dispatch_push(face, event, &*actions);
+            registry.dispatch_push(face, event, actions);
             return;
         }
         // The application's tables serve every face: this face's session states its own answer
@@ -1790,12 +1807,58 @@ fn dispatch_all<C: ClockSource + 'static>(
         registry
             .app
             .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
-        registry.dispatch(face, event, &*actions);
+        registry.dispatch(face, event, actions);
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
         registry.settle_decl_events(|| actions.peer_zid());
+    }
+}
+
+/// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
+/// link's gates, the session's lent reassembly and `FaceDispatch`. What each cell the open
+/// reserves for a link holds, so a link's session is never refused a cell for its size.
+pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
+    router_session_task_bytes::<
+        C,
+        Rc<dyn SessionDatagramLink>,
+        LentReassembly,
+        LentReassemblyMaker,
+        FaceDispatch<C>,
+    >()
+}
+
+/// What a session's runtime reserves when the session opens (`CoopRuntime::opening`), from the
+/// build's limits and the faces its config admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeTables {
+    /// Reserved at once: a task cell for each link the session may hold at once (the dial role's,
+    /// each face `max_faces` admits, each handshake `accept_pending` admits), in the bytes a
+    /// link's session task takes (`link_task_bytes`), and `MAX_TIMERS` deadlines.
+    pub(crate) rows: RuntimeRows,
+    /// The cells the open may add, one for each group it joins: a group's task is a future no
+    /// type names, so its cell takes the bytes the task has when the open spawns it.
+    pub(crate) groups: usize,
+}
+
+impl RuntimeTables {
+    /// The tables of a session `config` opens, its task cells together at most the build's
+    /// `MAX_TASKS`: the groups' first, as a session that cannot join a group it was told to does
+    /// not open, then the links', so a face past them is refused as one past `max_faces` is.
+    pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig) -> Self {
+        let groups = config.groups.len().min(caps::MAX_TASKS);
+        let links = crate::arena::links_of(config)
+            .unwrap_or(usize::MAX)
+            .min(caps::MAX_TASKS - groups);
+        Self {
+            rows: RuntimeRows {
+                tasks: links,
+                task_bytes: link_task_bytes::<C>(),
+                timers: caps::MAX_TIMERS,
+            },
+            groups,
+        }
     }
 }
 
@@ -2044,30 +2107,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Rc::new(unsafe { LaneGate::new(pump, self.lane.clone(), room) });
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        #[cfg(feature = "queryable")]
-        let dispatch = dispatch_holding_finals(
-            self.registry.clone(),
+        let dispatch = FaceDispatch {
+            registry: self.registry.clone(),
             face,
-            actions.clone(),
-            self.plane.clone(),
+            actions: actions.clone(),
+            #[cfg(feature = "queryable")]
+            plane: self.plane.clone(),
+            #[cfg(feature = "queryable")]
             generation,
-            self.lane.clone(),
-        );
-        #[cfg(not(feature = "queryable"))]
-        let dispatch = dispatch_all(
-            self.registry.clone(),
-            face,
-            actions.clone(),
-            self.lane.clone(),
-        );
+            #[cfg(debug_assertions)]
+            lane: self.lane.clone(),
+        };
         // The link's fragmented messages are staged in buffers of the session's one table, which
         // its links share: a chain claims one when its first fragment arrives and gives it back
         // when it ends, so no buffer is held while no chain is open, and a chain that finds none
         // free is refused and counted. The Router over them is written in the pump's own field
         // when the task first runs, so its slot machines are not a value on this call's stack.
         let chains = LentChains::over(&self.reassembly, LENT_CHAINS);
-        let policy = self.policy;
-        let task = spawn_session_with_router(
+        let spawned = spawn_session_with_router(
             &self.local,
             link.clone(),
             actions.clone(),
@@ -2077,9 +2134,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 role,
                 max_iters: None,
             },
-            move |place| lent_reassembly_in(place, &policy, chains),
+            LentReassemblyMaker {
+                policy: self.policy,
+                chains,
+            },
             dispatch,
         );
+        // The runtime's cells were reserved at the open, one for each link the config admits: a
+        // link past them has no task to run its session, and what it installed in the face's
+        // tables goes with it.
+        let task = match spawned {
+            Ok(task) => task,
+            Err(why) => {
+                self.registry.borrow_mut().forget_own_mapping_space(face);
+                return Err(OpenError::NoTask(why));
+            }
+        };
         Ok(Wire {
             actions,
             task,
@@ -2134,8 +2204,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Some(answer) => {
                     match self.dial_answered(DIAL_FACE, &endpoint, next, deadline_us, answer) {
                         Ok(link) => return Ok(link),
-                        Err(OpenError::EntropyUnavailable) => {
-                            return Err(OpenError::EntropyUnavailable)
+                        // Neither is the endpoint's: the next one would be refused the same.
+                        Err(refused @ (OpenError::EntropyUnavailable | OpenError::NoTask(_))) => {
+                            return Err(refused)
                         }
                         Err(refused) => last = refused,
                     }
@@ -2603,7 +2674,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 watchers: Arc::clone(&self.watchers),
             },
             dispatch,
-        );
+        )
+        .map_err(OpenError::NoTask)?;
         self.local.run_until_idle();
         if face.has_ended() {
             return Err(OpenError::Group(EndpointRefusal::new(
@@ -3369,7 +3441,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 )
                 .map_err(OpenError::Arena)?,
         );
-        let runtime = CoopRuntime::new(clock.clone());
+        // The task and timer tables, reserved here once: no spawn and no sleep of the session
+        // takes memory after its open (`open_links` seals them).
+        let tables = RuntimeTables::of::<C>(&config);
+        let runtime = CoopRuntime::opening(clock.clone(), tables.rows, tables.groups);
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
         // from its open. A face accepted or attached later grows the buffer once.
@@ -3438,7 +3513,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "liveliness")]
             live_subs,
             #[cfg(feature = "ticker")]
-            tickers: Tickers::default(),
+            tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
             reassembly,
             arena,
@@ -3531,6 +3606,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 core.poll_links(None, now_us)?;
             }
         }
+        // What the open spawned has its cells: from here a spawn finds a free cell or is refused.
+        core.runtime.seal();
         Ok(())
     }
 
@@ -5029,8 +5106,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let mut core = self.live()?;
         let id = self.next_local_id();
         let now_ms = core.0.clock.now_us() / 1000;
-        core.0.tickers.start(id, period_ms, tick, now_ms);
-        Some(id)
+        // A table of the build's `MAX_TICKERS` rows, reserved at the open: a start past them is
+        // refused as a build with no periodic jobs refuses it.
+        core.0
+            .tickers
+            .start(id, period_ms, tick, now_ms)
+            .then_some(id)
     }
 
     #[cfg(feature = "ticker")]

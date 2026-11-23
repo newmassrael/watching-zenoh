@@ -2140,6 +2140,7 @@ mod program_clock;
 mod queryable;
 mod redial_wait;
 mod replay;
+mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",
     feature = "listen",

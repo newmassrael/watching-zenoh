@@ -122,6 +122,8 @@ pub use engine::{
     ClockMovesWord, CoopConfig, CoopEngine, EndpointRefusal, KeyWireFormRefused, OpenError,
     OpenKeyIds, Refusal, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES,
 };
+/// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
+pub use wz_runtime_coop::executor::SpawnRefusal;
 #[cfg(feature = "time-base")]
 pub use engine::ClockMoves;
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
