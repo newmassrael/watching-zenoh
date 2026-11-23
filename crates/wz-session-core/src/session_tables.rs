@@ -1090,6 +1090,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         release_keyexpr(&mut self.keyexprs, handle)
     }
 
+    /// Take one more hold of the declaration `handle` names, for a holder of it that is copied,
+    /// with nothing on the wire: `false`, changing nothing, when it names no row now or the row
+    /// holds as many as its count holds.
+    pub fn retain_keyexpr(&mut self, handle: KeyexprHandle) -> bool {
+        let Some(row) = self.keyexprs.get_mut(handle) else {
+            return false;
+        };
+        match row.holds.checked_add(1) {
+            Some(holds) => {
+                row.holds = holds;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Retract the declaration `handle` names whatever holds it: its id, for its retraction to go
     /// on the wire. An entity that named its key by it names it whole from here on
     /// ([`Self::wire_of`]).

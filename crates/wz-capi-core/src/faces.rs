@@ -5020,8 +5020,8 @@ impl SharedSession {
     /// the wire. A declaration no longer held takes none.
     pub fn retain_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
-        if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) {
-            entry.holders = entry.holders.saturating_add(1);
+        if let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) {
+            guard.tables.retain_keyexpr(handle);
         }
     }
 
