@@ -887,8 +887,6 @@ pub mod ext_admit;
 /// The widths of a key expression's scope and a request's id, zenoh's `ExprId`
 /// and `RequestId`. Unconditional: every build that names either holds it at
 /// the width the wire carries.
-// Totality debt TD-151 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod wire_id;
 
 /// The identity of a unicast datagram link: the one remote end it carries a
