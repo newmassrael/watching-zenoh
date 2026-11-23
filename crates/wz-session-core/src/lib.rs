@@ -1517,12 +1517,7 @@ pub mod response_final_build;
 /// as their builders are.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-099 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used, clippy::unreachable)]
 pub mod lent_control;
 
 /// Fixed-memory step S9e -- a reply a queryable staged, written as the codec's

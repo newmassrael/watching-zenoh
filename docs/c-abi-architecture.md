@@ -294,7 +294,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
 | TD-095 | `wz-session-core` | `slot_observer` | `panic`, `arithmetic_side_effects` | 5 | open |
 | TD-098 | `wz-session-core` | `handshake_encode` | `expect_used`, `arithmetic_side_effects` | 4 | open |
-| TD-099 | `wz-session-core` | `lent_control` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 4 | open |
+| TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-101 | `wz-session-core` | `serde_codec` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-104 | `wz-session-core` | `lifecycle_contract` | `indexing_slicing` | 3 | open |
@@ -380,7 +380,10 @@ bounds of a one-entry list are checked when the build is compiled, but `Bounded:
 infallible declaration builder, so the row waits for a constructor whose type proves it: a
 `Bounded::one` in SCE's forge runtime that checks a capacity of one or more in a `const` and
 cannot fail. That is a change to SCE, reviewed by an SCE session, and a pin move here; the row
-leaves with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+leaves with them. TD-099 (`lent_control`) waits on the same change: `chain_of` is the
+fixed-capacity twin of `one_entry`, and `NamedKeyexpr::entry` holds a body of at most
+`NAMED_KEYEXPR_BYTES` as a slice of the `ZBuf`'s u32 bound, which a constructor from a list
+whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
 TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
