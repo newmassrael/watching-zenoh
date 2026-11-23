@@ -1092,7 +1092,7 @@ mod enforcement {
                 { caps::MAX_PENDING_DECLARES },
             > = crate::bounded::BoundedVec::new();
             for interest in 0..admitted as u64 {
-                observer.with_app(|app_half| {
+                observer.read_app(|app_half| {
                     app_half
                         .local_tokens
                         .respond_to_interest_borrowed(None, interest, &mut pending)
