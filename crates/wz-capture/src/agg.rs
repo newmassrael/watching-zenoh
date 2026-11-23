@@ -4217,8 +4217,16 @@ pub(crate) mod tests {
             &udp_packet(HIGH, 7447, LOW, 43210, &wire),
         );
         let frames = d.datagram_flows()[0].frames();
-        assert_eq!(frames.row(0).direction, Direction::A, "low -> high is A");
-        assert_eq!(frames.row(1).direction, Direction::B, "high -> low is B");
+        assert_eq!(
+            frames.get(0).expect("a message the list holds").direction,
+            Direction::A,
+            "low -> high is A"
+        );
+        assert_eq!(
+            frames.get(1).expect("a message the list holds").direction,
+            Direction::B,
+            "high -> low is B"
+        );
     }
 
     /// §1.1f, the plane itself: a capture answers WHICH keyexpr carried the

@@ -1802,14 +1802,6 @@ pub mod passive;
     feature = "codec-close",
     feature = "codec-frame"
 ))]
-// Totality debt TD-002 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
 pub mod passive_messages;
 
 // Open-debt item 924 — the chunked log the message lists and the capture

@@ -276,8 +276,9 @@ impl ChainSoFar {
             offset: self.bytes,
             length,
         };
-        self.fragments += 1;
-        self.bytes += length;
+        // Counts of what one chain holds: they saturate rather than wrap.
+        self.fragments = self.fragments.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(length);
         self.last_sn = sn;
         placed
     }
@@ -563,7 +564,7 @@ impl ChainFold {
     #[cfg_attr(not(feature = "dissect"), allow(unused_variables))]
     fn begin(&mut self, sn: u64, starts: bool, payload: &[u8]) -> OpenChain {
         let id = self.next;
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         OpenChain {
             id,
             held: ChainSoFar {
@@ -639,15 +640,13 @@ impl ChainFold {
     /// head owns, each key's boundary, and the chains that ended and were not yet
     /// handed on, with what theirs own. Exact, as [`crate::heap_account`] counts.
     fn allocated_bytes(&self) -> usize {
-        crate::heap_account::vec_bytes(&self.open)
-            + self
-                .open
-                .iter()
-                .map(|(_, open)| open.head_bytes())
-                .sum::<usize>()
-            + crate::heap_account::vec_bytes(&self.boundary)
-            + crate::heap_account::vec_bytes(&self.ended)
-            + self.ended.iter().map(EndedChain::head_bytes).sum::<usize>()
+        bytes_of([
+            crate::heap_account::vec_bytes(&self.open),
+            bytes_of(self.open.iter().map(|(_, open)| open.head_bytes())),
+            crate::heap_account::vec_bytes(&self.boundary),
+            crate::heap_account::vec_bytes(&self.ended),
+            bytes_of(self.ended.iter().map(EndedChain::head_bytes)),
+        ])
     }
 }
 
@@ -850,7 +849,7 @@ impl ChainRows {
         let back = match fact.chain_id {
             Some(id) => {
                 word |= ROW_HAS_ID;
-                minted - 1 - id
+                minted.saturating_sub(1).saturating_sub(id)
             }
             None => 0,
         };
@@ -873,7 +872,7 @@ impl ChainRows {
             return None;
         }
         let chain_id = if word & ROW_HAS_ID != 0 {
-            Some(minted - 1 - back)
+            Some(minted.saturating_sub(1).saturating_sub(back))
         } else {
             None
         };
@@ -1039,12 +1038,13 @@ impl EndedChains {
             ended.last_sn.unwrap_or(0),
             keyexpr_id,
         ]);
-        self.pushed += 1;
+        self.pushed = self.pushed.saturating_add(1);
     }
 
     /// The number, among every entry ever pushed, of the oldest one held.
     fn first_number(&self) -> u64 {
-        self.pushed - self.log.len() as u64
+        // Never more held than pushed.
+        self.pushed.saturating_sub(self.log.len() as u64)
     }
 
     /// Let go of every chain whose rows are all at or before `rows_end - 1`.
@@ -1138,15 +1138,13 @@ impl EndedChains {
     /// hold them.
     fn allocated_bytes(&self) -> usize {
         #[cfg(feature = "dissect")]
-        let suffixes = self.suffixes.allocated_bytes()
-            + self
-                .suffixes
-                .values()
-                .map(|suffix| suffix.len())
-                .sum::<usize>();
+        let suffixes = bytes_of([
+            self.suffixes.allocated_bytes(),
+            bytes_of(self.suffixes.values().map(|suffix| suffix.len())),
+        ]);
         #[cfg(not(feature = "dissect"))]
         let suffixes = 0;
-        self.log.allocated_bytes() + suffixes
+        self.log.allocated_bytes().saturating_add(suffixes)
     }
 }
 
@@ -1170,13 +1168,19 @@ impl MessageList {
     /// discarded, so asking reads one row's head and walks none.
     pub fn oldest_observed_ns(&self) -> Option<u64> {
         let row = self.oldest.oldest_row()?;
-        instant_in(&self.rows, self.produced - self.len() as u64, row)
+        instant_in(&self.rows, self.first_produced(), row)
+    }
+
+    /// The produced-index of the oldest message held: never more are held than
+    /// were appended.
+    fn first_produced(&self) -> u64 {
+        self.produced.saturating_sub(self.len() as u64)
     }
 
     /// Note the rows appended from produced-index `from` on in the earliest
     /// instant kept: called by every door that appends, once the rows are in.
     fn note_instants(&mut self, from: u64) {
-        let first_produced = self.produced - self.len() as u64;
+        let first_produced = self.first_produced();
         let end = self.produced;
         let Self { rows, oldest, .. } = self;
         let rows: &Store = rows;
@@ -1191,7 +1195,7 @@ impl MessageList {
     /// `produced` belongs to, if it is one ([`Self::whole_units`]).
     fn whole_unit(&self, produced: u64) -> Option<&[u8]> {
         let (&first, (rows, bytes)) = self.whole_units.range(..=produced).next_back()?;
-        (produced < first + rows).then_some(&**bytes)
+        (produced < first.saturating_add(rows)).then_some(&**bytes)
     }
 
     /// What the chain fold made of the row at produced-index `produced`, which is
@@ -1216,9 +1220,11 @@ impl MessageList {
         let held_at_abort = match row.outcome {
             // The chain the row aborted ended with it: every row of it is
             // below the one after this.
-            IngestOutcome::Aborted(_) => row
-                .chain_id
-                .and_then(|id| self.chains.ended.held_at_abort(produced + 1, id)),
+            IngestOutcome::Aborted(_) => row.chain_id.and_then(|id| {
+                self.chains
+                    .ended
+                    .held_at_abort(produced.saturating_add(1), id)
+            }),
             _ => None,
         };
         Some(ChainFact {
@@ -1242,7 +1248,7 @@ impl MessageList {
             let chains = &mut self.chains;
             chains.rows.push(produced, chains.fold.next, &fact);
             for ended in chains.fold.ended.drain(..) {
-                chains.ended.push(produced + 1, ended);
+                chains.ended.push(produced.saturating_add(1), ended);
             }
         }
     }
@@ -1285,8 +1291,9 @@ impl MessageList {
             Store::Held(log) => log.push_back(frame),
             Store::Indexed(index) => index.push_held(self.produced, frame),
         }
-        self.produced += 1;
-        self.note_instants(self.produced - 1);
+        let produced = self.produced;
+        self.produced = produced.saturating_add(1);
+        self.note_instants(produced);
     }
 
     /// Append a decoded batch, which is what a datagram unit yields.
@@ -1314,7 +1321,7 @@ impl MessageList {
         let readable = start.filter(|_| {
             frames.iter().all(UnitRow::can_hold_streamed)
                 && frames.first().is_some_and(|first| {
-                    let body = first.stream_offset + first.prefix_width;
+                    let body = first.stream_offset.saturating_add(first.prefix_width);
                     first.wire_end.is_some_and(|end| {
                         source.stream_bytes(first.direction, body, end).is_some()
                     })
@@ -1326,11 +1333,10 @@ impl MessageList {
         };
         let produced = self.produced;
         for (k, frame) in frames.iter().enumerate() {
-            self.note_chain(produced + k as u64, frame);
+            self.note_chain(produced.saturating_add(k as u64), frame);
         }
-        self.index()
-            .push_unit(produced, start, &frames, Locus::Streamed, None);
-        self.produced += frames.len() as u64;
+        self.with_index(|index| index.push_unit(produced, start, &frames, Locus::Streamed, None));
+        self.produced = produced.saturating_add(frames.len() as u64);
         self.note_instants(produced);
     }
 
@@ -1406,26 +1412,24 @@ impl MessageList {
     /// that lives for the read, and is told before the stream lets go of the
     /// first of them, as for a unit that is one stretch.
     ///
-    /// `spans` must not be empty, and their lengths add up to `payload`'s, the
-    /// unit as it was read (joined and unmasked), which the list keeps as
+    /// The lengths of `stretches` add up to `payload`'s, the unit as it was read
+    /// (joined and unmasked), which the list keeps as
     /// [`Self::push_datagram_in_stream`] says. A unit of one stretch is
     /// [`Self::push_datagram_in_stream`]'s.
     pub fn push_datagram_in_frames(
         &mut self,
         unit: ReadUnit,
-        spans: Vec<StreamSpan>,
+        stretches: Stretches,
         payload: &[u8],
         handshake: LinkHandshake,
     ) {
-        let Some(first) = spans.first() else {
-            unreachable!("a unit joined out of stretches has one");
-        };
+        let place = LogPlace::Frames(stretches.first().needs_from());
+        let spans = stretches.into_vec();
         debug_assert_eq!(
             spans.iter().map(|span| span.len as usize).sum::<usize>(),
             payload.len(),
             "the stretches are the payload"
         );
-        let place = LogPlace::Frames(first.needs_from());
         self.push_logged(unit, payload, |_| place, Some(spans), handshake);
     }
 
@@ -1468,41 +1472,46 @@ impl MessageList {
         };
         let produced = self.produced;
         for (k, frame) in frames.iter().enumerate() {
-            self.note_chain(produced + k as u64, frame);
+            self.note_chain(produced.saturating_add(k as u64), frame);
         }
-        let index = self.index();
-        let place = place(&mut index.log);
-        index.push_unit(
-            produced,
-            start,
-            &frames,
-            Locus::Logged {
-                place,
-                len,
-                handshake,
-                wire_end,
-            },
-            spans,
-        );
-        self.produced += frames.len() as u64;
+        self.with_index(|index| {
+            let place = place(&mut index.log);
+            index.push_unit(
+                produced,
+                start,
+                &frames,
+                Locus::Logged {
+                    place,
+                    len,
+                    handshake,
+                    wire_end,
+                },
+                spans,
+            );
+        });
+        self.produced = produced.saturating_add(frames.len() as u64);
         self.note_instants(produced);
     }
 
-    /// The list's index, made of the rows it keeps whole if it has none yet:
-    /// what a list that begins to keep entries turns into, whatever it held.
-    fn index(&mut self) -> &mut Index {
-        if let Store::Held(log) = &mut self.rows {
-            let mut index = Box::<Index>::default();
-            let first_produced = self.produced - log.len() as u64;
-            for (k, frame) in core::mem::take(log).into_iter().enumerate() {
-                index.push_held(first_produced + k as u64, frame);
-            }
-            self.rows = Store::Indexed(index);
-        }
-        match &mut self.rows {
+    /// `use_index` over the list's index, made of the rows it keeps whole if it
+    /// has none yet: what a list that begins to keep entries turns into,
+    /// whatever it held. The list holds the index again when `use_index` is done.
+    fn with_index<R>(&mut self, use_index: impl FnOnce(&mut Index) -> R) -> R {
+        let held = self.len() as u64;
+        let mut index = match core::mem::take(&mut self.rows) {
             Store::Indexed(index) => index,
-            Store::Held(_) => unreachable!("the list was given an index above"),
-        }
+            Store::Held(log) => {
+                let mut index = Box::<Index>::default();
+                let first_produced = self.produced.saturating_sub(held);
+                for (k, frame) in log.into_iter().enumerate() {
+                    index.push_held(first_produced.saturating_add(k as u64), frame);
+                }
+                index
+            }
+        };
+        let answer = use_index(&mut index);
+        self.rows = Store::Indexed(index);
+        answer
     }
 
     /// R2102 (open-debt item 524) — messages ever appended here, never
@@ -1530,18 +1539,21 @@ impl MessageList {
     /// already follow.
     #[must_use = "a discarded message must be accounted for -- see `Discarded`"]
     pub fn discard_oldest(&mut self, source: &dyn UnitBytes) -> Option<Discarded> {
-        let first_produced = self.produced - self.len() as u64;
+        let first_produced = self.first_produced();
         let frame = match &mut self.rows {
-            Store::Held(log) => log.pop_front()?,
+            Store::Held(log) => Ok(log.pop_front()?),
             Store::Indexed(index) => index.pop_front(first_produced, source)?,
         };
         self.oldest.release_through(first_produced);
         // The one moment the message is still in hand: fold what a chain's
         // identity needs of it, so the count does not depend on how much of the
-        // front a ceiling has taken. See the field's doc.
+        // front a ceiling has taken. See the field's doc. A row its source let
+        // go of before it was read again has nothing to fold.
         #[cfg(feature = "reassembly")]
         {
-            let _ = self.chain_prefix.observe(&frame);
+            if let Ok(frame) = &frame {
+                let _ = self.chain_prefix.observe(frame);
+            }
             // The prefix fold is kept for the identities; the chains it sees end
             // were kept by the list's own fold when they ended.
             self.chain_prefix.ended.clear();
@@ -1551,10 +1563,12 @@ impl MessageList {
         self.chains.rows.release_through(first_produced);
         // An ended chain whose every row is gone goes with its last row.
         #[cfg(feature = "reassembly")]
-        self.chains.ended.release_through(first_produced + 1);
+        self.chains
+            .ended
+            .release_through(first_produced.saturating_add(1));
         // A unit kept whole is let go with its last row.
         while let Some((&first, &(rows, _))) = self.whole_units.first_key_value() {
-            if first + rows > first_produced + 1 {
+            if first.saturating_add(rows) > first_produced.saturating_add(1) {
                 break;
             }
             self.whole_units.pop_first();
@@ -1601,7 +1615,7 @@ impl MessageList {
         from: usize,
         restate: &mut dyn FnMut(Direction, usize, Option<usize>) -> (usize, Option<usize>),
     ) {
-        let first_produced = self.produced - self.len() as u64;
+        let first_produced = self.first_produced();
         match &mut self.rows {
             Store::Held(log) => {
                 for frame in log.iter_mut_from(from) {
@@ -1649,15 +1663,23 @@ impl MessageList {
     /// message kept whole reads as it did, so every reader's answer is the one
     /// it was before the release. A list that keeps every message whole has
     /// nothing to do.
+    ///
+    /// Refused, with the rows before the one it could not read kept whole, when
+    /// `source` no longer holds a unit's bytes or they read again otherwise: the
+    /// list and its source had already come apart, and such a row reads as no
+    /// message from then on.
     pub fn keep_whole_before(
         &mut self,
         direction: Direction,
         offset: usize,
         source: &dyn UnitBytes,
-    ) {
-        let first_produced = self.produced - self.len() as u64;
-        if let Store::Indexed(index) = &mut self.rows {
-            index.keep_whole_before(first_produced, direction, offset, source);
+    ) -> Result<(), ReadAgainRefused> {
+        let first_produced = self.first_produced();
+        match &mut self.rows {
+            Store::Indexed(index) => {
+                index.keep_whole_before(first_produced, direction, offset, source)
+            }
+            Store::Held(_) => Ok(()),
         }
     }
 
@@ -1688,6 +1710,63 @@ pub trait UnitBytes {
     /// `None` when the holder lends none.
     fn container(&self) -> Option<&[u8]> {
         None
+    }
+}
+
+/// Why a message a list keeps as an index entry could not be read again: the list
+/// and the source it reads the unit's bytes from have come apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadAgainRefused {
+    /// The stream no longer holds bytes `from..to` of `direction`, the unit's.
+    StreamGone {
+        /// The direction whose stream it is.
+        direction: Direction,
+        /// The unit's first byte in it.
+        from: usize,
+        /// Past the unit's last byte.
+        to: usize,
+    },
+    /// Neither the list's log nor the container its holder lends holds the
+    /// `len` bytes of a datagram unit.
+    LogGone {
+        /// The unit's length.
+        len: usize,
+    },
+    /// The unit's bytes read again into other records than its entries
+    /// describe.
+    ReadDifferently(crate::passive::RedecodeError),
+    /// The entry names a reading context the list does not hold.
+    NoContext,
+}
+
+/// The stretches a unit joined out of several stands in, in order: never
+/// none, so the first is there to say where the unit begins being read
+/// ([`MessageList::push_datagram_in_frames`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stretches {
+    first: StreamSpan,
+    rest: Vec<StreamSpan>,
+}
+
+impl Stretches {
+    /// `spans`, in order; `None` for no stretch at all.
+    pub fn new(spans: Vec<StreamSpan>) -> Option<Self> {
+        let mut spans = spans.into_iter();
+        let first = spans.next()?;
+        Some(Self {
+            first,
+            rest: spans.collect(),
+        })
+    }
+
+    /// The first stretch.
+    pub fn first(&self) -> StreamSpan {
+        self.first
+    }
+
+    /// Every stretch, in order.
+    fn into_vec(self) -> Vec<StreamSpan> {
+        core::iter::once(self.first).chain(self.rest).collect()
     }
 }
 
@@ -1727,17 +1806,19 @@ impl StreamSpan {
     /// read. `None` when the stream no longer holds them (or the key).
     fn read<'a>(&self, direction: Direction, source: &'a dyn UnitBytes) -> Option<Cow<'a, [u8]>> {
         let len = self.len as usize;
+        // A stretch of a stream: its end is an offset in it.
+        let to = self.at.saturating_add(len);
         if !self.masked {
-            return source.stream_bytes(direction, self.at, self.at + len);
+            return source.stream_bytes(direction, self.at, to);
         }
         let from = self.at.checked_sub(MASK_KEY_LEN)?;
-        let wire = source.stream_bytes(direction, from, self.at + len)?;
-        let (key, masked) = wire.split_at(MASK_KEY_LEN);
+        let wire = source.stream_bytes(direction, from, to)?;
+        let (key, masked) = wire.split_first_chunk::<MASK_KEY_LEN>()?;
         Some(Cow::Owned(
             masked
                 .iter()
-                .enumerate()
-                .map(|(i, byte)| byte ^ key[i % MASK_KEY_LEN])
+                .zip(key.iter().cycle())
+                .map(|(byte, key)| byte ^ key)
                 .collect(),
         ))
     }
@@ -1900,27 +1981,29 @@ pub struct ListMemory {
 impl ListMemory {
     /// Every structure's bytes together.
     pub fn total(&self) -> usize {
-        self.rows
-            + self.unit_log
-            + self.whole_rows
-            + self.sparse
-            + self.wire_ends
-            + self.joined
-            + self.chains
-            + self.small
+        bytes_of([
+            self.rows,
+            self.unit_log,
+            self.whole_rows,
+            self.sparse,
+            self.wire_ends,
+            self.joined,
+            self.chains,
+            self.small,
+        ])
     }
 
     /// This report and `other` added field by field, for a holder of many lists.
     pub fn plus(&self, other: &Self) -> Self {
         Self {
-            rows: self.rows + other.rows,
-            unit_log: self.unit_log + other.unit_log,
-            whole_rows: self.whole_rows + other.whole_rows,
-            sparse: self.sparse + other.sparse,
-            wire_ends: self.wire_ends + other.wire_ends,
-            joined: self.joined + other.joined,
-            chains: self.chains + other.chains,
-            small: self.small + other.small,
+            rows: self.rows.saturating_add(other.rows),
+            unit_log: self.unit_log.saturating_add(other.unit_log),
+            whole_rows: self.whole_rows.saturating_add(other.whole_rows),
+            sparse: self.sparse.saturating_add(other.sparse),
+            wire_ends: self.wire_ends.saturating_add(other.wire_ends),
+            joined: self.joined.saturating_add(other.joined),
+            chains: self.chains.saturating_add(other.chains),
+            small: self.small.saturating_add(other.small),
         }
     }
 }
@@ -1946,20 +2029,18 @@ impl Index {
             rows: self.entries.allocated_bytes(),
             unit_log: self.log.allocated(),
             whole_rows: self.held.allocated_bytes(),
-            sparse: self.sparse.allocated_bytes()
-                + fates
-                + self.spans.allocated_bytes()
-                + self
-                    .spans
-                    .values()
-                    .map(crate::heap_account::vec_bytes)
-                    .sum::<usize>(),
+            sparse: bytes_of([
+                self.sparse.allocated_bytes(),
+                fates,
+                self.spans.allocated_bytes(),
+                bytes_of(self.spans.values().map(crate::heap_account::vec_bytes)),
+            ]),
             wire_ends: self.wire_ends.allocated_bytes(),
             joined,
             // The list's, which owns the chain facts and adds them.
             chains: 0,
             small: crate::heap_account::vec_bytes(&self.contexts)
-                + crate::heap_account::vec_bytes(&self.cut),
+                .saturating_add(crate::heap_account::vec_bytes(&self.cut)),
         }
     }
 }
@@ -1971,10 +2052,12 @@ impl MessageList {
     /// left), with the chains each has open.
     #[cfg(feature = "reassembly")]
     fn chain_bytes(&self) -> usize {
-        self.chains.rows.allocated_bytes()
-            + self.chains.ended.allocated_bytes()
-            + self.chains.fold.allocated_bytes()
-            + self.chain_prefix.allocated_bytes()
+        bytes_of([
+            self.chains.rows.allocated_bytes(),
+            self.chains.ended.allocated_bytes(),
+            self.chains.fold.allocated_bytes(),
+            self.chain_prefix.allocated_bytes(),
+        ])
     }
 
     /// Without reassembly no fragment is read and no chain is counted.
@@ -1994,14 +2077,11 @@ impl MessageList {
         };
         ListMemory {
             chains: self.chain_bytes(),
-            small: held.small + self.oldest.allocated_bytes(),
+            small: held.small.saturating_add(self.oldest.allocated_bytes()),
             // The bytes of the units kept whole are units' bytes the list keeps.
-            unit_log: held.unit_log
-                + self
-                    .whole_units
-                    .values()
-                    .map(|(_, bytes)| bytes.len())
-                    .sum::<usize>(),
+            unit_log: held.unit_log.saturating_add(bytes_of(
+                self.whole_units.values().map(|(_, bytes)| bytes.len()),
+            )),
             ..held
         }
     }
@@ -2241,12 +2321,10 @@ impl Fates {
     fn bytes(&self) -> (usize, usize) {
         (
             self.classes.allocated_bytes(),
-            self.joined.allocated_bytes()
-                + self
-                    .joined
-                    .values()
-                    .map(|bytes| bytes.capacity())
-                    .sum::<usize>(),
+            bytes_of([
+                self.joined.allocated_bytes(),
+                bytes_of(self.joined.values().map(|bytes| bytes.capacity())),
+            ]),
         )
     }
 }
@@ -2431,7 +2509,9 @@ impl UnitRow {
             && frame.offset_space == OffsetSpace::StreamBytes
             && frame
                 .wire_end
-                .and_then(|end| end.checked_sub(frame.stream_offset + frame.prefix_width))
+                .and_then(|end| {
+                    end.checked_sub(frame.stream_offset.saturating_add(frame.prefix_width))
+                })
                 .is_some_and(|n| u32::try_from(n).is_ok())
     }
 
@@ -2453,8 +2533,13 @@ impl UnitRow {
         let facts = MessageFacts::of(frame);
         let (locator, wire_len, mut flags) = match locus {
             Locus::Streamed => {
-                let body = frame.stream_offset + frame.prefix_width;
-                (body as u64, frame.wire_end.unwrap_or(body) - body, 0)
+                // `can_hold_streamed` held the end to at or past the body.
+                let body = frame.stream_offset.saturating_add(frame.prefix_width);
+                (
+                    body as u64,
+                    frame.wire_end.unwrap_or(body).saturating_sub(body),
+                    0,
+                )
             }
             Locus::Logged {
                 place,
@@ -2577,7 +2662,7 @@ impl UnitRow {
     /// stream.
     fn body(&self) -> (usize, usize) {
         let from = self.locator as usize;
-        (from, from + self.wire_len as usize)
+        (from, from.saturating_add(self.wire_len as usize))
     }
 
     /// Where the unit stands, in the space it was read in.
@@ -2648,12 +2733,11 @@ impl ReadAgain {
     /// of this unit's and not passed yet. The records before it are let go: a
     /// walk takes a unit's records in order, and a lookup takes one.
     fn take(&mut self, position: usize) -> Option<PassiveFrame> {
-        let k = position.checked_sub(self.from)? + self.cut;
-        if k < self.next {
-            return None;
-        }
-        self.frames.drain(..(k - self.next).min(self.frames.len()));
-        self.next = k + 1;
+        let k = position.checked_sub(self.from)?.checked_add(self.cut)?;
+        // A record already passed is not handed out again.
+        let skip = k.checked_sub(self.next)?;
+        self.frames.drain(..skip.min(self.frames.len()));
+        self.next = k.saturating_add(1);
         self.frames.pop_front()
     }
 }
@@ -2679,15 +2763,17 @@ impl Index {
         if self.contexts.last() != Some(&start) {
             self.contexts.push(start);
         }
-        let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
+        // The context just pushed, or the last one, which is `start`.
+        let context = u32::try_from(self.contexts.len().saturating_sub(1)).unwrap_or(u32::MAX);
         for (k, frame) in frames.iter().enumerate() {
             let (row, sparse, fate) = UnitRow::of(frame, locus, context);
+            let row_produced = produced.saturating_add(k as u64);
             if row.flags & SPARSE != 0 {
-                self.sparse.insert(produced + k as u64, sparse);
+                self.sparse.insert(row_produced, sparse);
             }
             #[cfg(feature = "reassembly")]
             if let Some(fate) = fate {
-                self.fates.insert(produced + k as u64, fate);
+                self.fates.insert(row_produced, fate);
             }
             #[cfg(not(feature = "reassembly"))]
             let _ = fate;
@@ -2719,7 +2805,8 @@ impl Index {
     /// The frame of the row kept whole at `position`.
     #[inline]
     fn held(&self, position: usize, first_produced: u64) -> Option<&PassiveFrame> {
-        self.held.get(&(first_produced + position as u64))
+        self.held
+            .get(&first_produced.saturating_add(position as u64))
     }
 
     /// Keep whole every row of `direction` whose unit's bytes begin before
@@ -2734,13 +2821,15 @@ impl Index {
         direction: Direction,
         offset: usize,
         source: &dyn UnitBytes,
-    ) {
+    ) -> Result<(), ReadAgainRefused> {
         let seat = usize::from(direction == Direction::B);
-        let mut position = usize::try_from(self.whole_below[seat].saturating_sub(first_produced))
-            .unwrap_or(usize::MAX);
+        let whole_below = self.whole_below.get(seat).copied().unwrap_or(0);
+        let mut position =
+            usize::try_from(whole_below.saturating_sub(first_produced)).unwrap_or(usize::MAX);
+        // Positions below the entries' count, so stepping on does not wrap.
         while let Some(entry) = self.entry(position) {
             let Entry::Unit(row) = entry else {
-                position += 1;
+                position = position.saturating_add(1);
                 continue;
             };
             // A unit the list's own log or the capture container holds is read
@@ -2749,23 +2838,23 @@ impl Index {
                 .stream_dependence()
                 .filter(|_| row.direction() == direction)
             else {
-                position += 1;
+                position = position.saturating_add(1);
                 continue;
             };
             if at >= offset {
                 break;
             }
             // Every row of the unit from here on, read once.
-            let mut unit = self.read_unit(position, first_produced, source);
+            let mut unit = self.read_unit(row, position, first_produced, source)?;
             while let Some(frame) = unit.take(position) {
-                let key = first_produced + position as u64;
+                let key = first_produced.saturating_add(position as u64);
                 self.entries.hold(position);
                 self.sparse.remove(&key);
                 // The frame kept whole carries what the fate says.
                 #[cfg(feature = "reassembly")]
                 let _ = self.fates.remove(key);
                 self.held.insert(key, frame);
-                position += 1;
+                position = position.saturating_add(1);
             }
             // The end is in the held frames now, and the stretches the unit was
             // joined out of were read for them.
@@ -2776,7 +2865,10 @@ impl Index {
                 self.spans.remove(&row.end_key());
             }
         }
-        self.whole_below[seat] = first_produced + position.min(self.entries.len()) as u64;
+        if let Some(below) = self.whole_below.get_mut(seat) {
+            *below = first_produced.saturating_add(position.min(self.entries.len()) as u64);
+        }
+        Ok(())
     }
 
     /// [`MessageList::restate_from`] over the rows from `from` on.
@@ -2789,7 +2881,8 @@ impl Index {
         for position in from..self.entries.len() {
             match self.entry(position) {
                 Some(Entry::Held) => {
-                    if let Some(frame) = self.held.get_mut(&(first_produced + position as u64)) {
+                    let key = first_produced.saturating_add(position as u64);
+                    if let Some(frame) = self.held.get_mut(&key) {
                         let (offset, end) =
                             restate(frame.direction, frame.stream_offset, frame.wire_end);
                         frame.stream_offset = offset;
@@ -2797,9 +2890,7 @@ impl Index {
                     }
                 }
                 Some(Entry::Unit(row)) => {
-                    let head = self.head(position, first_produced).unwrap_or_else(|| {
-                        unreachable!("an entry at {position} has a head");
-                    });
+                    let head = self.unit_head(&row);
                     let (offset, end) = restate(head.direction, head.stream_offset, head.wire_end);
                     let key = row.end_key();
                     match end {
@@ -2817,23 +2908,23 @@ impl Index {
         }
     }
 
-    /// Read again the unit of the row at `position`, which is an
-    /// [`Entry::Unit`]; `first_produced` is the produced-index of the oldest
-    /// row held.
+    /// Read again the unit of `row`, the entry at `position`; `first_produced`
+    /// is the produced-index of the oldest row held.
     ///
-    /// # Panics
-    ///
-    /// When neither the list's log nor `source` holds the unit's bytes, or the
-    /// unit does not read again into the records its entries describe. Either
-    /// says the list and its source have come apart: a holder releases bytes
-    /// only behind the oldest row it still holds, a reader of a list whose
+    /// Refused when neither the list's log nor `source` holds the unit's bytes,
+    /// or the unit does not read again into the records its entries describe.
+    /// Either says the list and its source have come apart: a holder releases
+    /// bytes only behind the oldest row it still holds, a reader of a list whose
     /// units are in a lent container hands the container in, and the walk that
-    /// read the unit is the walk that reads it again. Reading on would hand a
-    /// reader a row that is not the one the capture holds.
-    fn read_unit(&self, position: usize, first_produced: u64, source: &dyn UnitBytes) -> ReadAgain {
-        let Some(Entry::Unit(row)) = self.entry(position) else {
-            unreachable!("only an entry is read again, and {position} is not one");
-        };
+    /// read the unit is the walk that reads it again. A row read on would not be
+    /// the one the capture holds, so none is.
+    fn read_unit(
+        &self,
+        row: UnitRow,
+        position: usize,
+        first_produced: u64,
+        source: &dyn UnitBytes,
+    ) -> Result<ReadAgain, ReadAgainRefused> {
         let batch = row.batch_index as usize;
         // Rows of a unit sit together, so the unit's rows begin `batch` rows
         // before this one, unless a discard took the first of them, which
@@ -2842,7 +2933,7 @@ impl Index {
             Some(from) => (from, 0),
             None => (0, self.cut.len()),
         };
-        let mut messages: Vec<MessageFacts> = self.cut[..cut].to_vec();
+        let mut messages: Vec<MessageFacts> = self.cut.get(..cut).unwrap_or_default().to_vec();
         let mut resync = if cut > 0 { self.cut_resync } else { None };
         for (at, entry) in self.entries.iter_from(from).enumerate() {
             let Entry::Unit(member) = entry.entry() else {
@@ -2851,28 +2942,33 @@ impl Index {
             if member.batch_index as usize != messages.len() {
                 break;
             }
+            let member_produced = first_produced.saturating_add(from.saturating_add(at) as u64);
             let sparse = (member.flags & SPARSE != 0)
-                .then(|| self.sparse.get(&(first_produced + (from + at) as u64)))
+                .then(|| self.sparse.get(&member_produced))
                 .flatten();
             if messages.is_empty() {
                 resync = sparse.and_then(|s| s.resync);
             }
             #[cfg(feature = "reassembly")]
             let fate = (member.flags & FRAGMENT != 0)
-                .then(|| self.fates.get(first_produced + (from + at) as u64))
+                .then(|| self.fates.get(member_produced))
                 .flatten();
             #[cfg(not(feature = "reassembly"))]
             let fate: Option<Fate> = None;
             messages.push(member.facts(sparse, fate));
         }
+        let start = *self
+            .contexts
+            .get(row.context as usize)
+            .ok_or(ReadAgainRefused::NoContext)?;
         let facts = UnitFacts {
-            start: self.contexts[row.context as usize],
+            start,
             resync,
             unit_instant: messages.first().and_then(|m| m.observed_at_ns),
             messages,
         };
         let direction = row.direction();
-        let bytes = self.unit_bytes(&row, source);
+        let bytes = self.unit_bytes(&row, source)?;
         let mut frames = redecode_unit(
             UnitInput {
                 direction,
@@ -2889,34 +2985,40 @@ impl Index {
             },
             &facts,
         )
-        .unwrap_or_else(|e| panic!("a unit a list holds did not read again as it was read: {e:?}"));
+        .map_err(ReadAgainRefused::ReadDifferently)?;
         // The end a layer below gave the unit is no fact of its bytes.
         if let Some(end) = self.stated_end(&row) {
             for frame in &mut frames {
                 frame.wire_end = end;
             }
         }
-        ReadAgain {
+        Ok(ReadAgain {
             from,
             cut,
             frames: VecDeque::from(frames),
             next: 0,
-        }
+        })
     }
 
     /// The bytes of the unit `row` belongs to, from the list's log or from
-    /// `source`; panics where [`Self::read_unit`] says.
-    fn unit_bytes<'a>(&'a self, row: &UnitRow, source: &'a dyn UnitBytes) -> Cow<'a, [u8]> {
+    /// `source`; refused where [`Self::read_unit`] says.
+    fn unit_bytes<'a>(
+        &'a self,
+        row: &UnitRow,
+        source: &'a dyn UnitBytes,
+    ) -> Result<Cow<'a, [u8]>, ReadAgainRefused> {
         match self.held_unit_bytes(row, source) {
-            Some(bytes) => bytes,
-            None if row.logged() => panic!(
-                "the {} bytes of a datagram a list holds are not at {:?}",
-                row.wire_len,
-                LogPlace::of(row.locator)
-            ),
+            Some(bytes) => Ok(bytes),
+            None if row.logged() => Err(ReadAgainRefused::LogGone {
+                len: row.wire_len as usize,
+            }),
             None => {
-                let (body, end) = row.body();
-                panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds")
+                let (from, to) = row.body();
+                Err(ReadAgainRefused::StreamGone {
+                    direction: row.direction(),
+                    from,
+                    to,
+                })
             }
         }
     }
@@ -2935,7 +3037,9 @@ impl Index {
         }
         match LogPlace::of(row.locator) {
             // The unit is the stream's own bytes: the holder's source reads it.
-            LogPlace::Stream(at) => source.stream_bytes(row.direction(), at, at + len),
+            LogPlace::Stream(at) => {
+                source.stream_bytes(row.direction(), at, at.saturating_add(len))
+            }
             // The unit is the stream's bytes under a mask whose key stands just
             // before them: read both and unmask, a copy that lives for this read.
             LogPlace::StreamMasked(at) => StreamSpan {
@@ -2960,23 +3064,27 @@ impl Index {
         }
     }
 
-    /// The row at `position` as a reader is handed it.
+    /// The row at `position` as a reader is handed it: `None` past the end,
+    /// refused where [`Self::read_unit`] says.
     fn row<'a>(
         &'a self,
         position: usize,
         first_produced: u64,
         source: &dyn UnitBytes,
-    ) -> Option<Row<'a>> {
-        let produced = first_produced + position as u64;
-        match self.entry(position)? {
+    ) -> Result<Option<Row<'a>>, ReadAgainRefused> {
+        let produced = first_produced.saturating_add(position as u64);
+        let Some(entry) = self.entry(position) else {
+            return Ok(None);
+        };
+        Ok(match entry {
             Entry::Held => self
                 .held(position, first_produced)
                 .map(|frame| Row::held(frame, produced)),
-            Entry::Unit(_) => self
-                .read_unit(position, first_produced, source)
+            Entry::Unit(row) => self
+                .read_unit(row, position, first_produced, source)?
                 .take(position)
                 .map(|frame| Row::read(frame, produced)),
-        }
+        })
     }
 
     /// The end on the wire the index states for `row` ([`WIRE_END`]): `None`
@@ -2991,29 +3099,39 @@ impl Index {
     fn head(&self, position: usize, first_produced: u64) -> Option<RowHead> {
         match self.entry(position)? {
             Entry::Held => self.held(position, first_produced).map(RowHead::of),
-            Entry::Unit(row) => {
-                let mut head = row.head();
-                if let Some(end) = self.stated_end(&row) {
-                    head.wire_end = end;
-                }
-                Some(head)
-            }
+            Entry::Unit(row) => Some(self.unit_head(&row)),
         }
     }
 
-    /// Release the oldest row and hand back its frame. A row that was the last
-    /// its unit had held releases the unit's logged bytes with it.
-    fn pop_front(&mut self, first_produced: u64, source: &dyn UnitBytes) -> Option<PassiveFrame> {
+    /// The head of the entry `row`, with the end the index states for it.
+    fn unit_head(&self, row: &UnitRow) -> RowHead {
+        let mut head = row.head();
+        if let Some(end) = self.stated_end(row) {
+            head.wire_end = end;
+        }
+        head
+    }
+
+    /// Release the oldest row and hand back its frame: refused where
+    /// [`Self::read_unit`] says, the row released all the same. A row that was
+    /// the last its unit had held releases the unit's logged bytes with it.
+    fn pop_front(
+        &mut self,
+        first_produced: u64,
+        source: &dyn UnitBytes,
+    ) -> Option<Result<PassiveFrame, ReadAgainRefused>> {
         match self.entry(0)? {
             Entry::Held => {
                 let _ = self.entries.pop_front();
                 // A cut unit whose rows were kept whole since needs no facts.
                 self.cut.clear();
                 self.cut_resync = None;
-                self.held.remove(&first_produced)
+                self.held.remove(&first_produced).map(Ok)
             }
             Entry::Unit(row) => {
-                let frame = self.read_unit(0, first_produced, source).take(0);
+                let frame = self
+                    .read_unit(row, 0, first_produced, source)
+                    .map(|mut unit| unit.take(0));
                 let _ = self.entries.pop_front();
                 let sparse = self.sparse.remove(&first_produced);
                 #[cfg(feature = "reassembly")]
@@ -3024,7 +3142,7 @@ impl Index {
                 // needs of the row going. Otherwise the cut, if any, ends here.
                 let continues = matches!(
                     self.entry(0),
-                    Some(Entry::Unit(next)) if next.batch_index == row.batch_index + 1
+                    Some(Entry::Unit(next)) if Some(next.batch_index) == row.batch_index.checked_add(1)
                 );
                 if continues {
                     if self.cut.is_empty() {
@@ -3047,7 +3165,7 @@ impl Index {
                         self.spans.remove(&row.end_key());
                     }
                 }
-                frame
+                frame.transpose()
             }
         }
     }
@@ -3175,17 +3293,25 @@ impl<'a> Messages<'a> {
 
     /// The produced-index of the oldest message held.
     fn first_produced(&self) -> u64 {
-        self.list.produced - self.list.len() as u64
+        self.list.first_produced()
     }
 
-    /// The message at position `index` among those held, oldest first.
+    /// The message at position `index` among those held, oldest first: `None`
+    /// past the end, and for a message the list could not read again
+    /// ([`Self::try_get`] says why).
     #[inline]
     pub fn get(&self, index: usize) -> Option<Row<'a>> {
+        self.try_get(index).ok().flatten()
+    }
+
+    /// [`Self::get`], with why a message the list keeps as an index entry could
+    /// not be read again: its source no longer holds the unit's bytes, or they
+    /// read again otherwise. `Ok(None)` past the end.
+    pub fn try_get(&self, index: usize) -> Result<Option<Row<'a>>, ReadAgainRefused> {
         let list: &'a MessageList = self.list;
+        let produced = self.first_produced().saturating_add(index as u64);
         match &list.rows {
-            Store::Held(log) => log
-                .get(index)
-                .map(|frame| Row::held(frame, self.first_produced() + index as u64)),
+            Store::Held(log) => Ok(log.get(index).map(|frame| Row::held(frame, produced))),
             Store::Indexed(entries) => entries.row(index, self.first_produced(), self.source),
         }
     }
@@ -3203,7 +3329,7 @@ impl<'a> Messages<'a> {
         let list: &'a MessageList = self.list;
         let source: &'a dyn UnitBytes = self.source;
         let whole = || {
-            list.whole_unit(self.first_produced() + index as u64)
+            list.whole_unit(self.first_produced().saturating_add(index as u64))
                 .map(Cow::Borrowed)
         };
         match &list.rows {
@@ -3212,19 +3338,6 @@ impl<'a> Messages<'a> {
                 Entry::Held => whole(),
                 Entry::Unit(row) => entries.held_unit_bytes(&row, source),
             },
-        }
-    }
-
-    /// The message at `index`; panics past the end, as indexing a slice does.
-    ///
-    /// A method and not `Index`: indexing hands out a reference into the list,
-    /// and a row the list decodes on demand has none to hand out (see [`Row`]).
-    #[inline]
-    #[track_caller]
-    pub fn row(&self, index: usize) -> Row<'a> {
-        match self.get(index) {
-            Some(row) => row,
-            None => out_of_range(index, self.len()),
         }
     }
 
@@ -3423,16 +3536,20 @@ fn walk_row<'a>(
     position: usize,
     ahead: &mut Option<ReadAgain>,
 ) -> Option<Row<'a>> {
-    let produced = first_produced + position as u64;
+    let produced = first_produced.saturating_add(position as u64);
     match index.entry(position)? {
         Entry::Held => index
             .held(position, first_produced)
             .map(|frame| Row::held(frame, produced)),
-        Entry::Unit(_) => {
+        Entry::Unit(row) => {
             if let Some(frame) = ahead.as_mut().and_then(|unit| unit.take(position)) {
                 return Some(Row::read(frame, produced));
             }
-            let mut unit = index.read_unit(position, first_produced, source);
+            // A unit its source let go of ends the walk: the rows it would hand
+            // out are not the ones the capture holds.
+            let mut unit = index
+                .read_unit(row, position, first_produced, source)
+                .ok()?;
             let frame = unit.take(position);
             *ahead = Some(unit);
             frame.map(|frame| Row::read(frame, produced))
@@ -3448,8 +3565,9 @@ impl<'a> Iterator for RowIter<'a> {
         match &mut self.walk {
             Walk::Held { rows, front, .. } => {
                 let frame = rows.next()?;
-                *front += 1;
-                Some(Row::held(frame, *front - 1))
+                let produced = *front;
+                *front = produced.saturating_add(1);
+                Some(Row::held(frame, produced))
             }
             Walk::Indexed {
                 index,
@@ -3463,7 +3581,7 @@ impl<'a> Iterator for RowIter<'a> {
                     return None;
                 }
                 let position = *front;
-                *front += 1;
+                *front = position.saturating_add(1);
                 walk_row(index, *first_produced, *source, position, ahead)
             }
         }
@@ -3472,7 +3590,7 @@ impl<'a> Iterator for RowIter<'a> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let left = match &self.walk {
             Walk::Held { rows, .. } => rows.len(),
-            Walk::Indexed { front, back, .. } => back - front,
+            Walk::Indexed { front, back, .. } => back.saturating_sub(*front),
         };
         (left, Some(left))
     }
@@ -3488,11 +3606,12 @@ impl<'a> Iterator for RowIter<'a> {
     fn nth(&mut self, n: usize) -> Option<Row<'a>> {
         match &mut self.walk {
             Walk::Held { rows, front, back } => {
-                let skipped = (n as u64).min(*back - *front);
-                *front += skipped;
+                let skipped = (n as u64).min(back.saturating_sub(*front));
+                *front = front.saturating_add(skipped);
                 let frame = rows.nth(n)?;
-                *front += 1;
-                Some(Row::held(frame, *front - 1))
+                let produced = *front;
+                *front = produced.saturating_add(1);
+                Some(Row::held(frame, produced))
             }
             Walk::Indexed { front, back, .. } => {
                 *front = front.saturating_add(n).min(*back);
@@ -3507,7 +3626,7 @@ impl DoubleEndedIterator for RowIter<'_> {
         match &mut self.walk {
             Walk::Held { rows, back, .. } => {
                 let frame = rows.next_back()?;
-                *back -= 1;
+                *back = back.saturating_sub(1);
                 Some(Row::held(frame, *back))
             }
             Walk::Indexed {
@@ -3521,8 +3640,8 @@ impl DoubleEndedIterator for RowIter<'_> {
                 if *front >= *back {
                     return None;
                 }
-                *back -= 1;
-                index.row(*back, *first_produced, *source)
+                *back = back.saturating_sub(1);
+                index.row(*back, *first_produced, *source).ok().flatten()
             }
         }
     }
@@ -3530,10 +3649,10 @@ impl DoubleEndedIterator for RowIter<'_> {
     fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
         match &mut self.walk {
             Walk::Held { rows, front, back } => {
-                let skipped = (n as u64).min(*back - *front);
-                *back -= skipped;
+                let skipped = (n as u64).min(back.saturating_sub(*front));
+                *back = back.saturating_sub(skipped);
                 let frame = rows.nth_back(n)?;
-                *back -= 1;
+                *back = back.saturating_sub(1);
                 Some(Row::held(frame, *back))
             }
             Walk::Indexed { front, back, .. } => {
@@ -3571,8 +3690,8 @@ impl<'a> Rows<'a> {
                 let first = self.messages.first_produced();
                 Walk::Held {
                     rows: log.iter_from(self.from),
-                    front: first + self.from.min(log.len()) as u64,
-                    back: first + log.len() as u64,
+                    front: first.saturating_add(self.from.min(log.len()) as u64),
+                    back: first.saturating_add(log.len() as u64),
                 }
             }
             Store::Indexed(index) => {
@@ -3629,12 +3748,12 @@ impl Iterator for Heads<'_> {
             return None;
         }
         let position = self.front;
-        self.front += 1;
+        self.front = position.saturating_add(1);
         self.at(position)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.back - self.front;
+        let left = self.back.saturating_sub(self.front);
         (left, Some(left))
     }
 
@@ -3649,7 +3768,7 @@ impl DoubleEndedIterator for Heads<'_> {
         if self.front >= self.back {
             return None;
         }
-        self.back -= 1;
+        self.back = self.back.saturating_sub(1);
         self.at(self.back)
     }
 
@@ -3696,24 +3815,23 @@ impl ExactSizeIterator for Heads<'_> {}
 pub struct Discarded {
     /// `Some` until taken. The destructor reads exactly this: an untaken
     /// receipt still holds its frame, which is what makes the obligation
-    /// observable without a second flag to keep in step.
-    frame: Option<PassiveFrame>,
+    /// observable without a second flag to keep in step. The frame is the
+    /// refusal instead where the list could not read the row again.
+    frame: Option<Result<PassiveFrame, ReadAgainRefused>>,
 }
 
 impl Discarded {
     /// Take the discarded message, discharging the obligation to account for
-    /// it.
+    /// it: `None` for a receipt already spent, which counts nothing again.
     ///
     /// PRIVATE to this module (R311y746): the census below is the only caller,
     /// so there is no way to get the frame out without the count moving.
-    fn take(mut self) -> PassiveFrame {
+    fn take(mut self) -> Option<Result<PassiveFrame, ReadAgainRefused>> {
         // Emptying the option IS the discharge: `self` drops at the end of this
         // call and its destructor then sees a receipt with nothing left to
         // account for. No second flag, and no `mem::forget` -- a receipt that
         // skipped its own destructor could not assert anything.
-        self.frame
-            .take()
-            .expect("a receipt holds its frame until it is taken, once")
+        self.frame.take()
     }
 }
 
@@ -3747,17 +3865,29 @@ pub struct DroppedFrameCensus {
     network: usize,
     unknown: usize,
     undecodable: usize,
+    unread: usize,
 }
 
 impl DroppedFrameCensus {
     /// R311y746 — retire one discarded message: the receipt goes in, the count
     /// comes out, and there is no other door onto either.
     pub fn absorb(&mut self, receipt: Discarded) {
-        let f = receipt.take();
+        let Some(read) = receipt.take() else {
+            return;
+        };
+        let count = match &read {
+            Err(_) => &mut self.unread,
+            Ok(f) => self.bucket(f),
+        };
+        *count = count.saturating_add(1);
+    }
+
+    /// The bucket a discarded message read back as `f` counts in.
+    fn bucket(&mut self, f: &PassiveFrame) -> &mut usize {
         match &f.frame {
-            Ok(crate::inbound::InboundFrame::Init { .. }) => self.init += 1,
-            Ok(crate::inbound::InboundFrame::Open { .. }) => self.open += 1,
-            Ok(crate::inbound::InboundFrame::Close { .. }) => self.close += 1,
+            Ok(crate::inbound::InboundFrame::Init { .. }) => &mut self.init,
+            Ok(crate::inbound::InboundFrame::Open { .. }) => &mut self.open,
+            Ok(crate::inbound::InboundFrame::Close { .. }) => &mut self.close,
             // R311y752 — GATED ON THE VARIANT'S OWN FEATURE, exactly as
             // `Fragment` below has been since R311y655, and newly necessary
             // rather than newly correct: in `wz-capture` this module was always
@@ -3769,24 +3899,24 @@ impl DroppedFrameCensus {
             // reader of this census never has to know which features the binary
             // carries.
             #[cfg(feature = "codec-keep-alive")]
-            Ok(crate::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
-            Ok(crate::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
-            Ok(crate::inbound::InboundFrame::Network { .. }) => self.network += 1,
+            Ok(crate::inbound::InboundFrame::KeepAlive { .. }) => &mut self.keep_alive,
+            Ok(crate::inbound::InboundFrame::Frame { .. }) => &mut self.frame,
+            Ok(crate::inbound::InboundFrame::Network { .. }) => &mut self.network,
             // The VARIANT is gated on `reassembly`, and the ACCESSOR below is
             // not: a reader of this census must not have to know which features
             // this binary carries (R311y655). Without the feature a `0x06`
             // decodes as `Unknown { mid: 6 }` and is counted there, which is the
             // honest reading -- this build did not recognise it as a fragment.
             #[cfg(feature = "reassembly")]
-            Ok(crate::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
+            Ok(crate::inbound::InboundFrame::Fragment { .. }) => &mut self.fragment,
             #[cfg(feature = "codec-join")]
-            Ok(crate::inbound::InboundFrame::Join { .. }) => self.join += 1,
+            Ok(crate::inbound::InboundFrame::Join { .. }) => &mut self.join,
             // UNGATED, alone among these arms, because the variant is: transport
             // OAM needs no generated body codec, so no feature can take it away
             // and no build counts it as `unknown`.
-            Ok(crate::inbound::InboundFrame::Oam { .. }) => self.oam += 1,
-            Ok(crate::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
-            Err(_) => self.undecodable += 1,
+            Ok(crate::inbound::InboundFrame::Oam { .. }) => &mut self.oam,
+            Ok(crate::inbound::InboundFrame::Unknown { .. }) => &mut self.unknown,
+            Err(_) => &mut self.undecodable,
         }
     }
 
@@ -3855,27 +3985,36 @@ impl DroppedFrameCensus {
         self.undecodable
     }
 
+    /// Messages the list kept as index entries and could not read again when a
+    /// bound discarded them: their source had let their bytes go first.
+    pub fn unread(&self) -> usize {
+        self.unread
+    }
+
     /// Every discarded message this censused — the figure that must equal
     /// `DissectionDrops::frames` (`wz-capture`), and the assertion that keeps the two
     /// from drifting into two different stories about one trim.
     pub fn total(&self) -> usize {
-        self.init
-            + self.open
-            + self.close
-            + self.keep_alive
-            + self.frame
-            + self.fragment
-            + self.join
-            + self.oam
-            + self.network
-            + self.unknown
-            + self.undecodable
+        bytes_of([
+            self.init,
+            self.open,
+            self.close,
+            self.keep_alive,
+            self.frame,
+            self.fragment,
+            self.join,
+            self.oam,
+            self.network,
+            self.unknown,
+            self.undecodable,
+            self.unread,
+        ])
     }
 }
 
 impl Drop for Discarded {
     fn drop(&mut self) {
-        assert!(
+        debug_assert!(
             self.frame.is_none(),
             "R311y723: a message was discarded and never accounted for. Take it \
              with `Discarded::take` and fold it into the drop census -- a bound \
@@ -3884,12 +4023,9 @@ impl Drop for Discarded {
     }
 }
 
-/// The panic of an index past the end, kept off the path that does not take it.
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn out_of_range(index: usize, len: usize) -> ! {
-    panic!("message {index} of a list holding {len}")
+/// The sum of counts of one kind (bytes, messages), which saturates rather than wrap.
+fn bytes_of(terms: impl IntoIterator<Item = usize>) -> usize {
+    terms.into_iter().fold(0, usize::saturating_add)
 }
 
 #[cfg(test)]
@@ -3987,12 +4123,14 @@ mod tests {
     }
 
     /// THE OBLIGATION, as a type: a discarded message that nobody takes panics
-    /// at the moment it is dropped.
+    /// at the moment it is dropped, in a build with debug assertions (a release
+    /// build counts nothing it was not handed, and does not stop).
     ///
     /// This is the assertion that separates this type from a comment. Four
     /// rounds fixed one instance each of "a bound discarded and did not say
     /// so"; the fifth made it impossible.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "never accounted for")]
     fn a_discarded_message_nobody_accounts_for_panics() {
         let mut list = MessageList::new();
@@ -4403,7 +4541,7 @@ mod tests {
                 "head {k}"
             );
             assert_eq!(
-                alloc::format!("{:?}", *rows.row(k)),
+                alloc::format!("{:?}", *rows.get(k).expect("a row")),
                 alloc::format!("{:?}", *want)
             );
         }
@@ -4543,7 +4681,9 @@ mod tests {
             // Direction A lets go of its first 60 bytes: the units standing there
             // are kept whole first, and the stream then holds nothing of them.
             let cut = 60;
-            streamed.keep_whole_before(Direction::A, cut, &source);
+            streamed
+                .keep_whole_before(Direction::A, cut, &source)
+                .expect("the stream still holds the units");
             let [oldest_a, oldest_b] = oldest(&streamed);
             assert!(
                 oldest_a.is_some_and(|at| at >= cut),
@@ -4615,7 +4755,8 @@ mod tests {
                 if refused(packet) {
                     refuse(&mut read.frames);
                 }
-                framed.push_datagram_in_frames(read, spans, unit, handshake);
+                let stretches = Stretches::new(spans).expect("a unit stands in a stretch");
+                framed.push_datagram_in_frames(read, stretches, unit, handshake);
             }
             let mut kept = keeping.next_datagram_on(direction, unit, packet, handshake);
             if refused(packet) {
@@ -4656,7 +4797,9 @@ mod tests {
             // stretch (or its key) stands there are kept whole, the rest read
             // from stretches that still stand, and every row still reads.
             let cut = 60;
-            framed.keep_whole_before(Direction::A, cut, &source);
+            framed
+                .keep_whole_before(Direction::A, cut, &source)
+                .expect("the stream still holds the stretches");
             let oldest_a = framed.oldest_source_offset(Direction::A, usize::MAX);
             assert!(
                 oldest_a.is_some_and(|at| at >= cut),
@@ -4728,7 +4871,7 @@ mod tests {
 
             let rows = list.read(&source);
             for k in 0..rows.len() {
-                let unit = &units[whole.read(&NoBytes).row(k).stream_offset];
+                let unit = &units[whole.read(&NoBytes).get(k).expect("a row").stream_offset];
                 assert_eq!(
                     rows.unit_bytes(k).as_deref(),
                     Some(unit.as_slice()),
@@ -4757,12 +4900,17 @@ mod tests {
     /// A lent unit is read where the container holds it: a reader that does
     /// not hand the container in has no bytes to read it from.
     #[test]
-    #[should_panic(expected = "bytes of a datagram a list holds are not at")]
     fn a_lent_datagram_read_without_its_container_is_refused() {
         let units = datagrams(4);
         let container: Vec<u8> = units.concat();
         let (lent, _) = logged_and_whole(&units, LinkHandshake::Present, Some(&container));
-        let _ = lent.read(&NoBytes).row(0);
+        let read = lent.read(&NoBytes);
+        assert!(
+            matches!(read.try_get(0), Err(ReadAgainRefused::LogGone { .. })),
+            "{:?}",
+            read.try_get(0).map(|row| row.is_some())
+        );
+        assert!(read.get(0).is_none(), "a refused row is no message");
     }
 
     /// Discarding a unit's last row releases its logged bytes, and what stays

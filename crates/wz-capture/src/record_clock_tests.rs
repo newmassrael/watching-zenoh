@@ -601,10 +601,16 @@ fn the_clock_keeps_every_digit_the_source_gave_on_both_link_kinds() {
         Some(instant + 1),
         &tcp_packet(1000, &framed_keepalive()),
     );
-    let datagram = &d.datagram_flows()[0].frames().row(0);
+    let datagram = &d.datagram_flows()[0]
+        .frames()
+        .get(0)
+        .expect("a message the list holds");
     assert_eq!(datagram.observed_at_ns, Some(instant));
     assert_eq!(datagram.observed_at_ms, Some(1_700_000_000_123));
-    let stream = &d.flows()[0].frames().row(0);
+    let stream = &d.flows()[0]
+        .frames()
+        .get(0)
+        .expect("a message the list holds");
     assert_eq!(stream.observed_at_ns, Some(instant + 1));
     assert_eq!(stream.observed_at_ms, Some(1_700_000_000_123));
 }
@@ -656,7 +662,10 @@ fn a_capture_files_sub_millisecond_digits_reach_the_records() {
             &[(0, ticks, packet.as_slice())],
         );
         let d = Dissection::from_pcapng(&file).expect("reads");
-        let frame = &d.datagram_flows()[0].frames().row(0);
+        let frame = &d.datagram_flows()[0]
+            .frames()
+            .get(0)
+            .expect("a message the list holds");
         assert_eq!(
             frame.observed_at_ns,
             Some(want_ns),
@@ -1229,7 +1238,12 @@ fn rows_behind_a_hole_are_in_capture_order_and_their_instants_agree_with_it() {
     let order = flow.capture_order();
     let instants: Vec<Option<u64>> = order
         .iter()
-        .map(|&p| flow.frames().row(p).observed_at_ns)
+        .map(|&p| {
+            flow.frames()
+                .get(p)
+                .expect("a message the list holds")
+                .observed_at_ns
+        })
         .collect();
     assert!(
         instants.windows(2).all(|w| w[0] < w[1]),
