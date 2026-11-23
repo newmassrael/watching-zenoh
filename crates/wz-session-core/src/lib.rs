@@ -299,17 +299,9 @@ pub mod delivery_lane;
 // closed key set refuses and counts; one module with two files, `key_gate.rs` with the feature
 // and `key_gate_open.rs` (an open gate of no size) without it, at the same path either way.
 #[cfg(feature = "key-set-closed")]
-// Totality debt TD-014 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod key_catalogue;
 
 #[cfg(feature = "key-set-closed")]
-// Totality debt TD-041 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
 pub mod key_allowance;
 
 #[cfg_attr(not(feature = "key-set-closed"), path = "key_gate_open.rs")]

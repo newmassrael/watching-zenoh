@@ -236,7 +236,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-004 | `wz-session-core` | `session_actions` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 85 | open |
 | TD-010 | `wz-session-core` | `delivery_lane` | `indexing_slicing`, `arithmetic_side_effects` | 54 | open |
 | TD-013 | `wz-session-core` | `plain_push` | `indexing_slicing`, `unwrap_used`, `arithmetic_side_effects` | 40 | open |
-| TD-014 | `wz-session-core` | `key_catalogue` | `panic` | 39 | open |
 | TD-016 | `wz-session-core` | `lent_response` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
 | TD-017 | `wz-session-core` | `frame_encode` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 37 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
@@ -254,7 +253,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-038 | `wz-session-core` | `lifecycle_wire` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 22 | open |
 | TD-039 | `wz-session-core` | `dissect_schema` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |
 | TD-040 | `wz-session-core` | `event_ring` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |
-| TD-041 | `wz-session-core` | `key_allowance` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 20 | open |
 | TD-042 | `wz-session-core` | `serial_link` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 20 | open |
 | TD-043 | `wz-session-core` | `chain_staging` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
 | TD-044 | `wz-session-core` | `encoded_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | open |
@@ -376,12 +374,11 @@ whose refusal is a `RuntimeError` of its own and `block_on` answering a `Result`
 callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
 to give, and whose refusal belongs in that trait of `wz-session-core`.
 
-Some rows keep only `panic` for a check that runs while the build evaluates a constant, where the
-panic is how a wrong generated table or a misspelt build value stops the build that holds it.
-TD-014 is `KeyCatalogue::new`: its refusal as a value is `try_new`, and the panic moves out when
-the generator writes the `match` on `try_new` into the image's own crate. TD-023 is the refusal of
-a `WZ_POLICY_*` value no choice spells; its indexing is the `ALL[index]` of
-`policy_generated.rs`, which `wz_config.py` writes.
+TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
+is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
+no choice spells. Its indexing is the `ALL[index]` of `policy_generated.rs`, which `wz_config.py`
+writes. A generated key table is checked the other way: the library answers `try_new`, and the
+image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
