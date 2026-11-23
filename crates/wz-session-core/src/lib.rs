@@ -163,8 +163,6 @@ pub mod keyexpr_match;
 // The borrowed core (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc;
 // the owned `OwnedNonWildKeyExpr` namespace value is `alloc`-gated.
 #[cfg(feature = "keyexpr-prefix")]
-// Totality debt TD-012 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr_prefix;
 
 // §5.21 routing-namespace — the per-participant keyexpr namespace prefix/strip

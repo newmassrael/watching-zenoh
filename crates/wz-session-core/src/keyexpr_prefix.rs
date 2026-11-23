@@ -84,13 +84,12 @@ impl<'a> NonWildKeyExpr<'a> {
         // (0x2A) is a single byte and cannot occur inside a multi-byte UTF-8
         // sequence (continuation/lead bytes are all >= 0x80), so a raw byte scan
         // is correct on arbitrary UTF-8.
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'*' {
+        let mut rest = s.as_bytes();
+        while let [first, tail @ ..] = rest {
+            if *first == b'*' {
                 return Err(NonWildError::Wild);
             }
-            i += 1;
+            rest = tail;
         }
         Ok(NonWildKeyExpr(s))
     }
@@ -127,100 +126,103 @@ fn is_chunk_matching(target: &[u8], prefix: &[u8]) -> bool {
     if prefix.first() == Some(&b'@') && target.first() != Some(&b'@') {
         return false;
     }
-    let mut ti = 0usize;
-    let mut pi = 0usize;
+    let mut t = target;
+    let mut p = prefix;
     let mut tprev = b'/';
-    while ti < target.len() && pi < prefix.len() {
-        if target[ti] == b'*' {
-            if tprev == b'*' || ti + 1 == target.len() {
+    while let (Some((&tc, t_rest)), Some((&pc, p_rest))) = (t.split_first(), p.split_first()) {
+        if tc == b'*' {
+            if tprev == b'*' || t_rest.is_empty() {
                 // a `**` chunk, or a trailing single `*` — matches anything.
                 return true;
             } else if tprev == b'$' {
-                // `$*` partial: try to anchor the remainder at each prefix offset.
-                let mut i = pi;
-                while i < prefix.len() - 1 {
-                    if is_chunk_matching(&target[ti + 1..], &prefix[i..]) {
+                // `$*` partial: try to anchor the remainder at each prefix offset
+                // that leaves at least two bytes of prefix.
+                let mut q = p;
+                while let [_, after @ ..] = q {
+                    if after.is_empty() {
+                        break;
+                    }
+                    if is_chunk_matching(t_rest, q) {
                         return true;
                     }
-                    i += 1;
+                    q = after;
                 }
             }
-        } else if target[ti] == prefix[pi] {
-            pi += 1;
-        } else if target[ti] != b'$' {
+        } else if tc == pc {
+            p = p_rest;
+        } else if tc != b'$' {
             // ordinary char that does not match, and not the `$` of a `$*`.
             return false;
         }
-        tprev = target[ti];
-        ti += 1;
+        tprev = tc;
+        t = t_rest;
     }
-    if pi != prefix.len() {
+    if !p.is_empty() {
         // prefix not consumed entirely.
         return false;
     }
-    ti == target.len() || (ti + 2 == target.len() && target[ti] == b'$')
+    t.is_empty() || matches!(t, [b'$', _])
+}
+
+/// `s` split at its first `/`: the chunk before it, and the bytes after it when
+/// there is one (empty when the `/` is the last byte).
+fn split_chunk(s: &[u8]) -> (&[u8], Option<&[u8]>) {
+    let mut parts = s.splitn(2, |&c| c == b'/');
+    let chunk = parts.next().unwrap_or(s);
+    (chunk, parts.next())
 }
 
 /// Chunk-walk core. Port of zenoh's private `strip_nonwild_prefix_inner`
 /// (`borrowed.rs:331`), INCLUDING its `@`-verbatim branch since R311y543.
 fn strip_inner<'t>(target: &'t [u8], prefix: &[u8]) -> Option<&'t [u8]> {
-    let mut ti = 0usize;
-    let mut pi = 0usize;
-    while ti < target.len() && pi < prefix.len() {
-        let te = ti
-            + target[ti..]
-                .iter()
-                .position(|&c| c == b'/')
-                .unwrap_or(target.len() - ti);
-        let pe = pi
-            + prefix[pi..]
-                .iter()
-                .position(|&c| c == b'/')
-                .unwrap_or(prefix.len() - pi);
-        let tchunk = &target[ti..te];
-        if tchunk.len() == 2 && tchunk[0] == b'*' {
+    let mut t = target;
+    let mut p = prefix;
+    while !t.is_empty() && !p.is_empty() {
+        let (tchunk, t_next) = split_chunk(t);
+        let (pchunk, p_next) = split_chunk(p);
+        if matches!(tchunk, [b'*', _]) {
             // `**` — and the answer depends on whether the REMAINING PREFIX has
             // a verbatim chunk, which is zenoh `borrowed.rs:350-384`.
-            let remaining = &prefix[pi..];
-            let Some(mut p) = remaining.iter().position(|&c| c == b'@') else {
+            let remaining = p;
+            let Some(mut at) = remaining.iter().position(|&c| c == b'@') else {
                 // No `@` left to cross: `**` covers every remaining prefix chunk
                 // and the suffix is `**` plus the rest of the target.
-                return Some(&target[ti..]);
+                return Some(t);
             };
-            if te + 1 >= target.len() {
+            let rest = match t_next {
+                Some(rest) if !rest.is_empty() => rest,
                 // `**` is the LAST target chunk and it may not reach a verbatim
                 // chunk, so there is nothing left to cover the prefix with.
-                return None;
-            }
-            // Walk `p` backwards a chunk at a time, letting `**` absorb as many
+                _ => return None,
+            };
+            // Walk `at` backwards a chunk at a time, letting `**` absorb as many
             // NON-verbatim prefix chunks as it can before the verbatim one.
             loop {
-                if let Some(tail) = strip_inner(&target[(te + 1)..], &remaining[p..]) {
+                if let Some(tail) = remaining.get(at..).and_then(|r| strip_inner(rest, r)) {
                     return Some(tail);
                 }
-                if p == 0 {
-                    return None;
-                }
-                p -= 2;
-                while p > 0 && remaining[p - 1] != b'/' {
-                    p -= 1;
-                }
+                // The first chunk (`at` 0) has nothing before it to give back, and
+                // an `@` one byte in has no whole chunk before it: both refused.
+                let back = at.checked_sub(2)?;
+                at = remaining
+                    .get(..back)
+                    .and_then(|head| head.iter().rposition(|&c| c == b'/'))
+                    .map_or(0, |slash| slash.saturating_add(1));
             }
         }
-        if te == target.len() {
-            // target has no more chunks than prefix and the last is non-`**`, so
-            // it cannot fully cover prefix.
+        // No `/` after the chunk: target has no more chunks than prefix and the
+        // last is non-`**`, so it cannot fully cover prefix.
+        let t_next = t_next?;
+        if !is_chunk_matching(tchunk, pchunk) {
             return None;
         }
-        if !is_chunk_matching(tchunk, &prefix[pi..pe]) {
-            return None;
-        }
-        if pe == prefix.len() {
-            // prefix fully matched; the suffix starts after this target chunk.
-            return Some(&target[(te + 1)..]);
-        }
-        ti = te + 1;
-        pi = pe + 1;
+        // No `/` after the prefix chunk: prefix fully matched; the suffix starts
+        // after this target chunk.
+        let Some(p_next) = p_next else {
+            return Some(t_next);
+        };
+        t = t_next;
+        p = p_next;
     }
     None
 }
@@ -259,7 +261,8 @@ impl OwnedNonWildKeyExpr {
         if suffix.is_empty() {
             self.0.clone()
         } else {
-            let mut out = String::with_capacity(self.0.len() + 1 + suffix.len());
+            let mut out =
+                String::with_capacity(self.0.len().saturating_add(1).saturating_add(suffix.len()));
             out.push_str(&self.0);
             out.push('/');
             out.push_str(suffix);
