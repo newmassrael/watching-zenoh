@@ -145,6 +145,15 @@ impl Deliveries {
         })
     }
 
+    /// Whether this thread delivers for the engine now: a callback of the session may run below
+    /// on its stack, so nothing here waits for a call to end.
+    pub(super) fn delivers_here(&self) -> bool {
+        let word = os::current_word();
+        self.owner.load(Ordering::Acquire) == word
+            || (self.beside.load(Ordering::Acquire) > 0
+                && self.with_others(|others| others.iter().any(|t| t.word == word && t.delivering)))
+    }
+
     /// The callback of `key` runs on this thread until the guard drops, or unwinds.
     #[cfg(feature = "local-queryable")]
     pub(super) fn run(&self, key: TargetKey) -> Running<'_> {

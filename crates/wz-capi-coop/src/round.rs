@@ -8,8 +8,10 @@
 //! # One table
 //!
 //! A round is one table: the records the session's tables matched while the lock was held, each
-//! with the callbacks its rows hold, copied out of them, as zenoh-pico copies its subscriptions'
-//! callbacks out of its session mutex before it calls them. A record's parts are read where they
+//! with the calls it owes: a call of a subscriber's callback begun on its row's latch, which the
+//! row's table keeps where it lies until the call ends (`docs/c-abi-architecture.md`, P11), and a
+//! copy of any other callback, as zenoh-pico copies its subscriptions' callbacks out of its
+//! session mutex before it calls them. A record's parts are read where they
 //! lie when they lie in the datagram a link lends the step (UDP, a stream), so a sample of it is
 //! never copied; a key the session resolved from an alias lies in a frame of the dispatch, and is
 //! written into the table's keys; every other part that lies elsewhere (a rejoined message, a
@@ -44,8 +46,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::{AtomicU64, AtomicU8};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
-#[cfg(feature = "local-subscriber")]
-use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
@@ -62,11 +62,14 @@ use wz_session_core::sink::SampleView;
 
 #[cfg(feature = "liveliness")]
 use crate::engine::LivelinessCallback;
-use crate::engine::SubscriberCallback;
+use crate::engine::SubscriberCall;
 #[allow(unused_imports)]
 use crate::prelude::*;
+use wz_capi_port::sync::Lock;
 #[cfg(feature = "query")]
 use wz_capi_port::ReplyCallback;
+use wz_session_core::bounded::Static;
+use wz_session_core::session_tables::SubscriberHandle;
 
 /// The longest id of the clock that stamped a sample's timestamp the wire carries.
 const TIMESTAMP_ID_BYTES: usize = 16;
@@ -456,11 +459,13 @@ impl Entry {
     }
 }
 
-/// A callback a record of the round owes, copied out of the row that matched it under the
-/// session's lock and let go of, with no lock held, when the round is emptied.
+/// A callback a record of the round owes: a call of a subscriber's callback begun on its row under
+/// the session's lock and ended as the round is emptied ([`Released::settle`]), or another
+/// callback copied out of the row that matched it and let go of, with no lock held, as the round is
+/// emptied.
 enum Owed {
     /// A subscriber's.
-    Subscriber(SubscriberCallback),
+    Subscriber(SubscriberCall),
     /// A liveliness subscriber's.
     #[cfg(feature = "liveliness")]
     Liveliness(LivelinessCallback),
@@ -470,8 +475,8 @@ enum Owed {
 }
 
 impl Owed {
-    /// The callback, when it is a subscriber's.
-    fn subscriber(&self) -> Option<&SubscriberCallback> {
+    /// The call, when it is of a subscriber's callback.
+    fn subscriber(&self) -> Option<&SubscriberCall> {
         match self {
             Self::Subscriber(callback) => Some(callback),
             #[cfg(feature = "liveliness")]
@@ -747,10 +752,13 @@ impl Table {
         self.callbacks.get(entry.callbacks()).unwrap_or(&[])
     }
 
-    /// Hold nothing, for the next round; the area stays the table's.
-    fn clear(&mut self) {
+    /// Hold nothing, for the next round, each call it owes ended into `released`; the area stays
+    /// the table's.
+    fn empty(&mut self, released: &Released) {
+        while let Some(owed) = self.callbacks.pop() {
+            released.settle(owed);
+        }
         self.entries.clear();
-        self.callbacks.clear();
         self.keys.clear();
         self.key = None;
         self.datagram = (ptr::null(), 0);
@@ -759,11 +767,69 @@ impl Table {
     }
 }
 
-/// The subscribers a put of the session's own reaches, in the order the session's table reached
-/// them, each with the callback its row holds ([`Round::captured`]).
+/// The calls of the subscribers a put of the session's own reaches, in the order the session's
+/// table reached them, each begun on its row ([`Round::captured`]).
 #[cfg(feature = "local-subscriber")]
-pub(crate) type Captured =
-    BoundedVec<(SubId, SubscriberCallback), { caps::MAX_SUBSCRIPTIONS }, Static>;
+pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
+
+/// The rows whose last call ended after their subscriber was undeclared, by handle, for the session
+/// to let go of under its lock and drop after it ([`Round::take_released`]). Written by whoever
+/// ends a call: a delivery emptying the round with no lock of the session held, the session's own
+/// put after its calls, the session refusing a record under its lock.
+struct Released {
+    handles: Lock<BoundedVec<SubscriberHandle, { caps::MAX_SUBSCRIPTIONS }, Static>>,
+    /// Whether `handles` holds one, so a delivery that let none go takes no lock for it.
+    any: AtomicBool,
+}
+
+impl Released {
+    fn new() -> Self {
+        Self {
+            handles: Lock::new(BoundedVec::new_static()),
+            any: AtomicBool::new(false),
+        }
+    }
+
+    /// End `call`, its row kept for the session to let go of when it was the row's last call.
+    fn end(&self, call: SubscriberCall) {
+        let Some(handle) = call.end() else {
+            return;
+        };
+        let kept = self.handles.with(|handles| {
+            let kept = handles.push(handle).is_ok();
+            self.any.store(true, Ordering::Release);
+            kept
+        });
+        // An undeclared row keeps its slot until it is let go of, so the rows waiting here are
+        // never more than a table of subscribers holds; one that found no room would keep its slot.
+        debug_assert!(kept, "the rows waiting to be let go of fit a table of them");
+    }
+
+    /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
+    fn settle(&self, owed: Owed) {
+        match owed {
+            Owed::Subscriber(call) => self.end(call),
+            #[cfg(feature = "liveliness")]
+            Owed::Liveliness(callback) => drop(callback),
+            #[cfg(feature = "query")]
+            Owed::Reply(callback) => drop(callback),
+        }
+    }
+
+    /// The next row to let go of.
+    fn take(&self) -> Option<SubscriberHandle> {
+        if !self.any.load(Ordering::Acquire) {
+            return None;
+        }
+        self.handles.with(|handles| {
+            let next = handles.pop();
+            if handles.is_empty() {
+                self.any.store(false, Ordering::Release);
+            }
+            next
+        })
+    }
+}
 
 /// The session's round of deliveries (see the module).
 pub(crate) struct Round {
@@ -783,11 +849,13 @@ pub(crate) struct Round {
     /// The datagram lent before a rejoined message was lent in its place ([`Self::lend_rejoined`]),
     /// lent again once the message's records are dispatched. Written under the session's lock.
     lent_before: UnsafeCell<Option<(*const u8, usize)>>,
-    /// The callbacks of the subscribers the samples offered now reach, copied out of their rows
-    /// instead of held, while the session's own put asks for them ([`Self::capture`]). Written
-    /// under the session's lock.
+    /// The calls of the subscribers the samples offered now reach, begun on their rows and handed
+    /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
+    /// Written under the session's lock.
     #[cfg(feature = "local-subscriber")]
     capturing: UnsafeCell<Option<Captured>>,
+    /// The rows whose last call ended after their subscriber was undeclared ([`Released`]).
+    released: Released,
     /// What was not handed a callback ([`RoundCounts`]).
     dropped: AtomicU64,
     held_over: AtomicU64,
@@ -807,9 +875,11 @@ pub(crate) struct Round {
 
 // SAFETY: the table is reached by the holder of the session's lock while the state is empty or
 // filling, and by the one delivery that took it while it is delivering; `lending` and `capturing`
-// by the holder of the session's lock alone; every other field is an atomic or never written after
-// the round is made. A callback the table owes is `Send` and `Sync`, and the parts it reads lie
-// where the link and the arena keep them while it holds them.
+// by the holder of the session's lock alone; `released` behind its own lock; every other field is
+// an atomic or never written after the round is made. A call the table owes reads a row its table
+// keeps where it lies until the call ends, through a sink that is `Send` and `Sync`; every other
+// callback it owes is `Send` and `Sync`; and the parts it reads lie where the link and the arena
+// keep them while it holds them.
 unsafe impl Send for Round {}
 // SAFETY: as `Send`.
 unsafe impl Sync for Round {}
@@ -869,6 +939,7 @@ impl Round {
             ptr::write(addr_of_mut!((*at).lent_before), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).released), Released::new());
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).held_over), AtomicU64::new(0));
             #[cfg(debug_assertions)]
@@ -897,6 +968,7 @@ impl Round {
             lent_before: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
+            released: _,
             dropped: _,
             held_over: _,
             #[cfg(debug_assertions)]
@@ -980,9 +1052,10 @@ impl Round {
         count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Copy out, instead of holding, the callbacks of the subscribers the samples offered from here
-    /// on reach, until [`Self::captured`]: how the session's own put learns which of its
-    /// subscribers it reaches and what to call, to hand the sample to them itself.
+    /// Hand out, instead of holding, the calls of the subscribers the samples offered from here on
+    /// reach, until [`Self::captured`]: how the session's own put learns which of its subscribers
+    /// it reaches and what to call, to hand the sample to them itself and end each call
+    /// ([`Self::end_call`]).
     ///
     /// # Safety
     /// The caller holds the session's lock.
@@ -992,8 +1065,8 @@ impl Round {
         unsafe { *self.capturing.get() = Some(BoundedVec::new_static()) };
     }
 
-    /// The subscribers reached since [`Self::capture`] and their callbacks; what is offered after
-    /// this is held again.
+    /// The calls of the subscribers reached since [`Self::capture`]; what is offered after this is
+    /// held again.
     ///
     /// # Safety
     /// The caller holds the session's lock.
@@ -1003,78 +1076,88 @@ impl Round {
         unsafe { (*self.capturing.get()).take() }.unwrap_or_else(BoundedVec::new_static)
     }
 
-    /// Hold `sample` for `callback`, subscriber `subscriber`'s, read where it lies when it lies in
-    /// the datagram a link lends the step. A row whose registration was refused holds no callback
-    /// and is handed nothing. A sample offered again for one more subscriber is written once; what
-    /// finds no room is counted.
+    /// Hold `sample` for `call`, a call of a subscriber's callback begun on its row, read where it
+    /// lies when it lies in the datagram a link lends the step. A sample offered again for one more
+    /// subscriber is written once; what finds no room is counted, and its call ended.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub(crate) unsafe fn offer_sample(
-        &self,
-        subscriber: SubId,
-        callback: Option<&SubscriberCallback>,
-        sample: &dyn SampleView,
-    ) {
-        let Some(callback) = callback else {
-            return;
-        };
-        // The session's own put copies the callbacks out and holds nothing.
+    pub(crate) unsafe fn offer_sample(&self, call: SubscriberCall, sample: &dyn SampleView) {
+        // The session's own put is handed the calls and holds nothing.
         #[cfg(feature = "local-subscriber")]
         // SAFETY: the caller's contract: written under the session's lock, which is held.
         if let Some(found) = unsafe { &mut *self.capturing.get() } {
-            let kept = found.push((subscriber, Arc::clone(callback)));
-            debug_assert!(
-                kept.is_ok(),
-                "a session's subscribers fit the table of them"
-            );
+            let kept = match found.push(call) {
+                Ok(()) => true,
+                Err(full) => {
+                    self.released.end(full.0);
+                    false
+                }
+            };
+            debug_assert!(kept, "a session's subscribers fit the table of them");
             return;
         }
-        #[cfg(not(feature = "local-subscriber"))]
-        let _ = subscriber;
         let holds_sender = holds_its_sender(sample.reliability(), sample.qos());
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
         let Some(table) = (unsafe { self.writable() }) else {
             self.refuse(holds_sender);
+            self.released.end(call);
             return;
         };
-        if self.join_sample(table, callback, sample) {
-            self.filled(table);
-            return;
-        }
+        let call = match self.join_sample(table, call, sample) {
+            Ok(()) => {
+                self.filled(table);
+                return;
+            }
+            Err(call) => call,
+        };
         if !Self::takes(table, 1) {
             self.refuse(holds_sender);
+            self.released.end(call);
             return;
         }
         let Some((key, payload, rest)) = Self::place_sample(table, sample, lending) else {
             self.refuse(holds_sender);
+            self.released.end(call);
             return;
         };
         let first = table.callbacks.len();
-        let kept = table
-            .entries
-            .push(Entry::owing_one(
-                Held::Sample {
-                    head: Head {
-                        kind: sample.kind(),
-                        reliability: sample.reliability(),
-                        qos: sample.qos(),
-                        key,
-                        payload,
-                    },
-                    rest,
+        let entry = table.entries.push(Entry::owing_one(
+            Held::Sample {
+                head: Head {
+                    kind: sample.kind(),
+                    reliability: sample.reliability(),
+                    qos: sample.qos(),
+                    key,
+                    payload,
                 },
-                first,
-            ))
-            .is_ok()
-            && table
-                .callbacks
-                .push(Owed::Subscriber(Arc::clone(callback)))
-                .is_ok();
+                rest,
+            },
+            first,
+        ));
+        let kept = match entry {
+            Ok(()) => self.owe(table, call),
+            Err(_) => {
+                self.released.end(call);
+                false
+            }
+        };
         debug_assert!(kept, "the table had the room its checks found");
         self.filled(table);
+    }
+
+    /// Owe `call` in `table`, which has the room for it: `false`, the call ended, when it had
+    /// not after all.
+    fn owe(&self, table: &mut Table, call: SubscriberCall) -> bool {
+        match table.callbacks.push(Owed::Subscriber(call)) {
+            Ok(()) => true,
+            Err(full) => {
+                self.released.settle(full.0);
+                false
+            }
+        }
     }
 
     /// `sample`'s key, payload and other parts placed in `table`; `None` when a part finds no
@@ -1090,14 +1173,14 @@ impl Round {
         Some((key, payload, rest))
     }
 
-    /// Whether `sample` is the record `table` holds last, which `callback` is not owed yet: then
-    /// `callback` joins it.
+    /// Join `call` to the record `table` holds last when that is `sample` and no call of the same
+    /// row is owed it yet; the call back when it does not join.
     fn join_sample(
         &self,
         table: &mut Table,
-        callback: &SubscriberCallback,
+        call: SubscriberCall,
         sample: &dyn SampleView,
-    ) -> bool {
+    ) -> Result<(), SubscriberCall> {
         let Some(
             entry @ Entry {
                 what: Held::Sample { head, rest },
@@ -1105,7 +1188,7 @@ impl Round {
             },
         ) = table.entries.last()
         else {
-            return false;
+            return Err(call);
         };
         let joins = head.kind == sample.kind()
             && head.reliability == sample.reliability()
@@ -1117,21 +1200,16 @@ impl Round {
                 .owed(entry)
                 .iter()
                 .filter_map(Owed::subscriber)
-                .any(|held| Arc::ptr_eq(held, callback));
+                .any(|held| held.same_row(&call));
         if !joins || !Self::joins(table) {
-            return false;
+            return Err(call);
         }
-        if table
-            .callbacks
-            .push(Owed::Subscriber(Arc::clone(callback)))
-            .is_err()
-        {
-            return false;
+        if self.owe(table, call) {
+            if let Some(last) = table.entries.last_mut() {
+                last.owed = last.owed.saturating_add(1);
+            }
         }
-        if let Some(last) = table.entries.last_mut() {
-            last.owed = last.owed.saturating_add(1);
-        }
-        true
+        Ok(())
     }
 
     /// Hold `sample`, a token's appearance or retraction, for `callback`, a liveliness
@@ -1391,16 +1469,17 @@ impl Round {
         }
     }
 
-    /// Let go of the round's tables, their records and the callbacks those owe, before the arena
-    /// that lent them: what the session's end does. The tables left are lent nothing, so the
-    /// round's own drop, which may come after the arena's, reads none of the arena.
+    /// Let go of the round's tables, their records and the callbacks those owe, each call ended,
+    /// before the arena that lent them: what the session's end does. The tables left are lent
+    /// nothing, so the round's own drop, which may come after the arena's, reads none of the arena.
+    /// A row whose last call this ends waits in [`Self::take_released`].
     ///
     /// # Safety
     /// No delivery runs and none starts: the session's last handle is being let go of.
     pub(crate) unsafe fn let_go(&self) {
         // SAFETY: the caller's contract: nothing else reaches the table now.
         let table = unsafe { &mut *self.table.get() };
-        table.clear();
+        table.empty(&self.released);
         drop(core::mem::take(&mut table.entries));
         drop(core::mem::take(&mut table.callbacks));
         drop(core::mem::take(&mut table.keys));
@@ -1432,6 +1511,34 @@ impl Round {
         }
     }
 
+    /// End `call`, which the session's own put made ([`Self::captured`]): its row waits in
+    /// [`Self::take_released`] when it was the row's last call.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) fn end_call(&self, call: SubscriberCall) {
+        self.released.end(call);
+    }
+
+    /// The next row whose last call ended after its subscriber was undeclared, for the session to
+    /// let go of (`SessionTables::release_subscriber`) under its lock and drop after it.
+    pub(crate) fn take_released(&self) -> Option<SubscriberHandle> {
+        self.released.take()
+    }
+
+    /// Empty a sealed round no delivery has taken, handing nothing out, its calls ended: what the
+    /// session's close does, after which no callback of it is called. `false` when no round
+    /// waited, or a delivery hands it out now, which empties it itself.
+    pub(crate) fn discard(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        drop(Emptied(self));
+        true
+    }
+
     /// Hand each record the table holds, sealed, to its callbacks in order, and empty it: whether
     /// there was anything to hand. Nothing of the session is held; a delivery that finds the table
     /// not sealed, or taken by another, hands nothing.
@@ -1455,8 +1562,8 @@ impl Round {
                         rest: rest.as_ref(),
                         table,
                     };
-                    for callback in owed.iter().filter_map(Owed::subscriber) {
-                        callback.hand(&sample);
+                    for call in owed.iter().filter_map(Owed::subscriber) {
+                        call.hand(&sample);
                     }
                 }
                 #[cfg(feature = "liveliness")]
@@ -1530,14 +1637,15 @@ impl Round {
     }
 }
 
-/// A delivery of the round ends, a callback's unwinding included: the table is emptied, its
-/// callbacks let go of with no lock of the session held, and given back to the session.
+/// A delivery of the round ends, a callback's unwinding included: the table is emptied, its calls
+/// ended and its other callbacks let go of with no lock of the session held, and given back to the
+/// session.
 struct Emptied<'r>(&'r Round);
 
 impl Drop for Emptied<'_> {
     fn drop(&mut self) {
         // SAFETY: the table is this delivery's until the store below gives it back.
-        unsafe { (*self.0.table.get()).clear() };
+        unsafe { (*self.0.table.get()).empty(&self.0.released) };
         self.0.lends.store(false, Ordering::Release);
         self.0.state.store(EMPTY, Ordering::Release);
     }

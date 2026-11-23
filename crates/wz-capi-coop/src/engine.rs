@@ -36,6 +36,7 @@ use core::alloc::Layout;
 use core::any::Any;
 use core::cell::{Cell, RefCell};
 use core::ops::{Deref, DerefMut};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -51,7 +52,8 @@ use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
-use wz_session_core::session_tables::{RowCallbacks, SessionTables};
+use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::session_tables::{RowCallbacks, SessionTables, SubscriberHandle};
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -1167,54 +1169,9 @@ fn tables_mut(registry: &RefCell<Registry>) -> core::cell::RefMut<'_, CoopTables
     })
 }
 
-/// A subscriber's callback, as the ABI handed it ([`SubscriberSink`]), and whether it is shown each
-/// sample's timestamp (`entity-timestamp-opt-in`). It is called through a shared borrow with no
-/// lock: a delivery of the read task, one of the program's own `zp_read` and a put its own
-/// callback makes reach it at once and at any depth, as zenoh-pico's do. It is retired when its
-/// subscriber is undeclared or its session closed, so a delivery that copied it out of the
-/// subscriber's row before hands it nothing more; the sink is let go of with the last copy, after
-/// the last call has returned.
-pub(crate) struct LiveCallback {
-    live: AtomicBool,
-    expose: bool,
-    call: SubscriberSink,
-}
-
-impl LiveCallback {
-    pub(crate) fn new(call: SubscriberSink, expose: bool) -> Self {
-        Self {
-            live: AtomicBool::new(true),
-            expose,
-            call,
-        }
-    }
-
-    /// Hand `sample` to the callback, unless it was retired: the one place a sample is handed to
-    /// a subscriber's callback.
-    pub(crate) fn hand(&self, sample: &dyn SampleView) {
-        if !self.live.load(Ordering::Acquire) {
-            return;
-        }
-        if self.expose {
-            self.call.call(sample);
-        } else {
-            self.call.call(&HiddenTimestamp(sample));
-        }
-    }
-
-    /// Hand nothing more: its subscriber is gone.
-    fn retire(&self) {
-        self.live.store(false, Ordering::Release);
-    }
-}
-
-/// A subscriber's callback, shared by its row, the table of callbacks and the deliveries that
-/// copied it out of the row.
-pub(crate) type SubscriberCallback = Arc<LiveCallback>;
-
-/// A liveliness subscriber's callback, as the ABI handed it, held as [`LiveCallback`] holds a
-/// subscriber's: called through a shared borrow with no lock, retired when its subscriber is
-/// undeclared or its session closed, and let go of with the last copy.
+/// A liveliness subscriber's callback, as the ABI handed it: called through a shared borrow with no
+/// lock, from any thread and at any depth, retired when its subscriber is undeclared or its session
+/// closed, and let go of with the last copy.
 #[cfg(feature = "liveliness")]
 pub(crate) struct LiveLiveliness {
     live: AtomicBool,
@@ -1556,9 +1513,11 @@ fn sleep_ms(ms: u32) {
 }
 
 /// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// the pattern the subscriber matches and the declaration its key is named by, and this, its sink,
-/// everything else the session knows of it. The subscriber is that one row
-/// (`docs/c-abi-architecture.md`, P1).
+/// the pattern the subscriber matches and the declaration its key is named by, and this everything
+/// else the session knows of it, its callback among it. The subscriber is that one row
+/// (`docs/c-abi-architecture.md`, P1), and so is its callback's life (P11): a call is begun on the
+/// row's latch with the session held and made after it, and an undeclared row is let go of by
+/// whoever sees its last call end.
 pub(crate) struct SubscriberRow {
     id: SubId,
     retraction: Option<RetractionKey>,
@@ -1567,14 +1526,48 @@ pub(crate) struct SubscriberRow {
     /// session held. A build without groups reads none of it and holds it for that alone.
     #[cfg_attr(not(feature = "group"), allow(dead_code))]
     wire: WireKey,
-    /// Where a sample the row matches is offered, under the subscriber's id.
-    lane: Arc<Round>,
-    /// The callback the samples the row matches are handed to, copied out of the row with each
-    /// of them.
-    callback: Option<SubscriberCallback>,
+    /// The program's callback, called where the row lies: the tables lend their rows from the
+    /// session's arena and never move one.
+    sink: SubscriberSink,
+    /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
+    expose: bool,
+    /// How many calls of the callback run, and whether the subscriber was undeclared.
+    latch: CallLatch,
 }
 
 impl SubscriberRow {
+    /// Subscriber `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
+    /// handing what it hears to `sink`, the timestamp shown when `expose`.
+    pub(crate) fn new(
+        id: SubId,
+        retraction: Option<RetractionKey>,
+        wire: WireKey,
+        sink: SubscriberSink,
+        expose: bool,
+    ) -> Self {
+        Self {
+            id,
+            retraction,
+            wire,
+            sink,
+            expose,
+            latch: CallLatch::new(),
+        }
+    }
+
+    /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
+    /// begun: the one place a sample is handed to a subscriber's callback.
+    fn hand(&self, sample: &dyn SampleView) {
+        if self.latch.retired() {
+            return;
+        }
+        if self.expose {
+            self.sink.call(sample);
+        } else {
+            self.sink.call(&HiddenTimestamp(sample));
+        }
+    }
+
     /// Declare this subscriber, on `key`, over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(
         &self,
@@ -1586,36 +1579,95 @@ impl SubscriberRow {
             .is_ok()
     }
 
-    /// Retract this subscriber over `actions`, naming its key when its declaration asked to.
-    fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        match &self.retraction {
-            Some(key) => actions.send_undeclare_subscriber_naming(
-                u64::from(self.id),
-                key.mapping_id,
-                &key.suffix,
-            ),
-            None => actions.send_undeclare_subscriber(u64::from(self.id)),
+    /// Retract subscriber `id` over `actions`, naming its key as `retraction` does when its
+    /// declaration asked to. Read off the row before it is undeclared: a row a call of which runs
+    /// is kept out of every lookup until the call ends.
+    fn retract<C: ClockSource + 'static>(
+        id: SubId,
+        retraction: Option<&RetractionKey>,
+        actions: &McuActions<C>,
+    ) {
+        match retraction {
+            Some(key) => {
+                actions.send_undeclare_subscriber_naming(u64::from(id), key.mapping_id, &key.suffix)
+            }
+            None => actions.send_undeclare_subscriber(u64::from(id)),
         }
     }
 }
 
-// A subscriber's callback is called outside the session's lock through the copy of it each
-// sample carries (`LiveCallback`), not through the row: the row is let go of when it is undeclared.
-impl wz_session_core::row_callback::RowCallback for SubscriberRow {
-    type Call = core::convert::Infallible;
+// A call reads its row where it lies, so the rows lie where no table moves them.
+const _: () = assert!(
+    <Lent as wz_session_core::bounded::Storage>::ENFORCES_CAPACITY,
+    "the session's tables lend their rows and never move one"
+);
 
-    const READS_ROW_IN_PLACE: bool = false;
+// A delivery ends a call with no lock of the session held; a target whose latch is ended only with
+// the tables held has no atomic read-modify-write of a word, and so no `Arc` this engine is built on.
+const _: () = assert!(
+    !CallLatch::ENDS_HELD,
+    "a call of a subscriber's callback ends with no lock held"
+);
 
-    fn begin(&self) -> Option<core::convert::Infallible> {
-        None
+/// A call of a subscriber's callback, begun on its row's latch: where the row lies.
+pub(crate) struct RowCall(NonNull<SubscriberRow>);
+
+impl RowCallback for SubscriberRow {
+    type Call = RowCall;
+
+    const READS_ROW_IN_PLACE: bool = true;
+
+    fn begin(&self) -> Option<RowCall> {
+        self.latch.begin().then(|| RowCall(NonNull::from(self)))
     }
 
-    unsafe fn end(call: core::convert::Infallible) -> bool {
-        match call {}
+    unsafe fn end(call: RowCall) -> bool {
+        // SAFETY: the caller's: the row has not moved since the call began and is still in its
+        // table, which keeps it until its last call ended.
+        unsafe { call.0.as_ref() }.latch.end()
     }
 
     fn retire(&self) -> bool {
-        true
+        self.latch.retire()
+    }
+}
+
+/// A call of a subscriber's callback the session began under its lock and a delivery makes after
+/// it: the call, and the handle its row is let go of by when it ends the last call of an
+/// undeclared subscriber. Neither copied nor dropped unended: each is ended once ([`Self::end`]),
+/// or its row would keep its slot for good.
+#[must_use = "a call is ended, or its row is never let go of"]
+pub(crate) struct SubscriberCall {
+    call: RowCall,
+    handle: SubscriberHandle,
+}
+
+impl SubscriberCall {
+    /// `call`, begun on the row `handle` names.
+    pub(crate) fn new(call: RowCall, handle: SubscriberHandle) -> Self {
+        Self { call, handle }
+    }
+
+    /// Whether `other` is a call of the same row.
+    pub(crate) fn same_row(&self, other: &Self) -> bool {
+        self.call.0 == other.call.0
+    }
+
+    /// Hand `sample` to the row's callback.
+    pub(crate) fn hand(&self, sample: &dyn SampleView) {
+        // SAFETY: the row lies where the call began until its last call ended, and this one has
+        // not; nothing writes a row's sink or its timestamp choice after it is declared.
+        unsafe { self.call.0.as_ref() }.hand(sample);
+    }
+
+    /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
+    /// which the caller lets go of (`SessionTables::release_subscriber`).
+    pub(crate) fn end(self) -> Option<SubscriberHandle> {
+        // SAFETY: the row lies where the call began (the tables never move a row, asserted above)
+        // and keeps its slot until its last call ended, which this one is not yet; a call ends with
+        // no lock held (asserted above).
+        let last = unsafe { <SubscriberRow as RowCallback>::end(self.call) };
+        last.then_some(self.handle)
     }
 }
 
@@ -4175,6 +4227,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
         // there.
         while self.hand_out() {}
+        // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
+        self.let_go_of_released();
         // The tokens of a lost link the round had no room for, retracted now the round is handed
         // out, each round sealed as the session is let go of and handed out in turn.
         #[cfg(feature = "liveliness")]
@@ -4730,20 +4784,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             |row: &mut SubscriberRow| row.deliver(&sample),
         );
         // SAFETY: as above.
-        let reached = unsafe { self.samples.captured() };
-        // The callbacks copied out are let go of with no lock of the session held, the last of
-        // them perhaps the program's own drop of its closure.
+        let mut reached = unsafe { self.samples.captured() };
         drop(core);
+        let count = reached.len();
         {
             // A callback that steps the session from inside the put hands out nothing itself, as
-            // one inside a delivery does.
+            // one inside a delivery does; nor does an undeclare inside it wait for this call.
             let _delivering = self.deliveries.enter();
-            for (_, callback) in reached.iter() {
-                callback.hand(&sample);
+            for call in reached.iter() {
+                call.hand(&sample);
             }
         }
-        let count = reached.len();
-        drop(reached);
+        // Each call is ended; a row whose last call this was, its subscriber undeclared meanwhile,
+        // is let go of by the delivery below, its drop perhaps the program's own, with no lock held.
+        while let Some(call) = reached.pop() {
+            self.samples.end_call(call);
+        }
         self.deliver();
         Ok(count)
     }
@@ -4779,13 +4835,54 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.end_leg_now(leg);
     }
 
+    /// Let go of each subscriber row whose last call ended after it was undeclared: taken out of
+    /// its table under the session's lock and dropped after it, one at a time, so a C program's
+    /// `drop` never runs under the lock.
+    fn let_go_of_released(&self) {
+        while let Some(handle) = self.samples.take_released() {
+            let row = {
+                let guard = self.core.lock();
+                let mut tables = tables_mut(&guard.0.registry);
+                tables
+                    .release_subscriber(handle)
+                    .map(|row| row.into_callback())
+            };
+            drop(row);
+        }
+    }
+
+    /// Return once subscriber `handle`, undeclared while a call of it ran, is let go of: after
+    /// its last call has returned and its row, with the program's callback, was dropped (P11).
+    /// A thread that delivers now returns at once: the call that runs may be its own, below it on
+    /// its stack (a callback that undeclares its own subscriber), whose end lets the row go as the
+    /// delivery it is inside of ends.
+    fn wait_for_release(&self, handle: SubscriberHandle) {
+        if self.deliveries.delivers_here() {
+            return;
+        }
+        loop {
+            // A round sealed and handed out by no delivery yet may owe the row a call: handed out
+            // here, the call hands nothing to an undeclared subscriber and is ended.
+            self.deliver();
+            let held = {
+                let guard = self.core.lock();
+                let tables = tables(&guard.0.registry);
+                tables.subscribers().holds_slot(handle)
+            };
+            if !held {
+                return;
+            }
+            sleep_ms(1);
+        }
+    }
+
     /// Let go of the rows of the session's own declarations, which its close emptied: each row is
-    /// taken out under the session's lock, its callback retired, and the row let go of after the
-    /// lock, one at a time, so the last holder of a callback, a C program's `drop`, never runs
-    /// under it.
+    /// taken out under the session's lock, and the row let go of after the lock, one at a time, so
+    /// the last holder of a callback, a C program's `drop`, never runs under it. A subscriber a
+    /// call of which runs is let go of once the call ends ([`Self::wait_for_release`]).
     fn let_go_of_rows(&self) {
         loop {
-            let row = {
+            let undeclared = {
                 let guard = self.core.lock();
                 let mut tables = tables_mut(&guard.0.registry);
                 let Some((handle, _)) = tables.subscribers().iter().next() else {
@@ -4793,13 +4890,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 };
                 tables
                     .undeclare_subscriber(handle)
-                    .and_then(|undeclared| undeclared.row)
-                    .map(|row| row.into_callback())
+                    .map(|undeclared| (handle, undeclared.row.map(|row| row.into_callback())))
             };
-            if let Some(callback) = row.as_ref().and_then(|row| row.callback.as_ref()) {
-                callback.retire();
+            match undeclared {
+                Some((_, Some(row))) => drop(row),
+                Some((handle, None)) => self.wait_for_release(handle),
+                None => {}
             }
-            drop(row);
         }
         loop {
             let sink = {
@@ -5609,15 +5706,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let form = core.key_form(&wire, retraction.is_some());
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let callback: SubscriberCallback =
-            Arc::new(LiveCallback::new(sink, exposed_by(&core.policy)));
-        let row = SubscriberRow {
-            id,
-            retraction,
-            wire,
-            lane: self.samples.clone(),
-            callback: Some(callback),
-        };
+        let row = SubscriberRow::new(id, retraction, wire, sink, exposed_by(&core.policy));
         let declared =
             tables_mut(&core.registry).declare_subscriber(keyexpr, allowed_origin, form, row);
         let declared = match declared {
@@ -5697,11 +5786,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         }
         // The row is taken out of the tables under the lock and let go of after it: its key may hold
-        // a declaration whose release reaches the session (`WireKey`).
-        let entry = self.live().and_then(|mut core| {
+        // a declaration whose release reaches the session (`WireKey`). One a call of which runs is
+        // let go of once that call ends (`Self::wait_for_release`).
+        let undeclared = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            // The declaration its key is named by goes with it when it is the last that holds it.
-            let (handle, last) = {
+            // The declaration its key is named by goes with it when it is the last that holds it;
+            // what the links are told is read while the row stands.
+            let (handle, last, retraction) = {
                 let tables = tables(&core.registry);
                 let found = tables
                     .subscribers()
@@ -5714,7 +5805,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                                 .get(prefix)
                                 .is_some_and(|keyexpr| keyexpr.holds() <= 1)
                         });
-                        (handle, last)
+                        (handle, last, row.callback().retraction.clone())
                     });
                 found
             }?;
@@ -5732,10 +5823,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&core.registry).undeclare_subscriber(handle)?;
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
-            if let Some(row) = &row {
-                for actions in links {
-                    row.retract(&actions);
-                }
+            for actions in links {
+                SubscriberRow::retract(id, retraction.as_ref(), &actions);
             }
             if let (Some(links), Some(mapping_id)) = (keyexpr_links, undeclared.keyexpr) {
                 for actions in links {
@@ -5749,14 +5838,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
-            row
+            Some((handle, row))
         });
-        // A delivery that copied the callback out of the row before hands it nothing more; the row,
-        // and its callback with it, is let go of here, with no lock held.
-        if let Some(callback) = entry.as_ref().and_then(|row| row.callback.as_ref()) {
-            callback.retire();
+        // The row, and its callback with it, is let go of here, with no lock held; one a call of
+        // which runs is let go of by the call that ends last.
+        match undeclared {
+            Some((_, Some(row))) => drop(row),
+            Some((handle, None)) => self.wait_for_release(handle),
+            None => {}
         }
-        drop(entry);
         #[cfg(feature = "local-subscriber")]
         self.deliver();
     }
@@ -7019,6 +7109,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             }
             drop(self.gets.take_all_held());
         }
+        // A round sealed and handed out by no delivery is emptied unhanded, its calls ended: no
+        // callback of the session is called after its close. The rows whose last call that was
+        // go first, then every row the close emptied.
+        self.samples.discard();
+        self.let_go_of_released();
         self.let_go_of_rows();
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
@@ -7231,7 +7326,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // link left to end.
         self.core.dropping().end_links();
         // The round's tables lie in the session's arena, which the state's drop gives back: they
-        // are let go of first, with the callbacks their records owe.
+        // are let go of first, with the callbacks their records owe, each call ended before the
+        // row it reads is dropped with the tables.
         // SAFETY: the last handle is gone, so no delivery runs or starts.
         unsafe { self.samples.let_go() };
     }
