@@ -91,6 +91,17 @@ Does not prove: anything about tests not selected, or code that calls the host's
 socket; the aliasing model is the interpreter's default, and a pointer pattern only another model
 accepts is reported as it reads under that one.
 
+## What the lanes have found
+
+Each finding is named by the lane that found it, with where it was repaired.
+
+| lane | finding | repair |
+|---|---|---|
+| Vtsan | Three C examples of the library (`examples/c/profiles.c`, `examples/c/transports.c`, `tests/c/pico_app_transport.c`) waited for a get to end by polling a `volatile` flag that the reply closure's drop sets on a session thread: a data race in the program, which no library can give a happens-before edge to. | The examples wait under a mutex (`ex_counter_t`, a `z_owned_mutex_t`), as zenoh-pico's own `examples/unix/c11/z_get.c` waits for its drop under a mutex and a condition variable. |
+| Vtsan | A data race on a key's reference count in the cooperative engine: `z_undeclare_subscriber` drops the subscriber's entry outside the session lock (`crates/wz-capi-coop/src/engine.rs`, the undeclare's `drop((entry, callback))`) while the read task takes a declaration that names the same key (`absorb_declare_view`, `crates/wz-session-core/src/pubsub.rs`). | Open: repaired by a change of its own. Until it lands the hosted step of Layer Vtsan is soft (`deploy/soft_jobs.json`), and it becomes a gate once it reads green on two consecutive main runs. |
+| Vcov | The in-memory link the engine's tests run sessions over (`wz-session-mcu`'s `memory`) lent no outbound slot, so a session of the C library's build, which sends only from storage its link lends, could not send its handshake, and a test of the admission gate never opened. | The memory link lends two slots, as every link of the cooperative runtime does. |
+| Vcov | The tests of the lent control records fed the build that lends every record (the MCU kit's) owned frames, which that build asserts it never raises, and one walk test named a record kind the kit's build does not lend. | The tests feed such a build the one form it has and pin the lent result; the walk test is gated on the kinds it walks. |
+
 ## Running them
 
 Each lane is opt-in in a full sweep, as Layers S and Cmut are:
