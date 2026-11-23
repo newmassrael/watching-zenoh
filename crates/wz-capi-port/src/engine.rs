@@ -37,8 +37,8 @@ use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, NoRoomToHold, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId,
-    SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    MatchingSink, NoRoomToHold, QblId, QueryableSink, Refusal, ReplyCallback, StatementNotHonoured,
+    SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -290,28 +290,31 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// callback (`vendor/zenoh-pico/src/api/api.c` @
     /// `_z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`)
     /// and zenoh's querier asks for complete queryables when its target is `ALL_COMPLETE`.
+    ///
+    /// A refused listener answers why, with `sink` already let go of and nothing asked of a peer:
+    /// the caller has no listener to retract.
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId;
+    ) -> Result<MatchId, Refusal>;
 
     /// [`Self::declare_matching_listener`] for an entity whose `locality` says whose declarations
     /// count: the peers' (`Remote`), the session's own (`SessionLocal`), or both (`Any`), as
     /// upstream's matching status reads an entity by the destination it was declared with. A
-    /// listener of the session's own entities alone asks no peer. `None` from an engine with no
-    /// such listener in this build, which is the provided answer.
+    /// listener of the session's own entities alone asks no peer. [`Refusal::NotBuilt`] from an
+    /// engine with no such listener in this build, which is the provided answer.
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
+    ) -> Result<MatchId, Refusal> {
         let _ = (plane, keyexpr, sink, locality);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Whether anything `plane` counts matches `keyexpr`, from the declarations `locality` admits,

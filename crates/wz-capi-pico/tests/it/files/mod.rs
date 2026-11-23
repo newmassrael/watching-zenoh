@@ -27,6 +27,7 @@ mod listen_and_connect;
 mod listener_multipeer;
 mod liveliness_face_death;
 mod local_delivery;
+mod matching_listener_refused;
 mod matching_listener_release;
 mod matching_multiface;
 mod message_catalog_doors;

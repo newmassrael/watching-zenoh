@@ -64,6 +64,8 @@ use wz_capi_port::{
     KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
     SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
+// The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
+use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
@@ -2102,6 +2104,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.keys
             .kept(keyexpr)
             .or_else(|| self.keys.key(keyexpr).ok())
+    }
+
+    /// Why [`Self::row_key`] refused `keyexpr`: longer than a row holds, or no room for it left in
+    /// the key arena.
+    fn key_refusal(&self, keyexpr: &str) -> Declined {
+        if self.keys.holds_key(keyexpr.len()) {
+            Declined::TableFull
+        } else {
+            Declined::KeyTooLong
+        }
     }
 
     /// The dial role's face, which the session holds for its whole life.
@@ -5081,36 +5093,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Some(now_us)
     }
 
-    /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder:
-    /// `false`, with nothing held or sent, when a first holder finds the session with no entity
-    /// id left for it.
+    /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder.
+    /// Refused, with nothing held or sent, when a first holder finds no row of the Interests'
+    /// table free or the session with no entity id left for it.
     fn acquire_interest(
         &self,
         core: &mut Core<L, C>,
         plane: FilterPlane,
         keyexpr: &str,
         form: &InterestForm,
-    ) -> bool {
+    ) -> Result<(), Declined> {
         if let Some(hold) = core
             .interests
             .iter_mut()
             .find(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
         {
             hold.holds += 1;
-            return true;
+            return Ok(());
         }
         // A first holder takes a row of the Interests' table, which is lent one for each write
         // filter and matching listener: each of them takes a row of its own table first.
         if core.interests.free_slots() == 0 {
-            return false;
+            return Err(Declined::TableFull);
         }
         // zenoh-pico's Interest takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
         let Some(key) = core.row_key(keyexpr) else {
-            return false;
+            return Err(core.key_refusal(keyexpr));
         };
         let Some(interest_id) = self.next_entity_id() else {
-            return false;
+            return Err(Declined::NoEntityId);
         };
         // The rest of the key the form names is read from the row's own key, not copied.
         let suffix_at = suffix_place(keyexpr, form.suffix.as_deref());
@@ -5134,7 +5146,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The row was found free above, under the lock still held.
         let held = core.interests.push(hold).is_ok();
         debug_assert!(held, "the Interests' table had the row the check found");
-        held
+        if held {
+            Ok(())
+        } else {
+            Err(Declined::TableFull)
+        }
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -5877,27 +5893,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // (`Z_FEATURE_LOCAL_SUBSCRIBER` and `Z_FEATURE_LOCAL_QUERYABLE` 0) delivers nothing
         // locally.
         count_local: bool,
-    ) -> MatchId {
-        // A plane the build does not hold is refused first, with nothing taken.
-        let Some(watched) = Watched::of(plane, keyexpr, count_local) else {
-            return 0;
-        };
-        let Some(mut guard) = self.live() else {
-            return 0;
-        };
+    ) -> Result<MatchId, Declined> {
+        // A plane the build does not hold is refused first, with nothing taken. Every refusal
+        // lets `sink` go as it returns, before the caller hears of it.
+        let watched = Watched::of(plane, keyexpr, count_local).ok_or(Declined::NotBuilt)?;
+        let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
-        // A full table refuses the listener before its Interest is asked; its sink goes with the
-        // refusal.
+        // A full table refuses the listener before its Interest is asked.
         if core.matches.free_slots() == 0 {
-            return 0;
+            return Err(Declined::TableFull);
         }
-        // So does a key longer than its row holds.
+        // So does a key the session cannot hold.
         let Some(key) = core.row_key(keyexpr) else {
-            return 0;
+            return Err(core.key_refusal(keyexpr));
         };
-        // A listener whose Interest the session has no id left for is not declared, as a closed
-        // session declares none: it would never hear a peer.
-        if !self.acquire_interest(
+        // A listener whose Interest the session cannot hold is not declared, as a closed session
+        // declares none: it would never hear a peer.
+        self.acquire_interest(
             core,
             plane,
             keyexpr,
@@ -5906,9 +5918,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 suffix: Some(keyexpr.to_owned()),
                 aggregate: false,
             },
-        ) {
-            return 0;
-        }
+        )?;
         let id = core.next_match;
         core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, keyexpr);
@@ -5945,7 +5955,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         );
         drop(guard);
         self.deliver();
-        id
+        Ok(id)
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
@@ -6018,7 +6028,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let held = match &ask {
             Some(form) => {
                 let before = core.interests.len();
-                let held = self.acquire_interest(core, plane, keyexpr, form);
+                let held = self.acquire_interest(core, plane, keyexpr, form).is_ok();
                 if held && core.interests.len() > before {
                     spent = core.interests.last().map(|hold| hold.interest_id);
                 }

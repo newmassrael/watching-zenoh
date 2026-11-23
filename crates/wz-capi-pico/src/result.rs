@@ -9,6 +9,8 @@
 //! Every exported function returning a status returns this `i8`, so a C
 //! caller's `if (z_open(...) < 0)` check works unchanged.
 
+use wz_capi_port::Refusal;
+
 /// The pico status type: `int8_t`.
 pub type ZResult = i8;
 
@@ -215,9 +217,42 @@ pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
 /// [`WZ_EXT_ERR_POLICY_OFF`] is.
 pub const WZ_EXT_ERR_SCOUT_REENTERED: ZResult = -25;
 
+/// The code of a declaration the engine refused: this ABI's one table for the port's [`Refusal`].
+/// zenoh-pico answers an entity it has no room for, of its table, its key or its id, with
+/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` (`vendor/zenoh-pico/src/net/filtering.c` @
+/// `_z_write_filter_ctx_add_callback`), and one asked of a session that is closed with
+/// `_Z_ERR_SESSION_CLOSED`. A plane the build does not hold has no pico code, as its door has no
+/// pico symbol to be declared through; it is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
+pub(crate) fn refusal_code(refusal: Refusal) -> ZResult {
+    match refusal {
+        Refusal::TableFull | Refusal::KeyTooLong | Refusal::NoEntityId => {
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        }
+        Refusal::Closed => Z_ERR_SESSION_CLOSED,
+        Refusal::NotBuilt => WZ_EXT_ERR_UNSUPPORTED,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each refusal answers pico's code for it, and every code is a failure to a caller's `< 0`
+    /// test: none reads as the `Z_OK` of a declaration that was never made.
+    #[test]
+    fn each_refusal_answers_its_code() {
+        assert_eq!(refusal_code(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(
+            refusal_code(Refusal::KeyTooLong),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert_eq!(
+            refusal_code(Refusal::NoEntityId),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert_eq!(refusal_code(Refusal::Closed), Z_ERR_SESSION_CLOSED);
+        assert_eq!(refusal_code(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+    }
 
     /// The wz codes are errors to a caller's `< 0` test, differ from each other and from every
     /// code this file transcribes from pico.

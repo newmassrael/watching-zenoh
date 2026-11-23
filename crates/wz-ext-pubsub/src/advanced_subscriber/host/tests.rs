@@ -14,7 +14,7 @@ use std::time::Duration;
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -198,8 +198,8 @@ impl SessionEngine for Script {
         _keyexpr: &str,
         _sink: MatchingSink,
         _count_local: bool,
-    ) -> MatchId {
-        0
+    ) -> Result<MatchId, Refusal> {
+        Ok(0)
     }
     fn undeclare_matching_listener(&self, _id: MatchId) {}
     fn declare_write_filter(

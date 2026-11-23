@@ -293,12 +293,14 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
     let listen = |count_local: bool| {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
-        engine.declare_matching_listener(
-            plane,
-            "demo/lq/x",
-            Arc::new(move |matching| into.lock().unwrap().push(matching)),
-            count_local,
-        );
+        engine
+            .declare_matching_listener(
+                plane,
+                "demo/lq/x",
+                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                count_local,
+            )
+            .expect("a session with rows left declares");
         log
     };
     let counting = listen(true);

@@ -179,12 +179,14 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
     };
     let told = Arc::new(Mutex::new(Vec::new()));
     let into = told.clone();
-    engine.declare_matching_listener(
-        plane,
-        "demo/m/x",
-        Arc::new(move |matching| into.lock().unwrap().push(matching)),
-        false,
-    );
+    engine
+        .declare_matching_listener(
+            plane,
+            "demo/m/x",
+            Arc::new(move |matching| into.lock().unwrap().push(matching)),
+            false,
+        )
+        .expect("a session with rows left declares");
     let filter = engine
         .declare_write_filter(
             plane,

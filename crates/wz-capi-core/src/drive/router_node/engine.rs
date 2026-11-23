@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink,
-    PeerIdentity, QblId, QueryableSink, ReplyCallback, SessionEngine, StatementNotHonoured, SubId,
-    SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
+    StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -311,18 +311,18 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId {
+    ) -> Result<MatchId, Refusal> {
         let origin = if count_local {
             Locality::Any
         } else {
             Locality::Remote
         };
-        self.watch_matching(
+        Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             origin,
             Box::new(move |matching| sink(matching)),
-        )
+        ))
     }
 
     fn declare_matching_listener_in(
@@ -331,8 +331,8 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
-        Some(self.watch_matching(
+    ) -> Result<MatchId, Refusal> {
+        Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             locality,

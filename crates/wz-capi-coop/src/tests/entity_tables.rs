@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, MatchingSink, SessionDrive, SessionEngine, SubId, SubscriberSink,
-    WireKey,
+    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::limit_binding::{OutsideLimitDomain, Quota};
@@ -264,17 +264,17 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     );
 }
 
-/// The matching listeners' table at its limit refuses one more, as a listener the session cannot
-/// hold (id 0), before its Interest is asked; its sink goes with the refusal.
+/// The matching listeners' table at its limit refuses one more as a full table, before its Interest
+/// is asked; its sink goes with the refusal.
 #[test]
 fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let first =
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false);
-    assert_ne!(first, 0, "a row is free");
+    let first = engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false)
+        .expect("a row is free");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
@@ -284,7 +284,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let held = Arc::downgrade(&refused_sink);
     let refused =
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
-    assert_eq!(refused, 0);
+    assert_eq!(refused, Err(Refusal::TableFull));
     assert!(
         held.upgrade().is_none(),
         "the refused listener's sink is let go"
@@ -294,9 +294,10 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
 
     engine.undeclare_matching_listener(first);
     let again: MatchingSink = Arc::new(|_matching: bool| {});
-    assert_ne!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false,),
-        0,
+    assert!(
+        engine
+            .declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false)
+            .is_ok(),
         "the row the undeclaration gave back takes the next listener"
     );
 }
@@ -472,6 +473,12 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
     assert_eq!(declare_subscriber(&engine, past, &minted), None);
     assert_eq!(engine.acquire_keyexpr(past), None);
     assert_eq!(filter(&engine, FilterPlane::Subscribers, past), None);
+    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
+        Err(Refusal::KeyTooLong),
+        "a listener on the key is refused for its length"
+    );
     settle(&engine);
     assert_eq!(
         minted.load(Ordering::SeqCst),
@@ -512,6 +519,12 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
     let seen = router.seen(|s| s.declares);
 
     assert_eq!(declare_subscriber(&engine, "demo/k/3", &minted), None);
+    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
+        Err(Refusal::TableFull),
+        "a key of the bound with no room left in the arena is refused as a full table"
+    );
     settle(&engine);
     assert_eq!(
         minted.load(Ordering::SeqCst),

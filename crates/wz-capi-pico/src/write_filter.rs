@@ -48,7 +48,7 @@
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, WireKey};
+use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
@@ -180,20 +180,23 @@ impl WriteFilter {
     /// each time that changes. The listener is retracted with the filter, or before it by
     /// its id. The engine is handed back with the id, for a handle that retracts it. `released`
     /// is the latch of the closure behind `sink`, which the filter's drop waits on.
+    ///
+    /// A listener the engine refuses is answered by its cause, with `sink` let go of: the filter
+    /// keeps neither its id nor its latch, so its drop retracts and waits on nothing for it.
     pub(crate) fn declare_matching_listener(
         &self,
         sink: MatchingSink,
         released: Arc<ReleaseLatch>,
-    ) -> (Arc<Engine>, MatchId) {
+    ) -> Result<(Arc<Engine>, MatchId), Refusal> {
         let id = self.shared.declare_matching_listener(
             self.plane,
             self.keyexpr.as_str(),
             sink,
             self.count_local,
-        );
+        )?;
         self.listeners.lock().push(id);
         self.released.keep(released);
-        (self.shared.clone(), id)
+        Ok((self.shared.clone(), id))
     }
 
     /// pico `_z_write_filter_active`: `true` when nothing has said it matches,

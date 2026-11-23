@@ -1562,7 +1562,9 @@ impl Engine {
                         tokio_engine::matching_sink(callback, notifier),
                         tokio_engine::engine_locality(destination),
                     )
-                    .ok_or_else(|| zerror!("this engine has no matching listener"))?;
+                    .map_err(|refused| {
+                        zerror!("the engine refused a matching listener: {refused}")
+                    })?;
                 Id::try_from(id).map_err(|_| {
                     zerror!(
                         "the engine numbered a matching listener {id}, which is more than an id \

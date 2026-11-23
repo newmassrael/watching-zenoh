@@ -9,8 +9,8 @@ use std::any::Any;
 
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
-    MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
-    SubId, SubscriberSink, WireKey,
+    MatchingSink, PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive,
+    SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
@@ -338,14 +338,14 @@ impl SessionEngine for SharedSession {
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId {
-        SharedSession::declare_plane_matching_listener(
+    ) -> Result<MatchId, Refusal> {
+        Ok(SharedSession::declare_plane_matching_listener(
             self,
             plane,
             keyexpr.to_owned(),
             sink,
             count_local,
-        )
+        ))
     }
 
     fn declare_matching_listener_in(
@@ -354,8 +354,8 @@ impl SessionEngine for SharedSession {
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
-        Some(SharedSession::declare_matching_listener_in(
+    ) -> Result<MatchId, Refusal> {
+        Ok(SharedSession::declare_matching_listener_in(
             self,
             plane,
             keyexpr.to_owned(),

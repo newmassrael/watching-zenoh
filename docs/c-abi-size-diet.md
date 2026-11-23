@@ -365,7 +365,7 @@ Landed (`refactor(capi-coop): Link the peers' queryables only with a query plane
 `queryable` features. A client with neither links no `RemoteQueryableTable`, no dispatch of a
 peer's queryable declarations and no queriers' matching listener. What such a build answers, by
 name: a matching listener and a write filter on the queryables plane are refused before an
-Interest is asked (`engine::counts`: a listener as id 0, a filter as none; the ABI asks neither
+Interest is asked (`engine::counts`: a listener as `Refusal::NotBuilt`, a filter as none; the ABI asks neither
 without `query`), and a declaration watch of queryables is refused with `PlaneNotBuilt`, as one of
 tokens is without `liveliness` (`decl_watch::hears`): the build has nothing to tell it from.
 `slot_observer::OtherPeers::answers` has a default (`false`), so a build where another crate

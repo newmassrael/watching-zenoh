@@ -1329,8 +1329,8 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
 }
 
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
-/// matching listener and a write filter on that plane are refused (a listener as id 0, a filter as
-/// none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
+/// matching listener and a write filter on that plane are refused (a listener as not built, a filter
+/// as none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
 /// subscribers' plane, which every build holds.
 #[cfg(not(any(feature = "query", feature = "queryable")))]
 #[test]
@@ -1344,7 +1344,7 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let kept = Arc::downgrade(&sink);
     assert_eq!(
         engine.declare_matching_listener(plane, "demo/q", sink, false),
-        0
+        Err(wz_capi_port::Refusal::NotBuilt)
     );
     assert!(kept.upgrade().is_none(), "the refused sink is not kept");
     assert_eq!(
@@ -1362,9 +1362,10 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         None
     );
     let (sink, subscribers) = heard();
-    assert_ne!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/q", sink, false),
-        0,
+    assert!(
+        engine
+            .declare_matching_listener(FilterPlane::Subscribers, "demo/q", sink, false)
+            .is_ok(),
         "CONTROL: the subscribers' plane is held"
     );
     until(&engine, "the router to see the Interest", || {
@@ -1403,9 +1404,13 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
         complete_required: true,
     };
     let (sink, any) = heard();
-    let any_id = engine.declare_matching_listener(any_plane, "demo/q", sink, false);
+    let any_id = engine
+        .declare_matching_listener(any_plane, "demo/q", sink, false)
+        .expect("a session with rows left declares");
     let (sink, complete) = heard();
-    engine.declare_matching_listener(complete_plane, "demo/q", sink, false);
+    engine
+        .declare_matching_listener(complete_plane, "demo/q", sink, false)
+        .expect("a session with rows left declares");
     let complete_filter = engine
         .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
         .expect("a session with ids left declares");
@@ -1505,10 +1510,9 @@ fn a_listener_declared_on_a_match_is_told_once() {
     });
 
     let (sink, told) = heard();
-    assert_ne!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/x", sink, false),
-        0
-    );
+    assert!(engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/x", sink, false)
+        .is_ok());
     assert_eq!(
         *told.lock().unwrap(),
         [true],

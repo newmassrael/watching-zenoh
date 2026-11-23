@@ -17,7 +17,8 @@
 //! [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
-//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. The multicast groups
+//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. Why an engine refused
+//! a declaration is a [`Refusal`], which no id stands for. The multicast groups
 //! an ABI asks a session to join, and what it tells them, are [`group`]'s, read by either engine.
 //!
 //! The operations an engine implements are [`SessionEngine`]: what a zenoh-pico client asks of a
@@ -80,6 +81,7 @@ pub mod observation;
 pub mod os;
 mod peers;
 mod query;
+mod refusal;
 // The limits of the process's runtime, which the machines it makes apart from any session read.
 pub mod runtime_limits;
 pub mod sync;
@@ -95,6 +97,7 @@ pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
 pub use query::{
     HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback,
 };
+pub use refusal::Refusal;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
@@ -105,7 +108,8 @@ pub use query::{
 /// ([`SessionEngine::next_entity_id`]).
 pub type SubId = wz_session_core::wire_id::EntityId;
 
-/// A C-level matching-listener id, keying what an engine holds for one C declaration.
+/// A C-level matching-listener id, keying what an engine holds for one C declaration. Every value
+/// is a live id: a refused declaration answers a [`Refusal`], never a number.
 pub type MatchId = u64;
 
 /// A C-level WRITE FILTER id — zenoh-pico's `_z_write_filter_t`, which a publisher or querier
