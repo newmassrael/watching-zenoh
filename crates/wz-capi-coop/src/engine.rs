@@ -86,7 +86,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
@@ -2495,14 +2495,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // none free is refused and counted. The link's task holds the place it is lent in.
         let spawned = spawn_session_with_router(
             &self.local,
-            link.clone(),
-            actions.clone(),
-            self.entropy.clone(),
-            self.session_time.clone(),
-            SessionDriveConfig {
-                timeouts: self.config.timeouts,
-                role,
-                max_iters: None,
+            PumpFields {
+                link: link.clone(),
+                actions: actions.clone(),
+                entropy: self.entropy.clone(),
+                clock: self.session_time.clone(),
+                config: SessionDriveConfig {
+                    timeouts: self.config.timeouts,
+                    role,
+                    max_iters: None,
+                },
             },
             self.lend.clone(),
             dispatch,

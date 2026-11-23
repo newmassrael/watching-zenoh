@@ -1991,7 +1991,7 @@ mod tests {
 
     #[cfg(feature = "codec-request")]
     #[test]
-    #[should_panic(expected = "RequestQueryBuilder::parameters requires a non-empty params slice")]
+    #[should_panic(expected = "QueryBuilder::parameters requires a non-empty params slice")]
     fn build_request_query_with_parameters_rejects_empty_slice() {
         let _ = build_request_query_with_parameters(
             42,
@@ -2110,7 +2110,7 @@ mod tests {
     #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     #[should_panic(
-        expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
+        expected = "QueryBuilder::query_attachment requires a non-empty attachment slice"
     )]
     fn build_request_query_with_attachment_rejects_empty_slice() {
         let _ = build_request_query_with_attachment(
@@ -3108,7 +3108,7 @@ mod tests {
     /// where the panic actually fires now.
     #[cfg(feature = "codec-request")]
     #[test]
-    #[should_panic(expected = "RequestQueryBuilder::parameters")]
+    #[should_panic(expected = "QueryBuilder::parameters requires a non-empty params slice")]
     fn request_query_builder_parameters_rejects_empty() {
         let _ = RequestQueryBuilder::new(
             42,
