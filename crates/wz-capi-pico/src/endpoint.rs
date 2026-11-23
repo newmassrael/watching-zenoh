@@ -32,7 +32,16 @@ pub(crate) fn config_keys(scheme: &str) -> Option<&'static [&'static str]> {
 
 /// The scheme an endpoint's text opens with, empty when it names none.
 pub(crate) fn scheme_of(endpoint: &str) -> &str {
-    endpoint.split_once('/').map_or("", |(scheme, _)| scheme)
+    cut(endpoint, b'/').map_or("", |(scheme, _)| scheme)
+}
+
+/// `text` cut at its first `separator`, an ASCII byte, which neither half keeps; `None` when
+/// `text` has none. Every separator of an endpoint's text is ASCII, so the text is read a byte at
+/// a time and not searched for a character's encoding, as `str::split_once` searches it.
+fn cut(text: &str, separator: u8) -> Option<(&str, &str)> {
+    let at = text.bytes().position(|byte| byte == separator)?;
+    let (head, tail) = text.split_at_checked(at)?;
+    Some((head, tail.get(1..)?))
 }
 
 /// An endpoint as pico reads it with a link's `keys`: views into the endpoint's own text.
@@ -49,12 +58,27 @@ pub(crate) struct PicoEndpoint<'a> {
 impl<'a> PicoEndpoint<'a> {
     /// Read `endpoint` as pico's link of `keys` reads it.
     pub(crate) fn read(endpoint: &'a str, keys: &'static [&'static str]) -> Self {
-        let (locator, config) = endpoint.split_once('#').unwrap_or((endpoint, ""));
-        let locator = locator.split_once('?').map_or(locator, |(bare, _)| bare);
+        let (locator, config) = cut(endpoint, b'#').unwrap_or((endpoint, ""));
+        let locator = cut(locator, b'?').map_or(locator, |(bare, _)| bare);
         let mut values = [None; MAX_KEYS];
         let mut malformed = false;
-        for pair in config.split(';').filter(|pair| !pair.is_empty()) {
-            let Some((key, value)) = pair.split_once('=') else {
+        // The pairs between the `;`, an empty one skipped.
+        let mut rest = Some(config);
+        while let Some(text) = rest {
+            let pair = match cut(text, b';') {
+                Some((pair, after)) => {
+                    rest = Some(after);
+                    pair
+                }
+                None => {
+                    rest = None;
+                    text
+                }
+            };
+            if pair.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = cut(pair, b'=') else {
                 malformed = true;
                 break;
             };
@@ -259,6 +283,25 @@ mod tests {
         assert_eq!(
             dialled(&format!("tcp/{host}h:9000")),
             Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+    }
+
+    /// An endpoint's text is cut at the first of each separator: the metadata goes, an empty pair
+    /// is skipped, a value keeps an `=` of its own, and a text with no scheme names none.
+    #[test]
+    fn an_endpoint_is_cut_at_its_first_separators() {
+        assert_eq!(cut("a#b#c", b'#'), Some(("a", "b#c")));
+        assert_eq!(cut("#", b'#'), Some(("", "")));
+        assert_eq!(cut("abc", b'#'), None);
+        assert_eq!(scheme_of("tcp/127.0.0.1:9000"), "tcp");
+        assert_eq!(scheme_of("no-scheme"), "");
+        assert_eq!(
+            dialled("udp/127.0.0.1:9000?rel=1#;;iface=lo;").as_deref(),
+            Ok("udp/127.0.0.1:9000#iface=lo")
+        );
+        assert_eq!(
+            dialled("tcp/127.0.0.1:9000#tout=5=6").as_deref(),
+            Ok("tcp/127.0.0.1:9000#tout=5=6")
         );
     }
 
