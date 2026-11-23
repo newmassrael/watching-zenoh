@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# What the ingress fuzz targets share (src/lib.rs). It depends on no crate of
+# the session shell: each target builds the shell on a profile of its own.
+[package]
+name = "wz-fuzz-ingress-common"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[dependencies]
+wz-session-wire-fixtures = { path = "../../wz-session-wire-fixtures" }

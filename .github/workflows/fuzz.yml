@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # Nightly coverage-guided fuzzing of the C ABI doors a consumer hands outside
-# bytes to (crates/wz-fuzz): each target for a fixed time, with
-# AddressSanitizer, starting from the corpus the previous night left.
+# bytes to and of the network ingress, the bytes a peer sends into a session
+# (crates/wz-fuzz, whose README lists the targets): each target for a fixed
+# time, with AddressSanitizer, starting from the corpus the previous night left.
 #
 # What a night FINDS is a crash written to crates/target/fuzz/artifacts/ and
 # uploaded as this run's artifact; the commit that fixes it copies the input to
@@ -44,7 +45,8 @@ jobs:
       matrix:
         # The targets `scripts/fuzz.sh targets` prints; Layer C0 does not read
         # this list, so a target added there is added here in the same commit.
-        target: [pcap, live, transport, text, proto, e2e, replay, config, sender, selector_term]
+        target: [pcap, live, transport, text, proto, e2e, replay, config, sender, selector_term,
+                 ingress_frames, codec_roundtrip, session_unicast, slot_session, coop_read]
     env:
       WZ_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '1200' }}
     steps:

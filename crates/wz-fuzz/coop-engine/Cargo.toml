@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The target of the cooperative engine behind the C ABI (fuzz_targets/coop_read.rs),
+# with queryables. A package of its own so the features cargo unifies for it
+# are the engine's alone (../README.md).
+[package]
+name = "wz-fuzz-coop-engine"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+wz-capi-coop = { path = "../../wz-capi-coop", features = ["queryable"] }
+wz-capi-port = { path = "../../wz-capi-port", default-features = false }
+wz-fuzz-ingress-common = { path = "../ingress-common" }
+wz-runtime-coop = { path = "../../wz-runtime-coop", default-features = false }
+wz-session-core = { path = "../../wz-session-core", default-features = false }
+
+[[bin]]
+name = "coop_read"
+path = "fuzz_targets/coop_read.rs"
+test = false
+doc = false
+bench = false
