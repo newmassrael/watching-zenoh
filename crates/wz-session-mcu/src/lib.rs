@@ -45,6 +45,23 @@
 //! The crate depends on no link crate, for the reason the runtime tier does not:
 //! a shell that named a stack would be that stack's shell.
 
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
+
 // Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
 // all, so a use that creeps back into the slot profile is a compile error and not a
 // silent allocation (the rule `wz-link-lwip` keeps under `static-link-storage`). The
@@ -60,6 +77,8 @@ extern crate alloc;
 extern crate std;
 
 // R2827 — the application layer attached to the session drive.
+// Totality debt TD-224 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod app_layer;
 // Decision D7's contract: a node is asked to hold a peer by its zid. The transports (the admin
 // query, the control port, the declared peers) differ only in what feeds it.
@@ -71,15 +90,21 @@ pub mod control_port;
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract;
 // Where an application that is not the session's event leaves a query to be asked.
+// Totality debt TD-215 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "query-get")]
 pub mod get_mailbox;
 // R311lt — the multicast group session's drive loop, pump and slot table, over
 // whichever stack carries the group (`GroupTransport`). It was
 // `wz-session-lwip`'s and named lwIP's types for what it needs of a stack.
+// Totality debt TD-212 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "transport-multicast")]
 pub mod group_drive;
 // R2828 (§5.23 `adminspace-write`) — the node hosts upstream's
 // `connect/endpoints` config write on that application layer.
+// Totality debt TD-216 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "adminspace-write")]
 pub mod admin_host;
 // How a node of the slot profile opens a session out of the tables its image declared,
@@ -88,10 +113,14 @@ pub mod admin_host;
 #[cfg(feature = "session-slot")]
 pub mod slot_host;
 // The dialler of the slot profile, over that host: a written endpoint becomes an initiator session.
+// Totality debt TD-222 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "dial"))]
 pub mod slot_dial;
 // Room in a `static` for the parts of a node's loop that live as long as it runs: the slot profile's,
 // whichever node it is.
+// Totality debt TD-217 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "session-slot")]
 pub mod run_arena;
 // The admin node of the slot profile, over any stack: the connect manager, the admin space declared
@@ -105,18 +134,26 @@ pub mod run_arena;
 pub mod slot_admin;
 // A client of a router that answers queries, on the slot profile: the dialler over a fixed list of
 // endpoints, and the declarations sent on every session as it establishes.
+// Totality debt TD-225 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_client;
 // The latest sample of a subscription, in storage the image declared: what a node that
 // subscribes keeps, and what a queryable that answers from it reads.
+// Totality debt TD-218 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod latest;
 // The client node as a publisher: a stream of puts on a key, at the times of an arrival process, from
 // the session's own application layer or the group's pump.
+// Totality debt TD-209 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
 // The client node as a replayer: a recorded sequence of puts compiled into the image, paced and
 // mutated as the replay tool does, played on each session from the session's application layer.
+// Totality debt TD-210 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_replay;
 // What the client node knows of a plane it holds beside its sessions (a group, today): two traits and
@@ -125,6 +162,8 @@ pub mod slot_replay;
 pub mod slot_plane;
 // A multicast group the client node is a member of, beside its sessions: the group's pump in a cell of
 // a table the image declared, its events fanned to the node's observer, its publishers put on it.
+// Totality debt TD-220 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",
@@ -133,9 +172,13 @@ pub mod slot_plane;
 ))]
 pub mod slot_group;
 // When a querier's gets are due, and the outcome of a send that a publisher's puts share.
+// Totality debt TD-214 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_schedule;
 // A querier of the client node: a query asked every period, whose latest reply the node keeps.
+// Totality debt TD-226 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",
@@ -143,14 +186,24 @@ pub mod slot_schedule;
 ))]
 pub mod slot_querier;
 // The application layer of a node that publishes and asks on its own.
+// Totality debt TD-227 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_active;
 // The application of that client, written once for every platform: its storage, its factory and
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
+// Totality debt TD-213 (docs/c-abi-architecture.md section 7).
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_node;
 // The same node as a getter: it asks one query again and again and keeps the round trips, for
 // every platform. What the platform supplies is a clock, the table's sizes and where the figures go.
+// Totality debt TD-211 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",
@@ -159,15 +212,25 @@ pub mod slot_node;
 pub mod slot_getter;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
+// Totality debt TD-207 (docs/c-abi-architecture.md section 7).
+#[allow(
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(feature = "dial")]
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
 // session on the firmware's task set, over whichever stack opens the link.
+// Totality debt TD-208 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "dial")]
 pub mod dial;
 // A node that is a client of a router and answers queries: the dialer over a fixed list of
 // endpoints, an observer for the application's queryables and subscribers, and their
 // declarations sent on every session as it establishes.
+// Totality debt TD-221 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "client-node", not(feature = "session-slot")))]
 pub mod client_node;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
@@ -176,6 +239,8 @@ pub mod client_node;
 pub mod admin_status;
 // S9b — the same admin GET with no allocator: the node's state in fixed rows, the
 // reply built in a bounded arena and staged in the session's own stage.
+// Totality debt TD-219 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 pub mod admin_fixed;
 // R2837 — the node a host reaches and reconfigures at runtime: listen, the
@@ -188,5 +253,7 @@ pub mod admin_fixed;
 pub mod admin_node;
 // An in-memory network for the shell's tests, and for a sibling crate's that
 // wants a peer no stack owns.
+// Totality debt TD-223 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(any(test, feature = "test-support"), not(feature = "session-slot")))]
 pub mod memory;

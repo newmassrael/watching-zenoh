@@ -188,7 +188,7 @@ family; every cell of the host performance matrix WIN, on Linux and on pc3-win.
 
 ## 7. Totality debt register
 
-The four crates deny the totality lints outside a test build, at their roots:
+The five crates deny the totality lints outside a test build, at their roots:
 
 ```rust
 #![cfg_attr(
@@ -211,10 +211,12 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-206) and holds the register's lint cells (379) to its ratchet, which a paid row
-lowers in its own commit. For the lints a text read decides (`unwrap_used`, `expect_used` and the
-panicking macros) it also holds each row to its module's sites, both ways; indexing and arithmetic
-are held by the build's clippy alone.
+given (TD-227) and holds the register's lint cells (187) to its ratchet, which a paid row
+lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
+commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
+TD-227. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
+it also holds each row to its module's sites, both ways; indexing and arithmetic are held by the
+build's clippy alone.
 
 A module leaves the register when its sites are total functions: `get`, iterators and views of a
 known length for indexing; checked or saturating arithmetic where the operands are not bounded by
@@ -226,9 +228,12 @@ scout. A module the text read found no site in is not in the register.
 
 The classes: **open**, hand-written code not converted yet; **in flight**, a module another branch
 is restructuring now (the cooperative engine of step 4, the session core's entity modules, the pico
-doors of step 5), converted as it lands; **generated**, SCE output, whose totality is the
-generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
-orders the payment (largest first) and is not a measurement of what clippy reports.
+doors of step 5, the group drive's stage in `wz-session-mcu`), converted as it lands;
+**generated**, SCE output, whose totality is the generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
+orders the payment (largest first) and is not a measurement of what clippy reports. The rows of
+`wz-session-mcu` count clippy's own reports instead, over the crate's default build, its build
+with every feature, and its build with every feature but `session-slot`, which takes three modules
+out.
 
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
@@ -323,6 +328,31 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-204 | `wz-runtime-coop` | `local` | `panic` | 1 | open |
 | TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
 | TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
+| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 39 | open |
+| TD-208 | `wz-session-mcu` | `dial` | `indexing_slicing`, `arithmetic_side_effects` | 32 | open |
+| TD-209 | `wz-session-mcu` | `slot_publisher` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
+| TD-210 | `wz-session-mcu` | `slot_replay` | `indexing_slicing`, `arithmetic_side_effects` | 17 | open |
+| TD-211 | `wz-session-mcu` | `slot_getter` | `indexing_slicing`, `arithmetic_side_effects` | 17 | open |
+| TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
+| TD-213 | `wz-session-mcu` | `slot_node` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 9 | open |
+| TD-214 | `wz-session-mcu` | `slot_schedule` | `indexing_slicing`, `arithmetic_side_effects` | 7 | open |
+| TD-215 | `wz-session-mcu` | `get_mailbox` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-216 | `wz-session-mcu` | `admin_host` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-217 | `wz-session-mcu` | `run_arena` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
+| TD-218 | `wz-session-mcu` | `latest` | `indexing_slicing` | 5 | open |
+| TD-219 | `wz-session-mcu` | `admin_fixed` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
+| TD-220 | `wz-session-mcu` | `slot_group` | `indexing_slicing` | 4 | open |
+| TD-221 | `wz-session-mcu` | `client_node` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-222 | `wz-session-mcu` | `slot_dial` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-223 | `wz-session-mcu` | `memory` | `arithmetic_side_effects` | 2 | open |
+| TD-224 | `wz-session-mcu` | `app_layer` | `arithmetic_side_effects` | 1 | open |
+| TD-225 | `wz-session-mcu` | `slot_client` | `indexing_slicing` | 1 | open |
+| TD-226 | `wz-session-mcu` | `slot_querier` | `arithmetic_side_effects` | 1 | open |
+| TD-227 | `wz-session-mcu` | `slot_active` | `arithmetic_side_effects` | 1 | open |
+
+TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
+(`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
+once that lands, in the same module.
 
 Three rows of `wz-runtime-coop` are one panic each, held for a contract outside the module:
 TD-204 and TD-205 are the stall of a `block_on` (a future nothing can wake),
