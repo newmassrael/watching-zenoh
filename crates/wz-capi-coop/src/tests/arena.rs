@@ -1597,3 +1597,46 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         "a peer at the preset reserves less than a listener at the build's defaults"
     );
 }
+
+/// What a listener's open reserves when it is opened at the build's own limits and at the pico
+/// preset's, its links' cells included, as the engine plans it: the measure of the default each
+/// ABI opens under (the pico ABI at its preset, zenoh-c and the Rust API at the build's). Read
+/// with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints the arena a listener reserves at each default"]
+fn print_the_arena_a_listener_reserves_at_each_default() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+    use crate::engine::resolve_limits;
+
+    for (name, limits) in [
+        ("build defaults", SessionLimits::defaults()),
+        ("pico preset", pico_preset_limits()),
+    ] {
+        let config = CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            max_faces: admitted_faces(&limits).expect("the limits admit their own faces"),
+            accept_pending: admitted_handshakes(&limits)
+                .expect("the limits admit their own handshakes"),
+            limits,
+            ..client_config()
+        };
+        let plan = ArenaPlan::of(&config, &resolve_limits(&config))
+            .and_then(|plan| plan.holding_links(host_cell_bytes()))
+            .expect("the limits lay an arena out");
+        std::println!(
+            "{name}: {} faces, {} pending: {} B",
+            config.max_faces,
+            config.accept_pending,
+            plan.reserved_bytes().unwrap_or(usize::MAX)
+        );
+        for row in plan.rows() {
+            std::println!(
+                "  {:<40} {:>6} x {:>7} = {:>9} B",
+                row.part,
+                row.count,
+                row.entry_bytes,
+                row.bytes().unwrap_or(usize::MAX)
+            );
+        }
+    }
+}
