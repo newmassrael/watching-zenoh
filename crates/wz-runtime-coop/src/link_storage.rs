@@ -24,6 +24,94 @@ use alloc::vec::Vec;
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
 use wz_session_core::link::{TxSlot, TxSlotGrant};
 
+/// Where a driver receives into: its own buffer, which it holds for its life, or a buffer of its
+/// session's pool ([`PooledRx`]), which it holds only while the buffer holds something of the
+/// link's own.
+///
+/// Every buffer a type has as its own (`AsMut<[u8]>`: a `Vec<u8>`, a buffer of an image's table)
+/// is one, always there and never given back.
+pub trait RxStore {
+    /// The length of the buffer the link receives into: the largest batch it takes whole.
+    fn capacity(&mut self) -> usize;
+
+    /// The buffer's bytes, claimed from the pool first when the link holds none; `None` when it
+    /// holds none and the pool has none free, and the link then reads nothing.
+    fn bytes(&mut self) -> Option<&mut [u8]>;
+
+    /// The link holds nothing of its own in the buffer any more (no part of a batch, nothing it
+    /// was asked to keep): a pooled buffer goes back to its pool, for any link to read into. What
+    /// the last receive lent may be read until any link of the pool is next asked to receive or be
+    /// serviced, which the session's step holds back while a sample lies in it.
+    fn idle(&mut self) {}
+
+    /// Whether the last ask for the bytes found the pool dry and it is dry still: the link has
+    /// input it cannot read until another link's buffer goes back.
+    fn starved(&self) -> bool {
+        false
+    }
+}
+
+impl<B: AsMut<[u8]>> RxStore for B {
+    fn capacity(&mut self) -> usize {
+        self.as_mut().len()
+    }
+
+    fn bytes(&mut self) -> Option<&mut [u8]> {
+        Some(self.as_mut())
+    }
+}
+
+/// A link's receive buffer taken from its session's pool ([`LinkTables`]) for as long as the link
+/// holds something of its own in it: a stream's partial length or batch, or a batch or datagram it
+/// was asked to keep, as zenoh-pico keeps a stream peer's partial batch in a buffer of the peer's
+/// (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+/// `static z_result_t _z_unicast_handle_remaining_data(_z_transport_unicast_t *ztu, _z_transport_peer_unicast_t *peer,`)
+/// and reads every peer into the transport's one buffer otherwise. The facts about what the bytes
+/// are stay the link's (`StreamDriver`'s `held` and `spent`); only the bytes come from the pool.
+pub struct PooledRx {
+    pool: LentByteCells,
+    held: Option<ByteBuf>,
+    starved: bool,
+}
+
+impl PooledRx {
+    /// A link's place in `pool`, holding no buffer yet.
+    pub const fn of(pool: LentByteCells) -> Self {
+        Self {
+            pool,
+            held: None,
+            starved: false,
+        }
+    }
+
+    /// Whether the link holds a buffer of the pool now.
+    pub fn holds(&self) -> bool {
+        self.held.is_some()
+    }
+}
+
+impl RxStore for PooledRx {
+    fn capacity(&mut self) -> usize {
+        self.pool.size()
+    }
+
+    fn bytes(&mut self) -> Option<&mut [u8]> {
+        if self.held.is_none() {
+            self.held = self.pool.claim();
+        }
+        self.starved = self.held.is_none();
+        self.held.as_mut().map(ByteBuf::as_mut_slice)
+    }
+
+    fn idle(&mut self) {
+        self.held = None;
+    }
+
+    fn starved(&self) -> bool {
+        self.starved && self.pool.in_use() >= self.pool.capacity()
+    }
+}
+
 /// Where a driver's outbound frames are built: memory of its own that it lends the session to
 /// encode a frame into (`BoxedLinkDriver::tx_slot_acquire`), so the frame is written once, where
 /// the socket reads it, and no buffer is allocated for it.
@@ -150,12 +238,13 @@ impl TxStore for SlottedTx {
     }
 }
 
-/// The buffers a session's links take from the memory the session reserved when it opened: a table
-/// of receive buffers and a table of outbound storage, one buffer of each for every link the
-/// session may hold at once, the outbound one cut into slots of `slot_len` bytes ([`SlottedTx`]).
-/// A link claims one of each when it opens and gives them back when it is dropped, so the session's
-/// links take what its arena holds and no link allocates a buffer: a link the tables have no buffer
-/// left for is not opened, and the stack answers that it is exhausted.
+/// The buffers a session's links take from the memory the session reserved when it opened: a pool
+/// of receive buffers the links share, and a table of outbound storage, one buffer for every link
+/// the session may hold at once, cut into slots of `slot_len` bytes ([`SlottedTx`]). A link
+/// claims its outbound buffer when it opens and gives it back when it is dropped, so a link the
+/// table has no buffer left for is not opened, and the stack answers that it is exhausted; it
+/// takes a receive buffer of the pool only while that buffer holds something of its own
+/// ([`PooledRx`]). The session's links take what its arena holds and no link allocates a buffer.
 ///
 /// A handle, as the tables are: copies name the same buffers. The tables' memory is the session's
 /// arena, which is given back once every link of the session is gone.
@@ -167,19 +256,17 @@ pub struct LinkTables {
 }
 
 impl LinkTables {
-    /// The links' receive buffers in `rx` and their outbound storage in `tx`, each buffer of which
-    /// is cut into slots of `slot_len` bytes.
+    /// The links' pool of receive buffers in `rx` and their outbound storage in `tx`, each buffer
+    /// of which is cut into slots of `slot_len` bytes.
     pub const fn new(rx: LentByteCells, tx: LentByteCells, slot_len: usize) -> Self {
         Self { rx, tx, slot_len }
     }
 
-    /// The receive buffer and the outbound storage of one link, or `None` when either table has
-    /// none left; a receive buffer claimed for a link the other table could not serve is back in
-    /// its table when this returns.
-    pub fn claim(&self) -> Option<(ByteBuf, SlottedTx)> {
-        let rx = self.rx.claim()?;
+    /// The place in the receive pool and the outbound storage of one link, or `None` when the
+    /// outbound table has none left.
+    pub fn claim(&self) -> Option<(PooledRx, SlottedTx)> {
         let tx = self.tx.claim()?;
-        Some((rx, SlottedTx::new(tx, self.slot_len)))
+        Some((PooledRx::of(self.rx), SlottedTx::new(tx, self.slot_len)))
     }
 
     /// The length of every receive buffer: the largest batch a link of these tables takes.
@@ -189,26 +276,51 @@ impl LinkTables {
 
     /// How many links hold buffers of these tables now.
     pub fn in_use(&self) -> usize {
+        self.tx.in_use()
+    }
+
+    /// How many receive buffers of the pool links hold now.
+    pub fn rx_in_use(&self) -> usize {
         self.rx.in_use()
     }
 }
 
-/// A link's receive buffer on the heap profile: allocated when the link opens, or lent by its
-/// session's tables ([`LinkTables`]).
+/// A link's receive buffer on the heap profile: allocated when the link opens, or taken from its
+/// session's pool while it holds something ([`LinkTables`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub enum RxBuffer {
     /// The link's own allocation.
     Owned(Vec<u8>),
-    /// A buffer of the session's tables.
-    Lent(ByteBuf),
+    /// A place in the session's pool.
+    Pooled(PooledRx),
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl AsMut<[u8]> for RxBuffer {
-    fn as_mut(&mut self) -> &mut [u8] {
+impl RxStore for RxBuffer {
+    fn capacity(&mut self) -> usize {
         match self {
-            Self::Owned(bytes) => bytes.as_mut_slice(),
-            Self::Lent(buf) => buf.as_mut_slice(),
+            Self::Owned(bytes) => bytes.len(),
+            Self::Pooled(pooled) => pooled.capacity(),
+        }
+    }
+
+    fn bytes(&mut self) -> Option<&mut [u8]> {
+        match self {
+            Self::Owned(bytes) => Some(bytes.as_mut_slice()),
+            Self::Pooled(pooled) => pooled.bytes(),
+        }
+    }
+
+    fn idle(&mut self) {
+        if let Self::Pooled(pooled) = self {
+            pooled.idle();
+        }
+    }
+
+    fn starved(&self) -> bool {
+        match self {
+            Self::Owned(_) => false,
+            Self::Pooled(pooled) => pooled.starved(),
         }
     }
 }
@@ -264,7 +376,7 @@ pub(crate) fn heap_link_buffers(
             let (rx, tx) = tables
                 .claim()
                 .ok_or(crate::session_drive::LinkOpenError::Exhausted)?;
-            Ok((RxBuffer::Lent(rx), TxBuffer::Lent(tx)))
+            Ok((RxBuffer::Pooled(rx), TxBuffer::Lent(tx)))
         }
         None => Ok((
             RxBuffer::Owned(alloc::vec![0u8; rx]),
@@ -463,15 +575,15 @@ mod tests {
         LinkTables::new(rx, tx, slot_len)
     }
 
-    /// Each link takes a receive buffer and its slots from the session's tables until it goes: a
-    /// link past them is refused, and one the outbound table cannot serve gives its receive
-    /// buffer back.
+    /// Each link takes its slots from the session's tables until it goes, and a link past them is
+    /// refused; its place in the receive pool takes no buffer until it reads.
     #[test]
     fn a_sessions_tables_lend_each_link_its_buffers_until_it_goes() {
         let one = tables(1, 16, 1, 2, 8);
         assert_eq!(one.rx_len(), 16);
         let (mut rx, tx) = one.claim().expect("the first link's buffers");
-        assert_eq!(rx.as_mut_slice().len(), 16);
+        assert_eq!(rx.capacity(), 16);
+        assert_eq!(one.rx_in_use(), 0, "no receive buffer before a read");
         assert_eq!((tx.slots(), tx.slot_len()), (2, 8));
         assert_eq!(one.in_use(), 1);
         assert!(one.claim().is_none(), "a second link is refused");
@@ -481,19 +593,34 @@ mod tests {
             one.claim().is_some(),
             "the buffers are back once the link goes"
         );
+    }
 
-        let short = tables(2, 16, 1, 2, 8);
-        let held = short.claim().expect("the first link's buffers");
-        assert!(
-            short.claim().is_none(),
-            "no outbound buffer for a second link"
-        );
+    /// Links share the receive pool: each holds a buffer from its first ask for the bytes until it
+    /// is idle, a link that finds the pool dry gets none and says so, and a buffer given back is
+    /// the next link's. A link that goes gives its buffer back with it.
+    #[test]
+    fn links_hold_a_buffer_of_the_pool_only_until_they_are_idle() {
+        let shared = tables(1, 16, 2, 1, 8);
+        let (mut first, _first_tx) = shared.claim().expect("the first link");
+        let (mut second, _second_tx) = shared.claim().expect("the second link");
+        first.bytes().expect("the pool's one buffer")[0] = 7;
+        assert!(first.holds() && !first.starved());
+        assert_eq!(shared.rx_in_use(), 1);
         assert_eq!(
-            short.in_use(),
-            1,
-            "the second link's receive buffer went back"
+            first.bytes().map(|bytes| bytes[0]),
+            Some(7),
+            "a link that holds a buffer reads it again"
         );
-        drop(held);
+        assert!(second.bytes().is_none(), "the pool is dry");
+        assert!(second.starved() && !second.holds());
+        first.idle();
+        assert!(!first.holds());
+        assert_eq!(shared.rx_in_use(), 0);
+        assert!(!second.starved(), "a buffer is free for it now");
+        assert!(second.bytes().is_some(), "the buffer given back is lent");
+        assert!(!second.starved());
+        drop(second);
+        assert_eq!(shared.rx_in_use(), 0, "a link that goes gives it back");
     }
 
     /// A link whose slots its session's tables lend refuses a slot once every one is out, which is
@@ -528,14 +655,24 @@ mod tests {
     fn a_heap_links_buffers_are_its_own_or_its_sessions() {
         let lent = tables(1, 16, 1, 2, 8);
         let (rx, tx) = lent.claim().expect("the link's buffers");
-        let mut rx = RxBuffer::Lent(rx);
+        let mut rx = RxBuffer::Pooled(rx);
         let tx = TxBuffer::Lent(tx);
-        assert_eq!(rx.as_mut().len(), 16);
+        assert_eq!(rx.capacity(), 16);
+        assert_eq!(rx.bytes().map(|bytes| bytes.len()), Some(16));
+        assert_eq!(lent.rx_in_use(), 1);
+        rx.idle();
+        assert_eq!(lent.rx_in_use(), 0);
         assert_eq!((tx.slots(), tx.slot_len()), (2, 8));
 
         let mut own = RxBuffer::Owned(std::vec![0u8; 4]);
         let none = TxBuffer::Owned(HeapTx::new(0, 0));
-        assert_eq!(own.as_mut().len(), 4);
+        assert_eq!(own.capacity(), 4);
+        own.idle();
+        assert_eq!(
+            own.bytes().map(|bytes| bytes.len()),
+            Some(4),
+            "its own stays"
+        );
         assert!(!none.lends(), "a link of no slots lends nothing");
     }
 }

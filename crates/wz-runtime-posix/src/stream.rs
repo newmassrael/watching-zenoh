@@ -338,7 +338,10 @@ fn send_vecs(fd: c_int, vecs: &mut [libc::iovec], flags: c_int) -> Result<usize,
 impl StreamSocket for PosixTcpSocket {
     type Error = PosixNetError;
 
-    type Link<B: AsMut<[u8]> + 'static, X: wz_runtime_coop::link_storage::TxStore + 'static>
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
         = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
     where
         Self: 'static;

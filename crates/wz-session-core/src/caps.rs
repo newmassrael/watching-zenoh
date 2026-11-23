@@ -565,6 +565,17 @@ pub const MAX_FACES: usize = generated::MAX_FACES;
 /// a link past either bound is taken off its port and closed rather than left waiting there.
 pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
 
+/// How many receive buffers the links of a session whose engine lends them from its arena share
+/// at most: a link holds one only while it holds part of a batch or something it was asked to
+/// keep, and reads into a free one otherwise, as zenoh-pico reads every peer into its transport's
+/// one buffer and keeps a peer's partial stream batch apart. At least `1`.
+pub const RX_POOL_BUFFERS: usize = generated::RX_POOL_BUFFERS;
+
+const _: () = assert!(
+    RX_POOL_BUFFERS >= 1,
+    "a pool of no receive buffer reads nothing"
+);
+
 /// Maximum number of key expressions all the peers of a session hold declared to it at once,
 /// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'
 /// peers declare in one pool the faces share lends the fewer of this and what its faces could

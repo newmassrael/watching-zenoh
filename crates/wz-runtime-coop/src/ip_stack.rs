@@ -95,7 +95,7 @@ pub enum IpDriver<
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static = NoStream,
-    B: AsMut<[u8]> + 'static = ByteBuf,
+    B: crate::link_storage::RxStore + 'static = ByteBuf,
     X: TxStore + 'static = ByteBuf,
 > {
     /// A `udp/` link.
@@ -132,7 +132,7 @@ where
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: crate::link_storage::RxStore + 'static,
     X: TxStore + 'static,
 {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -229,7 +229,7 @@ where
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: crate::link_storage::RxStore + 'static,
     X: TxStore + 'static,
 {
     fn service(&self) {
@@ -259,6 +259,10 @@ where
 
     fn holds_input(&self) -> bool {
         either!(self, link => link.holds_input())
+    }
+
+    fn waits_for_buffer(&self) -> bool {
+        either!(self, link => link.waits_for_buffer())
     }
 
     fn owes_write(&self) -> bool {
@@ -1248,7 +1252,10 @@ mod tests {
     impl StreamSocket for Stream {
         type Error = ();
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<
+            B: crate::link_storage::RxStore + 'static,
+            X: crate::link_storage::TxStore + 'static,
+        >
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1291,7 +1298,10 @@ mod tests {
     impl StreamSocket for Channel {
         type Error = ();
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<
+            B: crate::link_storage::RxStore + 'static,
+            X: crate::link_storage::TxStore + 'static,
+        >
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1946,7 +1956,10 @@ mod tests {
         impl StreamSocket for Handshaking {
             type Error = ();
 
-            type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+            type Link<
+                B: crate::link_storage::RxStore + 'static,
+                X: crate::link_storage::TxStore + 'static,
+            >
                 = crate::stream_link::StreamDriver<Self, B, X>
             where
                 Self: 'static;

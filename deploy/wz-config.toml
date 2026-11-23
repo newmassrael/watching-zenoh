@@ -3469,6 +3469,39 @@ value = 1
 reason = "zenoh-pico accepts one link at a time: its accept task runs the whole handshake of the link it took before it takes the next (`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`)."
 
 [[limit]]
+id = "RX_POOL_BUFFERS"
+kconfig = "WZ_LIMIT_RX_POOL_BUFFERS"
+kind = "parameter"
+range = [1, 4294967295]
+default = 4
+storage = "capacity"
+scope = "session"
+binding_heap = "none"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link that finds no buffer free leaves what its peer sent in its stack until
+# one is, so no byte a peer sees changes.
+wire = "none"
+help = '''
+How many receive buffers, each of the batch a session advertises, the links of a
+session share when its engine lends their buffers from the session's memory at
+open. A link holds one only while it holds part of a batch the stream has not
+finished, or a batch or datagram it was asked to keep; it reads into a free one
+otherwise. A link that finds none free reads nothing until one is: what its peer
+sent waits in the network stack, and nothing is lost. A pool larger than the
+links a session may hold is held to them. At least 1; a session may lower it and
+never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a zenoh transport reads each link into buffers of its own, and the count of wz's shared receive buffers is wz's own."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico reads every peer of a unicast transport into the transport's one receive buffer and keeps a stream peer's batch that arrived in part in a buffer of that peer's (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`, `vendor/zenoh-pico/src/transport/unicast/read.c` @ `static z_result_t _z_unicast_handle_remaining_data(_z_transport_unicast_t *ztu, _z_transport_peer_unicast_t *peer,`): one buffer read into and one part held."
+
+[[limit]]
 id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kind = "bound"

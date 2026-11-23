@@ -56,7 +56,7 @@ use wz_session_core::reliability::Reliability;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
-use crate::link_storage::{TxLender, TxStore};
+use crate::link_storage::{RxStore, TxLender, TxStore};
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
 #[cfg(all(
     feature = "alloc",
@@ -88,7 +88,7 @@ pub trait StreamSocket: Sized {
     /// The link a stack holds over this stream: [`StreamDriver`] over it, for every stream there
     /// is one of. [`NoStream`] names itself, a link there is none of, so the case a stack keeps
     /// for a protocol it does not carry holds nothing and no code serves it.
-    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
     where
         Self: 'static;
 
@@ -320,7 +320,7 @@ pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
 pub fn link_over<S, B, X>(socket: S, rx: B, tx: X) -> S::Link<B, X>
 where
     S: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: RxStore + 'static,
     X: TxStore + 'static,
 {
     <S::Link<B, X> as StreamLink<S, B, X>>::over(socket, rx, tx)
@@ -338,7 +338,7 @@ pub enum NoStream {}
 impl StreamSocket for NoStream {
     type Error = core::convert::Infallible;
 
-    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>
+    type Link<B: RxStore + 'static, X: TxStore + 'static>
         = NoStream
     where
         Self: 'static;
@@ -682,7 +682,7 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// The peer is the other end of the connection, so the link has no binding to make: what arrives
 /// is the peer's. The receive buffer bounds the batch the link takes, and so the batch the session
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
-pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
+pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
     socket: S,
     /// The link's two ends, `tcp/<ip>:<port>` each, known from the connection.
     endpoints: LinkEndpoints,
@@ -756,11 +756,11 @@ impl<S: StreamSocket> StreamDriver<S, Vec<u8>, HeapTx> {
     }
 }
 
-impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
+impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// The link over the connected `socket`, receiving into `rx_buf` and building its frames in
     /// `tx`.
     pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
-        let rx_len = rx_buf.as_mut().len();
+        let rx_len = rx_buf.capacity();
         Self {
             endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()),
             socket,
@@ -848,7 +848,11 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             return false;
         }
         let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
+        // A link of a pool that holds no buffer and finds none free reads nothing: what its peer
+        // sent waits in the stack (`SessionDatagramLink::waits_for_buffer`).
+        let Some(bytes) = buf.bytes() else {
+            return false;
+        };
         let mut start = self.spent.get();
         let mut held = self.held.get();
         let lent = loop {
@@ -901,6 +905,14 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             front(&bytes[start..held], self.rx_len),
             Front::Batch(_)
         ));
+        // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
+        // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
+        // this link's (`held`, `spent`), so its buffer stays its own while one is there.
+        if start == held {
+            self.spent.set(0);
+            self.held.set(0);
+            buf.idle();
+        }
         lent
     }
 
@@ -1113,7 +1125,7 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
     }
 }
 
-impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver
+impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for StreamDriver<S, B, T>
 {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
@@ -1260,7 +1272,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     }
 }
 
-impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> SessionDatagramLink
+impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
     for StreamDriver<S, B, T>
 {
     fn service(&self) {
@@ -1282,6 +1294,10 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
     fn holds_input(&self) -> bool {
         self.batch_held()
+    }
+
+    fn waits_for_buffer(&self) -> bool {
+        self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
     }
 
     fn owes_write(&self) -> bool {
@@ -1334,7 +1350,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
             return None;
         }
         let mut buf = self.rx_buf.try_borrow_mut().ok()?;
-        let bytes: &mut [u8] = buf.as_mut();
+        let bytes = buf.bytes()?;
         let (start, mut held) = (self.spent.get(), self.held.get());
         // Nothing before what is left of a batch is lent any more (asked where a receive could
         // be): it moves to the front, as a receive moves it, and the read lands behind it.
@@ -1372,13 +1388,21 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
                 let held = (self.held.get() + n).min(self.rx_len);
                 self.held.set(held);
                 let mut buf = self.rx_buf.borrow_mut();
-                let bytes: &mut [u8] = buf.as_mut();
-                self.ready.set(matches!(
-                    front(&bytes[self.spent.get()..held], self.rx_len),
-                    Front::Batch(_)
-                ));
+                // The lease was lent from the buffer the link holds, which it holds still.
+                if let Some(bytes) = buf.bytes() {
+                    self.ready.set(matches!(
+                        front(&bytes[self.spent.get()..held], self.rx_len),
+                        Front::Batch(_)
+                    ));
+                }
             }
-            ReadWaited::Quiet => {}
+            ReadWaited::Quiet => {
+                // A read that brought nothing leaves a buffer that holds nothing of the link's
+                // own to its pool.
+                if self.held.get() == self.spent.get() {
+                    self.rx_buf.borrow_mut().idle();
+                }
+            }
             ReadWaited::Ended => self.end(LostCause::PeerClosed),
             ReadWaited::Failed(code) => {
                 if let Some(error) = S::read_failure(code) {
@@ -1410,7 +1434,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 impl<S, B, X> StreamLink<S, B, X> for StreamDriver<S, B, X>
 where
     S: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: RxStore + 'static,
     X: TxStore + 'static,
 {
     fn over(socket: S, rx: B, tx: X) -> Self {
@@ -1428,7 +1452,7 @@ where
     not(feature = "session-slot"),
     target_has_atomic = "ptr"
 ))]
-impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> Drop for StreamDriver<S, B, T> {
+impl<S: StreamSocket, B: RxStore, T: TxStore> Drop for StreamDriver<S, B, T> {
     fn drop(&mut self) {
         if let (Some(owner), true) = (&self.owner_read, self.rx_lent.get()) {
             self.socket.shutdown();
@@ -1484,7 +1508,7 @@ mod tests {
     impl StreamSocket for Pipe {
         type Error = Broken;
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<B: RxStore + 'static, X: crate::link_storage::TxStore + 'static>
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1643,14 +1667,130 @@ mod tests {
         out
     }
 
-    fn queue(link: &Link, piece: &[u8]) {
+    fn queue<B: RxStore>(link: &StreamDriver<Pipe, B, Slots>, piece: &[u8]) {
         link.socket.pieces.borrow_mut().push_back(piece.to_vec());
     }
 
-    fn received(link: &Link) -> Option<Vec<u8>> {
+    fn received<B: RxStore + 'static>(link: &StreamDriver<Pipe, B, Slots>) -> Option<Vec<u8>> {
         let mut got = None;
         link.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
         got
+    }
+
+    /// A link that reads into a pool of receive buffers its session's links share.
+    type Pooled = StreamDriver<Pipe, crate::link_storage::PooledRx, Slots>;
+
+    /// A pool of `buffers` receive buffers of 34 bytes, lent from an arena of its own that the test
+    /// process leaks, as a session's arena lends its links' pool.
+    fn pool(buffers: usize) -> wz_session_core::byte_cells::LentByteCells {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::byte_cells_bytes(34, buffers).expect("a test's pool fits");
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every buffer.
+        let mut arena = unsafe {
+            Arena::over(
+                core::ptr::NonNull::from(region).cast::<u8>(),
+                blocks * ARENA_ALIGN,
+            )
+        };
+        arena
+            .lend_byte_cells(34, buffers)
+            .expect("the arena holds the pool")
+    }
+
+    fn pooled(pool: wz_session_core::byte_cells::LentByteCells) -> Pooled {
+        StreamDriver::over(
+            Pipe::default(),
+            crate::link_storage::PooledRx::of(pool),
+            Slots(UnsafeCell::new([0; 64])),
+        )
+    }
+
+    /// Two stream links over one pool, each sent its batch in parts that alternate with the
+    /// other's, the length cut in two as well: each hands over its own batch whole, never a byte
+    /// of the other's, because a link keeps the buffer that holds its part of a batch and the
+    /// other reads into another. Once both are handed over neither holds a buffer. Then byte by
+    /// byte, alternating, the same holds at every step.
+    #[test]
+    fn two_stream_links_over_one_pool_each_keep_their_part_of_a_batch() {
+        let pool = pool(2);
+        let (a, b) = (pooled(pool), pooled(pool));
+        let (to_a, to_b) = (
+            batch(b"to a, all of it here"),
+            batch(b"and to b, another one"),
+        );
+        queue(&a, &to_a[..1]);
+        assert_eq!(received(&a), None, "half a length");
+        queue(&b, &to_b[..5]);
+        assert_eq!(received(&b), None, "a length and part of a batch");
+        assert_eq!(pool.in_use(), 2, "each link holds the buffer of its part");
+        queue(&a, &to_a[1..9]);
+        assert_eq!(received(&a), None, "still part of a batch");
+        queue(&b, &to_b[5..]);
+        assert_eq!(received(&b).as_deref(), Some(&to_b[2..]));
+        assert_eq!(pool.in_use(), 1, "b holds nothing of its own now");
+        queue(&a, &to_a[9..]);
+        assert_eq!(received(&a).as_deref(), Some(&to_a[2..]));
+        assert_eq!(pool.in_use(), 0);
+        assert!(!a.waits_for_buffer() && !b.waits_for_buffer());
+
+        let mut got: [Vec<Vec<u8>>; 2] = [Vec::new(), Vec::new()];
+        for at in 0..to_a.len().max(to_b.len()) {
+            for (link, wire, into) in [(&a, &to_a, 0), (&b, &to_b, 1)] {
+                if let Some(byte) = wire.get(at) {
+                    queue(link, &[*byte]);
+                }
+                if let Some(whole) = received(link) {
+                    got[into].push(whole);
+                }
+                assert!(pool.in_use() <= 2);
+            }
+        }
+        assert_eq!(got, [vec![to_a[2..].to_vec()], vec![to_b[2..].to_vec()]]);
+        assert_eq!(pool.in_use(), 0);
+    }
+
+    /// Over a pool of one buffer, a link whose part of a batch holds it leaves the other link
+    /// reading nothing: the other's batch stays in its stream, whole, and the link says it waits
+    /// for a buffer; once the first batch is handed over the buffer is free, the other no longer
+    /// waits, and its batch is read whole. A batch a link was asked to keep holds the buffer too,
+    /// until it is lent again and let go.
+    #[test]
+    fn a_link_that_finds_the_pool_dry_reads_nothing_and_loses_nothing() {
+        let pool = pool(1);
+        let (a, b) = (pooled(pool), pooled(pool));
+        let (to_a, to_b) = (batch(b"first"), batch(b"second"));
+        queue(&a, &to_a[..4]);
+        assert_eq!(received(&a), None);
+        queue(&b, &to_b);
+        assert_eq!(received(&b), None, "no buffer to read into");
+        assert!(b.waits_for_buffer());
+        assert_eq!(
+            b.socket.pieces.borrow().len(),
+            1,
+            "the batch waits in the stream, unread"
+        );
+        queue(&a, &to_a[4..]);
+        assert_eq!(received(&a).as_deref(), Some(&b"first"[..]));
+        assert!(!b.waits_for_buffer(), "the buffer is free");
+        assert_eq!(received(&b).as_deref(), Some(&b"second"[..]));
+        assert_eq!(pool.in_use(), 0);
+
+        queue(&a, &batch(b"kept"));
+        assert!(a.recv_with(&mut |_| a.keep()));
+        assert_eq!(pool.in_use(), 1, "a kept batch holds the buffer");
+        queue(&b, &batch(b"waits"));
+        assert_eq!(received(&b), None);
+        assert_eq!(received(&a).as_deref(), Some(&b"kept"[..]), "lent again");
+        assert_eq!(pool.in_use(), 0, "and let go");
+        assert_eq!(received(&b).as_deref(), Some(&b"waits"[..]));
     }
 
     /// A batch the session asks the link to keep, from inside the lend, is lent again whole by the

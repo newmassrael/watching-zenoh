@@ -529,7 +529,12 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         "every face's peer tables are the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
-    assert_eq!(row(&listening, "link receive buffers").count, 3 + 2);
+    assert_eq!(row(&listening, "link transmit slots").count, 3 + 2);
+    assert_eq!(
+        row(&listening, "link receive buffers").count,
+        caps::RX_POOL_BUFFERS.min(3 + 2),
+        "the links share a pool of receive buffers"
+    );
     assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
     assert_eq!(
         row(&listening, "subscribers"),
@@ -559,8 +564,7 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
     assert!(!crate::arena::dials(&only) && crate::arena::dials(&dialling));
     let (only, dialling) = (plan(&only), plan(&dialling));
     let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(row(&only, "link receive buffers").count, 3 + 2);
-    assert_eq!(row(&dialling, "link receive buffers").count, 1 + 3 + 2);
+    assert_eq!(row(&only, "link transmit slots").count, 3 + 2);
     assert_eq!(row(&dialling, "link transmit slots").count, 1 + 3 + 2);
     assert_eq!((only.peers().tables, only.gets().tables), (3, 3 + own));
     assert_eq!(
@@ -916,8 +920,13 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     };
     let batch = usize::from(config.batch_size);
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&plan, "link receive buffers").count, 3);
+    assert_eq!(
+        row(&plan, "link receive buffers").count,
+        caps::RX_POOL_BUFFERS.min(3),
+        "the links share a pool, of no more buffers than links"
+    );
     assert_eq!(row(&plan, "link receive buffers").entry_bytes, batch);
+    assert_eq!(row(&plan, "link transmit slots").count, 3);
     assert_eq!(
         row(&plan, "link transmit slots").entry_bytes,
         LINK_TX_SLOTS * batch
@@ -1362,6 +1371,10 @@ const LINK_PARTS: [&str; 4] = [
     "link transmit slots",
 ];
 
+/// The parts of the pool of receive buffers the links share (`RX_POOL_BUFFERS`, at most one for
+/// each link).
+const RX_PARTS: [&str; 2] = ["link receive flags", "link receive buffers"];
+
 /// The pico preset holds a session's faces to zenoh-pico's own bounds: ten peers on a listener
 /// (`Z_LISTEN_MAX_CONNECTION_NB`) and one handshake at a time, and a client its one transport. A
 /// client's arena lends one set of a face's tables and the buffers of one link; a peer's lends the
@@ -1436,7 +1449,12 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     assert_eq!(row(&client, "link receive buffers").count, 1);
     assert_eq!(peer.peers().tables, faces);
     assert_eq!(peer.gets().tables, faces + own);
-    assert_eq!(row(&peer, "link receive buffers").count, faces + handshakes);
+    assert_eq!(row(&peer, "link transmit slots").count, faces + handshakes);
+    assert_eq!(
+        row(&peer, "link receive buffers").count,
+        preset("RX_POOL_BUFFERS"),
+        "the peer's links share the preset's pool"
+    );
 
     // The pools hold the fewer of the session's limit and what the faces could hold, each at a
     // peer's own bound: a client's one face what its tables held, and the peer's ten the
@@ -1483,8 +1501,11 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             theirs.entry_bytes, ours.entry_bytes,
             "a face's and a link's items are the same size on either"
         );
-        // The peer listens and dials nothing: no link and no face of the dial role's.
-        let count = if LINK_PARTS.contains(&theirs.part) {
+        // The peer listens and dials nothing: no link and no face of the dial role's. Its links
+        // share the preset's pool of receive buffers, of which the client's one link takes one.
+        let count = if RX_PARTS.contains(&theirs.part) {
+            preset("RX_POOL_BUFFERS").min(faces + handshakes)
+        } else if LINK_PARTS.contains(&theirs.part) {
             ours.count * (faces + handshakes)
         } else if theirs.part == "peer tables" {
             ours.count * faces

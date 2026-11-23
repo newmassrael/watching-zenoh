@@ -3341,6 +3341,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
                         holds = true;
+                    } else if wire.link.waits_for_buffer() {
+                        // Its input waits in the stack until another link gives a receive
+                        // buffer back, which that link's own input wakes the read for.
                     } else if let Some(ready) = &wire.readiness {
                         if wire.link.owes_write() {
                             waits.push(AndRoom::of(ready.clone()));

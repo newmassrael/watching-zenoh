@@ -35,9 +35,11 @@
 //!   takes each from its heap as it comes. A session of one face shares with no one: its tables
 //!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
 //!   link and no pool state;
-//! - the buffers of each link the session may hold: a receive buffer of the batch the session
-//!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
-//!   length to encode its frames into, each table with the flags that say which buffers are lent
+//! - the buffers of the links the session may hold: a pool of receive buffers of the batch the
+//!   session advertises, a streamed batch's length counted inside it, as many as
+//!   `RX_POOL_BUFFERS` and no more than the links, which a link holds only while it holds part of
+//!   a batch or something it was asked to keep; and for each link [`LINK_TX_SLOTS`] slots of that
+//!   length to encode its frames into; each table with the flags that say which buffers are lent
 //!   (`SessionArena::lend_links`). The batch is the config's, held to the session's
 //!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
 //!   first;
@@ -280,6 +282,9 @@ pub struct ArenaPlan {
     len: usize,
     /// The links whose buffers the arena holds.
     links: usize,
+    /// The receive buffers of the pool those links share (`RX_POOL_BUFFERS`, at most one for each
+    /// link).
+    rx_buffers: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
     /// The bytes of the session's delivery lane (`crate::lane`).
@@ -321,10 +326,19 @@ impl ArenaPlan {
             "PICO_FRAG_MAX_BYTES",
             limits.pico_frag_max_bytes(),
         )?;
+        // The links read into a pool they share, a buffer held by a link only while it holds part
+        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
+        // a pool of more buffers than links would hold one no link can take.
+        let rx_buffers = lent::<{ caps::RX_POOL_BUFFERS }>(
+            "RX_POOL_BUFFERS",
+            Quota::at_most(limits.rx_pool_buffers()),
+        )?
+        .min(links);
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
             links,
+            rx_buffers,
             link_bytes,
             lane_bytes: lent::<{ caps::DELIVERY_LANE_BYTES }>(
                 "DELIVERY_LANE_BYTES",
@@ -346,14 +360,14 @@ impl ArenaPlan {
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
         plan.put(
             "link receive flags",
-            "PICO_UNICAST_BATCH_BYTES",
-            links,
+            "RX_POOL_BUFFERS",
+            rx_buffers,
             LentByteCells::FLAG_BYTES,
         )?;
         plan.put(
             "link receive buffers",
-            "PICO_UNICAST_BATCH_BYTES",
-            links,
+            "RX_POOL_BUFFERS",
+            rx_buffers,
             link_bytes,
         )?;
         plan.put(
@@ -1075,14 +1089,16 @@ impl SessionArena {
         self.arena.bytes()
     }
 
-    /// Lend the tables of the links' buffers `plan` lays out, its first rows: a receive buffer and
-    /// [`LINK_TX_SLOTS`] slots for each link the session may hold, which the session's links claim
-    /// as they open and give back as they go. Refused only by an arena reserved by another plan.
+    /// Lend the tables of the links' buffers `plan` lays out, its first rows: the pool of receive
+    /// buffers the links share, each held by a link only while it holds something of its own in
+    /// it, and [`LINK_TX_SLOTS`] slots for each link the session may hold, which the session's
+    /// links claim as they open and give back as they go. Refused only by an arena reserved by
+    /// another plan.
     pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
         let slots = times(LINK_TX_SLOTS, plan.link_bytes)?;
         let rx = self
             .arena
-            .lend_byte_cells(plan.link_bytes, plan.links)
+            .lend_byte_cells(plan.link_bytes, plan.rx_buffers)
             .map_err(ArenaRefused::Lend)?;
         let tx = self
             .arena
@@ -1209,6 +1225,7 @@ mod tests {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
             links: 0,
+            rx_buffers: 0,
             link_bytes: 0,
             lane_bytes: 0,
             reassembly_bytes: 0,
