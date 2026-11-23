@@ -410,6 +410,7 @@ const RING_MT_BYTES: usize = core::mem::size_of::<RingMtLayout>();
 /// # Safety
 /// `slot` must be a writable `size` bytes the C side allocated for the
 /// collection.
+#[inline(never)]
 unsafe fn install(slot: *mut c_void, capacity: usize, size: usize) -> ZResult {
     if slot.is_null() {
         return Z_ERR_INVALID;
@@ -516,6 +517,7 @@ unsafe fn push(
 /// # Safety
 /// `dst` must be writable storage for one element of the collection's element
 /// type, and `move_f` must be the matching mover.
+#[inline(never)]
 unsafe fn pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f) -> ZResult {
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
@@ -550,6 +552,7 @@ unsafe fn pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f)
 ///
 /// # Safety
 /// As [`pull`].
+#[inline(never)]
 unsafe fn try_pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f) -> ZResult {
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
@@ -613,6 +616,27 @@ unsafe fn clear(slot: *mut c_void, free_f: z_element_free_f) {
     }
 }
 
+/// A collection of `size` bytes from the C allocator, as `z_malloc` hands a program one, with a
+/// fresh channel installed; `NULL` when the allocator or the install refuses, nothing left
+/// behind. The fifo's and the ring's `_new` share it, and each export of the two families is
+/// a call into one body (`install`, `push`, `pull`, `try_pull`, `close`, `clear`) with
+/// the collection's size or its full policy as data.
+///
+/// # Safety
+/// `size` must be the size of the collection type the caller casts the answer to.
+#[inline(never)]
+unsafe fn new_collection(capacity: usize, size: usize) -> *mut c_void {
+    let raw = crate::platform::z_malloc(size);
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+    if install(raw, capacity, size) != Z_OK {
+        crate::platform::z_free(raw);
+        return core::ptr::null_mut();
+    }
+    raw
+}
+
 // --- fifo exports ----------------------------------------------------------
 
 /// pico `_z_fifo_mt_init`.
@@ -631,16 +655,7 @@ pub unsafe extern "C" fn _z_fifo_mt_init(fifo: *mut _z_fifo_mt_t, capacity: usiz
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_new(capacity: usize) -> *mut _z_fifo_mt_t {
     guard_val(core::ptr::null_mut(), || {
-        let raw = crate::platform::z_malloc(core::mem::size_of::<_z_fifo_mt_t>());
-        if raw.is_null() {
-            return core::ptr::null_mut();
-        }
-        let fifo = raw.cast::<_z_fifo_mt_t>();
-        if _z_fifo_mt_init(fifo, capacity) != Z_OK {
-            crate::platform::z_free(raw);
-            return core::ptr::null_mut();
-        }
-        fifo
+        new_collection(capacity, core::mem::size_of::<_z_fifo_mt_t>()).cast()
     })
 }
 
@@ -715,16 +730,7 @@ pub unsafe extern "C" fn _z_ring_mt_init(ring: *mut _z_ring_mt_t, capacity: usiz
 #[no_mangle]
 pub unsafe extern "C" fn _z_ring_mt_new(capacity: usize) -> *mut _z_ring_mt_t {
     guard_val(core::ptr::null_mut(), || {
-        let raw = crate::platform::z_malloc(core::mem::size_of::<_z_ring_mt_t>());
-        if raw.is_null() {
-            return core::ptr::null_mut();
-        }
-        let ring = raw.cast::<_z_ring_mt_t>();
-        if _z_ring_mt_init(ring, capacity) != Z_OK {
-            crate::platform::z_free(raw);
-            return core::ptr::null_mut();
-        }
-        ring
+        new_collection(capacity, core::mem::size_of::<_z_ring_mt_t>()).cast()
     })
 }
 
@@ -1040,6 +1046,27 @@ mod tests {
             producer.join().expect("producer thread");
             _z_fifo_mt_clear(fifo, Some(free_usize));
             drop(Box::from_raw(fifo));
+        }
+    }
+
+    #[test]
+    fn a_new_fifo_and_a_new_ring_start_empty_and_open() {
+        // SAFETY: each collection is made here, read while live and freed once.
+        unsafe {
+            let fifo = _z_fifo_mt_new(2);
+            assert!(!fifo.is_null());
+            assert_eq!(
+                _z_fifo_mt_try_pull(core::ptr::null_mut(), fifo.cast(), None),
+                Z_RES_CHANNEL_NODATA
+            );
+            _z_fifo_mt_free(fifo, None);
+            let ring = _z_ring_mt_new(2);
+            assert!(!ring.is_null());
+            assert_eq!(
+                _z_ring_mt_try_pull(core::ptr::null_mut(), ring.cast(), None),
+                Z_RES_CHANNEL_NODATA
+            );
+            _z_ring_mt_free(ring, None);
         }
     }
 
