@@ -271,8 +271,8 @@ impl DeclaredKeyexpr {
     /// Another holder of the declaration that covers a prefix of the key, if any, without the
     /// key's text: what keeps the declaration on the session for something that names the key by
     /// it.
-    pub(crate) fn declaration_hold(&self) -> Option<WireDeclaration> {
-        self.declaration.clone()
+    pub(crate) fn declaration_hold(&self) -> Option<KeyHold> {
+        self.declaration.as_ref().map(|d| d.hold.clone())
     }
 
     /// Another holder of the literal key's text, without the declaration.
@@ -2165,6 +2165,30 @@ mod arena_key_tests {
         assert!(declared(&engine), "the wire key holds it");
         drop(wire);
         assert!(!declared(&engine), "the last holder retracts it");
+        close(session);
+    }
+
+    /// A key that announces an entity holds the declaration of the entity's own key besides the
+    /// one it names, as the entity's retraction names it: the declaration outlives the key it was
+    /// made from until the announcing key lets go. Turned red by a key that keeps only what it
+    /// names.
+    #[test]
+    fn a_key_holds_the_declaration_its_entity_retracts_by() {
+        let (session, engine) = listening();
+        let declared = |engine: &Arc<Engine>| {
+            engine
+                .keyexpr_declarations()
+                .iter()
+                .any(|(_, key)| key == "demo/hold/entity")
+        };
+        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/entity", None).expect("declared");
+        let wire =
+            WireKey::literal().holding_also(key.declaration_hold().expect("the key is declared"));
+        assert!(wire.is_literal(), "the wire names no declaration");
+        drop(key);
+        assert!(declared(&engine), "the announcing key holds it");
+        drop(wire);
+        assert!(!declared(&engine), "and lets it go");
         close(session);
     }
 

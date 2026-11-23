@@ -563,7 +563,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // The session's close waits for this get's closure to finish and be dropped.
         handle.keep_background(closure.release_latch());
         let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
-            Ok(k) => k.to_owned(),
+            Ok(k) => k,
             Err(code) => return code,
         };
         // A NULL options pointer is pico's "defaults", not an error.
@@ -581,10 +581,13 @@ pub unsafe extern "C" fn z_liveliness_get(
         // interest by construction; the gate is carried anyway so this plane
         // uses the same admission rule as `z_get` rather than a second one that
         // could drift.
+        // The gate keeps the one copy of the key the get asks under, and the get is sent naming
+        // the gate's, as `z_get` sends its own: one text, made once.
         let gate = Arc::new(crate::get::ReplyGate {
-            query_keyexpr: ke.clone(),
+            query_keyexpr: ke.to_owned(),
             anyke: false,
         });
+        let asked = Arc::clone(&gate);
 
         // The cancellation, each leg's ownership and the order they drop in are the fan's, shared
         // with `z_get` (R311y575, R2949): registered BEFORE the first leg is issued, as upstream
@@ -592,7 +595,13 @@ pub unsafe extern "C" fn z_liveliness_get(
         // cancelled token answering `Z_ERR_CANCELLED` with no Interest sent.
         let engine = engine_of(handle);
         crate::get::fan_get(closure, gate, token, |fan, leg| {
-            engine.liveliness_get_on_wire(&ke, &WireKey::literal(), timeout_ms, fan, leg)
+            engine.liveliness_get_on_wire(
+                &asked.query_keyexpr,
+                &WireKey::literal(),
+                timeout_ms,
+                fan,
+                leg,
+            )
         })
     })
 }

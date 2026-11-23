@@ -430,6 +430,10 @@ pub struct WireKey {
     /// What follows the declared prefix, `None` when it covers the whole key.
     pub suffix: Option<String>,
     keeps: Keeps,
+    /// One hold on the declaration of the key of the entity this key announces, when that is not
+    /// the declaration the wire names: the entity's retraction names it, so it is held for as long
+    /// as the entry is ([`Self::holding_also`]).
+    also: Option<KeyHold>,
 }
 
 /// What a key keeps alive for as long as a declaration made on it stays recorded.
@@ -450,6 +454,7 @@ impl core::fmt::Debug for WireKey {
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
             .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
+            .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
             .finish()
     }
 }
@@ -517,6 +522,7 @@ impl WireKey {
             mapping_id,
             suffix,
             keeps: Keeps::Nothing,
+            also: None,
         }
     }
 
@@ -530,6 +536,14 @@ impl WireKey {
     /// stays recorded, in the engine's own count and with nothing of its own on the heap.
     pub fn holding(mut self, hold: KeyHold) -> Self {
         self.keeps = Keeps::Hold { _held: hold };
+        self
+    }
+
+    /// This key, holding besides what it names the declaration `hold` holds, of the key of the
+    /// entity it announces, which the entity's retraction names: one more hold in the engine's own
+    /// count, with nothing of its own on the heap.
+    pub fn holding_also(mut self, hold: KeyHold) -> Self {
+        self.also = Some(hold);
         self
     }
 
