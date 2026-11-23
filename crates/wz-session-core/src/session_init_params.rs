@@ -30,7 +30,7 @@ use crate::signing_key::SigningKey;
 pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
 
 /// The longest cookie a session keeps on the `session-slot` profile, in bytes: the build's
-/// `HANDSHAKE_COOKIE_BYTES` limit, 128 unless it says otherwise. It is the node's own bound and not
+/// `HANDSHAKE_COOKIE_BYTES` limit, 176 unless it says otherwise. It is the node's own bound and not
 /// the codec's: the INIT body declares a cookie of up to [`COOKIE_FIELD_MAX`] (`sce:max-size` of the
 /// generated `InitBody`) and the OPEN body declares none, so a cookie the decoder accepts may be
 /// longer than this: the in-place read refuses it (`inbound::read_control`), and the fixed form

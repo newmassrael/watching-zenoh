@@ -3752,20 +3752,30 @@ id = "HANDSHAKE_COOKIE_BYTES"
 kconfig = "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"
 kind = "bound"
 driven = "remote"
-default = 128
+# The widest cookie a zenoh 1.10.2 node of any build hands out in its InitAck: the plaintext of
+# `Cookie` (io/zenoh-transport/src/unicast/establishment/cookie.rs:57-81) at most 176 bytes, a
+# multiple of the cipher's 16-byte block (commons/zenoh-crypto/src/cipher.rs:37-42), so 176.
+# zid 17 (len + 16), whatami 1, resolution 1, batch size 3, nonce 9 (VLE of a u64,
+# commons/zenoh-codec/src/core/zint.rs:21), QoS 9; multilink 79 (flag 1, challenge 9, the
+# initiator's 512-bit RSA key as n 1+64 and e 1+3: ext/multilink.rs:32,230-244,
+# ext/auth/pubkey.rs:189-192); shared memory 0 (ext/shm/auth.rs:483); auth 21 (count 1, pubkey
+# id 1 + challenge 9, usrpwd id 1 + nonce 9: ext/auth/mod.rs:184-219, ext/auth/pubkey.rs,
+# ext/auth/usrpwd.rs); lowlatency 1, compression 1, patch 1; region name 33 (len + 32:
+# commons/zenoh-protocol/src/core/region.rs:211).
+default = 176
 storage = "capacity"
 scope = "session"
-# Its fixed profile is a `session-slot` build, which holds the cookie in storage of fixed size.
+# Its fixed profiles are a `session-slot` build and a build whose limits are its build's values
+# (`limits-lent-at-open`), which hold the cookie in storage of fixed size.
 binding_heap = "open"
 binding_fixed = "build"
 # `wire` is none: within the limit no byte a peer sees changes; past it, the cookie is left out.
 wire = "none"
 help = '''
-How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
+How many bytes of a peer's cookie a session keeps on a fixed-memory profile:
 the cookie in the peer's INIT acknowledgement, which the node echoes in its
 OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks
-against the one it issued. A longer cookie is not kept, so the node echoes none
-and the peer refuses its OPEN. At most 65535, the INIT cookie field's capacity, and for a
+against the one it issued. A longer cookie is refused where the message is read. At most 65535, the INIT cookie field's capacity, and for a
 node that accepts sessions at least the widest cookie it issues itself: a build
 with a smaller value does not compile. Each session holds buffers of this size,
 so the value is memory. The growable profile keeps a cookie of any length and
