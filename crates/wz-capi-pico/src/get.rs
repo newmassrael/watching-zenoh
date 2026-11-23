@@ -290,14 +290,8 @@ impl ReplyMarshal {
                     } else {
                         view.err_encoding()
                     },
-                    // Read where the view holds them first: a view of the session's delivery lane
-                    // carries no hint, only the parts.
-                    view.timestamp_parts()
-                        .map(|stamp| (stamp.time, stamp.zid))
-                        .or_else(|| {
-                            view.timestamp()
-                                .map(|hint| (hint.time, hint.zid.as_slice()))
-                        }),
+                    // Read where the view holds them: every view states its stamp as parts.
+                    view.timestamp_parts().map(|stamp| (stamp.time, stamp.zid)),
                     view.source_info(),
                 ),
             err_payload,
@@ -1970,10 +1964,10 @@ pub unsafe extern "C" fn z_reply_replier_id(
 mod tests {
     use super::*;
 
-    /// A Put reply of `"demo/stamped"` whose timestamp is held as parts, as a reply read from the
-    /// session's delivery lane holds it, or as the owned hint, as a retained reply holds it.
+    /// A Put reply of `"demo/stamped"` whose timestamp, when it has one, is held as parts, as every
+    /// view states it.
     struct Stamped {
-        hint: Option<wz_session_core::sample::TimestampHint>,
+        time: Option<u64>,
     }
 
     impl ReplyView for Stamped {
@@ -1993,16 +1987,8 @@ mod tests {
             None
         }
         fn timestamp_parts(&self) -> Option<wz_session_core::reply_stage::TimestampParts<'_>> {
-            match self.hint {
-                Some(_) => None,
-                None => Some(wz_session_core::reply_stage::TimestampParts {
-                    time: 42,
-                    zid: &[7, 8],
-                }),
-            }
-        }
-        fn timestamp(&self) -> Option<&wz_session_core::sample::TimestampHint> {
-            self.hint.as_ref()
+            self.time
+                .map(|time| wz_session_core::reply_stage::TimestampParts { time, zid: &[7, 8] })
         }
     }
 
@@ -2010,7 +1996,7 @@ mod tests {
     /// and a reply kept past it holds a copy of its own.
     #[test]
     fn a_reply_reads_its_payload_in_place_and_a_kept_one_copies_it() {
-        let view = Stamped { hint: None };
+        let view = Stamped { time: Some(42) };
         let read = |marshal: &ReplyMarshal| {
             // SAFETY: the marshal is bound and alive while it is read.
             unsafe {
@@ -2049,23 +2035,16 @@ mod tests {
         (!stamp.is_null()).then(|| unsafe { (*stamp).time })
     }
 
-    /// A reply's timestamp reaches its sample whether the view holds it as parts or as the hint.
+    /// A reply's timestamp reaches its sample from the parts its view states, and a reply with
+    /// none has none.
     #[test]
-    fn a_reply_timestamp_is_read_from_its_parts_or_its_hint() {
+    fn a_reply_timestamp_is_read_from_its_parts() {
         assert_eq!(
-            sample_time(&Stamped { hint: None }),
+            sample_time(&Stamped { time: Some(42) }),
             Some(42),
             "from the parts"
         );
-        let hint = wz_session_core::sample::TimestampHint {
-            time: 43,
-            zid: vec![7, 8],
-        };
-        assert_eq!(
-            sample_time(&Stamped { hint: Some(hint) }),
-            Some(43),
-            "from the hint"
-        );
+        assert_eq!(sample_time(&Stamped { time: None }), None, "none stated");
     }
 
     /// pico rewrites `timeout_ms == 0` to `Z_GET_TIMEOUT_DEFAULT` before
