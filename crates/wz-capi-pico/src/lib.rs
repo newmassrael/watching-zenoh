@@ -678,8 +678,6 @@ pub mod qos;
 #[allow(clippy::arithmetic_side_effects)]
 pub mod querier;
 #[cfg(feature = "queryable")]
-// Totality debt TD-183 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.

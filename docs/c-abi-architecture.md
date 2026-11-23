@@ -211,7 +211,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (152) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (151) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -297,7 +297,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-177 | `wz-capi-pico` | `message_catalog` | `arithmetic_side_effects` | 5 | in flight |
 | TD-181 | `wz-capi-pico` | `matching` | `arithmetic_side_effects` | 3 | in flight |
 | TD-182 | `wz-capi-pico` | `message_payload` | `arithmetic_side_effects` | 3 | in flight |
-| TD-183 | `wz-capi-pico` | `query` | `arithmetic_side_effects` | 3 | in flight |
 | TD-185 | `wz-capi-pico` | `app_transport` | `arithmetic_side_effects` | 2 | in flight |
 | TD-186 | `wz-capi-pico` | `ext_interface` | `arithmetic_side_effects` | 2 | in flight |
 | TD-188 | `wz-capi-pico` | `object_pool` | `arithmetic_side_effects` | 2 | in flight |
