@@ -359,16 +359,31 @@ config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
 	default 8
 	help
-	  The most tasks the runtime of a fixed-memory image may hold: a ceiling on
-	  the task table the image declares, which the image is checked against when
-	  it compiles.
+	  The most tasks a runtime holds: a ceiling on the task table a fixed-memory
+	  image declares, which the image is checked against when it compiles, and on
+	  the task cells a session of the C ABI's cooperative engine reserves when it
+	  opens, one for each link and group its configuration admits. A link or a
+	  group past them is refused, at the open as out of memory and after it as a
+	  link past the faces the session admits.
 
 config WZ_LIMIT_MAX_TIMERS
 	int "MAX_TIMERS"
 	default 16
 	help
-	  The most timers the runtime of a fixed-memory image may hold: a ceiling on
-	  the timer table the image declares, checked as the task ceiling is.
+	  The most timers a runtime holds: a ceiling on the timer table a
+	  fixed-memory image declares, checked as the task ceiling is, and the entries
+	  of the timer table a session of the C ABI's cooperative engine reserves when
+	  it opens. A sleep past them is refused an entry and counted, and ends by
+	  polling.
+
+config WZ_LIMIT_MAX_TICKERS
+	int "MAX_TICKERS"
+	default 16
+	help
+	  The periodic jobs a session of the C ABI's cooperative engine runs at once
+	  (an advanced publisher's heartbeat is one): the rows of the table the
+	  session reserves when it opens. Starting one more is refused, as an engine
+	  with no periodic jobs refuses it.
 
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
