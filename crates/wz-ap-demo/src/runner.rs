@@ -1570,58 +1570,70 @@ fn install_observer_callbacks(
     // substring searches still match because the original text appears
     // verbatim after the env_logger prefix.
     if remote_log_spec.on_remote_subscriber {
-        observer_lock
-            .remote_subscribers
-            .on_subscriber_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .remote_subscribers
-            .on_subscriber_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     if remote_log_spec.on_remote_queryable {
-        observer_lock
-            .remote_queryables
-            .on_queryable_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .remote_queryables
-            .on_queryable_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_queryables
+                .on_queryable_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_queryables
+                .on_queryable_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     if remote_log_spec.on_remote_liveliness {
-        observer_lock
-            .liveliness
-            .on_token_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .liveliness
-            .on_token_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .liveliness
+                .on_token_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .liveliness
+                .on_token_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     // observer_lock drops here; subsequent users (drive_session
     // dispatch closure, Session::publish loopback branch) re-lock

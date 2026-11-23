@@ -120,8 +120,7 @@ async fn receive(cfg: McastSocketConfig<'_>, budget: Duration) -> (usize, usize)
     {
         let fired = fired.clone();
         observer
-            .subscribers
-            .register(KEY, move |sample| {
+            .subscribe(KEY, move |sample| {
                 assert!(
                     String::from_utf8_lossy(sample.payload()).ends_with(VALUE),
                     "a decoded Push carries pico's value"

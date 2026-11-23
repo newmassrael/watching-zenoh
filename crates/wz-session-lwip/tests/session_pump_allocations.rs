@@ -345,8 +345,7 @@ fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_, '_>) + 'stati
     let counted = seen.clone();
     observer
         .borrow_mut()
-        .subscribers
-        .register_sink(
+        .register_subscriber(
             KEY,
             Locality::Any,
             BoxedSink::new(move |_sample| {
