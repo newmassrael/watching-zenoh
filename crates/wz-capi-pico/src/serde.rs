@@ -692,38 +692,60 @@ macro_rules! impl_arithmetic {
         #[doc = concat!("Serialize one `", stringify!($ty), "` into a fresh payload (pico `", stringify!($ser), "`).")]
         #[no_mangle]
         pub unsafe extern "C" fn $ser(bytes: *mut z_owned_bytes_t, data: $ty) -> ZResult {
-            guarded(|| {
-                if bytes.is_null() {
-                    return Z_ERR_NULL;
-                }
-                store_owned_bytes(bytes, ByteBuf::from(data.to_le_bytes().as_slice()))
-            })
+            serialize_fixed(bytes, &data.to_le_bytes())
         }
 
         #[doc = concat!("Deserialize one `", stringify!($ty), "` from a whole payload (pico `", stringify!($de), "`).")]
         #[no_mangle]
         pub unsafe extern "C" fn $de(bytes: *const z_loaned_bytes_t, data: *mut $ty) -> ZResult {
-            guarded(|| {
-                if data.is_null() {
-                    return Z_ERR_NULL;
-                }
-                let buf = match bytes_ref(bytes) {
-                    Some(b) => b,
-                    None => return Z_ERR_NULL,
-                };
-                const N: usize = core::mem::size_of::<$ty>();
-                // Exactly N bytes: a longer payload is an ERROR, mirroring
-                // pico's is-done check, not a prefix read.
-                if buf.len() != N {
-                    return Z_ERR_GENERIC;
-                }
-                let mut raw = [0u8; N];
-                raw.copy_from_slice(&buf[..N]);
+            if data.is_null() {
+                return Z_ERR_NULL;
+            }
+            let mut raw = [0u8; core::mem::size_of::<$ty>()];
+            let rc = deserialize_fixed(bytes, &mut raw);
+            if rc == Z_OK {
                 *data = <$ty>::from_le_bytes(raw);
-                Z_OK
-            })
+            }
+            rc
         }
     };
+}
+
+/// The body every `ze_serialize_<t>` of a fixed-width type shares: `le`, the value's
+/// little-endian bytes, as a whole payload. Out of line so that each export is the conversion of
+/// its own type and a call, and the payload is built by one copy of the code for all ten.
+///
+/// # Safety
+/// `bytes` must be null or valid and writable.
+#[inline(never)]
+unsafe fn serialize_fixed(bytes: *mut z_owned_bytes_t, le: &[u8]) -> ZResult {
+    guarded(|| {
+        if bytes.is_null() {
+            return Z_ERR_NULL;
+        }
+        store_owned_bytes(bytes, ByteBuf::from(le))
+    })
+}
+
+/// The body every `ze_deserialize_<t>` of a fixed-width type shares: the payload's bytes into
+/// `out`, which is the type's width. Exactly that many: a longer or a shorter payload is an
+/// error, as pico's is-done check makes it, not a prefix read, and `out` is left as it was.
+///
+/// # Safety
+/// `bytes` must be null or a live loaned payload.
+#[inline(never)]
+unsafe fn deserialize_fixed(bytes: *const z_loaned_bytes_t, out: &mut [u8]) -> ZResult {
+    guarded(|| {
+        let Some(buf) = bytes_ref(bytes) else {
+            return Z_ERR_NULL;
+        };
+        let read = buf.as_slice();
+        if read.len() != out.len() {
+            return Z_ERR_GENERIC;
+        }
+        out.copy_from_slice(read);
+        Z_OK
+    })
 }
 
 impl_arithmetic!(ze_serialize_uint8, ze_deserialize_uint8, u8);
@@ -1202,6 +1224,105 @@ mod tests {
                 ze_deserialize_uint32(crate::bytes::z_bytes_loan(&longer), &mut out),
                 Z_OK,
                 "a payload longer than the type must be rejected, not truncated"
+            );
+        }
+    }
+
+    /// Every fixed-width type goes through the one serialize body and the one deserialize body:
+    /// each width round-trips as its little-endian bytes, and a payload one byte short or one
+    /// byte long, a null payload and a null destination are refused with the value left as it
+    /// was.
+    #[test]
+    fn every_width_shares_one_body_and_its_refusals() {
+        unsafe fn payload(raw: &[u8]) -> z_owned_bytes_t {
+            let mut bytes = core::mem::zeroed();
+            store_owned_bytes(&mut bytes, ByteBuf::from(raw));
+            bytes
+        }
+        unsafe fn written(bytes: &z_owned_bytes_t) -> &[u8] {
+            bytes_ref(crate::bytes::z_bytes_loan(bytes))
+                .expect("payload")
+                .as_slice()
+        }
+        unsafe fn release(mut bytes: z_owned_bytes_t) {
+            crate::bytes::z_bytes_drop(crate::bytes::z_bytes_move(&mut bytes));
+        }
+        unsafe {
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_int16(&mut bytes, -2), Z_OK);
+            assert_eq!(written(&bytes), &[0xFE, 0xFF]);
+            let mut i16_out = 0i16;
+            assert_eq!(
+                ze_deserialize_int16(crate::bytes::z_bytes_loan(&bytes), &mut i16_out),
+                Z_OK
+            );
+            assert_eq!(i16_out, -2);
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_uint64(&mut bytes, 0x0807_0605_0403_0201), Z_OK);
+            assert_eq!(written(&bytes), &[1, 2, 3, 4, 5, 6, 7, 8]);
+            let mut u64_out = 0u64;
+            assert_eq!(
+                ze_deserialize_uint64(crate::bytes::z_bytes_loan(&bytes), &mut u64_out),
+                Z_OK
+            );
+            assert_eq!(u64_out, 0x0807_0605_0403_0201);
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_double(&mut bytes, 1.5), Z_OK);
+            assert_eq!(written(&bytes), &1.5f64.to_le_bytes());
+            let mut f64_out = 0f64;
+            assert_eq!(
+                ze_deserialize_double(crate::bytes::z_bytes_loan(&bytes), &mut f64_out),
+                Z_OK
+            );
+            assert_eq!(f64_out, 1.5);
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_uint8(&mut bytes, 0xA5), Z_OK);
+            assert_eq!(written(&bytes), &[0xA5]);
+            let mut u8_out = 0u8;
+            assert_eq!(
+                ze_deserialize_uint8(crate::bytes::z_bytes_loan(&bytes), &mut u8_out),
+                Z_OK
+            );
+            assert_eq!(u8_out, 0xA5);
+            release(bytes);
+
+            let short = payload(&[1, 2, 3]);
+            let mut kept = 7u32;
+            assert_eq!(
+                ze_deserialize_uint32(crate::bytes::z_bytes_loan(&short), &mut kept),
+                Z_ERR_GENERIC,
+                "a payload shorter than the type is refused"
+            );
+            assert_eq!(kept, 7, "a refused read leaves the value");
+            release(short);
+            let long = payload(&[1, 2, 3, 4, 5]);
+            assert_eq!(
+                ze_deserialize_uint32(crate::bytes::z_bytes_loan(&long), &mut kept),
+                Z_ERR_GENERIC
+            );
+            assert_eq!(kept, 7);
+            assert_eq!(
+                ze_deserialize_uint32(core::ptr::null(), &mut kept),
+                Z_ERR_NULL,
+                "no payload is refused"
+            );
+            assert_eq!(kept, 7);
+            assert_eq!(
+                ze_deserialize_uint32(crate::bytes::z_bytes_loan(&long), core::ptr::null_mut()),
+                Z_ERR_NULL,
+                "no destination is refused"
+            );
+            release(long);
+            assert_eq!(
+                ze_serialize_uint32(core::ptr::null_mut(), 1),
+                Z_ERR_NULL,
+                "no payload to write is refused"
             );
         }
     }
