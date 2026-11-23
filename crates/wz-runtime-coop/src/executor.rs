@@ -59,7 +59,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use core::alloc::Layout;
-use critical_section::Mutex;
+use critical_section::{CriticalSection, Mutex};
 use wz_runtime_core::RuntimeError;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -99,10 +99,14 @@ struct Ops {
     /// output at the offset.
     poll: unsafe fn(*mut u8, usize, &mut Context<'_>) -> Poll<()>,
     /// Drop the future at the buffer (a task that is swept before it ends).
-    drop_future: unsafe fn(*mut u8),
-    /// Drop the output at the buffer (a result no handle took).
-    drop_output: unsafe fn(*mut u8),
+    drop_future: DropFn,
+    /// Drop the output at the buffer (a result no handle took); `None` for an output with
+    /// nothing to drop, whose cell is then freed in the section that ends its task.
+    drop_output: Option<DropFn>,
 }
+
+/// Drop the value at the buffer, of a type erased with the task that wrote it.
+type DropFn = unsafe fn(*mut u8);
 
 /// What a cell's bookkeeping holds; touched only inside a critical section.
 struct Meta {
@@ -202,12 +206,34 @@ impl TaskCell {
     /// and one it stores was cloned before, so no code of another crate runs while the
     /// bookkeeping is borrowed and none can borrow it again on the same thread.
     fn with_meta<R>(&self, f: impl FnOnce(&mut Meta) -> R) -> R {
-        crate::cs::with(|_cs| {
-            // SAFETY: as above: one context holds the section, and nothing `f` runs reaches
-            // this cell's bookkeeping again.
-            f(unsafe { &mut *self.meta.get() })
-        })
+        crate::cs::with(|cs| self.meta_in(cs, f))
     }
+
+    /// Run `f` on the cell's bookkeeping inside the section `cs` the caller holds: what lets one
+    /// section look at several cells in turn, a pass settling one cell and looking at the next.
+    /// The rule is [`Self::with_meta`]'s, and the borrow ends with `f`, so no two are alive.
+    fn meta_in<R>(&self, _cs: CriticalSection<'_>, f: impl FnOnce(&mut Meta) -> R) -> R {
+        // SAFETY: the caller holds a critical section, so one context reaches the bookkeeping;
+        // nothing `f` runs reaches this cell's bookkeeping again.
+        f(unsafe { &mut *self.meta.get() })
+    }
+}
+
+/// Free the cell whose bookkeeping this is. Its bytes stay with it, for the next task.
+///
+/// The cell is freed only once no handle holds it, and a handle that lets go takes its waker with
+/// it ([`TaskJoin`]), so there is no waker to drop here, which no section could do.
+fn free(meta: &mut Meta) {
+    debug_assert!(
+        meta.join_waker.is_none(),
+        "a cell no handle holds keeps no handle's waker"
+    );
+    meta.ops = None;
+    meta.has_output = false;
+    meta.aborted = false;
+    meta.handle = false;
+    meta.set = 0;
+    meta.state = State::Free;
 }
 
 /// Take a count on the store that owns `cell`, for a waker or a handle that will point at it.
@@ -476,6 +502,54 @@ pub enum SpawnRefusal {
     /// The future and its output do not fit a cell, or ask for more alignment than
     /// a cell has.
     TooLarge,
+}
+
+/// How a pass left a cell it took (`Polling`).
+#[derive(Clone, Copy)]
+enum Left {
+    /// The task answered `Pending`: it waits for its next wake.
+    Pending,
+    /// The task answered and wrote its output.
+    Answered,
+    /// The task was swept: its future is dropped and it has no output.
+    Swept,
+}
+
+/// What a pass does with a cell, decided in the section that looks at it.
+#[derive(Clone, Copy)]
+enum Act {
+    Nothing,
+    Sweep(Ops, *mut u8),
+    Poll(Ops, *mut u8, usize),
+}
+
+/// What settling a cell leaves for after the section: a waker's code and an output's drop are
+/// their owners' code, which no section runs.
+#[derive(Default)]
+struct Settled {
+    /// The waker of the handle that waits for the task.
+    wake: Option<Waker>,
+    /// The output of a task no handle waits for, which needs dropping: the cell, the drop and
+    /// where the output lies.
+    unread: Option<(&'static TaskCell, DropFn, *mut u8)>,
+}
+
+impl Settled {
+    /// Wake the handle, or drop the output no handle will read and free its cell. Answers whether
+    /// a handle's waker was woken.
+    fn carry_out(self) -> bool {
+        let woke = self.wake.is_some();
+        if let Some(waker) = self.wake {
+            waker.wake();
+        }
+        if let Some((cell, drop_output, at)) = self.unread {
+            // SAFETY: the task answered and left its output at `at`, no handle will read it, and
+            // the cell stays the pass's (`Polling`) until it is freed here: it is dropped once.
+            unsafe { drop_output(at) };
+            cell.with_meta(free);
+        }
+        woke
+    }
 }
 
 /// A cell taken for a task: the cell, where its future lies and where its output will.
@@ -886,12 +960,14 @@ impl ExecutorState {
         let mut index = 0;
         // A cell of the table, free or not, has bytes the task fits.
         let mut room = false;
-        let found = loop {
+        // The search is one section: it takes the first free cell it finds, which no other
+        // context may take between its look and its claim.
+        let found = crate::cs::with(|cs| loop {
             let Some(cell) = self.cell_at(index) else {
                 break None;
             };
             index += 1;
-            let taken = cell.with_meta(|meta| {
+            let taken = cell.meta_in(cs, |meta| {
                 let fits = meta.cap >= need && cell_align(meta) >= align;
                 room |= fits;
                 let empty = meta.buf.is_null();
@@ -906,7 +982,7 @@ impl ExecutorState {
             if let Some(buf) = taken {
                 break Some((cell, buf));
             }
-        };
+        });
         let (cell, buf) = match found {
             Some(taken) => taken,
             None => match self.grow(set) {
@@ -952,12 +1028,17 @@ impl ExecutorState {
         // are long enough and aligned for `F` and its output, which `claim` checked
         // (a fixed table) or gave the cell (a grown one).
         unsafe { ptr::write(buf.cast::<F>(), fut) };
+        let drop_output: Option<DropFn> = if core::mem::needs_drop::<F::Output>() {
+            Some(drop_erased::<F::Output>)
+        } else {
+            None
+        };
         Self::go_live(
             cell,
             Ops {
                 poll: poll_erased::<F>,
                 drop_future: drop_erased::<F>,
-                drop_output: drop_erased::<F::Output>,
+                drop_output,
             },
             out_off,
         );
@@ -971,7 +1052,7 @@ impl ExecutorState {
         cell.cancel.store(false, Ordering::Release);
         cell.wake.store(true, Ordering::Release);
         cell.with_meta(|meta| {
-            // A cell is freed with no waker of a handle (`Self::release`).
+            // A cell is freed with no waker of a handle (`free`).
             debug_assert!(meta.join_waker.is_none());
             meta.ops = Some(ops);
             meta.out_off = out_off;
@@ -982,53 +1063,64 @@ impl ExecutorState {
         });
     }
 
-    /// The task at `cell` is over (`completed`: its future answered and left its
-    /// output; otherwise it was swept and its future dropped). With a handle the
-    /// cell stays, `Done`, until the handle has read it; without one it is freed.
-    fn finish(cell: &'static TaskCell, completed: bool) {
-        let (waker, free_output) = cell.with_meta(|meta| {
+    /// Give the cell back: a handle that read its task's result, or let go of a task that ended.
+    fn release(cell: &'static TaskCell) {
+        cell.with_meta(free);
+    }
+
+    /// Look at `cell` inside the section `cs`, the pass that holds it: a live task that was
+    /// aborted is to be swept and one whose wake flag is raised polled, either taken by the pass
+    /// (`Polling`); anything else is left as it is.
+    fn classify(cell: &'static TaskCell, cs: CriticalSection<'_>) -> Act {
+        cell.meta_in(cs, |meta| {
+            if meta.state != State::Live {
+                return Act::Nothing;
+            }
+            let Some(ops) = meta.ops else {
+                return Act::Nothing;
+            };
+            if cell.cancel.load(Ordering::Acquire) {
+                meta.state = State::Polling;
+                Act::Sweep(ops, meta.buf)
+            } else if cell.wake.swap(false, Ordering::AcqRel) {
+                meta.state = State::Polling;
+                Act::Poll(ops, meta.buf, meta.out_off)
+            } else {
+                Act::Nothing
+            }
+        })
+    }
+
+    /// Write how the pass left `cell` into its bookkeeping, inside the section `cs`: a task that
+    /// waits is live again; a task that is over is `Done` for its handle, or, with no handle,
+    /// free, once an output that needs dropping is dropped ([`Settled::carry_out`]).
+    fn settle(cell: &'static TaskCell, left: Left, cs: CriticalSection<'_>) -> Settled {
+        cell.meta_in(cs, |meta| {
+            let mut settled = Settled::default();
+            let completed = match left {
+                Left::Pending => {
+                    meta.state = State::Live;
+                    return settled;
+                }
+                Left::Answered => true,
+                Left::Swept => false,
+            };
             meta.has_output = completed;
             if meta.handle {
                 meta.state = State::Done;
-                (meta.join_waker.take(), None)
-            } else if completed {
-                (
-                    None,
-                    meta.ops
-                        .map(|ops| (ops.drop_output, meta.buf, meta.out_off)),
-                )
-            } else {
-                (None, None)
+                settled.wake = meta.join_waker.take();
+                return settled;
             }
-        });
-        if let Some(waker) = waker {
-            waker.wake();
-            return;
-        }
-        if let Some((drop_output, buf, out_off)) = free_output {
-            // SAFETY: `has_output` was set by a task that answered, and no handle
-            // will read it.
-            unsafe { drop_output(buf.add(out_off)) };
-        }
-        let detached = cell.with_meta(|meta| !meta.handle);
-        if detached {
-            Self::release(cell);
-        }
-    }
-
-    /// Give the cell back. Its bytes stay with it, for the next task.
-    fn release(cell: &'static TaskCell) {
-        let waker = cell.with_meta(|meta| {
-            meta.ops = None;
-            meta.has_output = false;
-            meta.aborted = false;
-            meta.handle = false;
-            meta.set = 0;
-            meta.state = State::Free;
-            meta.join_waker.take()
-        });
-        // Dropped outside the section: a waker's drop is its owner's code.
-        drop(waker);
+            let unread = meta.ops.and_then(|ops| ops.drop_output);
+            match unread {
+                // The cell stays the pass's (`Polling`) until its output is dropped.
+                Some(drop_output) if completed => {
+                    settled.unread = Some((cell, drop_output, meta.buf.wrapping_add(meta.out_off)));
+                }
+                _ => free(meta),
+            }
+            settled
+        })
     }
 
     /// Poll every ready task at most once, and sweep every task whose handle
@@ -1036,40 +1128,47 @@ impl ExecutorState {
     /// answers `Ready` leaves its output for its handle. A task spawned from inside
     /// a poll may be polled in this pass if its cell lies later in the table, or
     /// in the next.
+    ///
+    /// One critical section per cell: the section that looks at a cell also settles the cell
+    /// polled before it, so a task the pass polls costs it no section of its own. The cell polled
+    /// last is settled by the pass's closing section, so the table is settled when this returns.
     pub fn run_until_idle(&self) {
+        // The cell the pass polled or swept last and how it left it, to be settled by the next
+        // section.
+        let mut owed: Option<(&'static TaskCell, Left)> = None;
         let mut index = 0;
-        while let Some(cell) = self.cell_at(index) {
+        loop {
+            let next = self.cell_at(index);
             index += 1;
-            enum Act {
-                Nothing,
-                Sweep(Ops, *mut u8),
-                Poll(Ops, *mut u8, usize),
-            }
-            let act = cell.with_meta(|meta| {
-                if meta.state != State::Live {
-                    return Act::Nothing;
-                }
-                let Some(ops) = meta.ops else {
-                    return Act::Nothing;
+            let (settled, mut act) = crate::cs::with(|cs| {
+                let settled = match owed {
+                    Some((cell, left)) => Self::settle(cell, left, cs),
+                    None => Settled::default(),
                 };
-                if cell.cancel.load(Ordering::Acquire) {
-                    meta.state = State::Polling;
-                    Act::Sweep(ops, meta.buf)
-                } else if cell.wake.swap(false, Ordering::AcqRel) {
-                    meta.state = State::Polling;
-                    Act::Poll(ops, meta.buf, meta.out_off)
-                } else {
-                    Act::Nothing
-                }
+                let act = match next {
+                    Some(cell) => Self::classify(cell, cs),
+                    None => Act::Nothing,
+                };
+                (settled, act)
             });
-            match act {
-                Act::Nothing => {}
+            let woke = settled.carry_out();
+            let Some(cell) = next else {
+                return;
+            };
+            // The handle's waker woken just now may be the waker of this cell's task, which the
+            // section looked at before it was woken: it is looked at again, so it is polled in
+            // this pass, as it was when each cell was settled before the next was looked at.
+            if woke && matches!(act, Act::Nothing) && cell.wake.load(Ordering::Acquire) {
+                act = crate::cs::with(|cs| Self::classify(cell, cs));
+            }
+            owed = match act {
+                Act::Nothing => None,
                 Act::Sweep(ops, buf) => {
                     // SAFETY: the cell was `Live`, so it holds a future that has
                     // not answered; it is `Polling` now, which keeps every other
                     // user off it, and it is dropped once.
                     unsafe { (ops.drop_future)(buf) };
-                    Self::finish(cell, false);
+                    Some((cell, Left::Swept))
                 }
                 Act::Poll(ops, buf, out_off) => {
                     // The executor's own count keeps the cell while it polls: this waker holds
@@ -1078,59 +1177,67 @@ impl ExecutorState {
                     let mut cx = Context::from_waker(&waker);
                     // SAFETY: the cell was `Live`, so it holds a pinned future that
                     // has not answered, and it is `Polling` now.
-                    match unsafe { (ops.poll)(buf, out_off, &mut cx) } {
-                        Poll::Ready(()) => Self::finish(cell, true),
-                        Poll::Pending => cell.with_meta(|meta| meta.state = State::Live),
-                    }
+                    let left = match unsafe { (ops.poll)(buf, out_off, &mut cx) } {
+                        Poll::Ready(()) => Left::Answered,
+                        Poll::Pending => Left::Pending,
+                    };
+                    Some((cell, left))
                 }
-            }
+            };
         }
     }
 
     /// Diagnostic + test helper: cells that hold a task (or a result no handle has
     /// read yet).
     pub fn live_task_count(&self) -> usize {
-        let mut held = 0;
-        let mut index = 0;
-        while let Some(cell) = self.cell_at(index) {
-            index += 1;
-            if cell.with_meta(|meta| meta.state != State::Free) {
-                held += 1;
+        crate::cs::with(|cs| {
+            let mut held = 0;
+            let mut index = 0;
+            while let Some(cell) = self.cell_at(index) {
+                index += 1;
+                if cell.meta_in(cs, |meta| meta.state != State::Free) {
+                    held += 1;
+                }
             }
-        }
-        held
+            held
+        })
     }
 
     /// Diagnostic + test helper: tasks of a local set that have not ended (a result waiting for
     /// its handle is not one).
     pub(crate) fn running_local_count(&self) -> usize {
-        let mut running = 0;
-        let mut index = 0;
-        while let Some(cell) = self.cell_at(index) {
-            index += 1;
-            let is = cell.with_meta(|meta| {
-                meta.set != 0
-                    && matches!(meta.state, State::Spawning | State::Live | State::Polling)
-            });
-            if is {
-                running += 1;
+        crate::cs::with(|cs| {
+            let mut running = 0;
+            let mut index = 0;
+            while let Some(cell) = self.cell_at(index) {
+                index += 1;
+                let is = cell.meta_in(cs, |meta| {
+                    meta.set != 0
+                        && matches!(meta.state, State::Spawning | State::Live | State::Polling)
+                });
+                if is {
+                    running += 1;
+                }
             }
-        }
-        running
+            running
+        })
     }
 
     /// Diagnostic + test helper: true if a task that is waiting has its wake flag
     /// set.
     pub(crate) fn any_ready(&self) -> bool {
-        let mut index = 0;
-        while let Some(cell) = self.cell_at(index) {
-            index += 1;
-            if cell.with_meta(|meta| meta.state == State::Live) && cell.wake.load(Ordering::Acquire)
-            {
-                return true;
+        crate::cs::with(|cs| {
+            let mut index = 0;
+            while let Some(cell) = self.cell_at(index) {
+                index += 1;
+                if cell.meta_in(cs, |meta| meta.state == State::Live)
+                    && cell.wake.load(Ordering::Acquire)
+                {
+                    return true;
+                }
             }
-        }
-        false
+            false
+        })
     }
 }
 
@@ -1165,7 +1272,7 @@ impl ExecutorState {
                 // SAFETY: the cell was `Live`, so it holds a future that has not answered, and
                 // it is `Polling` now; it is dropped once.
                 unsafe { (ops.drop_future)(buf) };
-                Self::finish(cell, false);
+                crate::cs::with(|cs| Self::settle(cell, Left::Swept, cs)).carry_out();
             }
         }
     }
@@ -1341,7 +1448,9 @@ impl<T> TaskJoin<T> {
         enum Seen {
             Pending,
             Cancelled,
-            Output(*mut u8, Ops, bool),
+            /// Where the output lies, how it is dropped, whether the task was aborted, and
+            /// whether it left an output.
+            Output(*mut u8, Ops, bool, bool),
         }
         // Cloned, and the waker it replaces dropped, outside the section: a waker's clone and drop
         // are its owner's code.
@@ -1354,6 +1463,7 @@ impl<T> TaskJoin<T> {
                     meta.buf.wrapping_add(meta.out_off),
                     ops,
                     meta.aborted,
+                    meta.has_output,
                 );
                 (at, None)
             }
@@ -1375,13 +1485,13 @@ impl<T> TaskJoin<T> {
                 self.taken = true;
                 Poll::Ready(Err(RuntimeError::JoinCancelled))
             }
-            Seen::Output(at, ops, aborted) => {
+            Seen::Output(at, ops, aborted, has_output) => {
                 self.taken = true;
                 let answer = if aborted {
-                    if cell.with_meta(|meta| meta.has_output) {
+                    if let Some(drop_output) = ops.drop_output.filter(|_| has_output) {
                         // SAFETY: a done cell that holds an output holds it live;
                         // it is dropped once and the handle is over.
-                        unsafe { (ops.drop_output)(at) };
+                        unsafe { drop_output(at) };
                     }
                     Err(RuntimeError::JoinCancelled)
                 } else {
@@ -1405,28 +1515,31 @@ impl<T> Drop for TaskJoin<T> {
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         let owner = cell.owner;
         if !self.taken {
-            /// How to drop an output nobody read: the function and where it lies.
-            type Unread = Option<(unsafe fn(*mut u8), *mut u8)>;
-            // `Some` for a task that is done, with its output to drop; otherwise the task runs on
-            // without its handle, and the waker the handle left is dropped outside the section.
-            let (done, waker): (Option<Unread>, Option<Waker>) = cell.with_meta(|meta| {
-                if meta.state == State::Done {
-                    let ops = if meta.has_output { meta.ops } else { None };
-                    let output =
-                        ops.map(|ops| (ops.drop_output, meta.buf.wrapping_add(meta.out_off)));
-                    (Some(output), None)
-                } else {
+            // A done task's output to drop, the cell freed once it is; a done task with nothing
+            // to drop is freed in the section. A task not done runs on without its handle, and
+            // the waker the handle left is dropped outside the section.
+            let (unread, waker) = cell.with_meta(|meta| {
+                if meta.state != State::Done {
                     meta.handle = false;
-                    (None, meta.join_waker.take())
+                    return (None, meta.join_waker.take());
+                }
+                let drop_output = meta.ops.and_then(|ops| ops.drop_output);
+                match drop_output {
+                    Some(drop_output) if meta.has_output => (
+                        Some((drop_output, meta.buf.wrapping_add(meta.out_off))),
+                        None,
+                    ),
+                    _ => {
+                        free(meta);
+                        (None, None)
+                    }
                 }
             });
             drop(waker);
-            if let Some(output) = done {
-                if let Some((drop_output, at)) = output {
-                    // SAFETY: a done cell that holds an output holds it live and no
-                    // handle has read it; it is dropped once.
-                    unsafe { drop_output(at) };
-                }
+            if let Some((drop_output, at)) = unread {
+                // SAFETY: a done cell that holds an output holds it live and no
+                // handle has read it; it is dropped once.
+                unsafe { drop_output(at) };
                 ExecutorState::release(cell);
             }
         }
