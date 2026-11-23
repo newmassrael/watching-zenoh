@@ -6449,48 +6449,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.put_through_filter(filter, keyexpr, payload, None)
     }
 
-    /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
-    /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
-    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
-    /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
-    #[inline(never)]
-    fn put_through_filter(
-        &self,
-        filter: FilterId,
-        keyexpr: &str,
-        payload: &[u8],
-        given: Option<(ExprId, PlainPutParams)>,
-    ) -> FilteredPut {
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
-        if Self::holds_back_in(core, filter) {
-            return FilteredPut::Suppressed;
-        }
-        let (mapping_id, params) = match given {
-            Some(given) => given,
-            None => {
-                let Some((params, mapping_id)) = core
-                    .filters
-                    .iter()
-                    .find(|entry| entry.id == filter)
-                    .and_then(|entry| entry.plain.get())
-                else {
-                    return FilteredPut::NotPlain;
-                };
-                // A link that names keys its own way is sent the general way, which names the key
-                // as its form says: no declared id goes to every link at once.
-                #[cfg(feature = "shared-key-ids")]
-                if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
-                    return FilteredPut::NotPlain;
-                }
-                (mapping_id, params)
-            }
-        };
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
-    }
-
     /// Each group the session joined takes the step too, and is counted as a link is: a group's
     /// window holds what the session sends on the group, as pico's batch holds what it sends on
     /// its multicast transport, and is written by a flush or a stop on the caller's thread, as a
@@ -7363,6 +7321,48 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
+    /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
+    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
+    /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    #[inline(never)]
+    fn put_through_filter(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(ExprId, PlainPutParams)>,
+    ) -> FilteredPut {
+        let Some(core) = self.live() else {
+            return FilteredPut::Sent(Ok(0));
+        };
+        let core = &core.0;
+        if Self::holds_back_in(core, filter) {
+            return FilteredPut::Suppressed;
+        }
+        let (mapping_id, params) = match given {
+            Some(given) => given,
+            None => {
+                let Some((params, mapping_id)) = core
+                    .filters
+                    .iter()
+                    .find(|entry| entry.id == filter)
+                    .and_then(|entry| entry.plain.get())
+                else {
+                    return FilteredPut::NotPlain;
+                };
+                // A link that names keys its own way is sent the general way, which names the key
+                // as its form says: no declared id goes to every link at once.
+                #[cfg(feature = "shared-key-ids")]
+                if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+                    return FilteredPut::NotPlain;
+                }
+                (mapping_id, params)
+            }
+        };
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
+    }
+
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds
     /// as one of its `Arc`s, so the open makes nothing more for it.
     pub fn into_drive(self: Arc<Self>) -> CoopDrive<L, C> {
