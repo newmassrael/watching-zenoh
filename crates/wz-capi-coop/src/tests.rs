@@ -950,13 +950,11 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     );
 }
 
-/// The samples handed a subscriber find its callback in the table of callbacks once, not once a
-/// sample, however many steps they arrive in: what a delivery found is kept for the samples behind
-/// it and for the next step's, so a round trip's one sample a step is handed it with no lock of
-/// the table, no search of it and no count taken on the callback. The CONTROL is the next test: a
-/// removal from the table ends what was kept.
+/// The samples a link lends are handed the callback their subscriber's row holds, copied out of the
+/// row with each of them under the session's lock: the table of callbacks is not searched for
+/// them, however many steps they arrive in. The CONTROL is the count of the samples handed.
 #[test]
-fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
+fn the_samples_a_link_lends_take_their_callback_from_the_row() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
@@ -988,8 +986,8 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     });
     let found = engine.takes.callbacks.load(Ordering::SeqCst) - looks;
     assert_eq!(
-        found, 1,
-        "one look in the table for 8 samples: the callback is kept across them and across steps"
+        found, 0,
+        "no look in the table for 8 samples: each carries its row's callback"
     );
 }
 

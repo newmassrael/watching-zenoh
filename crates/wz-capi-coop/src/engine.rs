@@ -102,7 +102,6 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
-use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::{QosLevel, SampleKind};
@@ -114,7 +113,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
@@ -1056,9 +1055,39 @@ unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
 /// What a subscriber's sink mints: the callback a sample is handed to.
 type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 
-/// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
-/// from the read task and one from the program's own `zp_read` never overlap.
-type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
+/// A subscriber's callback, as the ABI's sink minted it: locked while it runs, so a delivery from
+/// the read task and one from the program's own `zp_read` never overlap, and retired when its
+/// subscriber is undeclared or its session closed, so a delivery that copied it out of the
+/// subscriber's row before hands it nothing more.
+pub(crate) struct LiveCallback {
+    live: AtomicBool,
+    call: Mutex<SubscriberCallbackFn>,
+}
+
+impl LiveCallback {
+    pub(crate) fn new(call: SubscriberCallbackFn) -> Self {
+        Self {
+            live: AtomicBool::new(true),
+            call: Mutex::new(call),
+        }
+    }
+
+    /// Hand `sample` to the callback, unless it was retired.
+    pub(crate) fn hand(&self, sample: &dyn SampleView) {
+        if self.live.load(Ordering::Acquire) {
+            (lock(&self.call))(sample);
+        }
+    }
+
+    /// Hand nothing more: its subscriber is gone.
+    fn retire(&self) {
+        self.live.store(false, Ordering::Release);
+    }
+}
+
+/// A subscriber's callback, shared by its row, the table of callbacks and the deliveries that
+/// copied it out of the row.
+pub(crate) type SubscriberCallback = Arc<LiveCallback>;
 
 /// How many subscribers of one sample a delivery keeps the callbacks of ([`Resolved`]): a sample
 /// for more is handed to the ones past these by a look in the table each.
@@ -1189,7 +1218,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
     }
 }
 
-/// Where a delivery goes.
+/// Where a delivery goes. Each kind is a shared handle, cloned out of the table so a delivery runs
+/// it with the table's lock let go (`CoopEngine::target`).
+#[derive(Clone)]
 enum Target {
     Subscriber(SubscriberCallback),
     Matching(MatchingSink),
@@ -1237,8 +1268,6 @@ type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
 pub(crate) struct EntryBytes;
 
 impl EntryBytes {
-    /// A subscriber's row.
-    pub(crate) const SUBSCRIBER: usize = core::mem::size_of::<SubEntry>();
     /// A queryable's row.
     #[cfg(feature = "queryable")]
     pub(crate) const QUERYABLE: usize = core::mem::size_of::<QblEntry>();
@@ -1327,7 +1356,6 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entities: EntityRows,
     /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
     keys: KeySpace,
-    subscribers: Rows<SubEntry, { caps::MAX_SUBSCRIPTIONS }>,
     keyexprs: Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
@@ -1523,26 +1551,53 @@ impl IdleWait {
     }
 }
 
-struct SubEntry {
+/// One of the session's own subscribers, as a row of the session core's subscriber table holds
+/// it: the row keeps the pattern the subscriber matches, and this, its sink, everything else the
+/// session knows of it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1).
+pub(crate) struct SubscriberRow {
     id: SubId,
-    registration: SubscriptionId,
     retraction: Option<RetractionKey>,
-    keyexpr: RowKey,
     /// The key the declaration names, kept to declare it again over a new link; holding it also
-    /// keeps alive what it holds.
+    /// keeps alive what it holds, so a row is let go of with no lock of the session held.
     wire: WireKey,
+    /// Where a sample the row matches is offered, under the subscriber's id.
+    lane: Arc<SharedLane>,
+    /// The callback the samples the row matches are handed to, copied out of the row with each
+    /// of them. Set once the row is registered, so a refused registration mints none.
+    callback: Option<SubscriberCallback>,
 }
 
-impl SubEntry {
-    /// Declare this subscriber over `actions`: whether the link took it.
-    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let wire = on_link(actions, &self.keyexpr, &self.wire);
+impl SubscriberRow {
+    /// Declare this subscriber, which matches `keyexpr`, over `actions`: whether the link took
+    /// it.
+    fn declare<C: ClockSource + 'static>(&self, keyexpr: &str, actions: &McuActions<C>) -> bool {
+        let wire = on_link(actions, keyexpr, &self.wire);
         if wire.is_literal() {
-            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
+            actions.send_declare_subscriber(self.id, 0, Some(keyexpr))
         } else {
             actions.send_declare_subscriber(self.id, wire.mapping_id, wire.suffix.as_deref())
         }
         .is_ok()
+    }
+
+    /// Retract this subscriber over `actions`, naming its key when its declaration asked to.
+    fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        match &self.retraction {
+            Some(key) => actions.send_undeclare_subscriber_naming(
+                u64::from(self.id),
+                key.mapping_id,
+                &key.suffix,
+            ),
+            None => actions.send_undeclare_subscriber(u64::from(self.id)),
+        }
+    }
+}
+
+impl SampleSink for SubscriberRow {
+    fn deliver(&mut self, sample: &dyn SampleView) {
+        // SAFETY: the session core's table hands its sinks a sample under the session's lock: it
+        // is the registry's, which only `Core` holds.
+        unsafe { self.lane.offer_to(self.id, self.callback.as_ref(), sample) }
     }
 }
 
@@ -3524,7 +3579,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The tables of the session's own declarations, lent from the arena as the plan counts
         // them. Declared after the arena, so a refusal before `core` holds them drops them first.
         let entities = plan.entities();
-        let subscribers = arena.lend(entities.subscribers).map_err(OpenError::Arena)?;
         let keyexprs = arena.lend(entities.keyexprs).map_err(OpenError::Arena)?;
         let filters = arena
             .lend(
@@ -3624,7 +3678,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             wire_zid: wire,
             entities,
             keys,
-            subscribers,
             keyexprs,
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
@@ -3929,18 +3982,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
+    /// How many subscribers the session core's table holds, each one row: what a test of a
+    /// subscriber's ends reads. Read under the lock, uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn subscriber_rows(&self) -> usize {
+        self.core.lock().0.registry.borrow().app.subscribers.len()
+    }
+
+    /// How many callbacks the table of callbacks holds: what a test of the close reads.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn callbacks_held(&self) -> usize {
+        lock(&self.targets).len()
+    }
+
     /// How many samples the session's delivery lane handed on to the deliveries since the open:
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn lane_handed(&self) -> usize {
-        self.samples.handed_on()
+        self.samples.handed_on() + self.samples.pending_counts().0
     }
 
     /// How many samples the session's delivery lane handed to their callbacks where their
     /// datagram lies since the open: what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn lane_lent(&self) -> usize {
-        self.samples.lent_count()
+        self.samples.lent_count() + self.samples.pending_counts().1
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
@@ -4172,7 +4238,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// and the queries each say without their locks whether they hold anything, so a pass that
     /// finds nothing, which every delivery's last pass is, takes none of their locks.
     fn hand_out(&self) -> bool {
-        let mut handed = self.samples.owes_a_delivery() && self.hand_out_lane();
+        // The pending samples came before anything the lane holds (`SharedLane::offer_to`).
+        let mut handed = self.hand_out_pending();
+        handed |= self.samples.owes_a_delivery() && self.hand_out_lane();
         // A face that came up or went down, told to each watcher as it stands now: the list is
         // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
         #[cfg(feature = "connectivity")]
@@ -4197,18 +4265,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 break;
             };
             handed = true;
-            let sink = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Matching(sink) if *t == TargetKey::Matching(id) => Some(sink.clone()),
-                    _ => None,
-                });
-            if let Some(sink) = sink {
+            if let Some(Target::Matching(sink)) = self.target(TargetKey::Matching(id)) {
                 sink(matching);
             }
         }
         let asked = self.hand_queries();
         handed || asked
+    }
+
+    /// Hand the samples of the datagram a link lent the last step to the callbacks their rows
+    /// matched, each copied out of its row under the session's lock (`lane::Pending`), with no
+    /// lock of the library held. Whether anything was handed.
+    fn hand_out_pending(&self) -> bool {
+        self.samples
+            .deliver_pending(|subscriber, callback, sample| {
+                #[cfg(feature = "local-subscriber")]
+                let _running = self.deliveries.run(TargetKey::Subscriber(subscriber));
+                #[cfg(not(feature = "local-subscriber"))]
+                let _ = subscriber;
+                callback.hand(sample);
+            })
     }
 
     /// Hand what the session's lane holds to the callbacks it is for, the oldest first. Whether
@@ -4249,34 +4325,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     #[cfg(feature = "query")]
                     LaneItem::Reply(reply) => {
                         let leg = reply.leg();
-                        let callback =
-                            lock(&self.targets)
-                                .iter()
-                                .find_map(|(t, target)| match target {
-                                    Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
-                                        Some(cb.clone())
-                                    }
-                                    _ => None,
-                                });
-                        if let Some(callback) = callback {
+                        if let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) {
                             (lock(&callback))(&reply);
                         }
                     }
                     #[cfg(feature = "liveliness")]
                     LaneItem::Liveliness(sample) => {
                         for id in sample.subscribers() {
-                            let callback =
-                                lock(&self.targets)
-                                    .iter()
-                                    .find_map(|(t, target)| match target {
-                                        Target::Liveliness(cb)
-                                            if *t == TargetKey::Liveliness(id) =>
-                                        {
-                                            Some(cb.clone())
-                                        }
-                                        _ => None,
-                                    });
-                            if let Some(callback) = callback {
+                            if let Some(Target::Liveliness(callback)) =
+                                self.target(TargetKey::Liveliness(id))
+                            {
                                 let _running = self.deliveries.run(TargetKey::Liveliness(id));
                                 (lock(&callback))(sample.as_sample());
                             }
@@ -4308,7 +4366,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let _running = self.deliveries.run(TargetKey::Subscriber(id));
             #[cfg(not(feature = "local-subscriber"))]
             let _ = id;
-            (lock(callback))(sample);
+            callback.hand(sample);
         };
         for (at, id) in subscribers.enumerate() {
             if at < RESOLVED_SUBSCRIBERS {
@@ -4342,10 +4400,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// go. A queryable undeclared since lets go of the hold all the same.
     #[cfg(feature = "queryable")]
     fn run_queryable(&self, id: QblId, query: &dyn QueryView, generation: u64) {
-        let callback = lock(&self.targets)
-            .iter()
-            .find_map(|(t, target)| match target {
-                Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
+        let callback = self
+            .target(TargetKey::Queryable(id))
+            .and_then(|target| match target {
+                Target::Queryable(callback) => Some(callback),
                 _ => None,
             });
         let mut onward = Onward::to(self, generation);
@@ -4638,12 +4696,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn subscriber_callback(&self, id: SubId) -> Option<SubscriberCallback> {
         #[cfg(test)]
         self.takes.callbacks.fetch_add(1, Ordering::Relaxed);
-        lock(&self.targets)
-            .iter()
-            .find_map(|(t, target)| match target {
-                Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
-                _ => None,
-            })
+        match self.target(TargetKey::Subscriber(id))? {
+            Target::Subscriber(callback) => Some(callback),
+            _ => None,
+        }
     }
 
     /// The callback of subscriber `id`, the `at`th of the sample a delivery hands, `at` under
@@ -4721,7 +4777,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for id in reached.iter().filter(|id| !inside(id)) {
                 if let Some(callback) = self.subscriber_callback(*id) {
                     let _running = self.deliveries.run(TargetKey::Subscriber(*id));
-                    (lock(&callback))(&sample);
+                    callback.hand(&sample);
                 }
             }
         }
@@ -4846,6 +4902,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // otherwise leave when the read task's wait ends, up to the group's tick a leg.
         #[cfg(feature = "group")]
         core.0.write_answers(generation);
+    }
+
+    /// The callback `key` names, while its owner holds it: the one look in the table every
+    /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
+    fn target(&self, key: TargetKey) -> Option<Target> {
+        lock(&self.targets)
+            .iter()
+            .find(|(t, _)| *t == key)
+            .map(|(_, target)| target.clone())
     }
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
@@ -5481,51 +5546,59 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return self.next_entity_id();
         };
         let core = &mut guard.0;
-        // A full table refuses the subscriber before it takes an id, registers or sends anything;
-        // the sink goes with the refusal.
-        if core.subscribers.free_slots() == 0 {
+        // The subscriber is one row of the session core's table. A full table refuses it before
+        // it takes an id, registers or sends anything; the sink goes with the refusal.
+        if core.registry.borrow().app.subscribers.is_full() {
             return None;
         }
-        // So does a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
-        let lane = self.samples.clone();
-        let registration = core.registry.borrow_mut().app.subscribers.register_sink(
-            keyexpr,
-            allowed_origin,
-            // SAFETY: the registry hands its sinks a sample under the session's lock.
-            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
-        );
-        // A registration the observer refuses is a refused declaration, told as one: an id
-        // answered for it would name a subscriber that hears nothing and was never announced.
-        let Ok(registration) = registration else {
-            return None;
+        // The row goes at the end of the table, where the replay finds it.
+        let at = core.registry.borrow().app.subscribers.len();
+        let row = SubscriberRow {
+            id,
+            retraction,
+            wire,
+            lane: self.samples.clone(),
+            callback: None,
         };
+        // A registration the table refuses (a key longer than a row holds or with no room in the
+        // key arena) is a refused declaration, told as one: an id answered for it would name a
+        // subscriber that hears nothing and was never announced.
+        let registered =
+            core.registry
+                .borrow_mut()
+                .app
+                .subscribers
+                .register_sink(keyexpr, allowed_origin, row);
+        if registered.is_err() {
+            return None;
+        }
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let callback = sample_shown(exposed_by(&core.policy), sink());
-        lock(&self.targets).push((
-            TargetKey::Subscriber(id),
-            Target::Subscriber(Arc::new(Mutex::new(callback))),
-        ));
-        let entry = SubEntry {
-            id,
-            registration,
-            retraction,
-            keyexpr: key,
-            wire,
-        };
-        core.announce(Kind::Subscriber, |actions| entry.declare(actions));
+        let callback: SubscriberCallback = Arc::new(LiveCallback::new(sample_shown(
+            exposed_by(&core.policy),
+            sink(),
+        )));
+        if let Some((_, row)) = core.registry.borrow_mut().app.subscribers.row_at_mut(at) {
+            row.callback = Some(Arc::clone(&callback));
+        }
+        lock(&self.targets).push((TargetKey::Subscriber(id), Target::Subscriber(callback)));
+        // Each link is told it from the row, which names the key as the table keeps it.
+        core.announce_subscriber(at);
         #[cfg(feature = "group")]
-        core.announce_to_groups(GroupEntity {
-            what: GroupDeclaration::Subscriber,
-            entity: id,
-            keyexpr: &entry.keyexpr,
-            wire: &entry.wire,
-            retraction: entry.retraction.as_ref(),
-            allowed_origin,
-        });
-        keep(&mut core.subscribers, entry);
+        {
+            let registry = core.registry.borrow();
+            if let Some((keyexpr, row)) = registry.app.subscribers.row_at(at) {
+                core.announce_to_groups(GroupEntity {
+                    what: GroupDeclaration::Subscriber,
+                    entity: id,
+                    keyexpr,
+                    wire: &row.wire,
+                    retraction: row.retraction.as_ref(),
+                    allowed_origin,
+                });
+            }
+        }
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -5569,36 +5642,33 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop((live, callback));
             return;
         }
+        // The row is taken out of the table under the lock and let go of after it: its key may hold
+        // a declaration whose release reaches the session (`WireKey`).
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let at = core.subscribers.iter().position(|s| s.id == id)?;
-            let links = core.retract(Kind::Subscriber, at);
-            let mut entry = core.subscribers.remove(at);
-            #[cfg(feature = "group")]
-            core.retract_from_groups(id);
-            core.registry
-                .borrow_mut()
+            let at = core
+                .registry
+                .borrow()
                 .app
                 .subscribers
-                .unregister(entry.registration);
+                .position_of(|row| row.id == id)?;
+            let links = core.retract(Kind::Subscriber, at);
+            #[cfg(feature = "group")]
+            core.retract_from_groups(id);
+            let row = core.registry.borrow_mut().app.subscribers.take_at(at)?;
             for actions in links {
-                match &entry.retraction {
-                    Some(key) => actions.send_undeclare_subscriber_naming(
-                        u64::from(id),
-                        key.mapping_id,
-                        &key.suffix,
-                    ),
-                    None => actions.send_undeclare_subscriber(u64::from(id)),
-                }
+                row.retract(&actions);
             }
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
-            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
-            entry.keyexpr.let_go();
-            Some(entry)
+            Some(row)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
+        // A delivery that copied the callback out of the row before hands it nothing more.
+        if let Some(Target::Subscriber(callback)) = &callback {
+            callback.retire();
+        }
         drop((entry, callback));
         #[cfg(feature = "local-subscriber")]
         self.deliver();
@@ -6752,57 +6822,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let core = &mut guard.0;
         core.end_links();
         // The rows go back to their tables with the session: a table lent from its arena keeps
-        // its rows, so each is emptied after its ids are read.
-        let subscribers: Vec<TargetKey> = core
-            .subscribers
-            .iter()
-            .map(|s| TargetKey::Subscriber(s.id))
-            .collect();
-        core.subscribers.clear();
-        let matches: Vec<TargetKey> = core
-            .matches
-            .iter()
-            .map(|m| TargetKey::Matching(m.id))
-            .collect();
+        // its rows. Their callbacks are the table of callbacks', taken whole below.
+        {
+            let mut registry = core.registry.borrow_mut();
+            let subscribers = &mut registry.app.subscribers;
+            while let Some(last) = subscribers.len().checked_sub(1) {
+                drop(subscribers.take_at(last));
+            }
+        }
         core.matches.clear();
         #[cfg(feature = "queryable")]
-        let queryables: Vec<TargetKey> = core
-            .queryables
-            .iter()
-            .map(|q| TargetKey::Queryable(q.id))
-            .collect();
-        #[cfg(feature = "queryable")]
         core.queryables.clear();
-        #[cfg(not(feature = "queryable"))]
-        let queryables: Vec<TargetKey> = Vec::new();
-        // A get still pending ends with its session: its entry and its leg's callback go.
+        // A get still pending ends with its session: its entry goes here, its leg's callback with
+        // the table.
         #[cfg(feature = "query")]
-        let gets: Vec<TargetKey> = {
+        {
             let mut registry = core.registry.borrow_mut();
-            core.pending_gets
-                .drain(..)
-                .map(|pending| {
-                    pending.unregister(&mut registry);
-                    TargetKey::Reply(pending.leg)
-                })
-                .collect()
-        };
-        #[cfg(not(feature = "query"))]
-        let gets: Vec<TargetKey> = Vec::new();
-        // The session's tokens end with its link; its liveliness subscribers' callbacks go.
+            for pending in core.pending_gets.drain(..) {
+                pending.unregister(&mut registry);
+            }
+        }
+        // The session's tokens end with its link, and its liveliness subscribers with it.
         #[cfg(feature = "liveliness")]
-        let live_subs: Vec<TargetKey> = {
+        {
             core.tokens.clear();
-            let ids: Vec<TargetKey> = core
-                .live_subs
-                .iter()
-                .map(|s| TargetKey::Liveliness(s.id))
-                .collect();
             core.live_subs.clear();
-            ids
-        };
-        #[cfg(not(feature = "liveliness"))]
-        let live_subs: Vec<TargetKey> = Vec::new();
+        }
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
         // of with no lock held.
         #[cfg(any(
@@ -6830,14 +6875,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // with no lock held.
         #[cfg(feature = "queryable")]
         drop(core::mem::take(&mut *self.plane.queries.lock()));
-        let taken: Vec<_> = subscribers
-            .into_iter()
-            .chain(matches)
-            .chain(queryables)
-            .chain(gets)
-            .chain(live_subs)
-            .filter_map(|id| self.take_target(id))
-            .collect();
+        // Every callback the session held goes with it, in one take of the table: the ones of the
+        // rows emptied above, and one whose row went before its callback (a get's leg whose link
+        // was lost, its end not handed out yet). The removal is counted under the table's lock,
+        // so what the deliveries kept is let go of first, and the rest with no lock held.
+        let taken = {
+            let mut targets = lock(&self.targets);
+            self.removed.fetch_add(1, Ordering::SeqCst);
+            core::mem::take(&mut *targets)
+        };
+        self.forget_resolved();
+        for (_, target) in &taken {
+            if let Target::Subscriber(callback) = target {
+                callback.retire();
+            }
+        }
         drop(taken);
     }
 

@@ -9,7 +9,8 @@
 //! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
 //! from the limits and the config the open was handed:
 //!
-//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), each
+//!   row the engine's whole record of a subscriber (`crate::engine::SubscriberRow`), with
 //!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
@@ -50,7 +51,7 @@
 //!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
+//!   link ([`EntityRows`]): its queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
@@ -109,10 +110,9 @@ use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_RO
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::row_pool::MAX_POOL_ROWS;
-use wz_session_core::sink::BoxedSink;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::EntryBytes;
+use crate::engine::{EntryBytes, SubscriberRow};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -387,7 +387,7 @@ impl ArenaPlan {
             "subscribers",
             "MAX_SUBSCRIPTIONS",
             lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
-            SubscriberTable::<BoxedSink, Lent>::ROW_BYTES,
+            SubscriberTable::<SubscriberRow, Lent>::ROW_BYTES,
         )?;
         #[cfg(feature = "queryable")]
         plan.put(
@@ -510,12 +510,6 @@ impl ArenaPlan {
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) -> Result<(), ArenaRefused> {
         let rows = self.entities;
-        self.put(
-            "subscriber declarations",
-            "MAX_SUBSCRIPTIONS",
-            rows.subscribers,
-            EntryBytes::SUBSCRIBER,
-        )?;
         #[cfg(feature = "queryable")]
         self.put(
             "queryable declarations",

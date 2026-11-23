@@ -23,7 +23,7 @@ use wz_capi_port::os::Mutex;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
-use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
@@ -178,10 +178,14 @@ impl DeclWatches {
     ///
     /// Whatever storage `P` the application's tables have: the session's registry holds them in
     /// rows its arena lent, while the lists of observers are the build's profile's in every
-    /// observer.
-    pub(super) fn observe<P: Storage>(
+    /// observer. Whatever binding `K` they have, too, so its observers are the boxed ones: the
+    /// engine's tables and the heap profile's alike.
+    pub(super) fn observe<
+        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        P: Storage,
+    >(
         &self,
-        app: &mut SlotObserverOf<HeapSinks, P>,
+        app: &mut SlotObserverOf<K, P>,
         plane: DeclPlane,
     ) -> Result<(), DeclWatchRefused> {
         let mut table = lock(&self.table);
@@ -252,9 +256,12 @@ impl DeclWatches {
     /// Stop watch `id`: nothing more is owed to it, and the observers of its kind leave `app`
     /// with the last watch of that kind. Its sink, for the caller to let go of with no lock held;
     /// `None` when no watch is declared under `id`.
-    pub(super) fn undeclare<P: Storage>(
+    pub(super) fn undeclare<
+        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        P: Storage,
+    >(
         &self,
-        app: &mut SlotObserverOf<HeapSinks, P>,
+        app: &mut SlotObserverOf<K, P>,
         id: DeclWatchId,
     ) -> Option<DeclWatchSink> {
         let mut table = lock(&self.table);
@@ -356,8 +363,8 @@ fn undeclared_sink(plane: DeclPlane, staged: &Arc<Mutex<Vec<Staged>>>) -> BoxedU
 }
 
 /// Install in `app` the two observers of `plane`, both or neither.
-fn install<P: Storage>(
-    app: &mut SlotObserverOf<HeapSinks, P>,
+fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>, P: Storage>(
+    app: &mut SlotObserverOf<K, P>,
     plane: DeclPlane,
     staged: &Arc<Mutex<Vec<Staged>>>,
 ) -> Result<Observers, DeclWatchRefused> {
@@ -418,7 +425,13 @@ fn install<P: Storage>(
 }
 
 /// Take the two observers `observers` names out of `app`.
-fn uninstall<P: Storage>(app: &mut SlotObserverOf<HeapSinks, P>, observers: Observers) {
+fn uninstall<
+    K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+    P: Storage,
+>(
+    app: &mut SlotObserverOf<K, P>,
+    observers: Observers,
+) {
     match observers.plane {
         DeclPlane::Subscribers => {
             app.remote_subscribers

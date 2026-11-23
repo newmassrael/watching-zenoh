@@ -459,7 +459,7 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         row(&plan, "subscribers").entry_bytes,
-        SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+        SubscriberTable::<crate::engine::SubscriberRow, Lent>::ROW_BYTES
     );
     assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
     // A key of the static policy is its text and its length; a place is a few words.
