@@ -300,8 +300,23 @@ struct Rest {
     /// The packed id, and where the schema lies when there is one.
     encoding: Option<(u32, Option<Span>)>,
     /// The time word, and where the id prefix lies.
-    timestamp: Option<(u64, Span)>,
+    timestamp: Option<(Word, Span)>,
     source_info: Option<SourceInfo>,
+}
+
+/// A 64-bit value a record holds at the alignment of a byte, so that the record keeps the
+/// alignment of its spans and pads nothing before the value.
+#[derive(Clone, Copy)]
+struct Word([u8; 8]);
+
+impl Word {
+    const fn of(value: u64) -> Self {
+        Self(value.to_ne_bytes())
+    }
+
+    const fn get(self) -> u64 {
+        u64::from_ne_bytes(self.0)
+    }
 }
 
 /// The parts of a sample, as a view hands them or as the table holds them.
@@ -382,7 +397,7 @@ struct HeldReply {
     payload: Span,
     attachment: Option<Span>,
     encoding: Option<(u32, Option<Span>)>,
-    timestamp: Option<(u64, Span)>,
+    timestamp: Option<(Word, Span)>,
     source_info: Option<SourceInfo>,
     responder: Option<(Span, u32)>,
 }
@@ -397,18 +412,48 @@ enum Held {
     Liveliness {
         kind: LivelinessSampleKind,
         key: Span,
-        token_id: u64,
+        token_id: Word,
     },
     /// A reply, for the callback of the leg of the get it answers.
     #[cfg(feature = "query")]
     Reply(HeldReply),
 }
 
-/// A record of the round: what it is, and the callbacks it owes, from `first` on.
+/// A record of the round: what it is, and the callbacks it owes, `owed` of them from `first` on.
+/// Both count callbacks of a table of at most `DELIVERY_LANE_CALLBACKS`, which a `u32` holds.
 struct Entry {
     what: Held,
-    first: usize,
-    owed: usize,
+    first: u32,
+    owed: u32,
+}
+
+const _: () = assert!(
+    caps::DELIVERY_LANE_CALLBACKS <= u32::MAX as usize,
+    "a record names its callbacks by a u32"
+);
+
+// A record is aligned as its spans are: a field aligned wider pads every record of the table.
+const _: () = assert!(
+    core::mem::align_of::<Entry>() == core::mem::align_of::<Span>(),
+    "a record holds nothing aligned wider than its spans"
+);
+
+impl Entry {
+    /// A record of `what` owing one callback, the one at `first` of its table's.
+    fn owing_one(what: Held, first: usize) -> Self {
+        Self {
+            what,
+            // Lossless: `first` is a length of the table of callbacks (asserted above).
+            first: first as u32,
+            owed: 1,
+        }
+    }
+
+    /// Where the callbacks it owes lie in its table's.
+    fn callbacks(&self) -> core::ops::Range<usize> {
+        let first = self.first as usize;
+        first..first.saturating_add(self.owed as usize)
+    }
 }
 
 /// A callback a record of the round owes, copied out of the row that matched it under the
@@ -660,7 +705,9 @@ impl Table {
             encoding: rest
                 .encoding
                 .map(|(id, schema)| (id, schema.map(|span| self.bytes(span)))),
-            timestamp: rest.timestamp.map(|(time, zid)| (time, self.bytes(zid))),
+            timestamp: rest
+                .timestamp
+                .map(|(time, zid)| (time.get(), self.bytes(zid))),
             source_info: rest.source_info.as_ref(),
         }
     }
@@ -684,7 +731,7 @@ impl Table {
             None => None,
         };
         let timestamp = match parts.timestamp {
-            Some((time, zid)) => Some((time, self.place(zid, lending)?)),
+            Some((time, zid)) => Some((Word::of(time), self.place(zid, lending)?)),
             None => None,
         };
         Some(Some(Rest {
@@ -697,9 +744,7 @@ impl Table {
 
     /// The callbacks `entry` owes.
     fn owed(&self, entry: &Entry) -> &[Owed] {
-        self.callbacks
-            .get(entry.first..entry.first.saturating_add(entry.owed))
-            .unwrap_or(&[])
+        self.callbacks.get(entry.callbacks()).unwrap_or(&[])
     }
 
     /// Hold nothing, for the next round; the area stays the table's.
@@ -1010,8 +1055,8 @@ impl Round {
         let first = table.callbacks.len();
         let kept = table
             .entries
-            .push(Entry {
-                what: Held::Sample {
+            .push(Entry::owing_one(
+                Held::Sample {
                     head: Head {
                         kind: sample.kind(),
                         reliability: sample.reliability(),
@@ -1022,8 +1067,7 @@ impl Round {
                     rest,
                 },
                 first,
-                owed: 1,
-            })
+            ))
             .is_ok()
             && table
                 .callbacks
@@ -1054,15 +1098,15 @@ impl Round {
         callback: &SubscriberCallback,
         sample: &dyn SampleView,
     ) -> bool {
-        let Some(Entry {
-            what: Held::Sample { head, rest },
-            first,
-            owed,
-        }) = table.entries.last()
+        let Some(
+            entry @ Entry {
+                what: Held::Sample { head, rest },
+                ..
+            },
+        ) = table.entries.last()
         else {
             return false;
         };
-        let (first, owed) = (*first, *owed);
         let joins = head.kind == sample.kind()
             && head.reliability == sample.reliability()
             && head.qos == sample.qos()
@@ -1070,9 +1114,7 @@ impl Round {
             && same(table.bytes(head.payload), sample.payload())
             && table.parts(rest.as_ref()).same(&Parts::of(sample))
             && !table
-                .callbacks
-                .get(first..first.saturating_add(owed))
-                .unwrap_or(&[])
+                .owed(entry)
                 .iter()
                 .filter_map(Owed::subscriber)
                 .any(|held| Arc::ptr_eq(held, callback));
@@ -1113,24 +1155,23 @@ impl Round {
             return;
         };
         let key = sample.keyexpr.as_bytes();
-        if let Some(Entry {
-            what:
-                Held::Liveliness {
-                    kind,
-                    key: at,
-                    token_id,
-                },
-            first,
-            owed,
-        }) = table.entries.last()
+        if let Some(
+            entry @ Entry {
+                what:
+                    Held::Liveliness {
+                        kind,
+                        key: at,
+                        token_id,
+                    },
+                ..
+            },
+        ) = table.entries.last()
         {
             let joins = *kind == sample.kind
-                && *token_id == sample.token_id
+                && token_id.get() == sample.token_id
                 && same(table.bytes(*at), key)
                 && !table
-                    .callbacks
-                    .get(*first..first.saturating_add(*owed))
-                    .unwrap_or(&[])
+                    .owed(entry)
                     .iter()
                     .filter_map(Owed::liveliness)
                     .any(|held| Arc::ptr_eq(held, callback));
@@ -1161,15 +1202,14 @@ impl Round {
         let first = table.callbacks.len();
         let kept = table
             .entries
-            .push(Entry {
-                what: Held::Liveliness {
+            .push(Entry::owing_one(
+                Held::Liveliness {
                     kind: sample.kind,
                     key: at,
-                    token_id: sample.token_id,
+                    token_id: Word::of(sample.token_id),
                 },
                 first,
-                owed: 1,
-            })
+            ))
             .is_ok()
             && table
                 .callbacks
@@ -1205,11 +1245,7 @@ impl Round {
         let first = table.callbacks.len();
         let kept = table
             .entries
-            .push(Entry {
-                what: Held::Reply(reply),
-                first,
-                owed: 1,
-            })
+            .push(Entry::owing_one(Held::Reply(reply), first))
             .is_ok()
             && table
                 .callbacks
@@ -1245,7 +1281,7 @@ impl Round {
                     .map(|hint| (hint.time, hint.zid.as_slice()))
             });
         let timestamp = match stamp {
-            Some((time, zid)) => Some((time, table.place(zid, lending)?)),
+            Some((time, zid)) => Some((Word::of(time), table.place(zid, lending)?)),
             None => None,
         };
         let responder = match view.responder() {
@@ -1432,7 +1468,7 @@ impl Round {
                     let sample = LivelinessSample {
                         kind: *kind,
                         keyexpr: table.text(*key),
-                        token_id: *token_id,
+                        token_id: token_id.get(),
                     };
                     for callback in owed.iter().filter_map(Owed::liveliness) {
                         callback.call(sample);
@@ -1547,7 +1583,7 @@ impl SampleView for RoundSample<'_> {
 
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
         let (time, zid) = self.rest?.timestamp?;
-        Some((time, self.table.bytes(zid)))
+        Some((time.get(), self.table.bytes(zid)))
     }
 
     fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
@@ -1614,7 +1650,7 @@ impl ReplyView for RoundReply<'_> {
         self.reply
             .timestamp
             .map(|(time, zid)| wz_session_core::reply_stage::TimestampParts {
-                time,
+                time: time.get(),
                 zid: self.table.bytes(zid),
             })
     }
