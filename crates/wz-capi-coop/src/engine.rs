@@ -2267,7 +2267,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             lease_ms: self.config.lease_ms,
             keep_alive: self.config.keep_alive,
             initial_sn: 0,
-            cookie: Vec::new(),
+            cookie: Default::default(),
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
             policy: self.policy,

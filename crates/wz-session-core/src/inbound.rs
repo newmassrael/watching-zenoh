@@ -2207,6 +2207,10 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             // capacity; the view holds any, so the decoder's storing is asked for its verdict.
             #[cfg(feature = "session-slot")]
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+            // A cookie past the build's bound is refused as the slot profile's storing refuses
+            // it, and not read only to be left out of the Open that echoes it.
+            #[cfg(all(feature = "limits-lent-at-open", not(feature = "session-slot")))]
+            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
             refuse_as_decoded(
                 wire_const::T_MID_INIT,
                 crate::ext_view::walked(view.extensions.as_ref()),
@@ -2233,6 +2237,10 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             let view = TransportOpenView::decode(&mut cursor)?;
             #[cfg(feature = "session-slot")]
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+            // A cookie past the build's bound is refused as the slot profile's storing refuses
+            // it, and not read only to be left out of the Open that echoes it.
+            #[cfg(all(feature = "limits-lent-at-open", not(feature = "session-slot")))]
+            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
             refuse_as_decoded(
                 wire_const::T_MID_OPEN,
                 crate::ext_view::walked(view.extensions.as_ref()),
@@ -2310,6 +2318,27 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
     };
     Ok((read, bytes.len() - cursor.remaining()))
+}
+
+/// The refusal of a handshake cookie longer than the session keeps
+/// (`session_init_params::COOKIE_MAX`): what the slot profile's storing of the body answers
+/// (`CapacityExceeded`), for a build that keeps the cookie in storage of the build's size without
+/// storing the body.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    feature = "limits-lent-at-open",
+    not(feature = "session-slot"),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+fn refuse_unkept_cookie(cookie: Option<&[u8]>) -> Result<(), InboundParseError> {
+    match cookie {
+        Some(cookie) if cookie.len() > crate::session_init_params::COOKIE_MAX => {
+            Err(InboundParseError::Codec(CodecError::CapacityExceeded))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The refusals the decoder answers for a handshake chain ([`collect_handshake_ext_chain`]),
@@ -3634,5 +3663,39 @@ mod control_read_tests {
             format!("{:?}", read.extensions),
             format!("{:?}", held.extensions)
         );
+    }
+
+    /// A build that keeps a cookie in storage of its own size refuses an InitAck whose cookie is
+    /// longer, as the slot profile's storing does, and reads one of exactly that size.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "limits-lent-at-open",
+        not(feature = "session-slot")
+    ))]
+    #[test]
+    fn a_cookie_past_the_build_bound_is_refused_in_place() {
+        use crate::session_init_params::COOKIE_MAX;
+        let init_ack = |len: usize| {
+            let mut wire = vec![
+                wire_const::T_MID_INIT | wire_const::FLAG_T_INIT_A,
+                0x09,
+                0x12,
+                0xAA,
+                0xBB,
+            ];
+            let mut n = len as u64;
+            while n >= 0x80 {
+                wire.push((n as u8 & 0x7F) | 0x80);
+                n >>= 7;
+            }
+            wire.push(n as u8);
+            wire.extend(core::iter::repeat(0x5A).take(len));
+            wire
+        };
+        assert!(read_control(&init_ack(COOKIE_MAX)).is_ok());
+        assert!(matches!(
+            read_control(&init_ack(COOKIE_MAX + 1)),
+            Err(InboundParseError::Codec(CodecError::CapacityExceeded))
+        ));
     }
 }
