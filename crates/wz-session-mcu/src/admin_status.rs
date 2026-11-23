@@ -406,7 +406,6 @@ mod tests {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
     use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-    use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::session_actions::SessionLinkActions;
     use wz_session_core::session_init_params::SessionInitParams;
@@ -523,7 +522,7 @@ mod tests {
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
         let runtime = CoopRuntime::new(FrozenClock);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let sink = driver.clone().into_sink();
         let actions =
             SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                 sink,
@@ -629,7 +628,7 @@ mod tests {
         status: &'static NodeStatus,
     ) -> (
         impl FnMut(IterationEvent<'_, '_>),
-        Rc<crate::memory::MemoryEnd>,
+        wz_runtime_coop::link_cells::CellRc<crate::memory::MemoryEnd>,
     ) {
         static CONFIG: FixedConfig = FixedConfig;
         static WRITES_OFF: WritesOff = WritesOff;
@@ -640,7 +639,7 @@ mod tests {
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
         let runtime = CoopRuntime::new(FrozenClock);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let sink = driver.clone().into_sink();
         let actions =
             SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                 sink,

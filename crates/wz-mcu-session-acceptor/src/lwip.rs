@@ -35,7 +35,7 @@ const PEER_RX_SLOTS: usize = 4;
 /// The acceptor and the crafted peer as two sockets on one lwIP loopback.
 pub struct LwipTopology {
     link: Rc<LwipLink>,
-    driver: Rc<LwipUdpDriver>,
+    driver: wz_runtime_coop::link_cells::CellRc<LwipUdpDriver>,
     peer: LwipUdpSocket<SESSION_RX_SLOT_SIZE, PEER_RX_SLOTS>,
 }
 
@@ -56,7 +56,8 @@ impl LwipTopology {
         let acceptor_sock: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, SESSION_PORT).expect("bind acceptor session rx"),
         ));
-        let driver = Rc::new(LwipUdpDriver::accepting(acceptor_sock));
+        let driver =
+            wz_runtime_coop::link_cells::CellRc::boxed(LwipUdpDriver::accepting(acceptor_sock));
 
         // ── The reactive crafted peer: a second real loopback endpoint. Sized
         //    off the ACTIVE session-rx slot size (SESSION_RX_SLOT_SIZE: 1536
@@ -81,8 +82,8 @@ impl Default for LwipTopology {
 impl AcceptorTopology for LwipTopology {
     type Link = LwipSessionLink<Rc<LwipLink>>;
 
-    fn acceptor_sink(&self) -> Rc<dyn BoxedLinkDriver> {
-        self.driver.clone()
+    fn acceptor_sink(&self) -> wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> {
+        self.driver.clone().into_sink()
     }
 
     fn acceptor_link(&self) -> Self::Link {

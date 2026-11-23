@@ -332,7 +332,7 @@ struct Pair {
     /// so the acceptor's SN gate admits it as the initiator's next frame.
     initiator: Rc<SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>>,
     /// The initiator's socket: what the measured frames are sent from.
-    initiator_sink: Rc<dyn BoxedLinkDriver>,
+    initiator_sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver>,
     /// Every Put the subscriber was handed, in order. Its capacity is reserved
     /// before anything is measured, so recording a delivery does not itself
     /// allocate.

@@ -692,6 +692,89 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     }
 }
 
+/// A link in a cell is a link: the handle the drive loop pumps names the same driver the
+/// session's actions send through (`crate::link_cells`).
+#[cfg(not(feature = "session-slot"))]
+impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells::CellRc<T> {
+    fn service(&self) {
+        (**self).service()
+    }
+
+    fn service_within(&self, max_wait_ms: u64) {
+        (**self).service_within(max_wait_ms)
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        (**self).uses_wake_budget()
+    }
+
+    fn try_recv(&self) -> Option<RxFrame> {
+        (**self).try_recv()
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        (**self).recv_with(f)
+    }
+
+    fn lost(&self) -> Option<LostCause> {
+        (**self).lost()
+    }
+
+    fn holds_input(&self) -> bool {
+        (**self).holds_input()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        (**self).waits_for_buffer()
+    }
+
+    fn owes_write(&self) -> bool {
+        (**self).owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        (**self).write_owed_now()
+    }
+
+    fn takes_input(&self) -> bool {
+        (**self).takes_input()
+    }
+
+    fn keeps_input(&self) -> bool {
+        (**self).keeps_input()
+    }
+
+    fn keep(&self) {
+        (**self).keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        (**self).lends_until_next_receive()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        (**self).readiness()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        (**self).writability()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        (**self).lend_rx()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn land_rx(&self, lease: RxLease) {
+        (**self).land_rx(lease)
+    }
+}
+
 /// The protocol of a link, as a locator's scheme names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkProto {
@@ -843,8 +926,9 @@ pub enum LinkOpenError {
 /// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
 #[cfg(not(feature = "session-slot"))]
 pub struct OpenedLink<P> {
-    /// What the session's actions send through.
-    pub sink: Rc<dyn BoxedLinkDriver>,
+    /// What the session's actions send through: a counted handle on the cell the link's driver
+    /// lives in (`crate::link_cells`).
+    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     /// What the drive loop services and takes datagrams from.
     pub pump: P,
 }
@@ -937,8 +1021,8 @@ pub trait SessionLinks {
     /// its owner's read of it reach the same link through clones of this. The default puts the
     /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
     /// handle back, so its link is behind one pointer and not two.
-    fn share_pump(pump: Self::Pump) -> Rc<dyn SessionDatagramLink> {
-        Rc::new(pump)
+    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
+        crate::link_cells::CellRc::boxed(pump).into_link()
     }
 }
 
@@ -2545,7 +2629,7 @@ mod wake_budget_tests {
     fn waited(in_ms: Option<u64>) -> u64 {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         // The session's own clock, whose epoch is its runtime's and not the board's.
         let now_ms = clock.now_monotonic_ms();
@@ -2567,7 +2651,7 @@ mod wake_budget_tests {
     fn raised(in_ms: Option<u64>) -> (usize, Option<u64>) {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
@@ -2596,7 +2680,7 @@ mod wake_budget_tests {
     fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
@@ -2640,7 +2724,7 @@ mod wake_budget_tests {
     fn a_link_that_is_gone_ends_its_session() {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
@@ -2705,7 +2789,7 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
@@ -2761,7 +2845,7 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let lend = RouterLend::<Router>::new();
@@ -2820,7 +2904,7 @@ mod wake_budget_tests {
             );
             let local = CoopLocalSet::new(&runtime);
             let clock = CoopTime::new(&runtime);
-            let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+            let sink = crate::link_cells::heap_sink(Null);
             let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
@@ -2900,7 +2984,7 @@ mod wake_budget_tests {
         runtime.seal();
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let task = spawn_session_with_router(
             &local,
@@ -2957,7 +3041,7 @@ mod wake_budget_tests {
     fn acceptor() -> (SessionPump<Stopped, Rc<Recording>>, u64) {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {

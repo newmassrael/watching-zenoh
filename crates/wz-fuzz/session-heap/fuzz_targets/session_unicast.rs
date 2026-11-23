@@ -145,7 +145,7 @@ fuzz_target!(|data: &[u8]| {
     reset_clock();
     let runtime = CoopRuntime::new(Clock);
     let clock = CoopTime::new(&runtime);
-    let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Nowhere);
+    let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
     let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
     let feed = Rc::new(Feed::default());
     let config = SessionDriveConfig {

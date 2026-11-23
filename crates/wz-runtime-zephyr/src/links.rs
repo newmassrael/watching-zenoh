@@ -16,8 +16,8 @@
 //! autoconfiguration or Kconfig through [`board_ip`](crate::net::board_ip), of the
 //! family the image's Kconfig chose.
 
-use alloc::rc::Rc;
 use core::net::{IpAddr, SocketAddr};
+use wz_runtime_coop::link_cells::CellRc;
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks};
 use wz_runtime_coop::udp_link::{bind_refused, dial_bind};
@@ -82,7 +82,7 @@ impl ZephyrLinks {
 }
 
 impl SessionLinks for ZephyrLinks {
-    type Pump = Rc<ZephyrUdpDriver>;
+    type Pump = CellRc<ZephyrUdpDriver>;
 
     type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
@@ -93,13 +93,13 @@ impl SessionLinks for ZephyrLinks {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = ZephyrUdpSocket::bind(SocketAddr::new(self.local, port))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = Rc::new(ZephyrUdpDriver::acceptor_with_buffers(
+        let driver = CellRc::boxed(ZephyrUdpDriver::acceptor_with_buffers(
             socket,
             self.rx_capacity,
             HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: driver,
         })
     }
@@ -113,14 +113,14 @@ impl SessionLinks for ZephyrLinks {
         // Port 0 has the stack choose a free one, one per initiator session.
         let socket = ZephyrUdpSocket::bind(dial_bind(self.local, to.at))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = Rc::new(ZephyrUdpDriver::initiator_with_buffers(
+        let driver = CellRc::boxed(ZephyrUdpDriver::initiator_with_buffers(
             socket,
             to.at,
             self.rx_capacity,
             HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: driver,
         })
     }

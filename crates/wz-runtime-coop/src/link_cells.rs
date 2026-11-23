@@ -3,7 +3,7 @@
 
 //! The cells a session's links live in: one for each link its open admits, reserved with the
 //! session's arena, each holding one link's driver for as long as a handle to it lives
-//! ([`Shared`]) and given back when the last handle goes. A handle is what the session's actions
+//! ([`CellRc`]) and given back when the last handle goes. A handle is what the session's actions
 //! send through and what its drive loop pumps, the one value behind both, as an `Rc` is, with no
 //! allocation: a link the session takes after its open takes a cell and no memory of the heap
 //! (`docs/c-abi-architecture.md`, P3).
@@ -22,6 +22,9 @@ use core::ptr::NonNull;
 
 use wz_session_core::bounded::ARENA_ALIGN;
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::link::BoxedLinkDriver;
+
+use crate::session_drive::SessionDatagramLink;
 
 /// What a cell keeps before its value: how many handles name it, and what drops the value and
 /// gives the cell's memory back once none does.
@@ -69,13 +72,13 @@ unsafe fn release<K>(head: NonNull<CellHead>) {
 /// A handle on the value a cell holds, counted as an `Rc` is: a clone names the same value, and
 /// the last handle to go drops it and gives the cell back. `T` is the value's type or a trait
 /// object of it ([`Self::unsize`]). Not `Send`: the cells belong to the session's one task.
-pub struct Shared<T: ?Sized> {
+pub struct CellRc<T: ?Sized> {
     head: NonNull<CellHead>,
     value: NonNull<T>,
     _owns: PhantomData<T>,
 }
 
-impl<K> Shared<K> {
+impl<K> CellRc<K> {
     /// `value` in a cell of `cells`, or `value` back when every cell is taken or a cell is too
     /// small for it, or not aligned for it.
     pub fn place(cells: &LentByteCells, value: K) -> Result<Self, K> {
@@ -156,7 +159,7 @@ impl<K> Shared<K> {
     }
 }
 
-impl<T: ?Sized> Shared<T> {
+impl<T: ?Sized> CellRc<T> {
     /// This handle as one on `U`, the value seen through `as_u`: a trait object of it.
     ///
     /// # Safety
@@ -166,9 +169,9 @@ impl<T: ?Sized> Shared<T> {
     pub unsafe fn unsize<U: ?Sized>(
         self,
         as_u: impl FnOnce(NonNull<T>) -> NonNull<U>,
-    ) -> Shared<U> {
+    ) -> CellRc<U> {
         let this = core::mem::ManuallyDrop::new(self);
-        Shared {
+        CellRc {
             head: this.head,
             value: as_u(this.value),
             _owns: PhantomData,
@@ -182,7 +185,29 @@ impl<T: ?Sized> Shared<T> {
     }
 }
 
-impl<T: ?Sized> Deref for Shared<T> {
+impl<K: BoxedLinkDriver + 'static> CellRc<K> {
+    /// This handle as the one the session's actions send through.
+    pub fn into_sink(self) -> CellRc<dyn BoxedLinkDriver> {
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        unsafe { self.unsize(|value| -> NonNull<dyn BoxedLinkDriver> { value }) }
+    }
+}
+
+impl<K: SessionDatagramLink + 'static> CellRc<K> {
+    /// This handle as the link the session's drive loop pumps.
+    pub fn into_link(self) -> CellRc<dyn SessionDatagramLink> {
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        unsafe { self.unsize(|value| -> NonNull<dyn SessionDatagramLink> { value }) }
+    }
+}
+
+/// `driver` in a cell of its own on the heap, as the session's actions send through it: the sink
+/// of a link no table lends a cell.
+pub fn heap_sink<K: BoxedLinkDriver + 'static>(driver: K) -> CellRc<dyn BoxedLinkDriver> {
+    CellRc::boxed(driver).into_sink()
+}
+
+impl<T: ?Sized> Deref for CellRc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -192,7 +217,7 @@ impl<T: ?Sized> Deref for Shared<T> {
     }
 }
 
-impl<T: ?Sized> Clone for Shared<T> {
+impl<T: ?Sized> Clone for CellRc<T> {
     fn clone(&self) -> Self {
         let handles = &self.head().handles;
         handles.set(handles.get().saturating_add(1));
@@ -204,7 +229,7 @@ impl<T: ?Sized> Clone for Shared<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Shared<T> {
+impl<T: ?Sized> Drop for CellRc<T> {
     fn drop(&mut self) {
         let head = self.head();
         let left = head.handles.get().saturating_sub(1);
@@ -265,16 +290,16 @@ mod tests {
     /// with the value handed back.
     #[test]
     fn a_placed_value_lives_while_a_handle_does_and_gives_its_cell_back() {
-        let cells = table(Shared::<Counted>::cell_bytes());
+        let cells = table(CellRc::<Counted>::cell_bytes());
         let drops = Rc::new(Cell::new(0));
-        let first = Shared::place(&cells, Counted(drops.clone()))
+        let first = CellRc::place(&cells, Counted(drops.clone()))
             .ok()
             .expect("a cell");
-        let second = Shared::place(&cells, Counted(drops.clone()))
+        let second = CellRc::place(&cells, Counted(drops.clone()))
             .ok()
             .expect("a cell");
         assert_eq!(cells.in_use(), 2);
-        let refused = Shared::place(&cells, Counted(drops.clone()));
+        let refused = CellRc::place(&cells, Counted(drops.clone()));
         assert!(refused.is_err(), "past the table's cells");
         drop(refused);
         assert_eq!(
@@ -303,8 +328,8 @@ mod tests {
     #[test]
     fn a_value_larger_than_a_cell_is_refused() {
         let cells = table(ARENA_ALIGN);
-        assert!(!Shared::<[u64; 4]>::fits(ARENA_ALIGN));
-        assert!(Shared::place(&cells, [7u64; 4]).is_err());
+        assert!(!CellRc::<[u64; 4]>::fits(ARENA_ALIGN));
+        assert!(CellRc::place(&cells, [7u64; 4]).is_err());
         assert_eq!(cells.in_use(), 0);
     }
 
@@ -312,15 +337,15 @@ mod tests {
     /// as what it was placed as, from a table's cell or from the heap.
     #[test]
     fn a_handle_seen_as_a_trait_object_drops_its_value_once() {
-        let cells = table(Shared::<Counted>::cell_bytes());
+        let cells = table(CellRc::<Counted>::cell_bytes());
         let drops = Rc::new(Cell::new(0));
-        let placed = Shared::place(&cells, Counted(drops.clone()))
+        let placed = CellRc::place(&cells, Counted(drops.clone()))
             .ok()
             .expect("a cell");
-        let boxed = Shared::boxed(Counted(drops.clone()));
+        let boxed = CellRc::boxed(Counted(drops.clone()));
         for handle in [placed, boxed] {
             // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
-            let named: Shared<dyn Named> =
+            let named: CellRc<dyn Named> =
                 unsafe { handle.unsize(|value| -> NonNull<dyn Named> { value }) };
             let again = named.clone();
             assert_eq!(again.name(), 7);

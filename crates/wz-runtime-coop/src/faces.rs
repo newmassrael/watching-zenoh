@@ -18,7 +18,6 @@
 //! (P3).
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Deref;
@@ -29,6 +28,7 @@ use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::zid_hex::same_zid;
 
+use crate::link_cells::CellRc;
 use crate::session_drive::{
     wait_any, AndRoom, LinkListener, LinkOpenError, LinkReadiness, LinkWritability, Locator,
     OpenedLink, PendingDial, RxLease, SessionDatagramLink, SessionLinks,
@@ -83,8 +83,8 @@ pub trait FaceRecord {
 pub struct Wire<S> {
     session: S,
     task: CoopLocalJoinHandle<DriverOutcome>,
-    link: Rc<dyn SessionDatagramLink>,
-    ungated: Rc<dyn SessionDatagramLink>,
+    link: CellRc<dyn SessionDatagramLink>,
+    ungated: CellRc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
     writability: Option<Arc<dyn LinkWritability>>,
 }
@@ -92,7 +92,7 @@ pub struct Wire<S> {
 /// Whether `link` has input in its stack it cannot read until another link gives a receive buffer
 /// back (`SessionDatagramLink::waits_for_buffer`): never in a build that only dials, whose links
 /// read into buffers of their own.
-fn waits_for_buffer(link: &Rc<dyn SessionDatagramLink>) -> bool {
+fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
     #[cfg(feature = "session-unicast-accept")]
     {
         link.waits_for_buffer()
@@ -111,8 +111,8 @@ impl<S> Wire<S> {
     pub fn new(
         session: S,
         task: CoopLocalJoinHandle<DriverOutcome>,
-        link: Rc<dyn SessionDatagramLink>,
-        ungated: Rc<dyn SessionDatagramLink>,
+        link: CellRc<dyn SessionDatagramLink>,
+        ungated: CellRc<dyn SessionDatagramLink>,
         readiness: Option<Arc<dyn LinkReadiness>>,
         writability: Option<Arc<dyn LinkWritability>>,
     ) -> Self {
@@ -808,6 +808,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
     use core::cell::Cell;
     use wz_session_core::link::RxFrame;
 
@@ -949,7 +950,7 @@ mod tests {
         if finished {
             local.run_until_idle();
         }
-        let link: Rc<dyn SessionDatagramLink> = Rc::new(Quiet { holds });
+        let link = CellRc::boxed(Quiet { holds }).into_link();
         Wire::new(session, task, link.clone(), link, None, None)
     }
 

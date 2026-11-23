@@ -75,6 +75,7 @@ use wz_runtime_coop::faces::{
     Dial, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
     Moved,
 };
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
@@ -2102,7 +2103,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
-        Rc<dyn SessionDatagramLink>,
+        CellRc<dyn SessionDatagramLink>,
         RouterLend<SessionReassembly>,
         RouterLend<SessionReassembly>,
         FaceDispatch<C>,
@@ -2420,17 +2421,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(feature = "listen")]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link: Rc<dyn SessionDatagramLink> = Rc::new(unsafe {
+        let link = CellRc::boxed(unsafe {
             LaneGate::new(
                 AdmissionGate::new(pump, actions.clone(), admitted.clone()),
                 self.lane.clone(),
                 room,
             )
-        });
+        })
+        .into_link();
         #[cfg(not(feature = "listen"))]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link: Rc<dyn SessionDatagramLink> =
-            Rc::new(unsafe { LaneGate::new(pump, self.lane.clone(), room) });
+        let link =
+            CellRc::boxed(unsafe { LaneGate::new(pump, self.lane.clone(), room) }).into_link();
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {

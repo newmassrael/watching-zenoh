@@ -140,9 +140,9 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     where
         L: 'static,
     {
-        let driver = Rc::new(driver);
+        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver);
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: self.pump_over(driver),
         })
     }
@@ -350,7 +350,8 @@ mod tests {
             } = links
                 .open_initiator(Locator::udp(SocketAddr::from(([127, 0, 0, 1], 7541))))
                 .expect("open initiator");
-            let initiator_link: Rc<dyn BoxedLinkDriver> = initiator_sink.clone();
+            let initiator_link: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
+                initiator_sink.clone();
             let initiator_actions = SessionLinkActions::<
                 CoopRuntime<FrozenClock>,
                 CoopTime<FrozenClock>,

@@ -47,7 +47,6 @@
 //! it held nearly always, and the read task, which takes it again at once, keeps it.
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -1317,7 +1316,9 @@ impl SessionLinks for AppLinks {
     }
 
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
-    fn share_pump(pump: Self::Pump) -> Rc<dyn crate::session_drive::SessionDatagramLink> {
+    fn share_pump(
+        pump: Self::Pump,
+    ) -> crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink> {
         pump
     }
 }
