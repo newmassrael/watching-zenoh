@@ -2501,8 +2501,8 @@ reason = "No key of upstream's configuration bounds it: a zenoh session holds it
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) liveliness_subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
 
 [limit.pico_preset]
-value = 1
-reason = "zenoh-pico bounds its liveliness subscribers by no count; its examples and its API tests hold one at a time on a session."
+value = 2
+reason = "zenoh-pico bounds its liveliness subscribers by no count; its advanced subscriber example holds two on a session, the one its history detects late publishers with and the one it detects publishers with."
 
 [[limit]]
 id = "MAX_LOCAL_TOKENS"
