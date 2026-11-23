@@ -118,6 +118,15 @@ peer-row-pools = []
 # fixed.
 bounded-heapless = []
 
+# `action-trace` keeps the session machine's action counters (`action_trace::ActionTrace`): every
+# action the unicast machine runs counts itself under the session's lock, and
+# `SessionLinkActions::trace_snapshot` reads them. They are an instrument for the tests and the
+# demonstration runners that assert which actions ran; no session path reads one to decide anything.
+# Without it the session holds no trace and an action takes no lock to count itself, so a library
+# that ships (the C ABI's) carries neither the slot nor a lock and an increment in every action.
+# Additive; named by the runtimes and the test builds that read the counters.
+action-trace = []
+
 # `key-set-closed` compiles in the closed key set: the sealed key table, the delivery of a message
 # by the selection of its key, the refusal of a key outside the set and the per-peer allowance. It
 # is what the `key-set` policy's `closed` value needs, and a build whose policy is `closed` without
@@ -1331,9 +1340,10 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 [dev-dependencies]
 # Round 3170 follow-up — this crate's own unit tests drive the lending form of
 # the encoders (a fixed `SliceTxBuf` slot, `dyn TxBuf`), which exists only
-# with `transport-tx-lend`. A dev-dependency on itself turns the feature on
-# for the test build alone; the library an image links is unchanged.
-wz-session-core = { path = ".", default-features = false, features = ["transport-tx-lend"] }
+# with `transport-tx-lend`, and read the action counters, which exist only
+# with `action-trace`. A dev-dependency on itself turns the features on for
+# the test build alone; the library an image links is unchanged.
+wz-session-core = { path = ".", default-features = false, features = ["transport-tx-lend", "action-trace"] }
 # R311ds — the four declare/* registries' wider behavioural tests
 # (callback fan-out value capture, mixed-message dispatch) migrated
 # here from the wz-runtime-tokio shells, joining the existing R311dm

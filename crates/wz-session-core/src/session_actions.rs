@@ -1734,6 +1734,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `target_has_atomic = "ptr"`.
     #[cfg(feature = "tx-lend-only")]
     pub tx_refusals: R::Mutex<TxRefusalCounts>,
+    /// How many times each action of the machine ran ([`SessionLinkActions::trace_snapshot`]);
+    /// held only by a build that keeps the counters (`action-trace`).
+    #[cfg(feature = "action-trace")]
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
@@ -4513,6 +4516,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 fragment_tx_budget: R::new_mutex(usize::MAX),
                 #[cfg(feature = "tx-lend-only")]
                 tx_refusals: R::new_mutex(TxRefusalCounts::default()),
+                #[cfg(feature = "action-trace")]
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
@@ -9916,8 +9920,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.link.shm_rx, |slot| slot.take_update())
     }
 
+    #[cfg(feature = "action-trace")]
     pub fn trace_snapshot(&self) -> ActionTrace {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
+    }
+
+    /// Count one run of an action in the trace (`count` names its counter). A build without
+    /// `action-trace` keeps no trace, and the count is no code at all: no lock is taken for it.
+    #[inline(always)]
+    pub(crate) fn note_action(&self, count: impl FnOnce(&mut ActionTrace)) {
+        #[cfg(feature = "action-trace")]
+        R::with_mutex_mut(&self.trace, count);
+        #[cfg(not(feature = "action-trace"))]
+        let _ = count;
     }
 
     /// The reason the session FSM staged for this link's Close frame: the
@@ -10715,7 +10730,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
+            self.note_action(|t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
@@ -16950,7 +16965,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // worker emit) must take the same pre-drain.
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
+            self.note_action(|t| t.send_close_frame_with_reason += 1);
             // R311y839 — the S flag is derived, not literal: this path tears down
             // ONE link, so it announces a whole-session close only when no other
             // link survives it. See `close_scope_is_session`.
@@ -16998,7 +17013,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+            self.note_action(|t| t.send_keep_alive += 1);
             let bytes = crate::handshake_encode::encode_keep_alive();
             // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must
             // ride the physical link this drive loop monitors (so that link's
@@ -17023,7 +17038,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the frames it may pass are the other carriage's or the companion's own best-effort ones.
     #[cfg(feature = "transport-keepalive")]
     pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
-        R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+        self.note_action(|t| t.send_keep_alive += 1);
         let bytes = crate::handshake_encode::encode_keep_alive();
         self.send_wire_urgent_this_link(&bytes, class);
     }
@@ -18059,7 +18074,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
     fn stage_close_reason(&self, reason: CloseReason) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.set_close_reason_count += 1);
+        self.inner.note_action(|t| t.set_close_reason_count += 1);
         R::with_mutex_mut(&self.link().close_reason, |slot| *slot = Some(reason));
     }
 }
@@ -18122,7 +18137,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn link_driver_open(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.link_driver_open += 1);
+        a.note_action(|t| t.link_driver_open += 1);
         a.link_driver().open_blocking();
     }
 
@@ -18135,7 +18150,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
+            a.note_action(|t| t.send_init_syn += 1);
             // This node dialled the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(false);
@@ -18236,7 +18251,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_open_syn += 1);
+            a.note_action(|t| t.send_open_syn += 1);
             // R3b — initiator usrpwd response (Zbuf {user, hmac}) staged into
             // the OpenSyn chain; HMACs over the nonce captured from InitAck.
             #[cfg(feature = "session-extauth")]
@@ -18304,7 +18319,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
+            a.note_action(|t| t.send_init_ack_with_cookie += 1);
             // This node accepted the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(true);
@@ -18529,7 +18544,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_open_ack += 1);
+            a.note_action(|t| t.send_open_ack += 1);
             // R3b — responder usrpwd accept (Unit) staged into the OpenAck
             // chain (reached only after accept_recv_open_syn verified the HMAC).
             #[cfg(feature = "session-extauth")]
@@ -18581,7 +18596,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(feature = "codec-close")]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_close_frame_with_reason += 1);
+            a.note_action(|t| t.send_close_frame_with_reason += 1);
             // Every transition into Closing stages a reason first; the
             // wire's own default answers an entry driven without one.
             let staged = R::with_mutex_mut(&self.link().close_reason, |r| *r);
@@ -18606,7 +18621,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn release_link(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
+        a.note_action(|t| t.release_link += 1);
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
         // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
@@ -18627,13 +18642,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn enable_rx_tx_regions(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.enable_rx_tx_regions += 1);
+        self.inner.note_action(|t| t.enable_rx_tx_regions += 1);
     }
 
     #[inline(never)]
     fn record_established_at(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.record_established_at += 1);
+        a.note_action(|t| t.record_established_at += 1);
         // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
         // clock (same epoch as last_inbound_at +
         // drive_session_until_terminal) so the lease comparator's u64
@@ -18670,7 +18685,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn start_lease_monitor(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.start_lease_monitor += 1);
+        self.inner.note_action(|t| t.start_lease_monitor += 1);
         // The monitor is the drive loop's lease deadline; arming it is what
         // gives this link one (`drive::lease_wake_deadline`).
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
@@ -18678,7 +18693,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.stop_lease_monitor += 1);
+        self.inner.note_action(|t| t.stop_lease_monitor += 1);
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
     }
 
@@ -18690,7 +18705,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // (`SESSION_HOST_REALIZATION`).
         #[cfg(feature = "transport-keepalive")]
         {
-            R::with_mutex_mut(&self.inner.trace, |t| t.start_keepalive_worker += 1);
+            self.inner.note_action(|t| t.start_keepalive_worker += 1);
             // The worker is the drive loops' keepalive deadline and the AP
             // pacer; both emit only while this is set.
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
@@ -18701,14 +18716,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
-            R::with_mutex_mut(&self.inner.trace, |t| t.stop_keepalive_worker += 1);
+            self.inner.note_action(|t| t.stop_keepalive_worker += 1);
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
         }
     }
 
     #[inline(never)]
     fn free_pool_slots(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.free_pool_slots += 1);
+        self.inner.note_action(|t| t.free_pool_slots += 1);
     }
 
     #[inline(never)]
@@ -18806,7 +18821,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// guard actually fired (vs. R57's `bind_bool` placeholder which never
     /// executed any dynamic check).
     pub fn cookie_valid(&self) -> bool {
-        R::with_mutex_mut(&self.trace, |t| t.cookie_valid_check += 1);
+        self.note_action(|t| t.cookie_valid_check += 1);
         if self.fixed_cookie() {
             return self.fixed_cookie_echoed();
         }

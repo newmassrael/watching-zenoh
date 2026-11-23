@@ -2158,7 +2158,9 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # Round 3170 follow-up — `transport-tx-lend`, unconditional for the same
 # reason: the stream writer lends the outbound vector (section 9.1), and the
 # AP has no image-size budget the dyn-buffer encoders could break.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend"] }
+# `action-trace`: the session machine's action counters, which this crate's
+# tests and the runners built on it read (`trace_snapshot`).
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.
