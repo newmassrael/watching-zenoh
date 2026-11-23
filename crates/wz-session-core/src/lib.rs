@@ -1068,12 +1068,6 @@ pub mod doc_out;
 /// the stock zenoh config an operator already holds is an INPUT to wz rather
 /// than only ever an output of it. `alloc`-only, same as its emit twin.
 #[cfg(feature = "alloc")]
-// Totality debt TD-060 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod json5;
 
 /// R2824 — the grammar of `json5` with no allocator: the scans both the tree
