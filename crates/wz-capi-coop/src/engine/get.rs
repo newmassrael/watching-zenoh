@@ -10,12 +10,15 @@
 //! reply keys and the consolidation `QueryOptions` reads, as the tokio engine registers its own.
 //!
 //! What the observer hands the entry's sink happens under the session's lock, and a C callback
-//! never runs there (decision D8), so the sink only queues: each reply in the session's delivery
-//! lane, one event of the lane for it and its bytes where the lane lies, and the leg's END when the
-//! entry is dropped (its Final, its deadline, its cancellation, the loss of its link), said by a
-//! guard the sink owns. The deliveries hand both out with no lock held, the end once the lane has
-//! handed every reply queued before it, as the drop of the leg's callback, which is how a C
-//! program learns its get is over.
+//! never runs there (decision D8), so the sink ([`LegSink`]) hands each reply on to be called
+//! after the lock: to the thread that made it, for an answer of the session's own queryables; to
+//! the lane's pending table, for a reply that lies in a datagram a link lends; to the session's
+//! delivery lane otherwise. What the entry's consolidation held to its end, and a timeout, wait in
+//! the plane's held table, given up whole, and the leg's END is said when the entry is dropped (its
+//! Final, its deadline, its cancellation, the loss of its link) by a guard the sink owns. The
+//! deliveries hand them out with no lock held, the end once the lane has handed every reply queued
+//! before it and the held table every reply held, as the drop of the leg's callback, which is how
+//! a C program learns its get is over.
 //!
 //! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
 //! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
@@ -27,8 +30,13 @@ use alloc::sync::Arc;
 
 use wz_session_core::bounded::{BoundedVec, Lent};
 
+use alloc::collections::VecDeque;
+
+#[cfg(feature = "local-queryable")]
+use wz_capi_port::sync::Lock;
 use wz_capi_port::ReplyCallback;
-use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
+use wz_session_core::reply::InboundReply;
+use wz_session_core::reply_sink::{timeout_reply, ReplySink, ReplyView};
 
 use crate::lane::SharedLane;
 
@@ -83,6 +91,13 @@ impl Pending for EndedLegs {
 pub(super) struct GetPlane {
     /// The legs that ended, handed out after the replies queued before them.
     pub(super) ended: Queued<EndedLegs>,
+    /// What the entries of legs held to their ends, each with its leg, in the order they gave it
+    /// up: handed to the leg's callback before its end.
+    held: Queued<VecDeque<(u64, Held)>>,
+    /// Whether a thread that holds the session's lock takes the callback the answer it makes
+    /// reaches ([`Self::capture`]).
+    #[cfg(feature = "local-queryable")]
+    capture: Lock<Capture>,
 }
 
 impl GetPlane {
@@ -90,7 +105,64 @@ impl GetPlane {
     pub(super) fn new(ended: EndedLegs) -> Self {
         Self {
             ended: Queued::new(ended),
+            held: Queued::new(VecDeque::new()),
+            #[cfg(feature = "local-queryable")]
+            capture: Lock::new(Capture::Off),
         }
+    }
+
+    /// Take out, instead of queueing, the callback of the leg the replies handed to the sinks from
+    /// here on reach, until [`Self::captured`]: how the thread that makes an answer of the
+    /// session's own queryables, holding the session's lock, learns what to call to hand it the
+    /// answer itself once it lets go.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn capture(&self) {
+        self.capture.with(|capture| *capture = Capture::On(None));
+    }
+
+    /// The callback the replies since [`Self::capture`] reached; what is handed after this is
+    /// queued again.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn captured(&self) -> Option<Arc<ReplyCallback>> {
+        self.capture
+            .with(|capture| match core::mem::replace(capture, Capture::Off) {
+                Capture::On(found) => found,
+                Capture::Off => None,
+            })
+    }
+
+    /// Whether `callback` was taken out for the thread that captures: one leg's, the first a reply
+    /// reached. A second leg reached under the same capture is queued, so nothing is lost.
+    #[cfg(feature = "local-queryable")]
+    fn captures(&self, callback: &Arc<ReplyCallback>) -> bool {
+        self.capture.with(|capture| match capture {
+            Capture::On(slot) if slot.is_none() => {
+                *slot = Some(Arc::clone(callback));
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Hold `held` for leg `leg`, after what it holds already.
+    fn hold(&self, leg: u64, held: Held) {
+        self.held.lock().push_back((leg, held));
+    }
+
+    /// What leg `leg`'s entry held to its end, the first of it, taken out; `None` once there is
+    /// nothing. Read without the lock while nothing is held.
+    pub(super) fn take_held(&self, leg: u64) -> Option<Held> {
+        if !self.held.is_pending() {
+            return None;
+        }
+        let mut held = self.held.lock();
+        let at = held.iter().position(|(of, _)| *of == leg)?;
+        held.remove(at).map(|(_, held)| held)
+    }
+
+    /// Everything held for every leg, taken out: the session is closed.
+    pub(super) fn take_all_held(&self) -> VecDeque<(u64, Held)> {
+        core::mem::take(&mut *self.held.lock())
     }
 }
 
@@ -144,34 +216,88 @@ impl Drop for LegEnd {
     }
 }
 
-/// The sink of leg `leg`'s pending entry, holding the leg's `callback`: each reply of a datagram
-/// a link lends is held for the callback in the lane's pending table, and any other is queued in
-/// the session's delivery `lane` (`SharedLane::offer_reply_to`); the entry's drop queues the
-/// leg's end. The Final itself says nothing more: the registry drops the entry once its Finals
-/// are in, which is the end. The table of callbacks holds the callback past the entry, so the
-/// entry's drop, under the session's lock, is never its last.
-pub(super) fn reply_sink(
+/// What a leg's entry held to its end and the deliveries hand its callback before they let it go:
+/// a reply its consolidation kept until the end, given up whole by the entry, or the timeout that
+/// ended it.
+pub(super) enum Held {
+    Reply(InboundReply),
+    Timeout(wz_session_core::wire_id::RequestId),
+}
+
+impl Held {
+    /// Hand this to `callback`, with no lock of the session held.
+    pub(super) fn hand(&self, callback: &ReplyCallback) {
+        match self {
+            Self::Reply(reply) => callback.call(reply),
+            Self::Timeout(rid) => callback.call(&timeout_reply(*rid)),
+        }
+    }
+}
+
+/// Whether the session's own queryables answer a get of the session now, on the thread that holds
+/// the session's lock: the callback of the leg the answer reaches is taken out, for that thread
+/// to hand it the answer once it lets go of the lock ([`GetPlane::capture`]).
+#[cfg(feature = "local-queryable")]
+enum Capture {
+    Off,
+    On(Option<Arc<ReplyCallback>>),
+}
+
+/// The sink of leg `leg`'s pending entry, holding the leg's `callback`. A reply the session's own
+/// queryables made while the plane captures is the thread's that made it, which hands it to the
+/// callback once it lets go of the session ([`GetPlane::capture`]); a reply of a datagram a link
+/// lends is held for the callback in the lane's pending table, and any other is queued in the
+/// session's delivery `lane` (`SharedLane::offer_reply_to`). What the entry's consolidation held
+/// to its end, and the timeout of a leg that timed out, wait in the plane's held table
+/// ([`GetPlane::take_held`]). The sink's drop is the leg's end: the Final says nothing more, as
+/// the registry drops the entry once its Finals are in. The table of callbacks holds the callback
+/// past the entry, so the entry's drop, under the session's lock, is never its last.
+pub(crate) struct LegSink {
     leg: u64,
-    callback: &Arc<ReplyCallback>,
-    plane: &Arc<GetPlane>,
-    lane: &Arc<SharedLane>,
-) -> BoxedReplySink {
-    let lane = Arc::clone(lane);
-    let callback = Arc::clone(callback);
-    let end = LegEnd {
-        leg,
-        plane: Arc::clone(plane),
-    };
-    BoxedReplySink::new(
-        move |view: &dyn ReplyView| {
-            // SAFETY: the registry hands its sinks a reply under the session's lock.
-            unsafe { lane.offer_reply_to(leg, &callback, view) };
-        },
-        move |_rid| {
-            // Owned by this closure so it is dropped with the sink.
-            let _ = &end;
-        },
-    )
+    callback: Arc<ReplyCallback>,
+    lane: Arc<SharedLane>,
+    end: LegEnd,
+}
+
+impl LegSink {
+    /// The sink of leg `leg`, handing what it is handed to `callback`.
+    pub(super) fn new(
+        leg: u64,
+        callback: &Arc<ReplyCallback>,
+        plane: &Arc<GetPlane>,
+        lane: &Arc<SharedLane>,
+    ) -> Self {
+        Self {
+            leg,
+            callback: Arc::clone(callback),
+            lane: Arc::clone(lane),
+            end: LegEnd {
+                leg,
+                plane: Arc::clone(plane),
+            },
+        }
+    }
+}
+
+impl ReplySink for LegSink {
+    fn on_reply(&mut self, reply: &dyn ReplyView) {
+        #[cfg(feature = "local-queryable")]
+        if self.end.plane.captures(&self.callback) {
+            return;
+        }
+        // SAFETY: the registry hands its sinks a reply under the session's lock.
+        unsafe { self.lane.offer_reply_to(self.leg, &self.callback, reply) };
+    }
+
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
+
+    fn on_timeout(&mut self, rid: wz_session_core::wire_id::RequestId) {
+        self.end.plane.hold(self.leg, Held::Timeout(rid));
+    }
+
+    fn on_reply_owned(&mut self, reply: InboundReply) {
+        self.end.plane.hold(self.leg, Held::Reply(reply));
+    }
 }
 
 #[cfg(test)]

@@ -207,6 +207,12 @@ use {
 
 #[cfg(feature = "query")]
 mod get;
+/// What a face's table of pending gets holds for each leg ([`get::LegSink`]); a build that asks
+/// no query registers none, and its tables are sized for the closure pair a sink would be.
+#[cfg(feature = "query")]
+pub(crate) use get::LegSink;
+#[cfg(not(feature = "query"))]
+pub(crate) type LegSink = wz_session_core::reply_sink::BoxedReplySink;
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
@@ -3908,7 +3914,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// What the session's key arena holds now, closed or not.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn key_counts(&self) -> wz_session_core::key_arena::KeyCounts {
         self.core.lock().0.keys.counts()
     }
@@ -4328,7 +4334,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if let Some(mut core) = self.live() {
                 core.0.pending_gets.retain(|pending| pending.leg != leg);
             }
+            self.hand_held(leg);
             drop(self.take_target(TargetKey::Reply(leg)));
+        }
+    }
+
+    /// Hand leg `leg`'s callback what its entry held to its end, one at a time, each taken out of
+    /// the plane's held table and handed with no lock held: the replies its consolidation kept,
+    /// then the timeout that ended it, as upstream's querier hands them.
+    #[cfg(feature = "query")]
+    fn hand_held(&self, leg: u64) {
+        let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) else {
+            // A leg whose callback is gone hands nothing; what it held goes with it.
+            while self.gets.take_held(leg).is_some() {}
+            return;
+        };
+        while let Some(held) = self.gets.take_held(leg) {
+            held.hand(&callback);
         }
     }
 
@@ -4891,6 +4913,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(feature = "query")]
     fn end_leg_now(&self, leg: u64) {
         self.gets.ended.lock().forget(leg);
+        while self.gets.take_held(leg).is_some() {}
         drop(self.take_target(TargetKey::Reply(leg)));
     }
 
@@ -4915,17 +4938,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !most.admits(payload) || !most.admits(attachment) {
             return Err(ReplyError::PayloadTooLarge);
         }
-        // The session's own get is answered to its pending entry, which is the registry's, and
-        // handed out when the answer ends (`Self::answer`).
+        // The session's own get is answered to its pending entry, which is the registry's: what
+        // the entry's consolidation forwards at once is handed to the leg's callback by this
+        // thread, once it lets go of the session, and what it holds is handed out when the answer
+        // ends (`Self::answer`).
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let reply = wz_session_core::query::QueryReply::from_parts(&parts);
+            let reply: wz_session_core::reply::InboundReply =
+                wz_session_core::query::QueryReply::from_parts(&parts).into();
+            self.gets.capture();
             core.0
                 .registry
                 .borrow_mut()
                 .local
                 .replies
-                .deliver_local_reply(&reply.into());
+                .deliver_local_reply(&reply);
+            let reached = self.gets.captured();
+            drop(core);
+            if let Some(callback) = reached {
+                // A callback that steps the session from inside the reply hands out nothing
+                // itself, as one inside a delivery does.
+                let delivering = self.deliveries.enter();
+                callback.call(&reply);
+                drop(delivering);
+                drop(callback);
+                self.deliver();
+            }
             return Ok(());
         }
         if let Some(route) = core.0.answer_route(generation) {
@@ -6426,11 +6464,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // ends before its timeout.
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            // A get no row holds is refused before its leg's callback is minted.
+            match core
+                .registry
+                .borrow_mut()
+                .face_mut(face)
+                .map(|tables| tables.gets.replies.has_room())
+            {
+                Some(true) => {}
+                Some(false) => {
+                    unheld += 1;
+                    continue;
+                }
+                None => continue,
+            }
             // The leg's callback, shared by the entry's sink and the table of callbacks.
             let callback = Arc::new(leg());
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
+                get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
@@ -6519,10 +6571,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            // A get no row holds is refused before its leg's callback is minted.
+            match core
+                .registry
+                .borrow_mut()
+                .face_mut(face)
+                .map(|tables| tables.gets.replies.has_room())
+            {
+                Some(true) => {}
+                Some(false) => {
+                    unheld += 1;
+                    continue;
+                }
+                None => continue,
+            }
             let callback = Arc::new(leg());
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
+                get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
             let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
@@ -6572,38 +6638,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
-            let callback = Arc::new(leg());
-            let sink = ConsolidatingSink::new(
-                opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
-            );
-            let registered = core.registry.borrow_mut().local.replies.register_sink(
-                rid,
-                1,
-                deadline_ms,
-                ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                sink,
-            );
-            if matches!(registered, Err(RegisterError::TableFull)) {
+            // A get no row holds is refused before its leg's callback is minted.
+            if !core.registry.borrow().local.replies.has_room() {
                 unheld += 1;
-            }
-            if registered.is_err() {
-                drop(guard);
-                drop(callback);
             } else {
-                self.hold_leg(leg_id, callback);
-                core.pending_gets.push(PendingGet {
-                    face: LOCAL_FACE,
-                    leg: leg_id,
-                    kind: GetKind::Query(rid),
-                });
-                // Asked once the legs to the peers were, as zenoh-pico asks it only once the send
-                // succeeded.
-                let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                drop(guard);
-                issued += 1;
-                let _ = self.cancelling(fan, leg_id);
-                self.hand_own_get(&asked, &query::OwnGet::of(keyexpr, opts, rid));
+                let callback = Arc::new(leg());
+                let sink = ConsolidatingSink::new(
+                    opts.resolved_consolidation(),
+                    get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                );
+                let registered = core.registry.borrow_mut().local.replies.register_sink(
+                    rid,
+                    1,
+                    deadline_ms,
+                    ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
+                    sink,
+                );
+                if registered.is_err() {
+                    // A leg no table holds is let go of with no lock held.
+                    drop(guard);
+                    drop(callback);
+                } else {
+                    self.hold_leg(leg_id, callback);
+                    core.pending_gets.push(PendingGet {
+                        face: LOCAL_FACE,
+                        leg: leg_id,
+                        kind: GetKind::Query(rid),
+                    });
+                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
+                    // send succeeded.
+                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
+                    drop(guard);
+                    issued += 1;
+                    let _ = self.cancelling(fan, leg_id);
+                    self.hand_own_get(&asked, &query::OwnGet::of(keyexpr, opts, rid));
+                }
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
@@ -6654,6 +6723,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let interest_id = u64::from(interest_id);
             let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            // A snapshot no row holds is refused before its leg's callback is minted.
+            if !core
+                .registry
+                .borrow_mut()
+                .face_mut(face)
+                .is_some_and(|tables| tables.gets.liveliness_gets.has_room())
+            {
+                continue;
+            }
             let callback = Arc::new(leg());
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
@@ -6665,7 +6743,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.register(
                         interest_id,
                         deadline_ms,
-                        get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
+                        get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
                     )
                 })
                 .is_some_and(|registered| matches!(registered, Ok(true)));
@@ -7000,7 +7078,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         drop(handed);
         #[cfg(feature = "query")]
-        self.gets.ended.lock().clear();
+        {
+            self.gets.ended.lock().clear();
+            drop(self.gets.take_all_held());
+        }
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]

@@ -108,11 +108,11 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
-use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{EntryBytes, SubscriberRow};
+use crate::engine::{EntryBytes, LegSink, SubscriberRow};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -235,7 +235,7 @@ impl GetTables {
 }
 
 /// One face's table of pending gets, as the arena lends it.
-type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at

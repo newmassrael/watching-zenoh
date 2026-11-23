@@ -1656,10 +1656,7 @@ struct PendedReply {
 impl PendedReply {
     /// `view` as it lies in `datagram`, and its key when that lies elsewhere; `None` when a part
     /// of it other than its key lies elsewhere.
-    fn of<'v>(
-        view: &'v dyn ReplyView,
-        datagram: (*const u8, usize),
-    ) -> Option<(Self, Option<&'v [u8]>)> {
+    fn of(view: &dyn ReplyView, datagram: (*const u8, usize)) -> Option<(Self, Option<&[u8]>)> {
         let payload = Span::of(view.payload(), datagram)?;
         let attachment = match view.attachment() {
             Some(part) => Some(Span::of(part, datagram)?),
@@ -2923,11 +2920,12 @@ impl SharedLane {
         self.handed_count.load(Ordering::SeqCst) != self.taken_count.load(Ordering::SeqCst)
     }
 
-    /// Whether every sample handed on is done with: what a leg's end waits for, so that it is told
-    /// after every reply queued before it.
+    /// Whether every sample handed on is done with, and the pending table holds nothing: what a
+    /// leg's end waits for, so that it is told after every reply queued or held before it.
     #[cfg(feature = "query")]
     pub(crate) fn is_idle(&self) -> bool {
         self.handed_count.load(Ordering::SeqCst) == self.done_count.load(Ordering::SeqCst)
+            && !self.pending.holds()
     }
 
     /// Whether what is offered from here on is a record a link's gate let through

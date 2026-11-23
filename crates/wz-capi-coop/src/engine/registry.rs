@@ -40,7 +40,7 @@ use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::query_sink::BoxedQuerySink;
-use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
@@ -49,7 +49,7 @@ use wz_session_core::slot_observer::{
 };
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
-use super::SubscriberRow;
+use super::{LegSink, SubscriberRow};
 use crate::arena::{FacePeers, GetTables};
 use wz_capi_port::FilterPlane;
 use wz_session_core::locality::Locality;
@@ -83,7 +83,7 @@ pub(super) const DIAL_FACE: FaceId = 1 << 62;
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
-pub(super) type Gets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+pub(super) type Gets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
 
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
