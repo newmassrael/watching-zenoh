@@ -1444,14 +1444,14 @@ impl KeptChain for InPlaceExtChain {
     )
 ))]
 impl InPlaceExtChain {
-    /// The fold of [`KeptChain::keep`], over the walk as a trait object: each message's header
-    /// document has a walk type of its own (the Frame's, the Fragment's), and the fold is
-    /// compiled once for all of them. A header's chain is a few entries at most, so a call through
+    /// The fold of [`KeptChain::keep`], over the walk as a trait object
+    /// ([`crate::ext_view::EntryWalk`]): each message's header document has a walk type of its
+    /// own (the Frame's, the Fragment's), and the fold is compiled once for all of them. A header's chain is a few entries at most, so a call through
     /// the table per entry costs nothing a receive can see.
     #[inline(never)]
     fn fold<'a>(
         mid: u8,
-        walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+        walked: &mut dyn crate::ext_view::EntryWalk<'a>,
     ) -> Result<Self, InboundParseError> {
         #[cfg(feature = "session-unicast")]
         let carrier = crate::ext_admit::ExtCarrier::Transport(mid);
@@ -1469,7 +1469,7 @@ impl InPlaceExtChain {
         #[cfg(feature = "reassembly")]
         let mut markers = crate::extfragment::FragmentMarkers::NONE;
         let mut priority = None;
-        for entry in walked {
+        while let Some(entry) = walked.next_entry() {
             #[cfg(all(
                 feature = "alloc",
                 any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")

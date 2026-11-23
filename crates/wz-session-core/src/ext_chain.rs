@@ -383,10 +383,10 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
 #[inline(never)]
 fn collect_walk<'a>(
     mid: u8,
-    walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    walked: &mut dyn crate::ext_view::EntryWalk<'a>,
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    for entry in walked {
+    while let Some(entry) = walked.next_entry() {
         // On `session-slot` only the entries of an extension the build reads are kept, one each:
         // a peer that repeats one fills the chain and is refused. Every other build keeps them all.
         #[cfg(feature = "session-slot")]
@@ -498,9 +498,9 @@ pub(crate) fn check_ext_chain<'a>(
 ))]
 #[inline(never)]
 fn check_walk<'a>(
-    walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    walked: &mut dyn crate::ext_view::EntryWalk<'a>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    for entry in walked {
+    while let Some(entry) = walked.next_entry() {
         let mut lent = wz_codecs::lent::ExtEntry::default();
         entry
             .into_builder(&mut lent)
