@@ -146,14 +146,22 @@ fuzz_target!(|data: &[u8]| {
     let runtime = CoopRuntime::new(Clock);
     let clock = CoopTime::new(&runtime);
     let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
-    let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+    let actions = new_session_actions(sink, params(), clock.clone());
     let feed = Rc::new(Feed::default());
     let config = SessionDriveConfig {
         timeouts: SessionTimeouts::from_build(),
         role: SessionRole::Initiator,
         max_iters: None,
     };
-    let mut pump = SessionPump::new(runtime, feed.clone(), actions.clone(), clock, config);
+    let entropy = wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0));
+    let mut pump = SessionPump::new(
+        runtime,
+        feed.clone(),
+        actions.clone(),
+        entropy,
+        clock,
+        config,
+    );
     let mut observer = ApplicationLayerObserver::new();
     let _ = observer.subscribe("**", |_| {});
     let _ = observer.with_app(|app_half| app_half.queryables.register("**", |_, _| {}));

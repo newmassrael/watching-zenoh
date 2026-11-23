@@ -246,16 +246,13 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         sink: acceptor_sink,
         pump: acceptor_pump,
     } = links.open_acceptor(port).expect("bind the acceptor");
-    let acceptor_actions = new_session_actions(
-        acceptor_sink,
-        params(0xa1),
-        CoopTime::new(&runtime),
-        Counting(1),
-    );
+    let acceptor_actions =
+        new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
     let _acceptor = spawn_session(
         &local,
         acceptor_pump,
         acceptor_actions.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
         CoopTime::new(&runtime),
         config(SessionRole::Acceptor),
         |_| {},
@@ -276,6 +273,7 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         &local,
         initiator_pump,
         initiator_actions.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
         CoopTime::new(&runtime),
         config(SessionRole::Initiator),
         |_| {},

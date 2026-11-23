@@ -80,11 +80,25 @@ impl Runtime for PlainRuntime {
     }
 }
 
+/// The test runtime's entropy: none, so a handshake these tests drive mints no cookie (the
+/// fail-closed draw).
+pub(super) struct NoEntropy;
+
+impl crate::entropy::EntropySource for NoEntropy {
+    fn try_fill_bytes(
+        &mut self,
+        _buf: &mut [u8],
+    ) -> Result<(), crate::entropy::EntropyUnavailable> {
+        Err(crate::entropy::EntropyUnavailable)
+    }
+}
+
 impl SessionRuntime for PlainRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
     type Driver = dyn BoxedLinkDriver;
     type Shared<U> = Arc<U>;
     type IterationWork = ();
+    type EntropyDraw = NoEntropy;
 
     fn share<U>(value: U) -> Self::Shared<U> {
         Arc::new(value)
@@ -223,7 +237,7 @@ mod action_trace {
         );
 
         let mut binding =
-            SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions));
+            SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         binding.link_driver_open();
         binding.free_pool_slots();
         binding.free_pool_slots();
@@ -260,7 +274,7 @@ mod action_trace {
     fn a_snapshot_keeps_the_counts_it_was_taken_with() {
         let (actions, _link) = bundle();
         let mut binding =
-            SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions));
+            SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         binding.enable_rx_tx_regions();
         let first = actions.trace_snapshot();
         binding.enable_rx_tx_regions();

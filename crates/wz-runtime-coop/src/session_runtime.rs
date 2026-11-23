@@ -46,6 +46,9 @@
 use alloc::rc::Rc;
 
 use wz_runtime_core::TimeSource;
+use wz_session_core::entropy::EntropySource;
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::entropy::EntropyUnavailable;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
@@ -161,6 +164,9 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     #[cfg(feature = "session-slot")]
     type ActionsHandle<T: TimeSource> = SlotRef<Self, T>;
 
+    // The session's one entropy source, as each of its links' bindings holds it.
+    type EntropyDraw = SessionEntropy;
+
     #[cfg(not(feature = "session-slot"))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
         crate::link_cells::CellRc::boxed(actions)
@@ -189,6 +195,42 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
 pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
     <CoopRuntime<C, D> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
+/// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
+/// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
+/// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's
+/// bundle keeps none. Single-task, as the rest of the profile is: the count needs no atomics, and
+/// a draw that found the source already drawing (a source that drew again from inside its own
+/// draw) is refused as no entropy, the fail-closed answer.
+#[cfg(not(feature = "session-slot"))]
+#[derive(Clone)]
+pub struct SessionEntropy(Rc<core::cell::RefCell<dyn EntropySource>>);
+
+#[cfg(not(feature = "session-slot"))]
+impl SessionEntropy {
+    /// The handle on `source`, the session's one source.
+    pub fn new(source: impl EntropySource + 'static) -> Self {
+        let source: Rc<core::cell::RefCell<dyn EntropySource>> =
+            Rc::new(core::cell::RefCell::new(source));
+        Self(source)
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl EntropySource for SessionEntropy {
+    fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+        match self.0.try_borrow_mut() {
+            Ok(mut source) => source.try_fill_bytes(buf),
+            Err(_) => Err(EntropyUnavailable),
+        }
+    }
+}
+
+/// See the counted form. Under `session-slot` the source lies in the session's slot, which hands
+/// out its one exclusive reference when it is opened ([`new_session_in_slot`]); nothing is
+/// allocated.
+#[cfg(feature = "session-slot")]
+pub type SessionEntropy = &'static mut dyn EntropySource;
+
 // ───────────────────── compile-time preconditions ─────────────────────
 //
 // These live in the (non-test) lib body — NOT a `#[cfg(test)]` module —
@@ -213,70 +255,20 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 /// R311y819 — the MCU profile's SESSION-BUNDLE CONSTRUCTION SEAM, the exact
 /// counterpart of the AP's `wz_runtime_tokio::session_glue::new_session_actions`.
 ///
-/// ## What it closes
-///
-/// R311y813 bound the acceptor's anti-amplification cookie to ONE handshake by
-/// folding a per-bundle nonce into the cookie MAC, and drew that nonce at the
-/// AP CONSTRUCTION seam rather than at each of the seven accept entry points —
-/// its own argument being that a caller cannot forget what construction does.
-/// The MCU profile had no such seam: it called
-/// [`SessionLinkActions::new_generic`] directly, which leaves the slot at its
-/// fail-closed `None`, and the one in-tree MCU deploy therefore installed a
-/// CONSTANT. A board built from that shape answers every handshake of its
-/// service life with one cookie per zid — the defect R311y813 closed on the AP
-/// side, alive on the profile whose e2e is a fixture. This seam gives the MCU
-/// the same "drawn at construction" property, so a board integrator supplies a
-/// TYPE (an [`EntropySource`]) instead of remembering a call.
-///
-/// ## Why the source is a parameter
-///
-/// §2.5 (`intrinsics-runtime--symbol-surface/2-5-rng`, ratified Round 11) puts
-/// RNG in the PLUGIN tier precisely because of implementation multiplicity —
-/// HW TRNG, ADC + Yarrow, `getrandom`, `arc4random`. There is no source this
-/// crate could name that is right for every board, so it takes one.
-///
-/// ## Fail-closed, and how you see it
-///
-/// An entropy failure leaves the slot at `None`, which is NOT "no cookie
-/// binding" but "admit no OpenSyn": the acceptor mints no HMAC cookie and every
-/// inbound OpenSyn is refused. That is deliberate — a fallback to an
-/// unbound cookie would be indistinguishable from a working binding. The AP
-/// seam reports the failure through `log::error!`; a no_std board has no such
-/// channel, so the observable here is
-/// [`SessionLinkActions::cookie_nonce`] returning `None`, and the bundle is
-/// still returned because an INITIATOR-role bundle never reads the slot and
-/// must not be denied a session over it.
-#[cfg(feature = "session-unicast")]
-/// ## R2763 — the source is handed OVER, not lent
-///
-/// This seam took `&mut E` while the nonce was drawn exactly once, at
-/// construction. A nonce drawn once is per BUNDLE, so an acceptor's second
-/// handshake re-minted the first one's cookie; the bundle now re-draws on
-/// every InitAck, which needs a source that lives as long as it does. Hence
-/// ownership. A board passes its TRNG type by value here instead of a borrow
-/// that ends when this function returns.
-#[cfg(not(feature = "session-slot"))]
-pub fn new_session_actions<C, E>(
+/// The bundle is one link's and keeps no entropy: the per-handshake cookie nonce and
+/// challenges are drawn at each InitAck by the session's handshake binding, from the
+/// session's one source ([`SessionEntropy`]) the pump that builds its engine is handed.
+/// Before that, a bundle holds no nonce (`cookie_nonce` is `None`, fail-closed).
+#[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+pub fn new_session_actions<C>(
     driver: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-    entropy: E,
 ) -> SessionHandle<C>
 where
     C: ClockSource,
-    E: wz_session_core::entropy::EntropySource + Send + 'static,
 {
-    let actions =
-        SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(driver, params, clock);
-    // The install, and the whole point of the seam: what a board supplies is a
-    // TYPE, and every handshake this bundle accepts draws through it.
-    actions.install_cookie_entropy(alloc::boxed::Box::new(entropy));
-    // The construction-time draw is KEPT. A failure here is the board's TRNG
-    // not being ready, and a no_std profile has no channel to log through, so
-    // the slot's own `None` is the report (see the fail-closed note above) --
-    // observable at construction rather than at the first handshake.
-    let _ = actions.draw_cookie_nonce();
-    actions
+    SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(driver, params, clock)
 }
 
 /// Fixed-memory step S5 — `new_session_actions` for `session-slot`: the same
@@ -284,25 +276,23 @@ where
 /// ([`SessionSlots::claim`](wz_session_core::session_slot::SessionSlots::claim)),
 /// which already holds the link driver and the board's entropy source by value.
 ///
-/// What the seam guarantees is unchanged: the entropy source is installed before
-/// the handle exists, so no handshake of this session can run without it, and
-/// the construction-time nonce draw is kept (a source that is not ready leaves
-/// `cookie_nonce` at `None`, the fail-closed report, observable here and not at
-/// the first handshake). Nothing is allocated.
+/// The slot's entropy source is handed back beside the handle, once: the session's one
+/// source, which the pump that builds the session's engine hands its binding. Nothing is
+/// allocated.
 #[cfg(feature = "session-slot")]
 pub fn new_session_in_slot<C, D, E>(
     claim: SlotClaim<CoopRuntime<C, D>, CoopTime<C>, D, E>,
     params: impl FnOnce() -> wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-) -> SlotRef<CoopRuntime<C, D>, CoopTime<C>>
+) -> (SlotRef<CoopRuntime<C, D>, CoopTime<C>>, SessionEntropy)
 where
     C: ClockSource + 'static,
     D: BoxedLinkDriver + 'static,
-    E: wz_session_core::entropy::EntropySource + Send + 'static,
+    E: EntropySource + Send + 'static,
 {
-    let actions = claim.open(params, clock);
-    let _ = actions.draw_cookie_nonce();
-    actions
+    let (actions, entropy) = claim.open(params, clock);
+    let entropy: SessionEntropy = entropy;
+    (actions, entropy)
 }
 
 /// LinkSink fixity. Mirrors the AP-side
@@ -400,39 +390,34 @@ mod cookie_nonce_draw_tests {
         }
     }
 
-    fn build<E: EntropySource + Send + 'static>(entropy: E) -> SessionHandle<StoppedClock> {
+    fn build() -> SessionHandle<StoppedClock> {
         let runtime = CoopRuntime::new(StoppedClock);
         let clock = CoopTime::new(&runtime);
         let driver = crate::link_cells::heap_sink(NullDriver);
-        new_session_actions(driver, params(), clock, entropy)
+        new_session_actions(driver, params(), clock)
     }
 
+    /// The bundle is one link's and keeps no source, so it holds no nonce until a handshake's
+    /// binding draws one from the session's source.
     #[test]
-    fn the_mcu_seam_installs_a_cookie_nonce_at_construction() {
-        // The headline. Before R311y819 the MCU profile called `new_generic`
-        // directly, which leaves the slot at `None`, and every deploy had to
-        // remember to install one itself.
-        assert!(
-            build(Counting(0)).cookie_nonce().is_some(),
-            "the construction seam must draw the nonce, so a deploy cannot forget it",
-        );
+    fn a_bundle_holds_no_nonce_until_its_binding_draws_one() {
+        let actions = build();
+        assert_eq!(actions.cookie_nonce(), None, "no source, no nonce");
+        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert!(actions.cookie_nonce().is_some());
     }
 
-    /// R2763 — REPLACES `two_bundles_take_two_nonces`, and the replacement is
-    /// strictly stronger rather than a weakening to fit the new signature.
-    ///
-    /// That test drove TWO bundles off ONE borrowed source and asserted their
-    /// nonces differed. It could only observe the source advancing, never the
-    /// bundle re-drawing, so a board whose every handshake re-minted the same
-    /// cookie passed it — which is the clause this round closes. The seam now
-    /// OWNS its source, so the property moves onto one bundle, where the
-    /// replay actually lives: the acceptor re-draws per handshake, and this is
-    /// the MCU-profile statement of it.
+    /// R2763 — the acceptor re-draws per handshake: two draws on one bundle are two nonces.
     #[test]
     fn two_draws_on_one_bundle_take_two_nonces() {
-        let actions = build(Counting(0));
+        let actions = build();
+        let mut entropy = SessionEntropy::new(Counting(0));
+        assert!(
+            actions.draw_cookie_nonce(&mut entropy),
+            "a live source must draw"
+        );
         let first = actions.cookie_nonce();
-        assert!(actions.draw_cookie_nonce(), "a live source must draw");
+        assert!(actions.draw_cookie_nonce(&mut entropy));
         assert_ne!(
             first,
             actions.cookie_nonce(),
@@ -440,35 +425,51 @@ mod cookie_nonce_draw_tests {
         );
     }
 
+    /// The handle draws the source's own bytes, in the port's byte order: a handle that hashed
+    /// or truncated the draw would pass the assertions above.
     #[test]
     fn the_drawn_nonce_is_the_sources_own_value() {
-        // Binds the seam to the port's fixed byte order rather than to
-        // "some value": a seam that hashed or truncated the draw would pass
-        // both assertions above.
         let mut probe = Counting(0);
         let expected = probe.try_next_u64().unwrap();
-        assert_eq!(build(Counting(0)).cookie_nonce(), Some(expected));
+        let actions = build();
+        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert_eq!(actions.cookie_nonce(), Some(expected));
+    }
+
+    /// One source serves every link of a session: two links' bindings hold handles on it and
+    /// draw from its one stream, so their nonces are its consecutive values.
+    #[test]
+    fn the_links_of_a_session_draw_from_its_one_source() {
+        let mut probe = Counting(0);
+        let (first, second) = (probe.try_next_u64().unwrap(), probe.try_next_u64().unwrap());
+        let session = SessionEntropy::new(Counting(0));
+        let (a, b) = (build(), build());
+        assert!(a.draw_cookie_nonce(&mut session.clone()));
+        assert!(b.draw_cookie_nonce(&mut session.clone()));
+        assert_eq!(
+            (a.cookie_nonce(), b.cookie_nonce()),
+            (Some(first), Some(second))
+        );
     }
 
     #[test]
     fn a_dry_source_leaves_the_slot_fail_closed() {
         // Not "no binding" but "admit no OpenSyn". A fallback to a constant
-        // here would be indistinguishable from a working binding, which is
-        // exactly the state this round found the MCU profile in.
+        // here would be indistinguishable from a working binding.
+        let actions = build();
+        assert!(!actions.draw_cookie_nonce(&mut SessionEntropy::new(Dry)));
         assert_eq!(
-            build(Dry).cookie_nonce(),
+            actions.cookie_nonce(),
             None,
             "an entropy failure must leave the acceptor refusing, never guessing",
         );
     }
 
-    /// R2763 — the fail-closed arm that only a per-handshake draw can have: a
-    /// source that WORKED and then stops must not leave the previous
-    /// handshake's nonce standing, because that is the binding the refresh
-    /// exists to replace.
+    /// R2763 — a source that WORKED and then stops must not leave the previous handshake's
+    /// nonce standing, because that is the binding the refresh exists to replace.
     #[test]
     fn a_source_that_dries_up_clears_the_nonce_it_had_drawn() {
-        /// Live for the construction draw, dry for every draw after it.
+        /// Live for the first draw, dry for every draw after it.
         struct DriesUp(bool);
 
         impl EntropySource for DriesUp {
@@ -483,12 +484,16 @@ mod cookie_nonce_draw_tests {
             }
         }
 
-        let actions = build(DriesUp(true));
+        let actions = build();
+        let mut entropy = SessionEntropy::new(DriesUp(true));
         assert!(
-            actions.cookie_nonce().is_some(),
-            "the first draw must have landed, else the clearing below is vacuous",
+            actions.draw_cookie_nonce(&mut entropy),
+            "the first draw lands"
         );
-        assert!(!actions.draw_cookie_nonce(), "the second draw must fail");
+        assert!(
+            !actions.draw_cookie_nonce(&mut entropy),
+            "the second draw must fail"
+        );
         assert_eq!(
             actions.cookie_nonce(),
             None,

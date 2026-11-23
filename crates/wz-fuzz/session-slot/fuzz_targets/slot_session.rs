@@ -278,7 +278,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(claim) = SESSIONS.claim(Nowhere::new(), Counting(0)) else {
         panic!("the session slot is free when an input begins");
     };
-    let actions = new_session_in_slot(claim, params, CoopTime::new(&runtime));
+    let (actions, entropy) = new_session_in_slot(claim, params, CoopTime::new(&runtime));
     let config = SessionDriveConfig {
         timeouts: SessionTimeouts::from_build(),
         role: SessionRole::Initiator,
@@ -288,6 +288,7 @@ fuzz_target!(|data: &[u8]| {
         runtime.clone(),
         Feed(&DATAGRAMS),
         actions.clone(),
+        entropy,
         CoopTime::new(&runtime),
         config,
     ) else {

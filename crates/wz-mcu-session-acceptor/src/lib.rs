@@ -710,7 +710,6 @@ where
         topology.acceptor_sink(),
         params,
         clock.clone(),
-        entropy,
     );
 
     // Open the handshake: the initiator's first move. The reactive peer
@@ -728,6 +727,7 @@ where
         runtime.clone(),
         topology.acceptor_link(),
         actions.clone(),
+        wz::runtime_coop::session_runtime::SessionEntropy::new(entropy),
         clock.clone(),
         SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),

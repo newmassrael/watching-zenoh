@@ -216,6 +216,11 @@ impl SessionRuntime for TokioRuntime {
     #[cfg(feature = "transport-unicast")]
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
+    // The AP's one source is the OS's, which no session owns: a zero-sized value stands for it
+    // in every binding.
+    #[cfg(feature = "transport-unicast")]
+    type EntropyDraw = crate::session_glue::OsEntropy;
+
     #[cfg(feature = "transport-unicast")]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
         let actions = Arc::new(actions);

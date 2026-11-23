@@ -325,16 +325,13 @@ mod tests {
                 pump: acceptor_pump,
             } = links.open_acceptor(7541).expect("bind acceptor");
             let acceptor_link = acceptor_sink.clone();
-            let acceptor_actions = new_session_actions(
-                acceptor_sink,
-                params(0xa1),
-                CoopTime::new(&runtime),
-                Counting(1),
-            );
+            let acceptor_actions =
+                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
             let _acceptor = spawn_session(
                 &local,
                 acceptor_pump,
                 acceptor_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -362,6 +359,7 @@ mod tests {
                 &local,
                 initiator_pump,
                 initiator_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),

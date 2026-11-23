@@ -3971,6 +3971,8 @@ pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBind
 /// (Stage 4b SSOT — wz-runtime-tokio's `new_session_engine<T>` delegates here).
 /// The caller retains `actions` (to read trace / observe link state) and drives
 /// the returned engine with `dispatch_link_event` / `check_lease_deadline`.
+/// `entropy` is the session's one source, which the binding draws each InitAck's
+/// cookie nonce and challenges from ([`SessionRuntime::EntropyDraw`]).
 ///
 /// docs/adr/0038 — the policy is built with `new` in a build whose binding
 /// performs every duty and with `new_simulated` in one that compiles a duty
@@ -3979,10 +3981,11 @@ pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBind
 /// compile time, to a binding that declares it performs.
 pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
     actions: &R::ActionsHandle<T>,
+    entropy: R::EntropyDraw,
 ) -> SessionEngine<R, T> {
     // `SessionActionsBinding.inner` is private to this crate; construct through
     // the pub `::new` constructor (mirrors the AP `new_session_engine`).
-    let binding = SessionActionsBinding::new(actions.clone());
+    let binding = SessionActionsBinding::new(actions.clone(), entropy);
     Engine::new(PolicyConstructor::<BINDING_PERFORMS>.build(binding))
 }
 
@@ -3992,8 +3995,9 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
 pub fn new_session_engine_in<'s, R: SessionRuntime, T: TimeSource>(
     slot: &'s mut core::mem::MaybeUninit<SessionEngine<R, T>>,
     actions: &R::ActionsHandle<T>,
+    entropy: R::EntropyDraw,
 ) -> &'s mut SessionEngine<R, T> {
-    let binding = SessionActionsBinding::new(actions.clone());
+    let binding = SessionActionsBinding::new(actions.clone(), entropy);
     Engine::new_in_place(slot, PolicyConstructor::<BINDING_PERFORMS>.build(binding))
 }
 

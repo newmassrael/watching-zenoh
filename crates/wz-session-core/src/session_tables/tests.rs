@@ -51,8 +51,15 @@ impl RowCallbacks for Latched {
     type Reply = CClosure<u32>;
 }
 
-/// The tables of the static policy, whose rows never move, with latched callbacks.
-type LatchedTables = SessionTables<Latched, Static>;
+/// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
+type LatchedTables = SessionTables<Latched, Lent>;
+
+/// Latched tables lent every table at the build's bound.
+fn latched_tables() -> LatchedTables {
+    let rows = rows();
+    let mut arena = arena(LatchedTables::arena_bytes(&rows).unwrap());
+    LatchedTables::lent(&mut arena, keys(4096), &rows).unwrap()
+}
 
 /// End `call`, begun on a row of `R`'s that has not moved since.
 fn ended<R: RowCallback>(call: R::Call) -> bool {
@@ -215,7 +222,7 @@ fn an_undeclared_entity_hands_its_row_back_and_its_handle_goes_stale() {
 
 #[test]
 fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let sub = tables
         .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
         .unwrap();
@@ -236,7 +243,7 @@ fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() 
 
 #[test]
 fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let sub = tables
         .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
         .unwrap();
@@ -255,7 +262,7 @@ fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
 
 #[test]
 fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let qbl = tables
         .declare_queryable("q", Locality::Any, false, KeyForm::default(), latched(1))
         .unwrap();
@@ -516,7 +523,7 @@ fn a_listener_on_no_filter_is_refused_with_its_callback() {
 
 #[test]
 fn a_filter_undeclared_while_its_listener_is_called_leaves_it_to_the_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let filter = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
@@ -1122,7 +1129,10 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
 fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     use crate::pubsub::LocalSubscribers;
     let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
-    let mut tables = SessionTables::<Sinks, Static>::new();
+    // A row read in place lies in the arena.
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Sinks, Lent>::arena_bytes(&rows).unwrap());
+    let mut tables = SessionTables::<Sinks, Lent>::lent(&mut arena, keys(256), &rows).unwrap();
     let sub = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();

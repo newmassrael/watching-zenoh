@@ -59,7 +59,6 @@ use wz_session_core::slot_observer::ObserverRows;
 #[cfg(feature = "listen")]
 use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
-use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyAsk,
     KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
@@ -89,7 +88,7 @@ use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -99,7 +98,7 @@ use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::driver_loop::{EventSink, IterationEvent};
-use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::SessionLimits;
@@ -648,26 +647,6 @@ pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
     let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
     SessionZid::new(&stated[..len]).map_err(OpenError::InvalidZid)
-}
-
-/// The session's entropy source, which every draw of the session goes through: its zid, the
-/// cookie key of each dial and, in a listening session, the cookie nonce of each handshake it
-/// accepts. A board has one source and it is not copied, so the users of it hold the one source
-/// behind a lock and draw from it in turn; each accepted session owns a handle of its own, as
-/// the session-core's accept path requires of a source (`install_cookie_entropy`).
-#[derive(Clone)]
-struct SharedEntropy(Arc<Lock<Box<dyn EntropySource + Send>>>);
-
-impl SharedEntropy {
-    fn new(source: impl EntropySource + Send + 'static) -> Self {
-        Self(Arc::new(Lock::new(Box::new(source))))
-    }
-}
-
-impl EntropySource for SharedEntropy {
-    fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
-        self.0.with(|source| source.try_fill_bytes(buf))
-    }
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
@@ -1480,8 +1459,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     groups: Vec<GroupFace>,
-    /// Each handshake's cookie key and nonce come from here.
-    entropy: SharedEntropy,
+    /// The session's one entropy source, which every draw of the session goes through: its zid,
+    /// the cookie key of each dial and, through each link's handshake binding (a handle on it,
+    /// cloned per link), the cookie nonce and challenges of each handshake it accepts.
+    entropy: SessionEntropy,
     /// The config the session opened with, which counts its endpoints: their texts are the
     /// session's rows (`endpoints`).
     config: CoopConfig<Counted>,
@@ -2413,15 +2394,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Arc::clone(&self.admission),
             matches!(role, SessionRole::Initiator),
         );
-        // An acceptor mints a cookie at each InitAck from a nonce it draws, and one with no source
-        // to draw from refuses every handshake (fail closed): it is given the session's, and a
+        // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
+        // session's source, and one whose source is dry refuses every handshake (fail closed): a
         // source that is dry now is not a link to accept.
         #[cfg(feature = "listen")]
-        if matches!(role, SessionRole::Acceptor) {
-            actions.install_cookie_entropy(Box::new(self.entropy.clone()));
-            if !actions.draw_cookie_nonce() {
-                return Err(OpenError::EntropyUnavailable);
-            }
+        if matches!(role, SessionRole::Acceptor) && self.entropy.try_next_u64().is_err() {
+            return Err(OpenError::EntropyUnavailable);
         }
         // The session's id space, read from its one table of declarations by the link (what it
         // sends names a key by its id) and by the tables of the face it serves (what the peer
@@ -2519,6 +2497,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             &self.local,
             link.clone(),
             actions.clone(),
+            self.entropy.clone(),
             self.session_time.clone(),
             SessionDriveConfig {
                 timeouts: self.config.timeouts,
@@ -3690,7 +3669,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // and given back only when the session is let go, after its last delivery.
         let samples =
             unsafe { SharedLane::shared_over(lane_area, lane_bytes, &resolve_limits(&config)) };
-        let mut entropy = SharedEntropy::new(entropy);
+        let mut entropy = SessionEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
             (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(&mut entropy)?,
