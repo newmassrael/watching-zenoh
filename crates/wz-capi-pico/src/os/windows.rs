@@ -94,7 +94,8 @@ pub fn sleep(unit: Unit, time: usize) {
         let part = left.min(u64::from(INFINITE - 1));
         // SAFETY: any thread, any count below `INFINITE`.
         unsafe { Sleep(part as u32) };
-        left -= part;
+        // `part` is at most `left`.
+        left = left.wrapping_sub(part);
         if left == 0 {
             break;
         }
@@ -141,7 +142,10 @@ pub fn clock_advance(clock: &mut Clock, unit: Unit, duration: c_ulong) {
     if frequency == 0 {
         return;
     }
-    clock.quad_part += arith::ticks_advance(duration, frequency, unit);
+    // The counter wraps as pico's `LARGE_INTEGER` addition does on the host.
+    clock.quad_part = clock
+        .quad_part
+        .wrapping_add(arith::ticks_advance(duration, frequency, unit));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +175,10 @@ pub fn wall_now() -> WallTime {
         (0, 0)
     } else {
         (
-            i16::try_from(zone.Bias + zone.StandardBias).unwrap_or(0),
+            zone.Bias
+                .checked_add(zone.StandardBias)
+                .and_then(|bias| i16::try_from(bias).ok())
+                .unwrap_or(0),
             i16::from(id == TIME_ZONE_ID_DAYLIGHT),
         )
     };
