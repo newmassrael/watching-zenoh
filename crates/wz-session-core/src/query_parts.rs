@@ -163,7 +163,8 @@ mod tests {
             )),
             timeout_ms: 1_500,
             qos: None,
-            ..QueryMetadata::default()
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let parts = QueryParts::of_metadata(&meta);
         assert_eq!(parts.qos, QosLevel::DEFAULT, "no QoS stated is the default");

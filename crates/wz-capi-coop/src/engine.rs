@@ -7287,7 +7287,7 @@ mod clock_moves_tests {
     #[test]
     fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
         let (moves, word) = word();
-        let wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
+        let mut wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
         // The wait stays on the thread that made it, as a session's read does (its lent receive
         // lease is no value of another thread's); the word comes from another, as a program's does.
         let telling = std::thread::spawn(move || {
@@ -7296,7 +7296,8 @@ mod clock_moves_tests {
             moves.moved.notify_all();
         });
         let started = Instant::now();
-        wait.wait();
+        // The word made the sleep a wait on input, so the sleep is never called.
+        wait.wait(|ms| std::thread::sleep(Duration::from_millis(u64::from(ms))));
         let took = started.elapsed();
         telling.join().expect("the thread that tells the word");
         assert!(

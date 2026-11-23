@@ -280,11 +280,8 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
         WireKey::literal(),
         Locality::Any,
         None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
         }),
     )
     .expect("the session declares the subscriber");
