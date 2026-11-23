@@ -24,17 +24,14 @@
 //! The free list, the generations, the pins and the bound are kept in a column of metadata and
 //! decided by one core that knows nothing of the rows' type, compiled once for every table
 //! (P5). What is typed is a column of `Option<T>` beside it and the few lines that move a value in
-//! and out of it. The column does not drop its rows: the map's own drop walks the metadata,
-//! untyped, and drops each row it holds with the one function of `T`, or not at all when `T`
-//! needs no drop, so dropping a table adds no walk of its own for each kind. Both columns are
-//! `BoundedVec`s of the storage policy `P`: lent from the session's arena at its open on the lent
-//! policy ([`SlotMap::lent`]), fixed on the static one, growable on the heap one, where `N` is
-//! advisory as it is for every table of that policy and the bound is the one
-//! [`SlotMap::limit_to`] sets, or [`MAX_SLOTS`]. A table at its bound refuses an insert and hands the value back; nothing grows past it (P3).
+//! and out of it. Both columns are `BoundedVec`s of the storage policy `P`: lent from the
+//! session's arena at its open on the lent policy ([`SlotMap::lent`]), fixed on the static one,
+//! growable on the heap one, where `N` is advisory as it is for every table of that policy and
+//! the bound is the one [`SlotMap::limit_to`] sets, or [`MAX_SLOTS`]. A table at its bound
+//! refuses an insert and hands the value back; nothing grows past it (P3).
 
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::{needs_drop, ManuallyDrop};
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage};
@@ -330,27 +327,13 @@ impl Core {
         }
         None
     }
-
-    /// Call `held` with the place of every slot that holds a row, live or retired.
-    #[inline(never)]
-    fn for_each_held(meta: &[Meta], held: &mut dyn FnMut(usize)) {
-        for (at, slot) in meta.iter().enumerate() {
-            if slot.state != State::Free {
-                held(at);
-            }
-        }
-    }
 }
-
-/// A row's place in the rows column: `None` while its slot is free. Not dropped by the column,
-/// but by [`SlotMap`]'s drop, which knows from the metadata which places hold a row.
-type RowCell<T> = ManuallyDrop<Option<T>>;
 
 /// A table of at most `N` rows of `T`, named by [`Handle<K>`], kept as the storage policy `P`
 /// keeps a table. See the module.
 pub struct SlotMap<K, T, const N: usize, P: Storage = Profile> {
     meta: BoundedVec<Meta, N, P>,
-    rows: BoundedVec<RowCell<T>, N, P>,
+    rows: BoundedVec<Option<T>, N, P>,
     core: Core,
     kind: PhantomData<fn() -> K>,
 }
@@ -414,9 +397,8 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             Claim::Reused(at) => {
                 let generation = self.meta.get(at).map_or(0, |slot| slot.generation);
                 match (self.rows.get_mut(at), Handle::at(at, generation)) {
-                    // The slot was free, so its place holds `None` and nothing is dropped.
                     (Some(row), Some(handle)) => {
-                        *row = ManuallyDrop::new(Some(value));
+                        *row = Some(value);
                         Ok(handle)
                     }
                     // The two columns are the same length and every place is under `MAX_SLOTS`,
@@ -446,12 +428,12 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
                 }
                 // The row's place is pushed empty and filled after, so a refused push still holds
                 // `value` to hand back.
-                if self.rows.push(ManuallyDrop::new(None)).is_err() {
+                if self.rows.push(None).is_err() {
                     let _ = self.meta.pop();
                     return Err(CapacityFull(value));
                 }
                 match self.rows.get_mut(at) {
-                    Some(row) => *row = ManuallyDrop::new(Some(value)),
+                    Some(row) => *row = Some(value),
                     None => {
                         let _ = self.rows.pop();
                         let _ = self.meta.pop();
@@ -467,13 +449,13 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// The live row `handle` names.
     pub fn get(&self, handle: Handle<K>) -> Option<&T> {
         let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
-        Option::as_ref(self.rows.get(at)?)
+        self.rows.get(at)?.as_ref()
     }
 
     /// The live row `handle` names, to change.
     pub fn get_mut(&mut self, handle: Handle<K>) -> Option<&mut T> {
         let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
-        Option::as_mut(self.rows.get_mut(at)?)
+        self.rows.get_mut(at)?.as_mut()
     }
 
     /// Whether `handle` names a live row.
@@ -495,7 +477,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .core
             .retire(&mut self.meta, handle.place(), handle.generation)?
         {
-            Retired::Now(at) => Option::take(self.rows.get_mut(at)?).map(Removal::Taken),
+            Retired::Now(at) => self.rows.get_mut(at)?.take().map(Removal::Taken),
             Retired::Deferred => Some(Removal::AfterCalls),
         }
     }
@@ -509,7 +491,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn pinned(&self, pinned: &Pinned<K>) -> Option<&T> {
         let handle = pinned.handle;
         let at = Core::find(&self.meta, handle.place(), handle.generation, true)?;
-        Option::as_ref(self.rows.get(at)?)
+        self.rows.get(at)?.as_ref()
     }
 
     /// Give back a pin: the row when it was removed while pinned and this was its last pin, for
@@ -521,7 +503,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .unpin(&mut self.meta, handle.place(), handle.generation)?
         {
             Unpinned::Held => None,
-            Unpinned::Freed(at) => Option::take(self.rows.get_mut(at)?),
+            Unpinned::Freed(at) => self.rows.get_mut(at)?.take(),
         }
     }
 
@@ -536,8 +518,8 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// table while it changes it.
     pub fn next_from(&self, cursor: &mut usize) -> Option<(Handle<K>, &T)> {
         while let Some((at, generation)) = Core::next_live(&self.meta, cursor) {
-            let row = self.rows.get(at).and_then(|row| Option::as_ref(row));
-            if let (Some(handle), Some(row)) = (Handle::at(at, generation), row) {
+            if let (Some(handle), Some(Some(row))) = (Handle::at(at, generation), self.rows.get(at))
+            {
                 return Some((handle, row));
             }
         }
@@ -551,12 +533,10 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .iter()
             .zip(self.rows.iter_mut())
             .enumerate()
-            .filter_map(
-                |(at, (slot, row))| match (slot.state, Option::as_mut(row)) {
-                    (State::Live, Some(row)) => Some((at, row)),
-                    _ => None,
-                },
-            )
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((at, row)),
+                _ => None,
+            })
     }
 
     /// The live row at `place`, whatever its generation, with its handle, to change: what a
@@ -569,7 +549,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             return None;
         }
         let handle = Handle::at(place, slot.generation)?;
-        Some((handle, Option::as_mut(self.rows.get_mut(place)?)?))
+        Some((handle, self.rows.get_mut(place)?.as_mut()?))
     }
 
     /// The live row at `place`, whatever its generation, with its handle, to read:
@@ -580,7 +560,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             return None;
         }
         let handle = Handle::at(place, slot.generation)?;
-        Some((handle, Option::as_ref(self.rows.get(place)?)?))
+        Some((handle, self.rows.get(place)?.as_ref()?))
     }
 
     /// Every live row with its place and its handle, in slot order, to read.
@@ -597,12 +577,10 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .iter()
             .zip(self.rows.iter_mut())
             .enumerate()
-            .filter_map(
-                |(at, (slot, row))| match (slot.state, Option::as_mut(row)) {
-                    (State::Live, Some(row)) => Some((at, Handle::at(at, slot.generation)?, row)),
-                    _ => None,
-                },
-            )
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((at, Handle::at(at, slot.generation)?, row)),
+                _ => None,
+            })
     }
 
     /// Every live row, in slot order.
@@ -611,12 +589,10 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .iter()
             .zip(self.rows.iter())
             .enumerate()
-            .filter_map(
-                |(at, (slot, row))| match (slot.state, Option::as_ref(row)) {
-                    (State::Live, Some(row)) => Some((Handle::at(at, slot.generation)?, row)),
-                    _ => None,
-                },
-            )
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((Handle::at(at, slot.generation)?, row)),
+                _ => None,
+            })
     }
 
     /// Every live row, in slot order, to change.
@@ -625,34 +601,16 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .iter()
             .zip(self.rows.iter_mut())
             .enumerate()
-            .filter_map(
-                |(at, (slot, row))| match (slot.state, Option::as_mut(row)) {
-                    (State::Live, Some(row)) => Some((Handle::at(at, slot.generation)?, row)),
-                    _ => None,
-                },
-            )
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((Handle::at(at, slot.generation)?, row)),
+                _ => None,
+            })
     }
 }
 
 impl<K, T, const N: usize, P: Storage> Default for SlotMap<K, T, N, P> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<K, T, const N: usize, P: Storage> Drop for SlotMap<K, T, N, P> {
-    fn drop(&mut self) {
-        if !needs_drop::<T>() {
-            return;
-        }
-        let rows = &mut self.rows;
-        // Assigning drops the row in place; the cell then holds `None`, which the column, not
-        // dropping its cells, leaves as it is.
-        Core::for_each_held(&self.meta, &mut |at| {
-            if let Some(row) = rows.get_mut(at) {
-                **row = None;
-            }
-        });
     }
 }
 
@@ -671,7 +629,7 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
     /// has left.
     pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
         let meta = arena.lend::<Meta, N>(rows)?;
-        let values = arena.lend::<RowCell<T>, N>(rows)?;
+        let values = arena.lend::<Option<T>, N>(rows)?;
         Ok(Self {
             meta,
             rows: values,
@@ -685,7 +643,7 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
     pub const fn arena_bytes(rows: usize) -> Option<usize> {
         match (
             Arena::table_bytes::<Meta>(rows),
-            Arena::table_bytes::<RowCell<T>>(rows),
+            Arena::table_bytes::<Option<T>>(rows),
         ) {
             (Some(meta), Some(values)) => meta.checked_add(values),
             _ => None,
