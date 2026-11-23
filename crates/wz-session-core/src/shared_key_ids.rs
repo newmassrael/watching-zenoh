@@ -60,6 +60,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::json5::{number_as_u64, Json5Value};
+use crate::json5_lex::{Json5Error, Json5Str, Lexer};
 use crate::keyexpr_canon::{validate_keyexpr, KeyexprRefusal};
 use crate::keyexpr_match::is_wild;
 use crate::limit_binding::Quota;
@@ -867,6 +868,208 @@ fn two_fields<'a>(
     match found {
         [Some(first), Some(second)] if whole => Some((first, second)),
         _ => None,
+    }
+}
+
+/// A `wz/key-ids` member [`read_member_in`] refused. The door that reads a member this way
+/// answers one code for every refusal, so it carries no reason: the reasons are the tree reader's
+/// (`read_document_member`), whose rules it applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberRefused;
+
+impl From<Json5Error> for MemberRefused {
+    fn from(_: Json5Error) -> Self {
+        Self
+    }
+}
+
+/// The key ids the `wz/key-ids` member whose value `lex` is at states, read with no tree: the
+/// member is walked once, each entry of its lists decoded into the row it names, and `lex` is left
+/// past the member. What it accepts and what it refuses are `read_document_member`'s rules,
+/// refused whole at the first: a shape that is not an object of lists of objects, a member or a
+/// field not read or stated twice, an id that is no wire id, a text that is no string, the faults
+/// of a dictionary (`dictionary_faults`), an empty locator, a locator stated twice, and a form
+/// the build's domain `in_domain` leaves out. The member nests at most `max_depth` deep, itself
+/// being 1, as [`Lexer::skip_value`] bounds a value.
+pub fn read_member_in(
+    lex: &mut Lexer<'_>,
+    max_depth: usize,
+    in_domain: impl Fn(KeyWireForm) -> bool,
+) -> Result<KeyIdsAtOpen, MemberRefused> {
+    let mut read = KeyIdsAtOpen::default();
+    open_in(lex, b'{', max_depth)?;
+    let (mut dictionary, mut links) = (false, false);
+    while let Some(name) = next_member_in(lex)? {
+        if name.eq_str("dictionary") {
+            first_in(&mut dictionary)?;
+            read.ids = lexed_dictionary(lex, max_depth - 1)?;
+        } else if name.eq_str("links") {
+            first_in(&mut links)?;
+            read.links = lexed_links(lex, max_depth - 1, &in_domain)?;
+        } else {
+            return Err(MemberRefused);
+        }
+        after_in(lex, b'}')?;
+    }
+    Ok(read)
+}
+
+/// `wz/key-ids/dictionary` at `lex`: `None` for a list of no entry, as the tree reader reads it.
+fn lexed_dictionary(
+    lex: &mut Lexer<'_>,
+    depth: usize,
+) -> Result<Option<SharedKeyIds>, MemberRefused> {
+    open_in(lex, b'[', depth)?;
+    let mut entries: Vec<(usize, ExprId, String)> = Vec::new();
+    while next_element_in(lex)? {
+        open_in(lex, b'{', depth - 1)?;
+        let (mut id, mut key) = (None, None);
+        while let Some(field) = next_member_in(lex)? {
+            if field.eq_str("id") && id.is_none() {
+                if !lex.at_number() {
+                    return Err(MemberRefused);
+                }
+                let number = number_as_u64(lex.number()?);
+                id = Some(
+                    number
+                        .and_then(|number| ExprId::try_from(number).ok())
+                        .ok_or(MemberRefused)?,
+                );
+            } else if field.eq_str("key") && key.is_none() {
+                key = Some(lexed_text(lex)?);
+            } else {
+                return Err(MemberRefused);
+            }
+            after_in(lex, b'}')?;
+        }
+        let (Some(id), Some(key)) = (id, key) else {
+            return Err(MemberRefused);
+        };
+        entries.push((entries.len(), id, key));
+        after_in(lex, b']')?;
+    }
+    let read: Vec<(usize, ExprId, &str)> = entries
+        .iter()
+        .map(|(at, id, key)| (*at, *id, key.as_str()))
+        .collect();
+    let mut faulty = false;
+    dictionary_faults(&read, |_| faulty = true);
+    if faulty {
+        return Err(MemberRefused);
+    }
+    if read.is_empty() {
+        return Ok(None);
+    }
+    KeyIds::new(read.iter().map(|&(_, id, key)| (id, key)))
+        .map(|ids| Some(alloc::sync::Arc::new(ids)))
+        .map_err(|_| MemberRefused)
+}
+
+/// `wz/key-ids/links` at `lex`, in its order.
+fn lexed_links(
+    lex: &mut Lexer<'_>,
+    depth: usize,
+    in_domain: &impl Fn(KeyWireForm) -> bool,
+) -> Result<Vec<(String, KeyWireForm)>, MemberRefused> {
+    open_in(lex, b'[', depth)?;
+    let mut links: Vec<(String, KeyWireForm)> = Vec::new();
+    while next_element_in(lex)? {
+        open_in(lex, b'{', depth - 1)?;
+        let (mut locator, mut form) = (None, None);
+        while let Some(field) = next_member_in(lex)? {
+            if field.eq_str("locator") && locator.is_none() {
+                locator = Some(lexed_text(lex)?);
+            } else if field.eq_str("form") && form.is_none() {
+                form = Some(lexed_text(lex)?);
+            } else {
+                return Err(MemberRefused);
+            }
+            after_in(lex, b'}')?;
+        }
+        let (Some(locator), Some(form)) = (locator, form) else {
+            return Err(MemberRefused);
+        };
+        if locator.is_empty() || links.iter().any(|(stated, _)| *stated == locator) {
+            return Err(MemberRefused);
+        }
+        let form = key_wire_form_named(&form)
+            .filter(|named| in_domain(*named))
+            .ok_or(MemberRefused)?;
+        links.push((locator, form));
+        after_in(lex, b']')?;
+    }
+    Ok(links)
+}
+
+/// The string at `lex`, its escapes resolved: what a row keeps.
+fn lexed_text(lex: &mut Lexer<'_>) -> Result<String, MemberRefused> {
+    if !lex.at_string() {
+        return Err(MemberRefused);
+    }
+    let mut text = String::new();
+    lex.string()?.decode_into(&mut text)?;
+    Ok(text)
+}
+
+/// Into the object or list `open` starts, when it is next and `depth` admits one more level.
+fn open_in(lex: &mut Lexer<'_>, open: u8, depth: usize) -> Result<(), MemberRefused> {
+    if depth == 0 || lex.peek() != Some(open) {
+        return Err(MemberRefused);
+    }
+    lex.bump();
+    Ok(())
+}
+
+/// The name of the next member of an open object, past its `:`, or `None` past its `}`.
+fn next_member_in<'t>(lex: &mut Lexer<'t>) -> Result<Option<Json5Str<'t>>, MemberRefused> {
+    lex.skip_trivia()?;
+    match lex.peek() {
+        Some(b'}') => {
+            lex.bump();
+            return Ok(None);
+        }
+        None => return Err(MemberRefused),
+        _ => {}
+    }
+    let name = lex.member_name()?;
+    lex.skip_trivia()?;
+    lex.expect(b':', ": after a member name")?;
+    lex.skip_trivia()?;
+    Ok(Some(name))
+}
+
+/// Whether an open list has another element, `false` past its `]`.
+fn next_element_in(lex: &mut Lexer<'_>) -> Result<bool, MemberRefused> {
+    lex.skip_trivia()?;
+    match lex.peek() {
+        Some(b']') => {
+            lex.bump();
+            Ok(false)
+        }
+        None => Err(MemberRefused),
+        _ => Ok(true),
+    }
+}
+
+/// Past a member's or an element's value: its `,`, or the `close` the next read takes.
+fn after_in(lex: &mut Lexer<'_>, close: u8) -> Result<(), MemberRefused> {
+    lex.skip_trivia()?;
+    match lex.peek() {
+        Some(b',') => {
+            lex.bump();
+            Ok(())
+        }
+        Some(byte) if byte == close => Ok(()),
+        _ => Err(MemberRefused),
+    }
+}
+
+/// The first reading of a member: a second one is refused.
+fn first_in(seen: &mut bool) -> Result<(), MemberRefused> {
+    if core::mem::replace(seen, true) {
+        Err(MemberRefused)
+    } else {
+        Ok(())
     }
 }
 
@@ -2300,5 +2503,86 @@ mod document_tests {
             "no dictionary stated keeps the document's"
         );
         assert_eq!(composed.links.len(), 3);
+    }
+
+    /// The member `member` as the lexed reader reads it, whole: `None` when it is refused or when
+    /// anything follows it.
+    fn lexed(member: &str, max_depth: usize) -> Option<KeyIdsAtOpen> {
+        let mut lex = Lexer::new(member);
+        let read = read_member_in(&mut lex, max_depth, form_in_domain).ok()?;
+        lex.skip_trivia().ok()?;
+        lex.at_end().then_some(read)
+    }
+
+    /// The reader that walks the member with no tree reads every member as the tree reader does:
+    /// the same key ids for one it accepts, a refusal for one it refuses, the escapes of a string
+    /// resolved alike.
+    #[test]
+    fn the_lexed_reader_reads_each_member_as_the_tree_reader_does() {
+        let members = [
+            r#"{
+                dictionary: [ { id: 40, key: "lab/rig" }, { key: "lab/rig/alpha", id: 0x29 } ],
+                links: [
+                    { locator: "tcp/192.0.2.7:7447", form: "literal" },
+                    { form: "declared", locator: "udp/192.0.2.8:7447" },
+                ],
+            }"#,
+            "{}",
+            "{ dictionary: [] }",
+            "{ links: [] }",
+            r#"{ dictionary: [ { id: 7, key: 'lab\/rig' } ] }"#,
+            r#"{ "dictionary": [ { "id": 7, "key": "lab/rig" } ], }"#,
+            r#"{ dictionary: [ { id: 0, key: "lab/a" } ] }"#,
+            r#"{ dictionary: [ { id: 5, key: "lab/a" }, { id: 5, key: "lab/b" } ] }"#,
+            r#"{ dictionary: [ { id: 5, key: "lab/a" }, { id: 6, key: "lab/a" } ] }"#,
+            r#"{ dictionary: [ { id: 5, key: "lab//a" } ] }"#,
+            r#"{ links: [ { locator: "tcp/192.0.2.7:7447", form: "Literal" } ] }"#,
+            r#"{ links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" },
+                          { locator: "tcp/192.0.2.7:7447", form: "declared" } ] }"#,
+            r#"{ links: [ { locator: "", form: "literal" } ] }"#,
+            r#"{ colour: "blue" }"#,
+            "{ dictionary: {} }",
+            r#"{ links: "tcp/192.0.2.7:7447" }"#,
+            "{ dictionary: [ 40 ] }",
+            "{ dictionary: [ { id: 40 } ] }",
+            r#"{ dictionary: [ { id: 40, key: "lab/a", note: "x" } ] }"#,
+            r#"{ dictionary: [ { id: 40, id: 41, key: "lab/a" } ] }"#,
+            r#"{ dictionary: [ { id: 70000, key: "lab/a" } ] }"#,
+            r#"{ dictionary: [ { id: -1, key: "lab/b" } ] }"#,
+            r#"{ dictionary: [ { id: "40", key: "lab/c" } ] }"#,
+            r#"{ dictionary: [ { id: 1.5, key: "lab/d" } ] }"#,
+            r#"{ dictionary: [ { id: 40, key: 7 } ] }"#,
+            "{ dictionary: [], dictionary: [] }",
+            "[]",
+            r#""lab/rig""#,
+        ];
+        for member in members {
+            let tree = statements_from_json5(&document(member))
+                .ok()
+                .map(|read| read.key_ids);
+            assert_eq!(lexed(member, 16), tree, "{member}");
+        }
+        assert!(
+            lexed(r#"{ dictionary: [ { id: 40, key: "lab/rig" } ] }"#, 16).is_some(),
+            "CONTROL: a member the two readers accept is read"
+        );
+    }
+
+    /// The member nests no deeper than the reader is let go: an entry is its third level, so a
+    /// reader let go two levels refuses a list with an entry and reads an empty one.
+    #[test]
+    fn the_lexed_reader_refuses_a_member_deeper_than_its_bound() {
+        let entry = r#"{ dictionary: [ { id: 40, key: "lab/rig" } ] }"#;
+        assert!(lexed(entry, 2).is_none(), "an entry past the bound is read");
+        assert!(
+            lexed(entry, 3).is_some(),
+            "CONTROL: the entry within the bound"
+        );
+        assert_eq!(
+            lexed("{ dictionary: [] }", 2),
+            Some(KeyIdsAtOpen::default()),
+            "an empty list is within two levels"
+        );
+        assert!(lexed("{}", 0).is_none(), "no level at all reads no object");
     }
 }
