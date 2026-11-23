@@ -25,13 +25,13 @@
 #     on the manual `cargo publish` invocation after the package
 #     metadata (repository URL, README, exclude list) lands.
 #
-# The Windows packages of the pico C ABI library (x64 and x86, each as
-# one library and as two) are built and tested by `windows-packages`
-# with the composite action the Platform workflow's `package-windows`
-# job runs, and `windows-packages-attach` attaches them to the release
-# with their `.zip.sha256` files and a combined SHA256SUMS once the
-# release job has made it. How a release is cut and checked:
-# docs/release.md.
+# The Windows packages of the pico C ABI library (x64 and x86, the one
+# library built without `std`: owner, 2026-11-23) are built and tested
+# by `windows-packages` with the composite action the Platform
+# workflow's `package-windows` job runs, and `windows-packages-attach`
+# attaches them to the release with their `.zip.sha256` files and a
+# combined SHA256SUMS once the release job has made it. How a release is
+# cut and checked: docs/release.md.
 
 name: Release
 
@@ -278,15 +278,19 @@ jobs:
           draft: true
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-mvp') || contains(github.event.inputs.tag || github.ref_name, '-rc') || contains(github.event.inputs.tag || github.ref_name, '-beta') || contains(github.event.inputs.tag || github.ref_name, '-alpha') }}
 
-  # The Windows packages of the pico C ABI library, one matrix row per width and form, made and
-  # tested by the composite action the Platform workflow's `package-windows` job runs, so a release
-  # ships the package that job tests. Unlike that job this one is not `continue-on-error`: a row whose
-  # build or test fails fails the run, and `windows-packages-attach`, which needs every row, attaches
-  # nothing. It runs beside the release job rather than after it, so the release waits on the longer
-  # of the two and not on their sum. No Rust cache, for the reasons the release job and the Platform
-  # job each give.
+  # The Windows packages of the pico C ABI library, one matrix row per width, made and tested by the
+  # composite action the Platform workflow's `package-windows` job runs, so a release ships the
+  # package that job tests. The form is the library without `std` (`os-windows`, whose allocations
+  # after open the units of docs/c-abi-no-heap-pools.md take away), the one library, which is the only form a
+  # release carries (owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7): the library with `std`
+  # is built by the Platform lane to compare against, and the split form, whose additional library has
+  # no form without `std`, is not released. `pico_windows_package.py --release` refuses a set that
+  # differs. A row whose build or test fails fails the run, and `windows-packages-attach`, which needs
+  # every row, attaches nothing. It runs beside the release job rather than after it, so the release
+  # waits on the longer of the two and not on their sum. No Rust cache, for the reasons the release
+  # job and the Platform job each give.
   windows-packages:
-    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     permissions:
@@ -295,7 +299,8 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x64, x86]
-        form: [single, split]
+        form: [single]
+        stdlib: [nostd]
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -309,11 +314,12 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
+          stdlib: ${{ matrix.stdlib }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}-${{ matrix.stdlib }}
           path: |
             ${{ steps.package.outputs.directory }}/*.zip
             ${{ steps.package.outputs.directory }}/*.zip.sha256
@@ -322,7 +328,7 @@ jobs:
 
   # The packages attached to the release the release job made (a draft), after the checks a
   # recipient can repeat: `pico_windows_package.py --release` holds the downloaded set to this tag
-  # and its commit (one package of every width and form the packager makes, each matching its
+  # and its commit (one package of every width in the form a release carries, each matching its
   # `.zip.sha256` and its manifest, built from the tag's commit with no uncommitted change, all of the
   # version the tag names) and writes SHA256SUMS; a finding fails the job before anything is
   # attached. `--clobber` lets a re-run replace the assets of the same names.
