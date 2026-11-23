@@ -1562,8 +1562,10 @@ fn sleep_ms(ms: u32) {
 pub(crate) struct SubscriberRow {
     id: SubId,
     retraction: Option<RetractionKey>,
-    /// The key the declaration names, kept to declare it again over a new link; holding it also
-    /// keeps alive what it holds, so a row is let go of with no lock of the session held.
+    /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
+    /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
+    /// session held. A build without groups reads none of it and holds it for that alone.
+    #[cfg_attr(not(feature = "group"), allow(dead_code))]
     wire: WireKey,
     /// Where a sample the row matches is offered, under the subscriber's id.
     lane: Arc<Round>,
@@ -2257,10 +2259,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// Begin face `face`'s dial of `endpoint`, which the network answers later
+    /// Begin a dial of `endpoint`, which the network answers later
     /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
-    fn begin_dial(&self, face: FaceId, endpoint: &str) -> Result<L::Dial, OpenError> {
+    fn begin_dial(&self, endpoint: &str) -> Result<L::Dial, OpenError> {
         let to = parse_locator(endpoint).map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
         })?;
@@ -2478,7 +2480,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         mut last: OpenError,
     ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
         for at in from..self.endpoints.dials() {
-            let mut pending = match self.begin_dial(DIAL_FACE, self.endpoints.dial_text(at)) {
+            let mut pending = match self.begin_dial(self.endpoints.dial_text(at)) {
                 Ok(pending) => pending,
                 Err(refused) => {
                     last = refused;
@@ -4720,12 +4722,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let sample = opts.loopback_sample(keyexpr, payload);
         // SAFETY: the session's lock is held (`core`).
         unsafe { self.samples.capture() };
-        core.0
-            .registry
-            .borrow_mut()
-            .app
-            .subscribers
-            .local_publish(&sample);
+        wz_session_core::pubsub::LocalSubscribers::fire_matching(
+            &mut core.0.registry.borrow_mut().app.subscribers,
+            &sample.keyexpr,
+            true,
+            false,
+            |row: &mut SubscriberRow| row.deliver(&sample),
+        );
         // SAFETY: as above.
         let reached = unsafe { self.samples.captured() };
         // The callbacks copied out are let go of with no lock of the session held, the last of

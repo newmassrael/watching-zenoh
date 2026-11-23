@@ -119,7 +119,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
-        let pending = match core.begin_dial(id, endpoint) {
+        let pending = match core.begin_dial(endpoint) {
             Ok(pending) => pending,
             Err(refused) => {
                 core.registry.borrow_mut().remove_face(id);
