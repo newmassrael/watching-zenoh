@@ -1383,11 +1383,19 @@ impl Arena {
         if rows > N {
             return Err(LendRefused::OverCeiling { rows, ceiling: N });
         }
-        let at = self.lend_span(rows.checked_mul(core::mem::size_of::<T>()))?;
-        // SAFETY: the span starts on an `ARENA_ALIGN` boundary, so it is aligned for `T`
-        // (asserted above); it holds `rows` rows of `T`, lies inside the arena, and no table was
-        // lent it before (`Self::lend_span`).
-        let inner = unsafe { LentSeq::lent(at.cast::<T>(), rows) };
+        let left = self.bytes - self.lent;
+        let span = match Self::table_bytes::<T>(rows) {
+            Some(span) if span <= left => span,
+            asked => return Err(LendRefused::Exhausted { asked, left }),
+        };
+        // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
+        // base aligned to it, so it is aligned for `T` (asserted above); it lies inside the
+        // arena, and no table was lent it before, as `lent` only grows.
+        let inner = unsafe {
+            let at = NonNull::new_unchecked(self.base.as_ptr().add(self.lent)).cast::<T>();
+            LentSeq::lent(at, rows)
+        };
+        self.lent += span;
         Ok(BoundedVec { inner })
     }
 
@@ -1449,9 +1457,7 @@ impl Arena {
 
     /// The next span of the arena, of `bytes` bytes rounded up to [`ARENA_ALIGN`], for the caller
     /// to lay rows out in. Refused, taking nothing, past what is left or when `bytes` is `None`
-    /// (past the address space). One body for every table an arena lends, so a table's type adds
-    /// only the making of its handle.
-    #[inline(never)]
+    /// (past the address space).
     pub(crate) fn lend_span(&mut self, bytes: Option<usize>) -> Result<NonNull<u8>, LendRefused> {
         let left = self.bytes - self.lent;
         let span = match bytes.and_then(Self::span) {
