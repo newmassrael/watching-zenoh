@@ -93,13 +93,13 @@ impl StaticEndpoints {
             list.len() <= caps::MAX_STATIC_CONNECT,
             "more endpoints than the node holds rows for"
         );
-        let mut i = 0;
-        while i < list.len() {
+        let mut rest = list;
+        while let [endpoint, tail @ ..] = rest {
             assert!(
-                list[i].len() <= caps::MAX_LOCATOR_LEN,
+                endpoint.len() <= caps::MAX_LOCATOR_LEN,
                 "an endpoint longer than a locator row"
             );
-            i += 1;
+            rest = tail;
         }
         Self { list }
     }
@@ -392,7 +392,7 @@ impl NodeOpener {
                 return Err(NodeRefusal::Unverifiable);
             }
             #[cfg(feature = "lifecycle-verbs")]
-            let leaving = t.pending_at(zid).is_some_and(|at| t.requests[at].withdraw);
+            let leaving = t.pending(zid).is_some_and(|pending| pending.withdraw);
             #[cfg(not(feature = "lifecycle-verbs"))]
             let leaving = false;
             // A node that is held or asked for, and is not on its way out, is unchanged.
@@ -410,9 +410,9 @@ impl NodeOpener {
             #[cfg(feature = "lifecycle-verbs")]
             if leaving {
                 // Asked again after a close: taken again once the close has run.
-                if let Some(at) = t.pending_at(zid) {
-                    t.requests[at].reopen = true;
-                    t.requests[at].passive = mode == OpenMode::Passive;
+                if let Some(pending) = t.pending_mut(zid) {
+                    pending.reopen = true;
+                    pending.passive = mode == OpenMode::Passive;
                 }
                 return Ok(());
             }
@@ -532,7 +532,7 @@ impl NodeDesk {
         }
         self.store.with(|t| {
             let links = t.held_node(zid).map_or(0, |node| node.links);
-            let closing = t.pending_at(zid).is_some_and(|at| t.requests[at].closing);
+            let closing = t.pending(zid).is_some_and(|pending| pending.closing);
             if closing {
                 SessionLinks {
                     open: 0,
@@ -560,7 +560,7 @@ impl NodeDesk {
     #[cfg(feature = "lifecycle-status")]
     pub fn read_machines(&self, zid: &DirectoryZid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
         let row = self.store.with(|t| {
-            let leaving = t.pending_at(zid).is_some_and(|at| t.requests[at].withdraw);
+            let leaving = t.pending(zid).is_some_and(|pending| pending.withdraw);
             if leaving {
                 return None;
             }
@@ -662,27 +662,27 @@ impl<const N: usize> CommanderList<N> {
     /// The zids `text` names, none for an empty text. Refuses what it cannot read by panicking,
     /// which in a `static` is a compile error that says why.
     pub const fn parse(text: &str) -> Self {
-        let text = text.as_bytes();
         let mut zids = [[0u8; CREDENTIAL_ZID_BYTES]; N];
         let mut len = 0;
-        if !text.is_empty() {
-            let mut start = 0;
-            loop {
-                let mut end = start;
-                while end < text.len() && text[end] != b',' {
-                    end += 1;
+        let mut rest = text.as_bytes();
+        while !rest.is_empty() {
+            let (zid, after) = zid_from_hex(rest);
+            assert!(
+                len < N,
+                "the text names more commanders than the list holds"
+            );
+            // A `const fn` takes no `&mut` on Rust 1.81, so the row is written by its index,
+            // which the assertion above holds below `N`.
+            zids[len] = zid;
+            len = len.wrapping_add(1);
+            rest = match after {
+                // A comma is followed by another entry.
+                [b',', more @ ..] => {
+                    assert!(!more.is_empty(), "a commander entry is empty");
+                    more
                 }
-                assert!(
-                    len < N,
-                    "the text names more commanders than the list holds"
-                );
-                zids[len] = zid_from_hex(text, start, end);
-                len += 1;
-                if end == text.len() {
-                    break;
-                }
-                start = end + 1;
-            }
+                _ => after,
+            };
         }
         Self { zids, len }
     }
@@ -693,27 +693,36 @@ impl<const N: usize> CommanderList<N> {
     }
 }
 
-/// The zid that `text[start..end]` spells in lowercase hex.
+/// Hex digits of a zid, two to a byte.
 #[cfg(feature = "lifecycle-verbs")]
-const fn zid_from_hex(text: &[u8], start: usize, end: usize) -> DirectoryZid {
-    assert!(end > start, "a commander entry is empty");
-    assert!(
-        end - start <= 2 * CREDENTIAL_ZID_BYTES,
-        "a zid is at most thirty-two hex digits"
-    );
-    let mut zid = [0u8; CREDENTIAL_ZID_BYTES];
-    let mut digit = 0;
-    while digit < end - start {
-        let c = text[end - 1 - digit];
-        let value = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'f' => c - b'a' + 10,
-            _ => panic!("a zid is written in lowercase hex digits"),
+const ZID_HEX_DIGITS: usize = 2 * CREDENTIAL_ZID_BYTES;
+
+/// The zid the lowercase hex at the start of `text` spells, up to the first comma or the end, and
+/// what follows it. The digits name a number, whose bytes the zid is, least significant first.
+/// Refuses what it cannot read by an assertion, which in a `static` is a compile error.
+#[cfg(feature = "lifecycle-verbs")]
+const fn zid_from_hex(text: &[u8]) -> (DirectoryZid, &[u8]) {
+    let mut value: u128 = 0;
+    let mut digits = 0usize;
+    let mut rest = text;
+    while let [c, tail @ ..] = rest {
+        let digit = match *c {
+            b',' => break,
+            b'0'..=b'9' => (*c).wrapping_sub(b'0'),
+            b'a'..=b'f' => (*c).wrapping_sub(b'a').wrapping_add(10),
+            _ => 16,
         };
-        zid[digit / 2] |= value << (4 * (digit % 2));
-        digit += 1;
+        assert!(digit < 16, "a zid is written in lowercase hex digits");
+        assert!(
+            digits < ZID_HEX_DIGITS,
+            "a zid is at most thirty-two hex digits"
+        );
+        value = (value << 4) | digit as u128;
+        digits = digits.wrapping_add(1);
+        rest = tail;
     }
-    zid
+    assert!(digits > 0, "a commander entry is empty");
+    (value.to_le_bytes(), rest)
 }
 
 /// The permit of a node that is commanded over a pipe as well as by peers (decision D12): the
@@ -1060,11 +1069,11 @@ impl Tables {
     /// a passive intent becomes one that dials, as BGP's other start event does to a peer that
     /// was started passive. A node whose intent already dials is left as it is.
     fn dial_a_passive_node(&mut self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
-        if let Some(at) = self.requests.iter().position(|p| p.zid == *zid) {
-            self.requests[at].passive = false;
+        if let Some(pending) = self.requests.iter_mut().find(|p| p.zid == *zid) {
+            pending.passive = false;
             #[cfg(feature = "lifecycle-verbs")]
             {
-                self.requests[at].open = true;
+                pending.open = true;
             }
             return Ok(());
         }
@@ -1098,28 +1107,35 @@ impl Tables {
         self.held.iter().find(|node| node.zid == *zid)
     }
 
-    /// The place of `zid` among the requests, if it has one.
+    /// The request of `zid`, if it has one.
     #[cfg(feature = "lifecycle-verbs")]
-    fn pending_at(&self, zid: &DirectoryZid) -> Option<usize> {
-        self.requests.iter().position(|p| p.zid == *zid)
+    fn pending(&self, zid: &DirectoryZid) -> Option<&Pending> {
+        self.requests.iter().find(|p| p.zid == *zid)
+    }
+
+    /// The request of `zid` to change, if it has one.
+    #[cfg(feature = "lifecycle-verbs")]
+    fn pending_mut(&mut self, zid: &DirectoryZid) -> Option<&mut Pending> {
+        self.requests.iter_mut().find(|p| p.zid == *zid)
     }
 
     /// Whether the node holds `zid` or was asked to.
     #[cfg(feature = "lifecycle-verbs")]
     fn knows(&self, zid: &DirectoryZid) -> bool {
-        self.held_node(zid).is_some() || self.pending_at(zid).is_some()
+        self.held_node(zid).is_some() || self.pending(zid).is_some()
     }
 
     /// How many nodes the room is spent on: the ones held, and the ones asked for and not yet
     /// taken. A node that is both is one.
     #[cfg(feature = "lifecycle-verbs")]
     fn nodes(&self) -> usize {
-        self.held.len()
-            + self
-                .requests
-                .iter()
-                .filter(|p| self.held_node(&p.zid).is_none())
-                .count()
+        let asked = self
+            .requests
+            .iter()
+            .filter(|p| self.held_node(&p.zid).is_none())
+            .count();
+        // Both are rows of tables the size of the room.
+        self.held.len().saturating_add(asked)
     }
 
     /// The entry of a node the node knows, made if it has none. A node it does not know has no
@@ -1129,14 +1145,10 @@ impl Tables {
         if !self.knows(zid) {
             return None;
         }
-        let at = match self.pending_at(zid) {
-            Some(at) => at,
-            None => {
-                self.requests.push(Pending::held(*zid)).ok()?;
-                self.requests.len() - 1
-            }
-        };
-        self.requests.get_mut(at)
+        if self.pending(zid).is_none() {
+            self.requests.push(Pending::held(*zid)).ok()?;
+        }
+        self.pending_mut(zid)
     }
 }
 
@@ -1693,8 +1705,9 @@ impl<D: Dialer> ConnectManager<D> {
                             t.planner.state(&row.key),
                             Some(PeerConnectionState::Passive | PeerConnectionState::PassiveUp)
                         ),
-                        links: u32::from(row.held.is_some())
-                            + u32::from(self.inbound.iter().any(|(node, _)| node == zid)),
+                        links: u32::from(row.held.is_some()).saturating_add(u32::from(
+                            self.inbound.iter().any(|(node, _)| node == zid),
+                        )),
                         #[cfg(feature = "lifecycle-status")]
                         state: t
                             .planner
@@ -1919,11 +1932,11 @@ impl<D: Dialer> ConnectManager<D> {
     /// in any other state is left as it is: the accept policy admitted or refused the session
     /// before this was asked.
     pub fn inbound_sessions(&mut self, zids: &[DirectoryZid], now_ms: u64) {
-        let mut at = 0;
-        while at < self.inbound.len() {
-            let (zid, face) = self.inbound[at];
+        let mut at = 0usize;
+        while let Some(&(zid, face)) = self.inbound.get(at) {
             if zids.contains(&zid) {
-                at += 1;
+                // Below the table's length.
+                at = at.wrapping_add(1);
                 continue;
             }
             self.inbound.swap_remove(at);
@@ -1932,7 +1945,7 @@ impl<D: Dialer> ConnectManager<D> {
             });
         }
         for at in 0..self.rows.len() {
-            let Key::Node(name) = self.rows[at].key else {
+            let Some(Key::Node(name)) = self.rows.get(at).map(|row| row.key) else {
                 continue;
             };
             let (key, zid) = (Key::Node(name), *name.zid());
@@ -1947,7 +1960,7 @@ impl<D: Dialer> ConnectManager<D> {
                 // A face of the planner's own numbering, as a dial is given: the planner holds
                 // the session by it until the session is gone.
                 let id = *next_id;
-                *next_id += 1;
+                *next_id = next_id.saturating_add(1);
                 if planner.inbound_up(key, id, ports, next_id, emit) {
                     held = Some(id);
                 }
@@ -2036,8 +2049,8 @@ impl<D: Dialer> ConnectManager<D> {
         // By index, one action at a time: the actions are a field of `self`, which the arms
         // below borrow whole.
         for at in 0..self.actions.len() {
-            match self.actions[at] {
-                PeerAction::Dial { id, key, .. } => match self.dial_peer(&key, now_ms) {
+            match self.actions.get(at) {
+                Some(&PeerAction::Dial { id, key, .. }) => match self.dial_peer(&key, now_ms) {
                     Ok(session) => {
                         if let Some(row) = self.row_mut(&key) {
                             row.held = Some(Held {
@@ -2055,12 +2068,12 @@ impl<D: Dialer> ConnectManager<D> {
                         let _ = failed.push(id);
                     }
                 },
-                PeerAction::Retry {
+                Some(&PeerAction::Retry {
                     key,
                     generation,
                     after_ms,
                     ..
-                } => {
+                }) => {
                     if let Some(row) = self.row_mut(&key) {
                         row.due = Some(Due {
                             generation,
@@ -2068,7 +2081,8 @@ impl<D: Dialer> ConnectManager<D> {
                         });
                     }
                 }
-                PeerAction::Close { id } => self.hang_up_face(id),
+                Some(&PeerAction::Close { id }) => self.hang_up_face(id),
+                None => {}
             }
         }
     }
@@ -2140,11 +2154,14 @@ impl<D: Dialer> ConnectManager<D> {
     /// Tell each machine whose session came up or ended.
     fn observe(&mut self, now_ms: u64) {
         for at in 0..self.rows.len() {
-            let node = match &self.rows[at].key {
+            let Some(row) = self.rows.get_mut(at) else {
+                continue;
+            };
+            let node = match &row.key {
                 Key::Node(name) => Some(*name.zid()),
                 Key::Endpoint(_) => None,
             };
-            let Some(held) = self.rows[at].held.as_mut() else {
+            let Some(held) = row.held.as_mut() else {
                 continue;
             };
             let face = held.face;
@@ -2162,7 +2179,7 @@ impl<D: Dialer> ConnectManager<D> {
             // the dialer's handshake let through (decision D4): it is hung up, and the dial
             // is the mismatch of a stale hint.
             if matches!((node, remote), (Some(expected), Some(named)) if expected != named) {
-                if let Some(held) = self.rows[at].held.take() {
+                if let Some(held) = self.rows.get_mut(at).and_then(|row| row.held.take()) {
                     self.dialer.hang_up(held.session);
                 }
                 self.drive(now_ms, &mut |planner, ports, next_id, emit| {
@@ -2195,7 +2212,9 @@ impl<D: Dialer> ConnectManager<D> {
                 up = true;
             }
             // The session is over: nothing is left to hang up, and its handle goes.
-            self.rows[at].held = None;
+            if let Some(row) = self.rows.get_mut(at) {
+                row.held = None;
+            }
             if up {
                 self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.face_down(face, ports, next_id, emit);
@@ -2328,17 +2347,21 @@ impl<D: Dialer> ConnectManager<D> {
         // row moves down by swaps of neighbours and not by `rotate_right(1)`: the library's
         // rotation inlined here holds a row (152 bytes) and a buffer of its own in the frame, a
         // swap holds neither.
-        let mut placed = 0;
+        let mut placed = 0usize;
         for entry in list.iter().filter(|e| dialable(e)) {
-            let rest = &mut self.rows[placed..];
+            let Some(rest) = self.rows.get_mut(placed..) else {
+                break;
+            };
             if let Some(at) = rest
                 .iter()
                 .position(|row| row.endpoint() == Some(entry.endpoint.as_str()))
             {
+                // `i` is below `at`, a place in `rest`, and `placed` below the rows' length:
+                // neither sum wraps.
                 for i in (0..at).rev() {
-                    rest.swap(i, i + 1);
+                    rest.swap(i, i.wrapping_add(1));
                 }
-                placed += 1;
+                placed = placed.wrapping_add(1);
             }
         }
     }

@@ -211,7 +211,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (169) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (167) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -328,7 +328,7 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-204 | `wz-runtime-coop` | `local` | `panic` | 1 | open |
 | TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
 | TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
-| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 39 | open |
+| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
 | TD-208 | `wz-session-mcu` | `dial` | `indexing_slicing`, `arithmetic_side_effects` | 32 | open |
 | TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
 | TD-216 | `wz-session-mcu` | `admin_host` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
@@ -340,6 +340,10 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-225 | `wz-session-mcu` | `slot_client` | `indexing_slicing` | 1 | open |
 | TD-228 | `wz-capi-port` | `cancellation` | `arithmetic_side_effects` | 5 | open |
 | TD-229 | `wz-capi-port` | `listeners` | `arithmetic_side_effects` | 1 | open |
+
+TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
+fills a list of `N` zids from the text a build states: on Rust 1.81 a `const fn` takes no `&mut`,
+so a row of an array whose length is a generic is written by index, as in TD-049.
 
 TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
 (`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid

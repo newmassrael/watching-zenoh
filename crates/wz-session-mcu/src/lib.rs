@@ -187,11 +187,7 @@ pub mod slot_getter;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 // Totality debt TD-207 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::indexing_slicing)]
 #[cfg(feature = "dial")]
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
