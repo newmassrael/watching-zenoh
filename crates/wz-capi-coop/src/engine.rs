@@ -1185,8 +1185,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 /// it with the table's lock let go (`CoopEngine::target`).
 #[derive(Clone)]
 enum Target {
-    Subscriber(SubscriberCallback),
-    Matching(MatchingSink),
     #[cfg(feature = "queryable")]
     Queryable(QueryableCallback),
     /// One leg of a get, locked while it runs.
@@ -1201,8 +1199,6 @@ enum Target {
 /// gets), so an id alone would find a callback of another kind that holds the same number.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetKey {
-    Subscriber(SubId),
-    Matching(MatchId),
     #[cfg(feature = "queryable")]
     Queryable(QblId),
     #[cfg(feature = "query")]
@@ -1743,6 +1739,9 @@ struct MatchEntry {
     plane: FilterPlane,
     watch: u64,
     keyexpr: RowKey,
+    /// The listener's callback, which every change of its status carries out of the lock
+    /// (`MatchFlips`); the row holds it to the listener's end, and is let go of with no lock held.
+    sink: MatchingSink,
 }
 
 /// The locality a matching criterion carries: what the entity counts. The session's own
@@ -4359,13 +4358,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         while self.matching.is_pending() {
             // Popped under the queue's lock alone, which is released before the sink runs.
             let next = self.matching.lock().next();
-            let Some((id, matching)) = next else {
+            let Some((_, matching, sink)) = next else {
                 break;
             };
             handed = true;
-            if let Some(Target::Matching(sink)) = self.target(TargetKey::Matching(id)) {
-                sink(matching);
-            }
+            sink(matching);
         }
         let asked = self.hand_queries();
         handed || asked
@@ -4917,6 +4914,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// The callback `key` names, while its owner holds it: the one look in the table every
     /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
+    #[cfg(any(feature = "queryable", feature = "query", feature = "liveliness"))]
     fn target(&self, key: TargetKey) -> Option<Target> {
         lock(&self.targets)
             .iter()
@@ -4925,6 +4923,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
+    #[cfg(any(feature = "queryable", feature = "query", feature = "liveliness"))]
     fn take_target(&self, key: TargetKey) -> Option<Target> {
         let taken = {
             let mut targets = lock(&self.targets);
@@ -5570,9 +5569,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let callback: SubscriberCallback =
             Arc::new(LiveCallback::new(sink, exposed_by(&core.policy)));
         if let Some((_, row)) = core.registry.borrow_mut().app.subscribers.row_at_mut(at) {
-            row.callback = Some(Arc::clone(&callback));
+            row.callback = Some(callback);
         }
-        lock(&self.targets).push((TargetKey::Subscriber(id), Target::Subscriber(callback)));
         // Each link is told it from the row, which names the key as the table keeps it.
         core.announce_subscriber(at);
         #[cfg(feature = "group")]
@@ -5659,12 +5657,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Self::reevaluate_subscriber_matching(core);
             Some(row)
         });
-        let callback = self.take_target(TargetKey::Subscriber(id));
-        // A delivery that copied the callback out of the row before hands it nothing more.
-        if let Some(Target::Subscriber(callback)) = &callback {
+        // A delivery that copied the callback out of the row before hands it nothing more; the row,
+        // and its callback with it, is let go of here, with no lock held.
+        if let Some(callback) = entry.as_ref().and_then(|row| row.callback.as_ref()) {
             callback.retire();
         }
-        drop((entry, callback));
+        drop(entry);
         #[cfg(feature = "local-subscriber")]
         self.deliver();
     }
@@ -5816,12 +5814,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = core.next_match;
         core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, keyexpr);
-        // The sink is in place before the watch is registered: a registration that already
-        // matches reports it as it registers, and a delivery on another thread may hand that out
-        // before this call reaches its own.
-        lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
+        // Each change carries the listener's callback with it, so a registration that already
+        // matches, and reports it as it registers, hands a change a delivery can call at once.
         let queue = self.matching.clone();
-        let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
+        let reported = Arc::clone(&sink);
+        let report =
+            BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching, &reported));
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         // An already-matching registration is told so by the registry as it registers, as
@@ -5845,6 +5843,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 plane,
                 watch,
                 keyexpr: key,
+                sink,
             },
         );
         drop(guard);
@@ -5853,9 +5852,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
-        if let Some(mut core) = self.live() {
+        let gone = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            if let Some(at) = core.matches.iter().position(|m| m.id == id) {
+            let at = core.matches.iter().position(|m| m.id == id)?;
+            {
                 let entry = core.matches.remove(at);
                 {
                     let mut registry = core.registry.borrow_mut();
@@ -5875,10 +5875,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     };
                 }
                 Self::release_interest(core, entry.plane, &entry.keyexpr);
+                Some(entry.sink)
             }
-        }
+        });
+        // The changes still owed go first, so the row's callback, let go of here with no lock
+        // held, is the last holder of it.
         self.matching.lock().forget(id);
-        drop(self.take_target(TargetKey::Matching(id)));
+        drop(gone);
     }
 
     #[inline(never)]
@@ -6830,15 +6833,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let core = &mut guard.0;
         core.end_links();
         // The rows go back to their tables with the session: a table lent from its arena keeps
-        // its rows. Their callbacks are the table of callbacks', taken whole below.
+        // its rows. Their callbacks are taken out of them, retired, and let go of with no lock
+        // held, below.
+        let mut subscribers_gone = Vec::new();
         {
             let mut registry = core.registry.borrow_mut();
             let subscribers = &mut registry.app.subscribers;
+            subscribers_gone.reserve_exact(subscribers.len());
             while let Some(last) = subscribers.len().checked_sub(1) {
-                drop(subscribers.take_at(last));
+                if let Some(mut row) = subscribers.take_at(last) {
+                    if let Some(callback) = row.callback.take() {
+                        callback.retire();
+                        subscribers_gone.push(callback);
+                    }
+                }
             }
         }
-        core.matches.clear();
+        let mut listeners_gone = Vec::with_capacity(core.matches.len());
+        while let Some(entry) = core.matches.pop() {
+            listeners_gone.push(entry.sink);
+        }
         #[cfg(feature = "queryable")]
         core.queryables.clear();
         // A get still pending ends with its session: its entry goes here, its leg's callback with
@@ -6900,12 +6914,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // rows emptied above, and one whose row went before its callback (a get's leg whose link
         // was lost, its end not handed out yet). The removal is counted under the table's lock,
         // so what the deliveries kept is let go of first, and the rest with no lock held.
+        drop((subscribers_gone, listeners_gone));
         let taken = core::mem::take(&mut *lock(&self.targets));
+        #[cfg(feature = "liveliness")]
         for (_, target) in &taken {
-            if let Target::Subscriber(callback) = target {
-                callback.retire();
-            }
-            #[cfg(feature = "liveliness")]
             if let Target::Liveliness(callback) = target {
                 callback.retire();
             }
