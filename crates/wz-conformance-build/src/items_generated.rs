@@ -245,7 +245,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     (
         "HANDSHAKE_COOKIE_BYTES",
         "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES",
-        128,
+        176,
     ),
     ("PICO_TX_QUEUE_SIZE", "WZ_LIMIT_PICO_TX_QUEUE_SIZE", 8),
     ("SNAPSHOT_PERIOD_MS", "WZ_LIMIT_SNAPSHOT_PERIOD_MS", 1000),

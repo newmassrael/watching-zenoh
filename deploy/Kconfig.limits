@@ -640,13 +640,12 @@ config WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES
 
 config WZ_LIMIT_HANDSHAKE_COOKIE_BYTES
 	int "HANDSHAKE_COOKIE_BYTES"
-	default 128
+	default 176
 	help
-	  How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
+	  How many bytes of a peer's cookie a session keeps on a fixed-memory profile:
 	  the cookie in the peer's INIT acknowledgement, which the node echoes in its
 	  OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks
-	  against the one it issued. A longer cookie is not kept, so the node echoes none
-	  and the peer refuses its OPEN. At most 65535, the INIT cookie field's capacity, and for a
+	  against the one it issued. A longer cookie is refused where the message is read. At most 65535, the INIT cookie field's capacity, and for a
 	  node that accepts sessions at least the widest cookie it issues itself: a build
 	  with a smaller value does not compile. Each session holds buffers of this size,
 	  so the value is memory. The growable profile keeps a cookie of any length and

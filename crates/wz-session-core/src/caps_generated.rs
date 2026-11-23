@@ -109,7 +109,7 @@ pub(super) const QUERY_PARAMETERS_MAX_BYTES: usize =
 pub(super) const QUERY_ATTACHMENT_MAX_BYTES: usize =
     limit(option_env!("WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES"), 0);
 pub(super) const HANDSHAKE_COOKIE_BYTES: usize =
-    limit(option_env!("WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"), 128);
+    limit(option_env!("WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"), 176);
 pub(super) const PICO_TX_QUEUE_SIZE: usize = limit(option_env!("WZ_LIMIT_PICO_TX_QUEUE_SIZE"), 8);
 pub(super) const SNAPSHOT_PERIOD_MS: usize =
     limit(option_env!("WZ_LIMIT_SNAPSHOT_PERIOD_MS"), 1000);
