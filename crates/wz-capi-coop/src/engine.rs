@@ -1051,7 +1051,7 @@ impl SessionKeyexprs {
 
 impl OwnMappingSpace for SessionKeyexprs {
     fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
-        self.with_key(id, String::from)
+        self.with_key(id, |key: &str| key.to_owned())
     }
 
     // The literal goes from the session's row straight into the resolver's buffer: the provided
@@ -2054,14 +2054,14 @@ impl RuntimeTables {
     }
 }
 
-/// The session's next entity id, taken: what a declaration and an Interest of the session are
-/// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed out,
-/// which refuses the declaration rather than wrap onto a live id.
-fn take_entity_id(&self) -> Option<EntityId> {
-    self.tables.borrow_mut().take_entity_id()
-}
-
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+    /// The session's next entity id, taken: what a declaration and an Interest of the session are
+    /// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed
+    /// out, which refuses the declaration rather than wrap onto a live id.
+    fn take_entity_id(&self) -> Option<EntityId> {
+        self.tables.borrow_mut().take_entity_id()
+    }
+
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
     /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
     /// key the session cannot hold is refused, never cut short, and the declaration with it,

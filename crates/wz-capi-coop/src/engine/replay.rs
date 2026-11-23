@@ -234,10 +234,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return match kind {
                 Kind::Keyexpr => {
                     let tables = self.tables.borrow();
-                    match tables.keyexprs().iter().nth(left) {
-                        Some((_, row)) => actions.send_declare_keyexpr(row.id(), row.key()).is_ok(),
-                        None => true,
-                    }
+                    let row = tables.keyexprs().iter().nth(left);
+                    row.map_or(true, |(_, row)| {
+                        actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
+                    })
                 }
                 Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
                     Some((keyexpr, row)) => row.declare(keyexpr, actions),
