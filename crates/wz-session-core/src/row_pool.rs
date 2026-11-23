@@ -568,65 +568,61 @@ impl RawRows {
         Some(Place { at, prev: NIL })
     }
 
-    /// Where a walk goes after `place`.
-    fn advance(&self, shape: &RowShape, place: Place) -> Option<Place> {
-        let next = match self.lay() {
-            Lay::Own { .. } => {
+    /// The row at a walk's place `at` and that place, `at` moved on to the next: the one step of
+    /// every walk over a table, kept out of line so a walk costs each of its callers a call.
+    #[inline(never)]
+    fn step(&self, shape: &RowShape, at: &mut Option<Place>) -> Option<(Place, NonNull<u8>)> {
+        let place = (*at)?;
+        let (row, next) = match self.lay() {
+            Lay::Own { base, .. } => {
                 let next = place.at + 1;
-                (next < self.len).then_some(next)
+                // SAFETY: a place of a walk is below the table's length, inside its span.
+                let row = unsafe { own_row(base, shape, usize::from(place.at)) };
+                (row, (next < self.len).then_some(next))
             }
             Lay::Pool(pool) => {
                 let next = pool.next(shape, place.at);
-                (next != NIL).then_some(next)
+                (pool.slot(shape, place.at), (next != NIL).then_some(next))
             }
-            Lay::Bare => None,
-        }?;
-        Some(Place {
+            Lay::Bare => return None,
+        };
+        *at = next.map(|next| Place {
             at: next,
             prev: place.at,
-        })
+        });
+        Some((place, row))
     }
 
-    /// The row at `place`, a place of a walk: a row the table holds, holding an item.
-    fn row(&self, shape: &RowShape, place: Place) -> NonNull<u8> {
-        match self.lay() {
-            // SAFETY: a place of a walk is below the table's length, inside its span.
-            Lay::Own { base, .. } => unsafe { base.add(usize::from(place.at) * shape.item_bytes) },
-            Lay::Pool(pool) => pool.slot(shape, place.at),
-            Lay::Bare => unreachable!("a table of no space holds no row"),
-        }
-    }
-
-    /// The first row `which` accepts, each row handed to it once, holding its item.
+    /// The first row `which` accepts and where it lies, each row handed to it once, holding its
+    /// item.
     #[inline(never)]
-    fn find(&self, shape: &RowShape, which: &mut dyn FnMut(NonNull<u8>) -> bool) -> Option<Place> {
+    fn find(
+        &self,
+        shape: &RowShape,
+        which: &mut dyn FnMut(NonNull<u8>) -> bool,
+    ) -> Option<(Place, NonNull<u8>)> {
         let mut at = self.start();
-        while let Some(place) = at {
-            if which(self.row(shape, place)) {
-                return Some(place);
+        while let Some((place, row)) = self.step(shape, &mut at) {
+            if which(row) {
+                return Some((place, row));
             }
-            at = self.advance(shape, place);
         }
         None
     }
 
-    /// The row of `id`.
+    /// The row of `id` and where it lies.
     ///
     /// # Safety
     /// `shape` is a keyed kind's: every row starts with its id, a `u64`.
     #[inline(never)]
-    unsafe fn find_id(&self, shape: &RowShape, id: u64) -> Option<Place> {
+    unsafe fn find_id(&self, shape: &RowShape, id: u64) -> Option<(Place, NonNull<u8>)> {
         debug_assert!(shape.keyed, "an id is read off a keyed row alone");
-        let mut at = self.start();
-        while let Some(place) = at {
+        self.find(shape, &mut |row: NonNull<u8>| {
             // SAFETY: the caller's contract; the row holds an item and starts on its alignment, at
             // least an id's.
-            if unsafe { self.row(shape, place).cast::<u64>().read() } == id {
-                return Some(place);
-            }
-            at = self.advance(shape, place);
-        }
-        None
+            let held = unsafe { row.cast::<u64>().read() };
+            held == id
+        })
     }
 
     /// Take the row at `place` out of the table, the order of the rest kept, and where the walk
@@ -686,47 +682,19 @@ impl RawRows {
     #[inline(never)]
     fn retain(&mut self, shape: &RowShape, keep: &mut dyn FnMut(NonNull<u8>) -> bool) {
         let mut at = self.start();
-        while let Some(place) = at {
-            at = if keep(self.row(shape, place)) {
-                self.advance(shape, place)
-            } else {
+        while let Some((place, row)) = self.step(shape, &mut at) {
+            if !keep(row) {
                 // SAFETY: the place is one of this walk, its row holding an item.
-                unsafe { self.detach(shape, place, true) }
-            };
+                at = unsafe { self.detach(shape, place, true) };
+            }
         }
     }
 
-    /// Give every row back, each item dropped: one step for each row the table holds. A drop that
-    /// panics leaks the rows after it rather than dropping one twice.
+    /// Give every row back, each item dropped, as a retain that keeps none: one step for each row
+    /// the table holds. A drop that panics leaks the rows after it rather than dropping one twice.
     #[inline(never)]
     fn clear(&mut self, shape: &RowShape) {
-        match self.lay() {
-            Lay::Own { base, .. } => {
-                let len = self.len();
-                self.len = 0;
-                for at in 0..len {
-                    // SAFETY: the rows below the old length held items, each dropped once here; the
-                    // length was set first.
-                    unsafe { drop_item(shape, own_row(base, shape, at)) };
-                }
-            }
-            Lay::Pool(pool) => {
-                let mut at = self.first;
-                self.first = NIL;
-                self.len = 0;
-                while at != NIL {
-                    let next = pool.next(shape, at);
-                    // SAFETY: the table held the row, holding an item, dropped once; the list it
-                    // was linked in is gone, and the row goes back after its item.
-                    unsafe {
-                        drop_item(shape, pool.slot(shape, at));
-                        pool.release(shape, at);
-                    }
-                    at = next;
-                }
-            }
-            Lay::Bare => {}
-        }
+        self.retain(shape, &mut |_: NonNull<u8>| false);
     }
 }
 
@@ -1236,33 +1204,28 @@ impl<K: RowKind> fmt::Debug for RowSpace<K> {
     }
 }
 
-/// Where the tables of one kind of row of a session take their rows: a pool every table that asks
-/// takes rows of, or one table's own span, handed to the first table that asks and to no other.
-pub enum RowSource<K: RowKind> {
-    /// A pool the faces share.
-    Pool(RowPool<K>),
+/// Where the tables of one kind take their rows, untyped ([`RowSource`]).
+enum RawSource {
+    /// A pool every table that asks takes rows of.
+    Pool(Pool),
     /// A span of one table's own, until it is handed out.
-    Own(Option<RowSpace<K>>),
+    Own(Option<RawSpace>),
 }
 
-impl<K: RowKind> RowSource<K> {
+impl RawSource {
     /// A space for one more table: of the pool, as often as asked; the own span, once.
-    #[inline]
-    pub fn hand_out(&mut self) -> Option<RowSpace<K>> {
+    #[inline(never)]
+    fn hand_out(&mut self) -> Option<RawSpace> {
         match self {
-            Self::Pool(pool) => Some(pool.space()),
+            Self::Pool(pool) => Some(RawSpace {
+                at: pool.base,
+                form: NIL,
+            }),
             Self::Own(own) => own.take(),
         }
     }
 
-    /// Whether the tables share these rows.
-    pub fn is_shared(&self) -> bool {
-        matches!(self, Self::Pool(_))
-    }
-
-    /// What a shared pool holds now; `None` for a span of one table's own, whose table says what it
-    /// holds.
-    pub fn counts(&self) -> Option<RowCounts> {
+    fn counts(&self) -> Option<RowCounts> {
         match self {
             Self::Pool(pool) => Some(pool.counts()),
             Self::Own(_) => None,
@@ -1270,11 +1233,136 @@ impl<K: RowKind> RowSource<K> {
     }
 }
 
+/// Where the tables of one kind of row of a session take their rows: a pool every table that asks
+/// takes rows of, or one table's own span, handed to the first table that asks and to no other.
+/// Not copied, so an own span is handed out once.
+pub struct RowSource<K: RowKind> {
+    raw: RawSource,
+    _kind: PhantomData<*const K>,
+}
+
+impl<K: RowKind> RowSource<K> {
+    fn of(raw: RawSource) -> Self {
+        Self {
+            raw,
+            _kind: PhantomData,
+        }
+    }
+
+    /// Rows of `pool` for every table that asks.
+    pub fn pool(pool: RowPool<K>) -> Self {
+        Self::of(RawSource::Pool(pool.pool))
+    }
+
+    /// `space` for the first table that asks alone.
+    pub fn own(space: RowSpace<K>) -> Self {
+        Self::of(RawSource::Own(Some(space.raw)))
+    }
+
+    /// A space for one more table: of the pool, as often as asked; the own span, once.
+    #[inline]
+    pub fn hand_out(&mut self) -> Option<RowSpace<K>> {
+        self.raw.hand_out().map(RowSpace::of)
+    }
+
+    /// Whether the tables share these rows.
+    pub fn is_shared(&self) -> bool {
+        matches!(self.raw, RawSource::Pool(_))
+    }
+
+    /// What a shared pool holds now; `None` for a span of one table's own, whose table says what it
+    /// holds.
+    pub fn counts(&self) -> Option<RowCounts> {
+        self.raw.counts()
+    }
+}
+
 impl<K: RowKind> fmt::Debug for RowSource<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pool(pool) => f.debug_tuple("Pool").field(pool).finish(),
-            Self::Own(own) => f.debug_tuple("Own").field(own).finish(),
+        f.debug_struct("RowSource")
+            .field("shared", &self.is_shared())
+            .field("counts", &self.counts())
+            .finish()
+    }
+}
+
+/// Lends the rows of a session's kinds from its arena in the order they are asked: for a session of
+/// many faces a pool of each kind, for a session of one face each group of kinds one span, the
+/// kinds of the group carved from it in order ([`OwnSpans`]). The first refusal is kept and every
+/// kind asked after it gets nothing; [`Self::finish`] hands it back. Untyped but for the kind each
+/// call names, so the kinds of a set are lent by one body of code.
+pub struct RowLender<'a> {
+    arena: &'a mut Arena,
+    shared: bool,
+    span: Option<OwnSpans>,
+    refused: Option<LendRefused>,
+}
+
+impl<'a> RowLender<'a> {
+    /// A lender of shared pools, or with `shared` false of own spans, from `arena`.
+    pub fn new(arena: &'a mut Arena, shared: bool) -> Self {
+        Self {
+            arena,
+            shared,
+            span: None,
+            refused: None,
+        }
+    }
+
+    /// Start a group of kinds whose own spans lie in one span of `bytes` bytes, as their plan adds
+    /// them up ([`OwnSpans::after`]; `None` past the address space, which refuses). Nothing for a
+    /// lender of shared pools.
+    #[inline(never)]
+    pub fn group(&mut self, bytes: Option<usize>) {
+        if self.shared || self.refused.is_some() {
+            return;
+        }
+        self.span = None;
+        let left = self.arena.bytes() - self.arena.high_water();
+        match bytes.map(|bytes| OwnSpans::lent(&mut *self.arena, bytes)) {
+            Some(Ok(span)) => self.span = Some(span),
+            Some(Err(why)) => self.refused = Some(why),
+            None => self.refused = Some(LendRefused::Exhausted { asked: None, left }),
+        }
+    }
+
+    /// The rows of one more kind `K`, `rows` of them: a pool, or the next own span of the group.
+    /// Nothing once a kind was refused.
+    #[inline]
+    pub fn next<K: RowKind>(&mut self, rows: usize) -> RowSource<K> {
+        RowSource::of(self.next_raw(K::SHAPE, rows))
+    }
+
+    #[inline(never)]
+    fn next_raw(&mut self, shape: &RowShape, rows: usize) -> RawSource {
+        if self.refused.is_none() {
+            let lent = if self.shared {
+                RawSpace::lent_pool(&mut *self.arena, shape, rows)
+                    .map(|raw| RawSource::Pool(Pool { base: raw.at }))
+            } else {
+                match self.span.as_mut() {
+                    Some(span) => span
+                        .carve_raw(shape, rows)
+                        .map(|raw| RawSource::Own(Some(raw))),
+                    None => Err(LendRefused::Exhausted {
+                        asked: None,
+                        left: 0,
+                    }),
+                }
+            };
+            match lent {
+                Ok(source) => return source,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        RawSource::Own(None)
+    }
+
+    /// The first refusal, if any kind was refused.
+    pub fn finish(self) -> Result<(), LendRefused> {
+        match self.refused {
+            Some(why) => Err(why),
+            None => Ok(()),
         }
     }
 }
@@ -1377,16 +1465,16 @@ impl<K: RowKind, const N: usize> PooledRows<K, N> {
         self.raw.clear(K::SHAPE);
     }
 
-    /// Take the item at `place` out of the table, its row given back.
+    /// Take the item of the row at `place` out of the table, the row given back.
     ///
     /// # Safety
-    /// `place` is a place of a walk over this table, its row holding an item.
+    /// `place` is a place of a walk over this table and `row` its row, holding an item.
     #[inline]
-    unsafe fn take_at(&mut self, place: Place) -> K::Item {
+    unsafe fn take_at(&mut self, place: Place, row: NonNull<u8>) -> K::Item {
         // SAFETY: the caller's contract: the row holds an item, read out once; the row, holding
         // none, then leaves the table.
         unsafe {
-            let item = K::take(self.raw.row(K::SHAPE, place));
+            let item = K::take(row);
             self.raw.detach(K::SHAPE, place, false);
             item
         }
@@ -1408,14 +1496,14 @@ impl<T, const N: usize> PooledRows<Seq<T>, N> {
     /// Take the first value `which` accepts out of the table, its row given back.
     #[inline]
     pub fn remove_first<F: FnMut(&T) -> bool>(&mut self, mut which: F) -> Option<T> {
-        let place = self
+        let (place, row) = self
             .raw
             .find(<Seq<T> as RowKind>::SHAPE, &mut |row: NonNull<u8>| {
                 // SAFETY: as `retain`'s.
                 which(unsafe { <Seq<T> as RowKind>::get(row) })
             })?;
-        // SAFETY: the place was found by a walk over this table.
-        Some(unsafe { self.take_at(place) })
+        // SAFETY: the place and its row were found by a walk over this table.
+        Some(unsafe { self.take_at(place, row) })
     }
 }
 
@@ -1423,31 +1511,29 @@ impl<V, const N: usize> PooledRows<Keyed<V>, N> {
     /// The value of `id`.
     #[inline]
     pub fn get_id(&self, id: u64) -> Option<&V> {
-        let shape = <Keyed<V> as RowKind>::SHAPE;
         // SAFETY: the shape is a keyed kind's.
-        let place = unsafe { self.raw.find_id(shape, id) }?;
-        // SAFETY: the place is a row the table holds, holding an item, and the table is borrowed
-        // for as long as the reference lives.
-        Some(unsafe { <Keyed<V> as RowKind>::get(self.raw.row(shape, place)) }.1)
+        let (_, row) = unsafe { self.raw.find_id(<Keyed<V> as RowKind>::SHAPE, id) }?;
+        // SAFETY: the row is one the table holds, holding an item, and the table is borrowed for as
+        // long as the reference lives.
+        Some(unsafe { <Keyed<V> as RowKind>::get(row) }.1)
     }
 
     /// The value of `id`, to write.
     #[inline]
     pub fn get_id_mut(&mut self, id: u64) -> Option<&mut V> {
-        let shape = <Keyed<V> as RowKind>::SHAPE;
         // SAFETY: the shape is a keyed kind's.
-        let place = unsafe { self.raw.find_id(shape, id) }?;
+        let (_, row) = unsafe { self.raw.find_id(<Keyed<V> as RowKind>::SHAPE, id) }?;
         // SAFETY: as `get_id`'s, the table borrowed mutably for as long.
-        Some(unsafe { <Keyed<V> as RowKind>::get_mut(self.raw.row(shape, place)) }.1)
+        Some(unsafe { <Keyed<V> as RowKind>::get_mut(row) }.1)
     }
 
     /// Take the row of `id` out of the table, its row given back, and hand back its value.
     #[inline]
     pub fn remove_id(&mut self, id: u64) -> Option<V> {
         // SAFETY: the shape is a keyed kind's.
-        let place = unsafe { self.raw.find_id(<Keyed<V> as RowKind>::SHAPE, id) }?;
-        // SAFETY: the place was found by a walk over this table.
-        Some(unsafe { self.take_at(place) }.1)
+        let (place, row) = unsafe { self.raw.find_id(<Keyed<V> as RowKind>::SHAPE, id) }?;
+        // SAFETY: the place and its row were found by a walk over this table.
+        Some(unsafe { self.take_at(place, row) }.1)
     }
 }
 
@@ -1490,12 +1576,11 @@ impl<'a, K: RowKind> Iterator for Rows<'a, K> {
 
     #[inline]
     fn next(&mut self) -> Option<K::Ref<'a>> {
-        let place = self.at?;
-        self.at = self.raw.advance(K::SHAPE, place);
+        let (_, row) = self.raw.step(K::SHAPE, &mut self.at)?;
         self.left -= 1;
-        // SAFETY: the place is a row the table holds, holding an item, and the table is borrowed
-        // for `'a`, so the row is not written or given back meanwhile.
-        Some(unsafe { K::get(self.raw.row(K::SHAPE, place)) })
+        // SAFETY: the row is one the table holds, holding an item, and the table is borrowed for
+        // `'a`, so the row is not written or given back meanwhile.
+        Some(unsafe { K::get(row) })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1520,12 +1605,11 @@ impl<'a, K: RowKind> Iterator for RowsMut<'a, K> {
 
     #[inline]
     fn next(&mut self) -> Option<K::Mut<'a>> {
-        let place = self.at?;
-        self.at = self.raw.advance(K::SHAPE, place);
+        let (_, row) = self.raw.step(K::SHAPE, &mut self.at)?;
         self.left -= 1;
         // SAFETY: the table is borrowed mutably for `'a` by this walk alone, which visits each row
         // once, so no other reference to the row is handed out meanwhile.
-        Some(unsafe { K::get_mut(self.raw.row(K::SHAPE, place)) })
+        Some(unsafe { K::get_mut(row) })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1694,10 +1778,9 @@ mod tests {
         let shape = <Seq<u32> as RowKind>::SHAPE;
         let mut out = Vec::new();
         let mut at = raw.start();
-        while let Some(place) = at {
-            // SAFETY: a place of a walk is a row the table holds, holding a `u32`.
-            out.push(unsafe { raw.row(shape, place).cast::<u32>().read() });
-            at = raw.advance(shape, place);
+        while let Some((_, row)) = raw.step(shape, &mut at) {
+            // SAFETY: a row of a walk is one the table holds, holding a `u32`.
+            out.push(unsafe { row.cast::<u32>().read() });
         }
         out
     }
@@ -1736,14 +1819,18 @@ mod tests {
         );
         let keyed = <Keyed<[u32; 3]> as RowKind>::SHAPE;
         assert_eq!(
-            (keyed.item_bytes, keyed.slot_bytes),
-            (size_of::<(u64, [u32; 3])>(), size_of::<(u64, [u32; 3])>()),
-            "the link takes the padding of an id and a three-word value"
+            keyed.slot_bytes,
+            (offset_of!(KeyedRow<[u32; 3]>, value) + size_of::<[u32; 3]>() + size_of::<Link>())
+                .next_multiple_of(align_of::<KeyedRow<[u32; 3]>>()),
+            "the link follows the value's last byte, in what the row's padding leaves"
         );
+        assert_eq!(keyed.item_bytes, size_of::<(u64, [u32; 3])>());
         assert!(keyed.keyed && keyed.drop.is_none());
         assert!(
             <Keyed<crate::key_arena::KeyRef> as RowKind>::SHAPE.slot_bytes
-                <= size_of::<(u64, crate::key_arena::KeyRef)>() + size_of::<Link>()
+                <= (size_of::<(u64, crate::key_arena::KeyRef)>() + size_of::<Link>())
+                    .next_multiple_of(align_of::<(u64, crate::key_arena::KeyRef)>()),
+            "a link costs a key's row at most one step of its alignment"
         );
         assert_eq!((size_of::<PoolState>(), STATE_BYTES), (12, ARENA_ALIGN));
         assert!(RowSpace::<Seq<u8>>::pool_bytes(MAX_POOL_ROWS).is_some());
@@ -1796,13 +1883,15 @@ mod tests {
             }
             assert!(!raw_push(&mut raw, 3, 4), "the bound");
             assert_eq!(raw.refused, 1);
-            let middle = raw
-                .advance(shape, raw.start().expect("rows"))
-                .expect("a second row");
+            let mut at = raw.start();
+            raw.step(shape, &mut at).expect("a first row");
+            let (middle, _) = raw.step(shape, &mut at).expect("a second row");
             // SAFETY: the place is one of a walk; the `u32` needs no drop, so dropping is moving out.
-            let next = unsafe { raw.detach(shape, middle, true) }.expect("a row after it");
-            // SAFETY: as above.
-            assert_eq!(unsafe { raw.row(shape, next).cast::<u32>().read() }, 3);
+            let next = unsafe { raw.detach(shape, middle, true) };
+            let mut after = next;
+            let (_, row) = raw.step(shape, &mut after).expect("a row after it");
+            // SAFETY: a row of a walk holds a `u32`.
+            assert_eq!(unsafe { row.cast::<u32>().read() }, 3);
             assert_eq!(raw_values(&raw), [1, 3]);
             assert!(raw_push(&mut raw, 3, 5));
             assert_eq!(raw_values(&raw), [1, 3, 5]);
@@ -1887,13 +1976,49 @@ mod tests {
     /// A source hands a pool to every table that asks and an own span to the first alone.
     #[test]
     fn a_source_hands_a_pool_to_every_table_and_an_own_span_once() {
-        let mut shared = RowSource::Pool(pool_of::<Seq<u32>>(2));
+        let mut shared = RowSource::pool(pool_of::<Seq<u32>>(2));
         assert!(shared.hand_out().is_some() && shared.hand_out().is_some());
         assert!(shared.is_shared());
-        let mut own = RowSource::Own(Some(own_of::<Seq<u32>>(2)));
+        let mut own = RowSource::own(own_of::<Seq<u32>>(2));
         assert!(own.hand_out().is_some_and(|space| !space.is_shared()));
         assert!(own.hand_out().is_none(), "the span went to the first");
         assert_eq!((own.is_shared(), own.counts()), (false, None));
+    }
+
+    /// A lender of shared pools lends a pool of each kind it is asked for; one of own spans carves a
+    /// group's kinds, in order, from one span its plan counts. Its first refusal is kept: every kind
+    /// asked after it gets nothing, and `finish` hands it back.
+    #[test]
+    fn a_lender_lends_pools_or_carves_a_group_and_keeps_its_first_refusal() {
+        let bytes = RowSpace::<Seq<u32>>::pool_bytes(2).expect("fits")
+            + RowSpace::<Keyed<u64>>::pool_bytes(3).expect("fits");
+        let mut arena = arena_of(bytes);
+        let mut lend = RowLender::new(&mut arena, true);
+        lend.group(None);
+        let (mut a, b) = (lend.next::<Seq<u32>>(2), lend.next::<Keyed<u64>>(3));
+        assert!(
+            lend.finish().is_ok(),
+            "a group means nothing to shared pools"
+        );
+        assert!(a.is_shared() && b.counts().map(|counts| counts.rows) == Some(3));
+        assert!(a.hand_out().is_some() && a.hand_out().is_some());
+
+        let plan = OwnSpans::after::<Keyed<u64>>(OwnSpans::after::<Seq<u32>>(Some(0), 2), 3)
+            .expect("fits");
+        let mut arena = arena_of(Arena::span(plan).expect("fits"));
+        let mut lend = RowLender::new(&mut arena, false);
+        lend.group(Some(plan));
+        let (mut a, mut b) = (lend.next::<Seq<u32>>(2), lend.next::<Keyed<u64>>(3));
+        let mut c = lend.next::<Seq<u32>>(1);
+        assert!(
+            matches!(lend.finish(), Err(LendRefused::Exhausted { .. })),
+            "a third kind is past the group's span"
+        );
+        assert!(c.hand_out().is_none());
+        let space = a.hand_out().expect("the first kind's span");
+        assert_eq!((space.is_shared(), space.rows()), (false, 2));
+        assert!(a.hand_out().is_none(), "an own span is handed out once");
+        assert_eq!(b.hand_out().map(|space| space.rows()), Some(3));
     }
 
     /// A shared pool lends its rows by handle until every one is held, refuses the next and counts

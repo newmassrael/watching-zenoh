@@ -52,7 +52,7 @@ use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
-use crate::row_pool::{Keyed, OwnSpans, RowSource, RowSpace};
+use crate::row_pool::{Keyed, OwnSpans, RowLender, RowSource, RowSpace};
 use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 
@@ -469,50 +469,30 @@ pub struct PeerPoolCounts {
 
 impl PeerPools {
     /// The rows `rows` states, lent from `arena` in the order [`PeerPoolRows::arena_bytes`]
-    /// counts them: the aliases', the declarations' and the interests'. Refused, what was lent so
-    /// far going back with the arena, when the arena has not the room or a count is past what a
-    /// pool or a span names.
+    /// counts them: the aliases', the declarations' and the interests'. For a session of one face
+    /// each of those is one span, the declaration tables' carved in the order `decl_end` lays
+    /// them out. Refused, what was lent so far going back with the arena, when the arena has not
+    /// the room or a count is past what a pool or a span names.
     pub fn lent(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
-        if !rows.shared {
-            return Self::own_in(arena, rows);
-        }
         let decls = rows.remote_decls;
-        Ok(Self {
-            aliases: RowSource::Pool(arena.lend_pool(rows.aliases)?),
-            subscribers: RowSource::Pool(arena.lend_pool(decls)?),
-            queryables: RowSource::Pool(arena.lend_pool(decls)?),
-            tokens: RowSource::Pool(arena.lend_pool(decls)?),
+        let mut lend = RowLender::new(arena, rows.shared);
+        lend.group(RowSpace::<KeyKind>::own_bytes(rows.aliases));
+        let aliases = lend.next(rows.aliases);
+        lend.group(decl_end(decls));
+        let pools = Self {
+            aliases,
+            subscribers: lend.next(decls),
+            queryables: lend.next(decls),
+            tokens: lend.next(decls),
             #[cfg(feature = "alloc")]
-            sub_repeats: RowSource::Pool(arena.lend_pool(decls)?),
+            sub_repeats: lend.next(decls),
             #[cfg(feature = "alloc")]
-            queryable_repeats: RowSource::Pool(arena.lend_pool(decls)?),
+            queryable_repeats: lend.next(decls),
             #[cfg(feature = "declare-subscriber")]
-            interests: crate::pubsub::InterestRows::lent_pool(arena, rows.interests)?,
-        })
-    }
-
-    /// The spans of one face's own tables `rows` states: one for its aliases, one its declaration
-    /// tables share, carved in the order [`decl_end`] lays them out, one for its interests.
-    fn own_in(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
-        let left = arena.bytes() - arena.high_water();
-        let Some(decl_bytes) = decl_end(rows.remote_decls) else {
-            return Err(LendRefused::Exhausted { asked: None, left });
+            interests: crate::pubsub::InterestRows::lent(&mut lend, rows.interests),
         };
-        let aliases = arena.lend_own(rows.aliases)?;
-        let mut decls = OwnSpans::lent(arena, decl_bytes)?;
-        let each = rows.remote_decls;
-        Ok(Self {
-            aliases: RowSource::Own(Some(aliases)),
-            subscribers: RowSource::Own(Some(decls.carve::<KeyKind>(each)?)),
-            queryables: RowSource::Own(Some(decls.carve::<QueryableKind>(each)?)),
-            tokens: RowSource::Own(Some(decls.carve::<KeyKind>(each)?)),
-            #[cfg(feature = "alloc")]
-            sub_repeats: RowSource::Own(Some(decls.carve::<RepeatKind>(each)?)),
-            #[cfg(feature = "alloc")]
-            queryable_repeats: RowSource::Own(Some(decls.carve::<RepeatKind>(each)?)),
-            #[cfg(feature = "declare-subscriber")]
-            interests: crate::pubsub::InterestRows::lent_own(arena, rows.interests)?,
-        })
+        lend.finish()?;
+        Ok(pools)
     }
 
     /// The bytes of an arena [`Self::lent`] takes for `rows`. `None` past the most rows a pool

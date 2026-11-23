@@ -3592,22 +3592,15 @@ pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
 
 #[cfg(feature = "declare-subscriber")]
 impl InterestRows {
-    /// A pool of `rows` interests the faces share, lent from `arena`. Refused, taking nothing,
-    /// past what is left.
-    pub fn lent_pool(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        let pool = arena.lend_pool(rows)?;
-        Ok(Self(crate::row_pool::RowSource::Pool(pool)))
+    /// `rows` interests lent by `lend`: a pool the faces share, or a span of one face's own, a group
+    /// of its own ([`Self::own_bytes`]). A refusal is `lend`'s to hand back.
+    pub fn lent(lend: &mut crate::row_pool::RowLender<'_>, rows: usize) -> Self {
+        lend.group(Self::own_bytes(rows));
+        Self(lend.next(rows))
     }
 
-    /// A span of one face's own of `rows` interests, lent from `arena`. Refused, taking nothing,
-    /// past what is left.
-    pub fn lent_own(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        let own = arena.lend_own(rows)?;
-        Ok(Self(crate::row_pool::RowSource::Own(Some(own))))
-    }
-
-    /// The bytes of an arena [`Self::lent_pool`] takes for `rows` interests. `None` past the most
-    /// rows a pool names or the address space.
+    /// The bytes of an arena a pool of `rows` interests takes. `None` past the most rows a pool
+    /// names or the address space.
     pub const fn pool_bytes(rows: usize) -> Option<usize> {
         crate::row_pool::RowSpace::<InterestKind>::pool_bytes(rows)
     }
