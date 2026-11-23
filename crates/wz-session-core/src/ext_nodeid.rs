@@ -262,7 +262,11 @@ pub fn set_source<S: ExtEntryStorage>(
 mod tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use wz_codecs::ext_zint::ExtZint;
 
+    #[cfg(feature = "alloc")]
     fn nodeid_ext(value: u64) -> ExtEntryOwned {
         ExtEntryOwned {
             header: NODEID_EXT_HEADER,
@@ -270,6 +274,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn other_ext() -> ExtEntryOwned {
         ExtEntryOwned {
             header: 0x01 | EXT_ENC_Z64,
@@ -283,6 +288,7 @@ mod tests {
     /// z64 of id 3 with the mandatory bit CLEAR is an unknown extension there,
     /// and an edit of the node id must neither read it nor replace it. The
     /// chain flag is no part of the identity, so `0xB3` is the node id.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_node_id_is_told_by_its_identity_not_its_id() {
         use crate::ext_header::lookalike_headers;
@@ -347,6 +353,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn read_absent_is_zero() {
         assert_eq!(
@@ -376,6 +383,7 @@ mod tests {
         assert_eq!(header, EXT_FLAG_M, "idempotent on empty");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn set_inserts_terminal_nodeid_and_reports_present() {
         let mut exts: Option<Vec<ExtEntryOwned>> = None;
@@ -386,6 +394,7 @@ mod tests {
         assert_eq!(read_source(exts.as_ref()), 7);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn set_zero_removes_and_reports_empty() {
         let mut exts = Some(vec![nodeid_ext(7)]);
@@ -394,6 +403,7 @@ mod tests {
         assert_eq!(read_source(exts.as_ref()), 0);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn set_replaces_existing_nodeid() {
         let mut exts = Some(vec![nodeid_ext(7)]);
@@ -403,6 +413,7 @@ mod tests {
         assert_eq!(read_source(exts.as_ref()), 9);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn coexists_with_another_ext_and_normalises_chain_bits() {
         let mut exts = Some(vec![other_ext()]);

@@ -293,12 +293,14 @@ pub fn region_of(
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
+    #[cfg(feature = "alloc")]
     use alloc::vec;
 
     use super::*;
     use WhatAmI::{Client, Peer, Router};
 
     const ZID_A: [u8; 4] = [0xaa; 4];
+    #[cfg(feature = "alloc")]
     const ZID_B: [u8; 4] = [0xbb; 4];
 
     fn facts<'a>(zid: &'a [u8], whatami: WhatAmI) -> RemoteFacts<'a> {
@@ -310,12 +312,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn only(filter: RegionFilter) -> SouthSubregion {
         SouthSubregion {
             filters: Some(vec![filter]),
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn by_zid(zid: &[u8]) -> RegionFilter {
         RegionFilter {
             zids: Some(vec![zid.to_vec()]),
@@ -323,6 +327,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn by_mode(modes: WhatAmIMatcher) -> RegionFilter {
         RegionFilter {
             modes: Some(modes),
@@ -331,6 +336,7 @@ mod tests {
     }
 
     /// A subregion whose filter list is this one filter.
+    #[cfg(feature = "alloc")]
     fn passes(filter: &RegionFilter, remote: &RemoteFacts<'_>) -> bool {
         matches_filters(Some(core::slice::from_ref(filter)), remote)
     }
@@ -338,6 +344,7 @@ mod tests {
     // ── the filters, field by field ──
 
     /// No filter list matches every remote; an empty list matches none.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_missing_filter_list_matches_everyone_and_an_empty_one_nobody() {
         let r = facts(&ZID_A, Peer);
@@ -346,6 +353,7 @@ mod tests {
     }
 
     /// Any filter of the list may match.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_remote_matching_any_one_filter_matches_the_list() {
         let r = facts(&ZID_B, Peer);
@@ -355,6 +363,7 @@ mod tests {
     }
 
     /// All fields of one filter must match, not any of them.
+    #[cfg(feature = "alloc")]
     #[test]
     fn every_present_field_of_a_filter_must_match() {
         let both = RegionFilter {
@@ -374,6 +383,7 @@ mod tests {
     }
 
     /// `modes` is a set of roles.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_modes_field_is_a_role_set() {
         let rp = by_mode(WhatAmIMatcher::empty().router().peer());
@@ -383,6 +393,7 @@ mod tests {
     }
 
     /// `region_names` needs the remote to have announced a name among them.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_region_names_field_needs_an_announced_name() {
         let f = RegionFilter {
@@ -403,6 +414,7 @@ mod tests {
 
     /// `interfaces` is an ALL over the remote's interfaces, so a remote that
     /// reports none satisfies any interface filter. That is upstream's reading.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_interfaces_field_requires_all_of_the_remotes_interfaces() {
         let f = RegionFilter {
@@ -428,6 +440,7 @@ mod tests {
     /// A zid is matched as a zid, not as a byte string: the pin compares two
     /// `ZenohIdProto`s, each a 16-byte id, so trailing zero bytes on either the
     /// rule's or the remote's spelling do not make them two nodes.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_zid_matches_whatever_its_trailing_zero_bytes() {
         let rule = by_zid(&[0x01]);
@@ -441,6 +454,7 @@ mod tests {
     }
 
     /// `negated` inverts the verdict of the fields.
+    #[cfg(feature = "alloc")]
     #[test]
     fn negation_inverts_a_filters_verdict() {
         let not_a = RegionFilter {
@@ -473,6 +487,7 @@ mod tests {
 
     /// The first matching subregion wins, carries the remote's own mode, and a
     /// remote no subregion matches is in the north region.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_remote_is_in_the_first_matching_subregion_or_the_north() {
         let partition = SouthPartition::Custom(vec![
@@ -509,6 +524,7 @@ mod tests {
     }
 
     /// A router remote may be put in a subregion only by a router.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_router_remote_is_a_subregion_member_only_of_a_router() {
         let partition = SouthPartition::Custom(vec![SouthSubregion::default()]);
@@ -530,6 +546,7 @@ mod tests {
 
     // ── compute_region_of, arm by arm ──
 
+    #[cfg(feature = "alloc")]
     fn custom_south_peers() -> SouthPartition {
         SouthPartition::Custom(vec![only(by_mode(WhatAmIMatcher::empty().peer()))])
     }
@@ -583,6 +600,7 @@ mod tests {
 
     /// Arm `(Some(South), None)`: our rule puts it in a subregion, it announced
     /// nothing, so it is in that subregion and north-bound.
+    #[cfg(feature = "alloc")]
     #[test]
     fn arm_our_rule_puts_it_south_and_it_announced_nothing() {
         assert_eq!(
@@ -619,6 +637,7 @@ mod tests {
 
     /// Arm `(Some(North), None)`: our rule puts it north. The auto table must not
     /// put it in a subregion, else the pin refuses.
+    #[cfg(feature = "alloc")]
     #[test]
     fn arm_our_rule_puts_it_north_and_the_auto_table_must_not_put_it_south() {
         let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
@@ -636,6 +655,7 @@ mod tests {
 
     /// Arm `(Some(North), Some(North))`: both ends call the other north, which is
     /// valid only between nodes of one mode.
+    #[cfg(feature = "alloc")]
     #[test]
     fn arm_both_ends_north_needs_equal_modes() {
         let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
@@ -658,6 +678,7 @@ mod tests {
     }
 
     /// Arm `(Some(South), Some(South))`: both ends put the other in a subregion.
+    #[cfg(feature = "alloc")]
     #[test]
     fn arm_both_ends_south_is_refused() {
         assert_eq!(
@@ -674,6 +695,7 @@ mod tests {
     /// Arms `(Some(North), Some(South))` and `(Some(South), Some(North))`: the two
     /// ends agree on the boundary, the node's rule places the remote and the
     /// remote's announcement is its bound.
+    #[cfg(feature = "alloc")]
     #[test]
     fn arm_the_ends_agree_on_a_boundary() {
         assert_eq!(

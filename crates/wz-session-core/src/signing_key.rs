@@ -355,6 +355,7 @@ mod tests {
     use super::*;
     use alloc::format;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     /// HMAC-SHA256 cookie generator must produce 16-byte output and
     /// be deterministic given the same (key, peer_zid, nonce) inputs.
@@ -367,6 +368,7 @@ mod tests {
     /// OpenSyn. R311y813 added the nonce, which is the term that stops
     /// that determinism from also spanning handshakes — see
     /// `a_fresh_nonce_moves_the_cookie_for_the_same_peer`.
+    #[cfg(feature = "alloc")]
     #[test]
     fn cookie_hmac_sha256_deterministic_16_byte_output() {
         let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
@@ -392,6 +394,7 @@ mod tests {
     /// Deleting the `nonce` term from the MAC input fails exactly here and
     /// nowhere else in this module: every other test in the file fixes one
     /// nonce and would keep passing.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_fresh_nonce_moves_the_cookie_for_the_same_peer() {
         let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
@@ -413,6 +416,7 @@ mod tests {
     ///
     /// Without the ordering rule both sides below concatenate to the same
     /// ten bytes and two DIFFERENT handshakes share one cookie.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_zid_and_the_nonce_cannot_realign_into_one_another() {
         let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
@@ -434,12 +438,33 @@ mod tests {
     /// Short-key reject is loud at construction site (RFC §5.M
     /// mandates >= 32 bytes; the typed constructor returns
     /// `Err(SigningKeyTooShort)` instead of letting a 16-byte key
-    /// reach the wire-decode-time peer reject path).
+    /// reach the wire-decode-time peer reject path). Both constructors refuse
+    /// it; `new` is the heap profile's alone.
     #[test]
     fn signing_key_short_returns_err() {
-        let too_short = vec![0xAA; 16];
-        let result = SigningKey::new(too_short);
-        assert!(matches!(result, Err(SigningKeyTooShort(_))));
+        let too_short = [0xAA; 16];
+        assert!(matches!(
+            SigningKey::from_slice(&too_short),
+            Err(SigningKeyTooShort(_))
+        ));
+        #[cfg(feature = "alloc")]
+        assert!(matches!(
+            SigningKey::new(too_short.to_vec()),
+            Err(SigningKeyTooShort(_))
+        ));
+    }
+
+    /// A key longer than the HMAC block is held as its SHA-256 under the slot
+    /// profile and as it is under the heap profile; RFC 2104 makes the two the
+    /// same key, so the MAC over a payload is the one the whole key gives.
+    #[test]
+    fn a_key_longer_than_the_block_macs_as_the_whole_key() {
+        let long = [0xaa; 131];
+        let key = SigningKey::from_slice(&long).expect("a long key is valid");
+        let payload = b"cookie payload";
+        let full = compute_hmac_sha256_full(&long, payload);
+        assert_eq!(cookie_payload_tag(&key, payload)[..], full[..16]);
+        assert!(cookie_payload_tag_verify(&key, payload, &full[..16]));
     }
 
     /// SigningKey Debug impl never leaks the bytes — only the
@@ -447,7 +472,7 @@ mod tests {
     /// adds `#[derive(Debug)]` (which would print the inner Vec).
     #[test]
     fn signing_key_debug_redacts_bytes() {
-        let key = SigningKey::new(vec![0xDE; 32]).unwrap();
+        let key = SigningKey::from_slice(&[0xDE; 32]).unwrap();
         let dbg = format!("{:?}", key);
         assert!(dbg.contains("<redacted>"), "Debug must redact: {dbg}");
         assert!(!dbg.contains("DE"), "Debug must not leak hex: {dbg}");
@@ -649,12 +674,12 @@ mod tests {
 
     #[test]
     fn key_draw_uses_the_validators_own_floor() {
-        // The draw and `new`'s `>= 32` check read ONE constant. A draw sized
-        // below the floor would build a key `new` would have refused, which no
-        // other assertion here would notice.
+        // The draw and the constructors' `>= 32` check read ONE constant. A
+        // draw sized below the floor would build a key the constructors would
+        // have refused, which no other assertion here would notice.
         let key = SigningKey::from_entropy(&mut Counting(0)).expect("counting source fills");
         assert_eq!(key.len(), SIGNING_KEY_BYTES);
-        assert!(SigningKey::new(vec![0u8; SIGNING_KEY_BYTES]).is_ok());
+        assert!(SigningKey::from_slice(&[0u8; SIGNING_KEY_BYTES]).is_ok());
     }
 
     #[test]

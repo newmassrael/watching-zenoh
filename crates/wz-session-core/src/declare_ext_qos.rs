@@ -413,8 +413,9 @@ pub fn set_response_final_qos(
 /// because that one needs `codec-declare` and `wz_codecs::interest` does not.
 /// The PAIR is the arm here: the liveliness SUBSCRIBER carries the ext and the
 /// liveliness GET does not, and a test that only asserted the first would pass
-/// just as well against a build that stamped every Interest.
-#[cfg(test)]
+/// just as well against a build that stamped every Interest. The builders and
+/// the reader are the owned Interest's, which only the heap profile has.
+#[cfg(all(test, feature = "alloc"))]
 mod interest_tests {
     use super::*;
     use crate::ext_nodeid::MESSAGE_FLAG_Z;

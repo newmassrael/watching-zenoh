@@ -133,7 +133,17 @@ pub fn zenoh_hex_to_zid(hex: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_out::FixedText;
+    #[cfg(feature = "alloc")]
     use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// What [`write_zenoh_hex`] writes for `zid`; 32 bytes hold the widest id.
+    fn written(zid: &[u8]) -> FixedText<32> {
+        let mut out = FixedText::new();
+        write_zenoh_hex(zid, &mut out);
+        out
+    }
 
     #[test]
     fn le_array_zero_pads_and_truncates() {
@@ -151,6 +161,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn hex_renders_le_reversed_with_leading_zero_stripped() {
         // 0x01 (one wire byte) -> u128 0x0000..01 -> "1" (leading zero of the
@@ -164,6 +175,7 @@ mod tests {
     /// S9c -- the writer a node without a `String` uses prints what the string
     /// form prints, for every width and for the ids whose first digit is 0 after the
     /// pad (the case the string form's strip exists for).
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_writer_prints_what_the_string_form_does() {
         let mut zids: Vec<Vec<u8>> = vec![vec![], vec![0x00], vec![0x0a], vec![0x10]];
@@ -177,6 +189,23 @@ mod tests {
         }
     }
 
+    /// The writer every profile has prints the recipe itself: the id read as a
+    /// little-endian `u128` in hex with no leading zero, so the printed digits
+    /// are the wire bytes reversed, and the widest id fills 32 digits.
+    #[test]
+    fn the_writer_renders_le_reversed_with_no_leading_zero() {
+        assert_eq!(written(&[]).finish(), Ok("0"));
+        assert_eq!(written(&[0x01]).finish(), Ok("1"));
+        assert_eq!(written(&[0xab]).finish(), Ok("ab"));
+        assert_eq!(written(&[0x01, 0x02]).finish(), Ok("201"));
+        assert_eq!(written(&[0x01, 0x02, 0x03, 0x04]).finish(), Ok("4030201"));
+        assert_eq!(
+            written(&[0xff; 16]).finish(),
+            Ok("ffffffffffffffffffffffffffffffff")
+        );
+    }
+
+    #[cfg(feature = "alloc")]
     #[test]
     fn hex_round_trips_and_rejects_garbage() {
         for zid in [vec![0x01u8], vec![0x01, 0x02, 0x03], vec![0xff; 16]] {
@@ -194,6 +223,7 @@ mod tests {
     /// Each case is a spelling `from_str_radix` ALONE accepts, which is what
     /// this function was until R2633 — so a green here is the repair, not the
     /// absence of a subject.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_spelling_a_conforming_node_refuses_is_not_a_zid() {
         assert_eq!(zenoh_hex_to_zid("ABC"), None, "uppercase");
@@ -212,6 +242,7 @@ mod tests {
     /// zenohd loads `dst_zid: "+1"` and resolves it to `"1"` (measured). The
     /// case is pinned so a later tightening cannot quietly make wz refuse a
     /// document upstream takes.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_plus_prefix_parses_because_upstream_takes_it() {
         assert_eq!(zenoh_hex_to_zid("+1").as_deref(), Some(&[0x01][..]));
@@ -241,8 +272,8 @@ mod tests {
             &[0x00, 0x05][..],
         ] {
             assert_eq!(
-                zid_to_zenoh_hex(zid),
-                zid_to_zenoh_hex(canonical_zid(zid)),
+                written(zid).finish(),
+                written(canonical_zid(zid)).finish(),
                 "a spelling and its canonical form must print alike: {zid:?}"
             );
         }
@@ -274,6 +305,7 @@ mod tests {
     /// every test written with them. This one cannot: `01 02 03 04` is `4030201`
     /// in zenoh's spelling and `01020304` per byte, and the parse must take the
     /// former to the wire bytes and refuse the latter's leading zero.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_zid_that_is_not_a_palindrome_prints_reversed_and_parses_back() {
         let wire = [0x01u8, 0x02, 0x03, 0x04];
