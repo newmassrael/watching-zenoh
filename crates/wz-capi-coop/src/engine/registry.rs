@@ -187,11 +187,8 @@ pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them.
 pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<HeldSet>();
 
-/// A face past the sets the open lent: the session refuses it as one past `max_faces`. Only a
-/// build of faces besides the dial role's adds one.
 #[cfg(any(feature = "listen", feature = "group", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FacesFull;
+mod adding;
 
 /// A set a face holds: where it lies among the registry's sets, and the face. An entry is two
 /// words, so a walk over the faces reads one line of the index for every few faces and then the
@@ -573,43 +570,6 @@ impl Registry {
             return Some(&mut self.local);
         }
         self.face_mut(id).map(|face| &mut face.gets)
-    }
-
-    /// Tables for a face that has come: a set the arena lent that no face holds, empty, as its
-    /// peer has said nothing yet. [`FacesFull`] when every set is held: the open lent one for each
-    /// face the config admits, so the session refuses such a face before it comes.
-    #[cfg(any(feature = "listen", feature = "group", test))]
-    pub(super) fn add_face(&mut self, id: FaceId) -> Result<(), FacesFull> {
-        let at = self.free_set();
-        if at >= self.sets.len() {
-            return Err(FacesFull);
-        }
-        self.writing();
-        let place = self
-            .held
-            .iter()
-            .position(|held| held.at > at)
-            .unwrap_or(self.held.len());
-        // The index has a row for each set, and the set at `at` is free, so a row is left.
-        self.held.push(HeldSet { at, id }).map_err(|_| FacesFull)?;
-        if let Some(after) = self.held.get_mut(place..) {
-            after.rotate_right(1);
-        }
-        Ok(())
-    }
-
-    /// The first set no face holds, or the place past the last set. The lent sets lie first, so
-    /// the first free set is a lent one while any is.
-    #[cfg(any(feature = "listen", feature = "group", test))]
-    fn free_set(&self) -> usize {
-        // The index is in set order with one entry for each held set, so the first entry whose set
-        // lies past its own place in the index has a free set at that place, and with none the
-        // first free set is the one past the last entry.
-        self.held
-            .iter()
-            .enumerate()
-            .position(|(place, held)| held.at != place)
-            .unwrap_or(self.held.len())
     }
 
     /// The tables of face `id`, gone with the face and left, emptied, where they lie for the next
@@ -1127,6 +1087,7 @@ mod tests {
     //! Each face's tables are lent from the session's arena: the dial face's at the open, an
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
     //! what is asked of them: the session takes no memory but its arena.
+    use super::adding::FacesFull;
     use super::*;
     use crate::arena::{AllocatorMemory, SessionArena};
     use wz_session_core::peer_tables::PeerPoolRows;
