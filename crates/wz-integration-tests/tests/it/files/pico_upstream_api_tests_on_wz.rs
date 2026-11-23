@@ -36,7 +36,15 @@
 //! block of pico's `CMakeLists.txt` does not run, so it lacks exactly that symbol and the control
 //! pins it.
 //!
-//! One program carries a correction. `encoding`'s `test_encoding_with_id` checks `e2` after it
+//! `z_client_test`, upstream's client test (`routed.sh z_client_test` in its `CMakeLists.txt`),
+//! runs here too: a hundred keys, subscribers, queryables and publishers on two sessions and ten
+//! thousand gets issued without waiting, the most any of zenoh-pico's own tests holds at once,
+//! which is what the session limits of this ABI are held to. It reads zenoh-pico's private layer
+//! only for what it prints and for the lists it keeps its entities in, so those reads are replaced
+//! by the public calls that mean the same, each one listed where they are stated
+//! (`CLIENT_TEST_PUBLIC_API`), and the rest of its text is upstream's.
+//!
+//! Another carries a correction. `encoding`'s `test_encoding_with_id` checks `e2` after it
 //! dropped it, where it means `e4`. The real library passes the unmodified text by accident:
 //! `_z_encoding_clear` frees the schema and leaves the id, so a dropped encoding still reads as
 //! set (MEASURED: the unmodified program passes against the real library under this arm). wz
@@ -77,34 +85,228 @@ struct Build {
     extra_sources: &'static [&'static str],
     /// `-D` words upstream gives the target.
     defines: &'static [&'static str],
-    /// `(found, replacement)`: `found` must occur exactly once in the program.
-    correction: Option<(&'static str, &'static str)>,
+    /// `(found, replacement)` pairs, applied in order: each `found` must occur exactly once in
+    /// the program as the pairs before it left it.
+    corrections: &'static [(&'static str, &'static str)],
 }
 
 /// The `tests/utils/tcp_proxy.c` arm of upstream's `if(UNIX)`.
 const WITH_TCP_PROXY: Build = Build {
     extra_sources: &["utils/tcp_proxy.c"],
     defines: &["Z_ADVANCED_PUBSUB_TEST_USE_TCP_PROXY"],
-    correction: None,
+    corrections: &[],
 };
 
 /// `z_api_timestamp_test` is the one target upstream builds with its test hooks on.
 const WITH_TEST_HOOKS: Build = Build {
     extra_sources: &[],
     defines: &["Z_TEST_HOOKS=1"],
-    correction: None,
+    corrections: &[],
 };
 
 /// `test_encoding_with_id` drops `e2` and then checks it, where it means the `e4` just made.
 const ENCODING_CHECKS_E4: Build = Build {
     extra_sources: &[],
     defines: &[],
-    correction: Some((
+    corrections: &[(
         "z_encoding_from_substr(&e4, \"custom_id;custom_schema\", 16);\n    \
          assert(z_internal_encoding_check(&e2));",
         "z_encoding_from_substr(&e4, \"custom_id;custom_schema\", 16);\n    \
          assert(z_internal_encoding_check(&e4));",
-    )),
+    )],
+};
+
+/// `z_client_test` reads zenoh-pico's private layer for what it prints and for the lists it keeps
+/// its entities in; each such read is replaced, one exact text at a time, by the public call that
+/// means the same, and nothing else is touched: a hundred keys, subscribers, queryables and
+/// publishers, every put and fragmented put, and the ten thousand gets run as upstream wrote them.
+/// What is replaced, in upstream's order (lines of the pinned `tests/z_client_test.c`):
+///
+/// * the includes gain `<string.h>`, for the comparison below;
+/// * the lists `pubs1`, `subs2`, `qles2` (`_z_list_t`, lines 42, 45-46, and their pushes and pops
+///   at 197, 211, 222, 348-353, 358-363, 367-372) become arrays of `SET` with a length, popped
+///   last first as the list was;
+/// * `_z_string_equals` of two loaned strings (60, 90, 113) becomes `strings_equal`, the lengths
+///   and the bytes compared, and the alias of 106 a `z_view_string_t`;
+/// * a session's id printed through `_Z_RC_IN_VAL(..)->_local_zid` and `_z_id_to_string` (141-143,
+///   153-155) becomes `z_info_zid` and `z_id_to_string`;
+/// * a key printed through `z_loan(..)->_inner._keyexpr` (167-168, 180-181, 194-196, 244-246,
+///   285-287, 378-379, 386-387) becomes `z_keyexpr_as_view_string`;
+/// * an entity's id read off its private struct (`_entity_id`, `_id`; 194, 210, 220, 350, 360,
+///   369) is dropped from the line that prints it: no public call of the integration arm names it,
+///   and nothing reads it back.
+const CLIENT_TEST_PUBLIC_API: Build = Build {
+    extra_sources: &[],
+    defines: &[],
+    corrections: &[
+        (
+            r#"#include <stdlib.h>"#,
+            r#"#include <stdlib.h>
+#include <string.h>"#,
+        ),
+        (
+            r#"_z_list_t *pubs1 = NULL;"#,
+            r#"z_owned_publisher_t *pubs1[SET];
+size_t pubs1_len = 0;
+
+// wz: a key's text, a session's id and two strings compared through the public API, where upstream
+// reads zenoh-pico's private strings and structs.
+static int ke_len(const z_loaned_keyexpr_t *ke) {
+    z_view_string_t s;
+    z_keyexpr_as_view_string(ke, &s);
+    return (int)z_string_len(z_loan(s));
+}
+static const char *ke_data(const z_loaned_keyexpr_t *ke) {
+    z_view_string_t s;
+    z_keyexpr_as_view_string(ke, &s);
+    return z_string_data(z_loan(s));
+}
+static bool strings_equal(const z_loaned_string_t *a, const z_loaned_string_t *b) {
+    return z_string_len(a) == z_string_len(b) && memcmp(z_string_data(a), z_string_data(b), z_string_len(a)) == 0;
+}
+static void print_zid(const char *what, const z_loaned_session_t *s) {
+    z_id_t id = z_info_zid(s);
+    z_owned_string_t text;
+    z_id_to_string(&id, &text);
+    printf("%s with PID: %.*s\n", what, (int)z_string_len(z_loan(text)), z_string_data(z_loan(text)));
+    z_drop(z_move(text));
+}"#,
+        ),
+        (
+            r#"_z_list_t *subs2 = NULL;
+_z_list_t *qles2 = NULL;"#,
+            r#"z_owned_subscriber_t *subs2[SET];
+size_t subs2_len = 0;
+z_owned_queryable_t *qles2[SET];
+size_t qles2_len = 0;"#,
+        ),
+        (
+            r#"
+    assert(_z_string_equals(z_loan(k_str), z_loan(res_str)));"#,
+            r#"
+    assert(strings_equal(z_loan(k_str), z_loan(res_str)));"#,
+        ),
+        (
+            r#"        assert(_z_string_equals(z_loan(k_str), z_loan(res_str)));"#,
+            r#"        assert(strings_equal(z_loan(k_str), z_loan(res_str)));"#,
+        ),
+        (
+            r#"    _z_string_t res_str = _z_string_alias_str(res);"#,
+            r#"    z_view_string_t res_str;
+    z_view_string_from_str(&res_str, res);"#,
+        ),
+        (
+            r#"    assert(_z_string_equals(z_loan(k_str), &res_str));"#,
+            r#"    assert(strings_equal(z_loan(k_str), z_loan(res_str)));"#,
+        ),
+        (
+            r#"    _z_string_t zid1 = _z_id_to_string(&(_Z_RC_IN_VAL(z_loan(s1))->_local_zid));
+    printf("Session 1 with PID: %.*s\n", (int)_z_string_len(&zid1), _z_string_data(&zid1));
+    _z_string_clear(&zid1);"#,
+            r#"    print_zid("Session 1", z_loan(s1));"#,
+        ),
+        (
+            r#"    _z_string_t zid2 = _z_id_to_string(&(_Z_RC_IN_VAL(z_loan(s2))->_local_zid));
+    printf("Session 2 with PID: %.*s\n", (int)_z_string_len(&zid2), _z_string_data(&zid2));
+    _z_string_clear(&zid2);"#,
+            r#"    print_zid("Session 2", z_loan(s2));"#,
+        ),
+        (
+            r#"        printf("Declared resource on session 1: %.*s\n", (int)z_string_len(&z_loan(expr)->_inner._keyexpr),
+               z_string_data(&z_loan(expr)->_inner._keyexpr));"#,
+            r#"        printf("Declared resource on session 1: %.*s\n", ke_len(z_loan(expr)), ke_data(z_loan(expr)));"#,
+        ),
+        (
+            r#"        printf("Declared resource on session 2: %.*s\n", (int)z_string_len(&z_loan(expr)->_inner._keyexpr),
+               z_string_data(&z_loan(expr)->_inner._keyexpr));"#,
+            r#"        printf("Declared resource on session 2: %.*s\n", ke_len(z_loan(expr)), ke_data(z_loan(expr)));"#,
+        ),
+        (
+            r#"        printf("Declared subscription on session 2: %ju %.*s\n", (uintmax_t)z_subscriber_loan(sub)->_entity_id,
+               (int)z_string_len(&z_loan(rids2[i])->_inner._keyexpr),
+               z_string_data(&z_loan(rids2[i])->_inner._keyexpr));
+        subs2 = _z_list_push(subs2, sub);"#,
+            r#"        printf("Declared subscription on session 2: %.*s\n", ke_len(z_loan(rids2[i])), ke_data(z_loan(rids2[i])));
+        subs2[subs2_len++] = sub;"#,
+        ),
+        (
+            r#"        printf("Declared queryable on session 2: %ju %i %s\n", (uintmax_t)qle->_val._entity_id, 0, s1_res);
+        qles2 = _z_list_push(qles2, qle);"#,
+            r#"        printf("Declared queryable on session 2: %i %s\n", 0, s1_res);
+        qles2[qles2_len++] = qle;"#,
+        ),
+        (
+            r#"            printf("Declared publisher on session 1: %zu\n", z_loan(*pub)->_id);"#,
+            r#"            printf("Declared publisher on session 1\n");"#,
+        ),
+        (
+            r#"        pubs1 = _z_list_push(pubs1, pub);"#,
+            r#"        pubs1[pubs1_len++] = pub;"#,
+        ),
+        (
+            r#"            printf("Wrote data from session 1: %.*s %zu b\t(%u/%u)\n",
+                   (int)z_string_len(&z_loan(rids1[i])->_inner._keyexpr),
+                   z_string_data(&z_loan(rids1[i])->_inner._keyexpr), len, n * SET + (i + 1), total);"#,
+            r#"            printf("Wrote data from session 1: %.*s %zu b\t(%u/%u)\n",
+                   ke_len(z_loan(rids1[i])), ke_data(z_loan(rids1[i])), len, n * SET + (i + 1), total);"#,
+        ),
+        (
+            r#"                printf("Wrote fragment data from session 1: %.*s %zu b\t(%u/%u)\n",
+                       (int)z_string_len(&z_loan(rids1[i])->_inner._keyexpr),
+                       z_string_data(&z_loan(rids1[i])->_inner._keyexpr), len, n * SET + (i + 1), total);"#,
+            r#"                printf("Wrote fragment data from session 1: %.*s %zu b\t(%u/%u)\n",
+                       ke_len(z_loan(rids1[i])), ke_data(z_loan(rids1[i])), len, n * SET + (i + 1), total);"#,
+        ),
+        (
+            r#"    while (pubs1) {
+        z_owned_publisher_t *pub = _z_list_value(pubs1);
+        printf("Undeclared publisher on session 2: %zu\n", z_loan(*pub)->_id);
+        z_drop(z_move(*pub));
+        pubs1 = _z_list_pop(pubs1, _z_noop_elem_free, NULL);
+    }"#,
+            r#"    while (pubs1_len > 0) {
+        z_owned_publisher_t *pub = pubs1[--pubs1_len];
+        printf("Undeclared publisher on session 2\n");
+        z_drop(z_move(*pub));
+    }"#,
+        ),
+        (
+            r#"    while (subs2) {
+        z_owned_subscriber_t *sub = _z_list_value(subs2);
+        printf("Undeclared subscriber on session 2: %ju\n", (uintmax_t)sub->_val._entity_id);
+        z_drop(z_move(*sub));
+        subs2 = _z_list_pop(subs2, _z_noop_elem_free, NULL);
+    }"#,
+            r#"    while (subs2_len > 0) {
+        z_owned_subscriber_t *sub = subs2[--subs2_len];
+        printf("Undeclared subscriber on session 2\n");
+        z_drop(z_move(*sub));
+    }"#,
+        ),
+        (
+            r#"    while (qles2) {
+        z_owned_queryable_t *qle = _z_list_value(qles2);
+        printf("Undeclared queryable on session 2: %ju\n", (uintmax_t)qle->_val._entity_id);
+        z_drop(z_move(*qle));
+        qles2 = _z_list_pop(qles2, _z_noop_elem_free, NULL);
+    }"#,
+            r#"    while (qles2_len > 0) {
+        z_owned_queryable_t *qle = qles2[--qles2_len];
+        printf("Undeclared queryable on session 2\n");
+        z_drop(z_move(*qle));
+    }"#,
+        ),
+        (
+            r#"        printf("Undeclared resource on session 1: %.*s\n", (int)z_string_len(&z_loan(rids1[i])->_inner._keyexpr),
+               z_string_data(&z_loan(rids1[i])->_inner._keyexpr));"#,
+            r#"        printf("Undeclared resource on session 1: %.*s\n", ke_len(z_loan(rids1[i])), ke_data(z_loan(rids1[i])));"#,
+        ),
+        (
+            r#"        printf("Undeclared resource on session 2: %.*s\n", (int)z_string_len(&z_loan(rids2[i])->_inner._keyexpr),
+               z_string_data(&z_loan(rids2[i])->_inner._keyexpr));"#,
+            r#"        printf("Undeclared resource on session 2: %.*s\n", ke_len(z_loan(rids2[i])), ke_data(z_loan(rids2[i])));"#,
+        ),
+    ],
 };
 
 /// A program compiled for the integration arm, and the directory that holds it.
@@ -125,21 +327,22 @@ fn compile_upstream_test(name: &str, build: &Build, against_wz: bool) -> Result<
         upstream.display()
     );
     let dir = tempfile::tempdir().expect("tempdir for the compiled test");
-    let src = match build.correction {
-        None => upstream,
-        Some((found, replacement)) => {
-            let text = std::fs::read_to_string(&upstream).expect("read the upstream program");
+    let src = if build.corrections.is_empty() {
+        upstream
+    } else {
+        let mut text = std::fs::read_to_string(&upstream).expect("read the upstream program");
+        for (found, replacement) in build.corrections {
             assert_eq!(
                 text.matches(found).count(),
                 1,
-                "upstream {name}.c no longer has the line this leg corrects exactly once; the \
-                 correction is stale"
+                "upstream {name}.c no longer has the text this leg corrects exactly once; the \
+                 correction is stale:\n{found}"
             );
-            let corrected = dir.path().join(format!("{name}.c"));
-            std::fs::write(&corrected, text.replacen(found, replacement, 1))
-                .expect("write the corrected program");
-            corrected
+            text = text.replacen(found, replacement, 1);
         }
+        let corrected = dir.path().join(format!("{name}.c"));
+        std::fs::write(&corrected, text).expect("write the corrected program");
+        corrected
     };
     let extra: Vec<PathBuf> = build
         .extra_sources
@@ -338,6 +541,7 @@ upstream_tests! {
     routed upstreams_advanced_pubsub_test_passes_on_wz_beside_a_zenohd => "z_api_advanced_pubsub_test", WITH_TCP_PROXY;
     routed upstreams_callback_drop_on_undeclare_test_passes_on_wz_beside_a_zenohd => "z_api_callback_drop_on_undeclare_test", WITH_TCP_PROXY;
     routed upstreams_batching_test_passes_on_wz_beside_a_zenohd => "z_api_batching_test";
+    routed upstreams_client_test_passes_on_wz_beside_a_zenohd => "z_client_test", CLIENT_TEST_PUBLIC_API;
 }
 
 // wz-proves: none -- pins the set of pico-private symbols a program needs that wz does not export
