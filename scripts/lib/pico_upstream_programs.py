@@ -919,7 +919,7 @@ def play(sc: Scenario, exes: dict[str, pathlib.Path], locator: str, work: pathli
         first_role, first = order[0]
         running[first_role] = Running(first_role, first, exes[first_role], locator, work, 1)
         if len(order) == 2:
-            wait_ready(running[first_role], first.ready, deadline)
+            wait_ready(running[first_role], first.ready, min(deadline, time.monotonic() + READY_S))
             time.sleep(SETTLE_S)
             second_role, second = order[1]
             if running[first_role].poll() is None or first.ends:
