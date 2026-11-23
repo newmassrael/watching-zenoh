@@ -375,12 +375,17 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   through a table of `MAX_ADMIN_LOCATORS` views on the delivering frame (`lend_hello`,
   `StringArrayState::lent`), so a delivery copies nothing, and the scout reads its config's keys
   in place; a Hello with more locators than the table is handed through copies, and
-  `z_hello_clone` owns copies. The window's half: a window records its Hellos in a table of
-  `MAX_SCOUT_HELLOS` rows (`HelloTable`, pico preset 1), each row its locators, at most
+  `z_hello_clone` owns copies. The window's half: a cooperative window records its Hellos in a
+  table of `MAX_SCOUT_HELLOS` rows (`HelloTable`, pico preset 1), each row its locators, at most
   `SCOUT_HELLO_LOCATORS` of `MAX_LOCATOR_LEN` bytes, in a text of its own (`HelloRow`), decoded
-  from the datagram with no heap (`decode_hello_row`); a Hello past the table is counted
-  (`hellos_refused`), and the cooperative windows lend the rows to the callback
-  (`deliver_rows_in_upstream_order`). What a window still allocates: its actions (`Arc`), the
+  into the row in place (`HelloRow::decode_into`); a Hello past the table is counted
+  (`hellos_refused`), and the rows are lent to the callback (`deliver_rows_in_upstream_order`).
+  The table is never on a stack: the window holds a pointer to it
+  (`ScoutingActions::over_table`), and the pico C ABI keeps the one table in the library's static
+  memory, claimed by one window at a time; a window that finds it claimed (another thread's scout,
+  or one asked from a scout's callback) is refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`. The Rust
+  preset's window (`ScoutingActions::new`, the tokio engine) keeps zenoh's collection on the
+  heap, with no bound. What a window still allocates: its actions (`Arc`), the
   Scout it stages (`Vec<u8>`), the first locator it captured (`String`), the record of ignored
   datagrams, the read buffer (`vec![0; rx]`), and `scouted_hellos`/`scout_first` for a host or
   an open that takes owned Hellos.
@@ -543,9 +548,11 @@ suites (C1co, Layer Z) unchanged.
       `wz_ext_replay_publisher_storage_size`, holds past the rings an answer area (`AnswerArea`:
       the order of the cells, each frame's length, a copy of every frame and one frame's room for
       the release), aligned wherever the storage starts; one answer at a time copies into it under
-      the cache's lock and replies after it, so an answer allocates nothing. A query asked of the
-      cache from inside a callback of its own answer, on the answering thread, would wait on that
-      answer. The `replay` row's rounds put and do not answer, so the row does not move with it.
+      the cache's lock and replies after it, so an answer allocates nothing. zenoh-pico answers
+      its cache the same way (one outbox held for the whole answer, the cache's lock only for the
+      copy); zenoh-ext replies under a read lock of its cache, so its answers run side by side and
+      a send waits for them. A query asked of the cache from inside a callback of its own answer,
+      on the answering thread, would wait on that answer. The `replay` row's rounds put and do not answer, so the row does not move with it.
     - End-to-end and catalogs: the supervision's streams and the catalogs' entries are lent under
       the process's rows already (`ProcessRows`). In this crate their doors allocate the state's
       `Box<Mutex<..>>` when it is made (U9) and a refusal's text (`format!` and `to_string`

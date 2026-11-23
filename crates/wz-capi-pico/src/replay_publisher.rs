@@ -191,6 +191,14 @@ unsafe impl Sync for Shared {}
 /// after the cache's lock is let go, while a record may write the rings, so the answer reads its
 /// copy; it lies in the storage the program sized (`wz_ext_replay_publisher_storage_size`), so an
 /// answer allocates nothing. One answer at a time holds it.
+///
+/// zenoh-pico answers its cache the same way: one outbox for each cache, held for the whole answer,
+/// and the cache's own lock only while the samples are copied into it
+/// (`vendor/zenoh-pico/src/collections/advanced_cache.c` @
+/// `res = _z_mutex_lock(&cache->_outbox_mutex);`), so its answers run one at a time and a send
+/// is cached while one is replied. zenoh-ext replies under a read lock of its cache
+/// (`zenoh-ext/src/advanced_cache.rs` @ `if let Ok(queue) = cache.read() {`): its answers run
+/// side by side, and a send waits for them to end before it is cached.
 struct AnswerArea<'a> {
     order: &'a mut [usize],
     lens: &'a mut [usize],
