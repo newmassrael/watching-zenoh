@@ -1278,9 +1278,10 @@ fn a_delivery_names_each_row_it_reaches_by_its_handle() {
             Counted::default(),
         )
         .unwrap();
+    // Literal keys: a build without the wildcard features reads `*` as a literal chunk.
     let own = tables
         .declare_subscriber(
-            "a/*",
+            "a/b",
             Locality::SessionLocal,
             KeyForm::default(),
             Counted::default(),
