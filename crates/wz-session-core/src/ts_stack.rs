@@ -131,7 +131,7 @@ impl TsStack {
             let (timestamp, after) = (tail.get(..len)?, tail.get(len..)?);
             stack.push(Interception {
                 flags,
-                timestamp: tail[..len].to_vec(),
+                timestamp: timestamp.to_vec(),
             });
             rest = after;
         }
