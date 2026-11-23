@@ -459,7 +459,7 @@ fn poll_datagram(guard: &AppLinkGuard, cx: &mut Context<'_>) -> Poll<Option<Rece
     let transport = &guard.transport;
     let handle = guard.handle;
     let (read, drained) = transport.with(|table| {
-        let read = table.read_datagram(handle, Some(cx.waker()));
+        let read = table.read_datagram(handle, Some(cx.waker()), |datagram| datagram.to_received());
         (read, table.take_drained())
     });
     transport.perform(drained);

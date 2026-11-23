@@ -177,15 +177,126 @@ pub enum InboundRefusal {
     /// A group's datagram named no source: the session tells the members of a group apart by
     /// the locator each datagram came from.
     NoSource,
+    /// The call hands in more than the link could ever hold at once: a datagram longer than
+    /// [`DATAGRAM_MAX`] or named by a locator longer than [`SOURCE_MAX`], or stream bytes past
+    /// the link's whole storage. Handed in again it is refused again; a stream's bytes are taken
+    /// in smaller calls.
+    TooLarge,
 }
 
-/// Bytes the program handed in, copied at the call.
+/// The most bytes one datagram a link carries holds: the widest batch the wire can state.
+pub const DATAGRAM_MAX: usize = u16::MAX as usize;
+
+/// The longest locator a datagram is queued with.
+pub const SOURCE_MAX: usize = u8::MAX as usize - 1;
+
+/// The head of each queued datagram: its length (two bytes, little-endian) and the length of
+/// the locator after it, one more than the locator's bytes, 0 for none.
+const RECORD_HEAD: usize = 3;
+
+/// A queued datagram copied out whole, for an engine that owns what it reads
+/// ([`QueuedDatagram::to_received`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Received {
     /// The bytes.
     pub bytes: Vec<u8>,
     /// The locator a datagram came from, when the program named one.
     pub source: Option<String>,
+}
+
+/// One datagram as [`AppLinkTable::read_datagram`] finds it, lent from its link's queue for the
+/// read: its bytes, in at most two runs where the queue wraps, and the locator it came from.
+#[derive(Debug, Clone, Copy)]
+pub struct QueuedDatagram<'a> {
+    parts: (&'a [u8], &'a [u8]),
+    source: Option<&'a str>,
+}
+
+impl<'a> QueuedDatagram<'a> {
+    /// How many bytes the datagram holds.
+    pub fn len(&self) -> usize {
+        self.parts.0.len() + self.parts.1.len()
+    }
+
+    /// Whether the datagram holds no byte.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The locator the datagram came from, when the program named one.
+    pub fn source(&self) -> Option<&'a str> {
+        self.source
+    }
+
+    /// Copy the datagram into `buf`, cut to it: how many bytes were copied.
+    pub fn copy_to(&self, buf: &mut [u8]) -> usize {
+        let (first, second) = self.parts;
+        let n = self.len().min(buf.len());
+        let from_first = n.min(first.len());
+        buf[..from_first].copy_from_slice(&first[..from_first]);
+        buf[from_first..n].copy_from_slice(&second[..n - from_first]);
+        n
+    }
+
+    /// The datagram and its locator copied onto the heap.
+    pub fn to_received(&self) -> Received {
+        let mut bytes = Vec::with_capacity(self.len());
+        bytes.extend_from_slice(self.parts.0);
+        bytes.extend_from_slice(self.parts.1);
+        Received {
+            bytes,
+            source: self.source.map(String::from),
+        }
+    }
+}
+
+/// The tasks a table method found waiting, for the host to wake once the lock is let go. One
+/// link's opener, reader and writer are held in place, which is every wake a table method makes:
+/// the streams a released listener closes with it were never handed to the session, so nothing
+/// waits on them. A wake past those three would be kept on the heap.
+#[derive(Debug, Default)]
+pub struct Wakes {
+    held: [Option<Waker>; 3],
+    spill: Vec<Waker>,
+}
+
+impl Wakes {
+    /// How many tasks are to be woken.
+    pub fn len(&self) -> usize {
+        self.held.iter().flatten().count() + self.spill.len()
+    }
+
+    /// Whether no task is to be woken.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn push(&mut self, waker: Waker) {
+        match self.held.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => *slot = Some(waker),
+            None => self.spill.push(waker),
+        }
+    }
+}
+
+impl Extend<Waker> for Wakes {
+    fn extend<I: IntoIterator<Item = Waker>>(&mut self, wakers: I) {
+        for waker in wakers {
+            self.push(waker);
+        }
+    }
+}
+
+impl IntoIterator for Wakes {
+    type Item = Waker;
+    type IntoIter = core::iter::Chain<
+        core::iter::Flatten<core::array::IntoIter<Option<Waker>, 3>>,
+        alloc::vec::IntoIter<Waker>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.held.into_iter().flatten().chain(self.spill)
+    }
 }
 
 /// What the host does after a method returns, with no lock held: call the program's `close` for
@@ -200,7 +311,7 @@ pub struct Effects {
     /// have since been read down to half their bound: the program may hand bytes in again.
     pub drained: Vec<LinkHandle>,
     /// The tasks to wake.
-    pub wake: Vec<Waker>,
+    pub wake: Wakes,
 }
 
 impl Effects {
@@ -238,11 +349,11 @@ pub enum StreamRead {
     End,
 }
 
-/// What a read of a datagram link found.
+/// What a read of a datagram link found: `T` is what the reader made of the datagram it was lent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DatagramRead {
-    /// One datagram, whole.
-    Datagram(Received),
+pub enum DatagramRead<T> {
+    /// One datagram, whole, as the reader took it.
+    Datagram(T),
     /// Nothing queued; the waker given is woken when one arrives or the link closes.
     Empty,
     /// The link is closed and every datagram it carried has been read.
@@ -329,12 +440,123 @@ impl AppLinkActions for LinkDuties {
     }
 }
 
+/// What a link holds for the session to read, in storage taken when the link is made: a stream's
+/// bytes as the program handed them in, or each datagram as a record (its head, its locator, its
+/// bytes). A call of the program's copies into it and a read copies out of it, so neither
+/// allocates; only a link with no bound grows it.
+struct RxRing {
+    /// The storage; its length is the ring's capacity.
+    buf: Vec<u8>,
+    /// Where the oldest byte held is.
+    head: usize,
+    /// How many bytes are held, the records' heads and locators included.
+    len: usize,
+}
+
+impl RxRing {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: alloc::vec![0; capacity],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn free(&self) -> usize {
+        self.capacity() - self.len
+    }
+
+    /// Room for `more` bytes, for the one link whose storage could not be taken whole when it was
+    /// made: a link with no bound.
+    fn grow_for(&mut self, more: usize) {
+        let need = self.len + more;
+        if need <= self.capacity() {
+            return;
+        }
+        let mut next = alloc::vec![0; need.next_power_of_two()];
+        let (first, second) = self.front(self.len);
+        next[..first.len()].copy_from_slice(first);
+        next[first.len()..self.len].copy_from_slice(second);
+        self.buf = next;
+        self.head = 0;
+    }
+
+    /// Append `bytes`, which the caller has found room for.
+    fn push(&mut self, bytes: &[u8]) {
+        debug_assert!(bytes.len() <= self.free(), "the caller found room");
+        if bytes.is_empty() {
+            return;
+        }
+        let capacity = self.capacity();
+        let tail = (self.head + self.len) % capacity;
+        let first = bytes.len().min(capacity - tail);
+        self.buf[tail..tail + first].copy_from_slice(&bytes[..first]);
+        self.buf[..bytes.len() - first].copy_from_slice(&bytes[first..]);
+        self.len += bytes.len();
+    }
+
+    /// The oldest `n` bytes held (all of them when fewer are), in at most two runs.
+    fn front(&self, n: usize) -> (&[u8], &[u8]) {
+        let n = n.min(self.len);
+        let first = n.min(self.capacity() - self.head);
+        (
+            &self.buf[self.head..self.head + first],
+            &self.buf[..n - first],
+        )
+    }
+
+    /// Let go of the oldest `n` bytes.
+    fn consume(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.len -= n;
+        self.head = if self.len == 0 {
+            0
+        } else {
+            (self.head + n) % self.capacity()
+        };
+    }
+
+    /// Move the oldest bytes into `out`, as many as it holds: how many were moved.
+    fn take_into(&mut self, out: &mut [u8]) -> usize {
+        let (first, second) = self.front(out.len());
+        let n = first.len() + second.len();
+        out[..first.len()].copy_from_slice(first);
+        out[first.len()..n].copy_from_slice(second);
+        self.consume(n);
+        n
+    }
+}
+
+/// The storage a link of `kind` held to `queue` takes when it is made: the bound, and never less
+/// than the largest unit one call of the program's hands in, so an empty queue takes any datagram
+/// the wire can carry. A listener carries nothing; a link with no bound starts there and grows.
+fn rx_capacity(kind: AppLinkKind, queue: Quota) -> usize {
+    if kind.is_listener() {
+        return 0;
+    }
+    let unit = if kind.is_datagram() {
+        RECORD_HEAD + SOURCE_MAX + DATAGRAM_MAX
+    } else {
+        DATAGRAM_MAX
+    };
+    queue.most().map_or(unit, |most| most.max(unit))
+}
+
 struct Link {
     kind: AppLinkKind,
     machine: Engine<AppLinkPolicy<LinkDuties>>,
-    rx: VecDeque<Received>,
-    /// How much of the front of `rx` a stream read has already taken.
-    rx_front_taken: usize,
+    rx: RxRing,
+    /// The bytes the program handed in and the session has not read: what the bound counts, the
+    /// datagrams' heads and locators left out.
+    queued: usize,
     /// The streams accepted on a listener and not yet taken by the session.
     accepted: VecDeque<(LinkHandle, String)>,
     /// The locator the program named for the remote end of an accepted stream.
@@ -375,8 +597,8 @@ impl Link {
         Self {
             kind,
             machine,
-            rx: VecDeque::new(),
-            rx_front_taken: 0,
+            rx: RxRing::with_capacity(rx_capacity(kind, queue)),
+            queued: 0,
             accepted: VecDeque::new(),
             remote: None,
             reader: None,
@@ -403,11 +625,7 @@ impl Link {
 
     /// The bytes queued and not yet read.
     fn queued(&self) -> usize {
-        self.rx
-            .iter()
-            .map(|received| received.bytes.len())
-            .sum::<usize>()
-            - self.rx_front_taken
+        self.queued
     }
 
     /// After a read: a link that refused the program for being full and is now read down to half
@@ -526,8 +744,10 @@ impl AppLinkTable {
 
     /// A new link of `kind`, Opening, before the program is asked to open it, which queues at most
     /// `queue` bytes in each direction: the `APP_LINK_QUEUE_BYTES` of the session that opens it.
-    /// A link always takes the program's bytes when its queue is empty, so a quota of 0 holds one
-    /// chunk at a time. The streams or sources accepted on a listener keep the listener's.
+    /// The link takes its storage now (its bound, and room for the widest datagram), and always
+    /// takes what the program hands in when its queue is empty and the storage holds it, so a
+    /// quota of 0 holds one chunk at a time. The streams or sources accepted on a listener keep
+    /// the listener's.
     pub fn reserve(&mut self, kind: AppLinkKind, queue: Quota) -> LinkHandle {
         let handle = self.take_handle();
         self.links.insert(handle, Link::new(kind, queue));
@@ -665,20 +885,47 @@ impl AppLinkTable {
         if bytes.is_empty() && link.kind.is_stream() {
             return Ok(effects);
         }
+        let datagram = link.kind.is_datagram();
+        // A stream's bytes carry no locator: a source the program names with them is dropped.
+        let source = if datagram { source } else { None };
+        if datagram
+            && (bytes.len() > DATAGRAM_MAX || source.is_some_and(|named| named.len() > SOURCE_MAX))
+        {
+            return Err(InboundRefusal::TooLarge);
+        }
+        let stored = if datagram {
+            RECORD_HEAD + source.map_or(0, str::len) + bytes.len()
+        } else {
+            bytes.len()
+        };
+        if link.queue.is_unbounded() {
+            link.rx.grow_for(stored);
+        } else if stored > link.rx.capacity() {
+            return Err(InboundRefusal::TooLarge);
+        }
         // Past the bound nothing is taken, and the program learns when to hand it in again. An
-        // empty queue takes anything, so a datagram larger than the bound is not refused forever.
-        if !link.rx.is_empty() && !link.admits(link.queued() + bytes.len()) {
+        // empty queue takes any unit its storage holds, so a datagram larger than the bound is
+        // not refused forever.
+        if !link.rx.is_empty()
+            && (!link.admits(link.queued() + bytes.len()) || stored > link.rx.free())
+        {
             link.refused_full = true;
             return Err(InboundRefusal::Full);
         }
-        link.rx.push_back(Received {
-            bytes: bytes.to_vec(),
-            source: if link.kind.is_datagram() {
-                source.map(String::from)
+        if datagram {
+            let name = source.map_or(&[][..], str::as_bytes);
+            // Both fit their bytes: the lengths were checked against DATAGRAM_MAX and SOURCE_MAX.
+            let [low, high] = (bytes.len() as u16).to_le_bytes();
+            let named = if source.is_some() {
+                name.len() as u8 + 1
             } else {
-                None
-            },
-        });
+                0
+            };
+            link.rx.push(&[low, high, named]);
+            link.rx.push(name);
+        }
+        link.rx.push(bytes);
+        link.queued += bytes.len();
         effects.wake.extend(link.reader.take());
         Ok(effects)
     }
@@ -693,21 +940,8 @@ impl AppLinkTable {
         let Some(link) = self.links.get_mut(&handle) else {
             return StreamRead::End;
         };
-        let mut copied = 0;
-        while copied < buf.len() {
-            let Some(front) = link.rx.front() else {
-                break;
-            };
-            let available = &front.bytes[link.rx_front_taken..];
-            let n = available.len().min(buf.len() - copied);
-            buf[copied..copied + n].copy_from_slice(&available[..n]);
-            copied += n;
-            link.rx_front_taken += n;
-            if link.rx_front_taken == front.bytes.len() {
-                link.rx.pop_front();
-                link.rx_front_taken = 0;
-            }
-        }
+        let copied = link.rx.take_into(buf);
+        link.queued -= copied;
         if copied > 0 {
             link.note_read(handle, &mut self.drained);
             return StreamRead::Bytes(copied);
@@ -736,20 +970,48 @@ impl AppLinkTable {
         false
     }
 
-    /// The next datagram queued on `handle`.
-    pub fn read_datagram(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> DatagramRead {
+    /// The next datagram queued on `handle`, lent to `take` where the queue holds it and let go
+    /// of once `take` returns: what `take` made of it.
+    pub fn read_datagram<T>(
+        &mut self,
+        handle: LinkHandle,
+        waker: Option<&Waker>,
+        take: impl FnOnce(QueuedDatagram<'_>) -> T,
+    ) -> DatagramRead<T> {
         let Some(link) = self.links.get_mut(&handle) else {
             return DatagramRead::End;
         };
-        if let Some(datagram) = link.rx.pop_front() {
-            link.note_read(handle, &mut self.drained);
-            return DatagramRead::Datagram(datagram);
-        }
-        if link.is_gone() {
+        // A stream's bytes are no datagrams; a listener holds none.
+        if !link.kind.is_datagram() {
             return DatagramRead::End;
         }
-        keep(&mut link.reader, waker);
-        DatagramRead::Empty
+        if link.rx.is_empty() {
+            if link.is_gone() {
+                return DatagramRead::End;
+            }
+            keep(&mut link.reader, waker);
+            return DatagramRead::Empty;
+        }
+        let mut head = [0u8; RECORD_HEAD];
+        link.rx.take_into(&mut head);
+        let len = usize::from(u16::from_le_bytes([head[0], head[1]]));
+        let mut name = [0u8; SOURCE_MAX];
+        let named = usize::from(head[2]).saturating_sub(1);
+        let named = link.rx.take_into(&mut name[..named]);
+        // The locator was a `str` when it was queued.
+        let source = match head[2] {
+            0 => None,
+            _ => core::str::from_utf8(&name[..named]).ok(),
+        };
+        let (first, second) = link.rx.front(len);
+        let taken = take(QueuedDatagram {
+            parts: (first, second),
+            source,
+        });
+        link.rx.consume(len);
+        link.queued -= len;
+        link.note_read(handle, &mut self.drained);
+        DatagramRead::Datagram(taken)
     }
 
     /// The next stream accepted on `listener`. The session owns it from here, and releases it as
@@ -1468,7 +1730,7 @@ mod tests {
             .received(link, b"d", Some("udp/198.51.100.7:40000"))
             .unwrap();
         assert!(matches!(
-            table.read_datagram(link, None),
+            table.read_datagram(link, None, |datagram| datagram.to_received()),
             DatagramRead::Datagram(_)
         ));
         // The listener itself carries nothing and sends nothing.
@@ -1530,23 +1792,29 @@ mod tests {
             InboundRefusal::NoSource
         );
         assert_eq!(
-            table.read_datagram(handle, None),
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
             DatagramRead::Datagram(Received {
                 bytes: b"one".to_vec(),
                 source: Some(String::from("udp/198.51.100.4:7447")),
             })
         );
         assert_eq!(
-            table.read_datagram(handle, None),
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
             DatagramRead::Datagram(Received {
                 bytes: Vec::new(),
                 source: Some(String::from("udp/198.51.100.5:7447")),
             }),
             "an empty datagram is a datagram"
         );
-        assert_eq!(table.read_datagram(handle, None), DatagramRead::Empty);
+        assert_eq!(
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
+            DatagramRead::Empty
+        );
         let _ = table.event(handle, ProgramEvent::Closed).unwrap();
-        assert_eq!(table.read_datagram(handle, None), DatagramRead::End);
+        assert_eq!(
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
+            DatagramRead::End
+        );
     }
 
     #[test]
@@ -1629,7 +1897,7 @@ mod tests {
             InboundRefusal::Full
         );
         assert!(matches!(
-            table.read_datagram(handle, None),
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
             DatagramRead::Datagram(_)
         ));
         assert_eq!(table.take_drained().drained, [handle]);
@@ -1719,5 +1987,217 @@ mod tests {
             table.hold_remainder(handle, b"y").unwrap_err(),
             InboundRefusal::Full
         );
+    }
+
+    /// A datagram link opened under `queue`, up.
+    fn open_datagram_under(table: &mut AppLinkTable, queue: Quota) -> LinkHandle {
+        let handle = table.reserve(AppLinkKind::Datagram, queue);
+        let _ = table.opened(handle, ProgramOpen::Up);
+        handle
+    }
+
+    /// `len` bytes that differ from their neighbours, so a run read from the wrong place shows.
+    fn pattern(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|at| (at as u8).wrapping_add(seed)).collect()
+    }
+
+    #[test]
+    fn datagrams_are_read_whole_where_the_queue_wraps() {
+        let mut table = AppLinkTable::new();
+        let handle = open_datagram_under(&mut table, Quota::at_most(60_000));
+        let source = Some("udp/198.51.100.4:7447");
+        let read = |table: &mut AppLinkTable| {
+            table.read_datagram(handle, None, |datagram| datagram.to_received())
+        };
+        // Two held at a time, so each one queued after the first lands where the last left off
+        // and the storage, a little over one widest datagram, wraps under them.
+        let mut held = alloc::collections::VecDeque::new();
+        for seed in 0..6u8 {
+            let datagram = pattern(25_000, seed);
+            let _ = table.received(handle, &datagram, source).unwrap();
+            held.push_back(datagram);
+            if held.len() == 2 {
+                let oldest = held.pop_front().unwrap();
+                assert_eq!(
+                    read(&mut table),
+                    DatagramRead::Datagram(Received {
+                        bytes: oldest,
+                        source: source.map(String::from),
+                    }),
+                    "datagram {seed}"
+                );
+            }
+        }
+        let last = held.pop_front().unwrap();
+        assert_eq!(
+            read(&mut table),
+            DatagramRead::Datagram(Received {
+                bytes: last,
+                source: source.map(String::from),
+            })
+        );
+        assert_eq!(table.queued_bytes(handle), 0);
+    }
+
+    #[test]
+    fn stream_bytes_are_read_in_order_where_the_queue_wraps() {
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(60_000));
+        let first = pattern(40_000, 1);
+        let second = pattern(40_000, 2);
+        let _ = table.received(handle, &first, None).unwrap();
+        let mut buf = alloc::vec![0u8; 30_000];
+        assert_eq!(
+            table.read_stream(handle, &mut buf, None),
+            StreamRead::Bytes(30_000)
+        );
+        assert_eq!(buf[..], first[..30_000]);
+        // Ten thousand bytes still held near the middle: the next forty thousand wrap.
+        let _ = table.received(handle, &second, None).unwrap();
+        let mut rest = alloc::vec![0u8; 50_000];
+        assert_eq!(
+            table.read_stream(handle, &mut rest, None),
+            StreamRead::Bytes(50_000)
+        );
+        assert_eq!(rest[..10_000], first[30_000..]);
+        assert_eq!(rest[10_000..], second[..]);
+        assert_eq!(table.queued_bytes(handle), 0);
+    }
+
+    #[test]
+    fn a_datagram_is_copied_cut_to_the_buffer() {
+        let mut table = AppLinkTable::new();
+        let handle = open_datagram_under(&mut table, QUEUE);
+        let _ = table.received(handle, b"abcdef", None).unwrap();
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            table.read_datagram(handle, None, |datagram| {
+                let source = datagram.source().map(String::from);
+                (datagram.len(), datagram.copy_to(&mut buf), source)
+            }),
+            DatagramRead::Datagram((6, 4, None))
+        );
+        assert_eq!(&buf, b"abcd");
+        assert_eq!(
+            table.queued_bytes(handle),
+            0,
+            "the whole datagram was let go"
+        );
+    }
+
+    #[test]
+    fn an_empty_locator_is_read_back_as_named() {
+        let mut table = AppLinkTable::new();
+        let handle = open_datagram_under(&mut table, QUEUE);
+        let _ = table.received(handle, b"x", Some("")).unwrap();
+        assert_eq!(
+            table.read_datagram(handle, None, |datagram| datagram.to_received()),
+            DatagramRead::Datagram(Received {
+                bytes: b"x".to_vec(),
+                source: Some(String::new()),
+            })
+        );
+    }
+
+    #[test]
+    fn what_no_storage_could_hold_is_refused_as_too_large() {
+        let mut table = AppLinkTable::new();
+        let datagrams = open_datagram_under(&mut table, QUEUE);
+        assert_eq!(
+            table
+                .received(datagrams, &alloc::vec![0u8; DATAGRAM_MAX + 1], None)
+                .unwrap_err(),
+            InboundRefusal::TooLarge
+        );
+        let long = "u".repeat(SOURCE_MAX + 1);
+        assert_eq!(
+            table
+                .received(datagrams, b"x", Some(long.as_str()))
+                .unwrap_err(),
+            InboundRefusal::TooLarge
+        );
+        // At the edges both are taken.
+        let edge = "u".repeat(SOURCE_MAX);
+        let _ = table
+            .received(
+                datagrams,
+                &alloc::vec![0u8; DATAGRAM_MAX],
+                Some(edge.as_str()),
+            )
+            .unwrap();
+        let stream = open_stream_under(&mut table, Quota::at_most(4));
+        assert_eq!(
+            table
+                .received(stream, &alloc::vec![0u8; DATAGRAM_MAX + 1], None)
+                .unwrap_err(),
+            InboundRefusal::TooLarge
+        );
+        assert_eq!(table.queued_bytes(stream), 0, "nothing of it was taken");
+        let _ = table
+            .received(stream, &alloc::vec![0u8; DATAGRAM_MAX], None)
+            .unwrap();
+        // A link with no bound grows to what it is handed.
+        let open = open_stream_under(&mut table, Quota::UNBOUNDED);
+        let _ = table
+            .received(open, &alloc::vec![0u8; 2 * DATAGRAM_MAX], None)
+            .unwrap();
+        assert_eq!(table.queued_bytes(open), 2 * DATAGRAM_MAX);
+    }
+
+    #[test]
+    fn a_queue_whose_storage_is_full_refuses_under_the_bound_and_says_when_it_drains() {
+        let mut table = AppLinkTable::new();
+        let bound = 2 * DATAGRAM_MAX;
+        let handle = open_datagram_under(&mut table, Quota::at_most(bound));
+        let source = "s".repeat(SOURCE_MAX);
+        let mut taken = 0;
+        while table.received(handle, b"d", Some(source.as_str())).is_ok() {
+            taken += 1;
+        }
+        assert_eq!(
+            taken,
+            bound / (RECORD_HEAD + SOURCE_MAX + 1),
+            "each datagram's head and locator take storage the bound does not count"
+        );
+        assert!(table.queued_bytes(handle) < bound / 2);
+        assert_eq!(
+            table
+                .received(handle, b"d", Some(source.as_str()))
+                .unwrap_err(),
+            InboundRefusal::Full
+        );
+        assert!(matches!(
+            table.read_datagram(handle, None, |_| ()),
+            DatagramRead::Datagram(())
+        ));
+        assert_eq!(table.take_drained().drained, [handle]);
+        let _ = table.received(handle, b"d", Some(source.as_str())).unwrap();
+    }
+
+    #[test]
+    fn a_stream_link_lends_no_datagram() {
+        let mut table = AppLinkTable::new();
+        let handle = open_stream(&mut table);
+        let _ = table.received(handle, b"ab", None).unwrap();
+        assert!(matches!(
+            table.read_datagram(handle, None, |_| ()),
+            DatagramRead::End
+        ));
+        assert_eq!(table.queued_bytes(handle), 2, "the stream's bytes stay");
+    }
+
+    #[test]
+    fn wakes_past_one_links_three_are_all_kept() {
+        let mut wakes = Wakes::default();
+        assert!(wakes.is_empty());
+        let counters: Vec<_> = (0..5).map(|_| counter()).collect();
+        wakes.extend(counters.iter().map(|(_, waker)| waker.clone()));
+        assert_eq!(wakes.len(), 5);
+        for waker in wakes {
+            waker.wake();
+        }
+        for (count, _) in &counters {
+            assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        }
     }
 }

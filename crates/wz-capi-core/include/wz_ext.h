@@ -1642,12 +1642,17 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * is the link's close.
  *
  * THE RECEIVE BOUND. A link queues at most APP_LINK_QUEUE_BYTES (a limit of
- * the build) of bytes the session has not read. wz_ext_transport_received past
- * it answers WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read
- * the queue down to half, the transport calls the program's drained(context,
- * link), from a session thread, and the program hands the same bytes in
- * again. A program that gives no drained retries on its own. An empty queue
- * takes any datagram, however large.
+ * the build) of bytes the session has not read, in storage the link takes
+ * when it is made: the bound, and never less than 65,535 bytes, so nothing is
+ * allocated as bytes arrive. wz_ext_transport_received past the bound, or past
+ * the storage the queued datagrams' locators also take, answers
+ * WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read the queue
+ * down to half, the transport calls the program's drained(context, link),
+ * from a session thread, and the program hands the same bytes in again. A
+ * program that gives no drained retries on its own. An empty queue takes any
+ * datagram of up to 65,535 bytes, however low the bound; a longer one, a
+ * locator longer than 254 bytes, or stream bytes past the link's whole
+ * storage are refused with Z_EINVAL, as no queue could take them.
  *
  * WHO OWNS WHAT. The program makes the transport (wz_ext_transport_new) and
  * names it in every call it makes, so it can hand in bytes while z_open is
@@ -1788,7 +1793,8 @@ z_result_t wz_ext_config_transport(z_loaned_config_t *config,
 /* Bytes that arrived on link, copied before this returns; source is the
  * locator a datagram came from, or NULL (a group's datagrams need one). Z_OK;
  * Z_ERR_NULL for a NULL transport, NULL data with a length, or a group's
- * datagram with no source; Z_EINVAL for a source that is not UTF-8;
+ * datagram with no source; Z_EINVAL for a source that is not UTF-8, or for
+ * more than the link could ever hold at once (THE RECEIVE BOUND);
  * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; WZ_EXT_ERR_LINK_FULL
  * past the receive bound, nothing taken. */
 z_result_t wz_ext_transport_received(const wz_ext_loaned_transport_t *transport,
