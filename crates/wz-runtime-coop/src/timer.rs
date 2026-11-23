@@ -195,19 +195,8 @@ impl TimerQueue {
         loop {
             let due = crate::cs::with(|cs| {
                 self.with_slots(cs, |slots| {
-                    let mut best: Option<(usize, u64, u64)> = None;
-                    for (index, slot) in slots.iter().enumerate() {
-                        if let Some(entry) = slot.0.borrow(cs).borrow().as_ref() {
-                            if entry.deadline_us <= now_us
-                                && best.map_or(true, |(_, deadline, seq)| {
-                                    (entry.deadline_us, entry.seq) < (deadline, seq)
-                                })
-                            {
-                                best = Some((index, entry.deadline_us, entry.seq));
-                            }
-                        }
-                    }
-                    best.and_then(|(index, ..)| slots[index].0.borrow(cs).borrow_mut().take())
+                    earliest(cs, slots, now_us)
+                        .and_then(|(index, _)| slots[index].0.borrow(cs).borrow_mut().take())
                 })
             });
             match due {
@@ -234,10 +223,7 @@ impl TimerQueue {
     pub fn next_deadline_us(&self) -> Option<u64> {
         crate::cs::with(|cs| {
             self.with_slots(cs, |slots| {
-                slots
-                    .iter()
-                    .filter_map(|slot| slot.0.borrow(cs).borrow().as_ref().map(|e| e.deadline_us))
-                    .min()
+                earliest(cs, slots, u64::MAX).map(|(_, deadline_us)| deadline_us)
             })
         })
     }
@@ -252,4 +238,23 @@ impl TimerQueue {
     pub fn capacity(&self) -> usize {
         crate::cs::with(|cs| self.with_slots(cs, |slots| slots.len()))
     }
+}
+
+/// The entry of `slots` due first at `until_us` or before, ties in registration order: its index
+/// and its deadline. One body for the pass that wakes what is due and for the look at what is next.
+#[inline(never)]
+fn earliest(cs: CriticalSection<'_>, slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if let Some(entry) = slot.0.borrow(cs).borrow().as_ref() {
+            if entry.deadline_us <= until_us
+                && best.map_or(true, |(_, deadline, seq)| {
+                    (entry.deadline_us, entry.seq) < (deadline, seq)
+                })
+            {
+                best = Some((index, entry.deadline_us, entry.seq));
+            }
+        }
+    }
+    best.map(|(index, deadline_us, _)| (index, deadline_us))
 }
