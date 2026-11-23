@@ -186,13 +186,7 @@ impl NodeGroup {
             })
         });
         let subscriber = engine
-            .declare_subscriber_on_wire(
-                event_key.clone(),
-                WireKey::literal(),
-                Locality::Any,
-                None,
-                sink,
-            )
+            .declare_subscriber_on_wire(&event_key, WireKey::literal(), Locality::Any, None, sink)
             .ok_or(NodeGroupError::Refused("the event subscriber was refused"))?;
 
         // The member's own record, served from its own key to whoever asks.
@@ -208,7 +202,7 @@ impl NodeGroup {
             }) as QueryCallback
         });
         let Some(queryable) = engine.declare_queryable_on_wire(
-            record_key,
+            &record_key,
             WireKey::literal(),
             true,
             Locality::Any,

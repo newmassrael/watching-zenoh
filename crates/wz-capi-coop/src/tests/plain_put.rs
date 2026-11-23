@@ -18,7 +18,7 @@ fn filter_on(engine: &Engine, key: &str) -> FilterId {
     engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            key.to_owned(),
+            key,
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,

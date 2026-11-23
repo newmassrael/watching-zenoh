@@ -1,0 +1,32 @@
+# Layer C1cs: each case's seconds, its build and its pico reference's, as capability_cost_gate.py
+# prints them (`<id>: <N>s`). The hosted lane is planned over these (capability_cost_gate.py,
+# "The hosted shards"); they decide the balance of its shards, never which case is built.
+#
+# Read 2026-11-23 from one `--measure` of every case in the gate's order on four cores of a build
+# machine, an empty artifact root and a warm cargo home: 1,218 s together, where the one hosted job
+# of run 45051019628 read 1,013 s. The first case of a run also builds the dependencies; refresh
+# the rows from a hosted shard's lines, which carry that cost where the plan put it.
+pico-client 66
+pico-client-small 55
+pico-client-udp 26
+pico-client-coop 31
+pico-client-coop-nostd 33
+pico-client-coop-unstable 11
+pico-client-coop-local 12
+pico-client-coop-connectivity 14
+pico-client-coop-admin-space 51
+pico-client-coop-query 42
+pico-client-coop-local-queryable 17
+pico-client-coop-scout 41
+pico-peer-coop 38
+pico-peer 70
+pico-default 111
+capic-client 54
+capic-client-small 52
+capic-scout 55
+capic-peer 33
+capic-router-node 107
+capic-default 161
+capic-default-lean 93
+statement-pico-stated 11
+statement-capic-shm-arm 34

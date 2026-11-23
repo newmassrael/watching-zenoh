@@ -702,17 +702,26 @@ impl GroupFace {
         self.stop.set(true);
     }
 
-    /// The zid of each member the group holds, whatever role it announced; a group whose session
-    /// ended holds none.
-    pub(super) fn member_zids(&self) -> Vec<Vec<u8>> {
+    /// The first member at or past place `from` of the group's member table, whatever role it
+    /// announced, with its place; a group whose session ended holds none.
+    pub(super) fn member_zid_from(
+        &self,
+        from: usize,
+    ) -> Option<(usize, wz_session_core::session_zid::SessionZid)> {
         if self.has_ended() {
-            return Vec::new();
+            return None;
         }
         self.members
             .borrow()
             .iter()
-            .map(|member| member.peer.as_slice().to_vec())
-            .collect()
+            .enumerate()
+            .skip(from)
+            .find_map(|(at, member)| {
+                Some((
+                    at,
+                    wz_session_core::session_zid::SessionZid::new(member.peer.as_slice()).ok()?,
+                ))
+            })
     }
 
     /// The members the group holds, each as the transport it is reported as (`connectivity`); a

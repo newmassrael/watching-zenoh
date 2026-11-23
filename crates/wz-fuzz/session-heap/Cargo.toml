@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The session target of the heap profile (fuzz_targets/session_unicast.rs): a
+# unicast session on the cooperative runtime with an allocator, its receive
+# the copying one. A package of its own so the features cargo unifies for it
+# are this profile's alone (../README.md).
+[package]
+name = "wz-fuzz-session-heap"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+wz-fuzz-ingress-common = { path = "../ingress-common" }
+wz-runtime-coop = { path = "../../wz-runtime-coop", default-features = false, features = [
+    "alloc",
+    "host-lock",
+    "session-unicast",
+    "session-unicast-open",
+    "codec-frame",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-keep-alive",
+    "codec-close",
+    "transport-keepalive",
+    "reassembly",
+] }
+wz-session-core = { path = "../../wz-session-core", features = [
+    "session-unicast",
+    "session-unicast-open",
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-declare",
+    "rx-push",
+    "rx-response",
+    "rx-control",
+    "pubsub-put",
+    "pubsub-delete",
+    "declare-subscriber",
+    "declare-queryable",
+    "declare-final",
+    "declare-interest",
+    "declare-keyexpr",
+    "query-queryable",
+    "transport-fragmentation",
+] }
+
+[[bin]]
+name = "session_unicast"
+path = "fuzz_targets/session_unicast.rs"
+test = false
+doc = false
+bench = false

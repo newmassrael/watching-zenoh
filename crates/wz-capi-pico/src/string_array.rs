@@ -71,30 +71,73 @@ impl StringArrayEntry {
 }
 
 pub(crate) struct StringArrayState {
-    // `clippy::vec_box` fires here and is WRONG for this type, exactly as it is
-    // for the sibling zenoh-c state: the lint's premise is that the `Vec`
-    // already heap-allocates, so the `Box` buys nothing. What it buys is the
-    // whole point — an element address that survives a reallocation. Without
-    // it, one `push` past capacity invalidates every pointer
-    // `z_string_array_get` has handed out, which is the use-after-free
-    // `an_element_pointer_survives_a_reallocating_push` pins.
-    #[allow(clippy::vec_box)]
-    entries: Vec<Box<StringArrayEntry>>,
+    items: Items,
+}
+
+// `clippy::vec_box` fires here and is WRONG for this type, exactly as it is
+// for the sibling zenoh-c state: the lint's premise is that the `Vec`
+// already heap-allocates, so the `Box` buys nothing. What it buys is the
+// whole point — an element address that survives a reallocation. Without
+// it, one `push` past capacity invalidates every pointer
+// `z_string_array_get` has handed out, which is the use-after-free
+// `an_element_pointer_survives_a_reallocating_push` pins.
+#[allow(clippy::vec_box)]
+enum Items {
+    /// Strings the array owns.
+    Owned(Vec<Box<StringArrayEntry>>),
+    /// Views of strings another object owns, read in place for as long as the lender keeps them
+    /// (`StringArrayState::lent`): a scouted Hello's locators, handed to a scout's callback with
+    /// no copy.
+    #[cfg_attr(
+        not(any(feature = "scout", feature = "scout-mcu", test)),
+        allow(dead_code)
+    )]
+    Lent {
+        views: *const z_loaned_string_t,
+        len: usize,
+    },
 }
 
 impl StringArrayState {
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
         Box::new(Self {
-            entries: items.into_iter().map(StringArrayEntry::new).collect(),
+            items: Items::Owned(items.into_iter().map(StringArrayEntry::new).collect()),
         })
     }
 
+    /// An array over `views`, strings another object owns, which it reads in place and never
+    /// pushes to.
+    ///
+    /// # Safety
+    /// The array is not read after `views`, or a string one of them views, is gone.
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
+    pub(crate) unsafe fn lent(views: &[z_loaned_string_t]) -> Self {
+        Self {
+            items: Items::Lent {
+                views: views.as_ptr(),
+                len: views.len(),
+            },
+        }
+    }
+
+    /// Whether the strings are another object's (`Self::lent`).
+    fn is_lent(&self) -> bool {
+        matches!(self.items, Items::Lent { .. })
+    }
+
     fn len(&self) -> usize {
-        self.entries.len()
+        match &self.items {
+            Items::Owned(entries) => entries.len(),
+            Items::Lent { len, .. } => *len,
+        }
     }
 
     fn view(&self, k: usize) -> Option<&z_loaned_string_t> {
-        self.entries.get(k).map(|entry| &entry.view)
+        match &self.items {
+            Items::Owned(entries) => entries.get(k).map(|entry| &entry.view),
+            // SAFETY: `k` is within the views, which outlive the array (`Self::lent`).
+            Items::Lent { views, len } => (k < *len).then(|| unsafe { &*views.add(k) }),
+        }
     }
 
     /// Every entry as an OWNED string.
@@ -104,10 +147,17 @@ impl StringArrayState {
     /// borrowing would silently extend the caller's lifetime obligation to an
     /// array it never pushed to.
     pub(crate) fn to_strings(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .map(|entry| entry.value.clone())
-            .collect()
+        match &self.items {
+            Items::Owned(entries) => entries.iter().map(|entry| entry.value.clone()).collect(),
+            Items::Lent { .. } => (0..self.len())
+                .filter_map(|k| self.view(k))
+                .map(|view| {
+                    // SAFETY: a lent view reads a live string (`Self::lent`).
+                    let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
+                    String::from_utf8_lossy(bytes.unwrap_or(&[])).into_owned()
+                })
+                .collect(),
+        }
     }
 }
 
@@ -368,16 +418,21 @@ unsafe fn string_array_push(
     let Some(state) = string_array_state_mut(array) else {
         return 0;
     };
+    let len = state.len();
+    // A lent array's strings are its lender's: nothing is added to them.
+    let Items::Owned(entries) = &mut state.items else {
+        return len;
+    };
     let Some(view) = value.as_ref() else {
-        return state.len();
+        return len;
     };
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
-        return state.len();
+        return len;
     };
-    state.entries.push(StringArrayEntry::new(
+    entries.push(StringArrayEntry::new(
         String::from_utf8_lossy(bytes).into_owned(),
     ));
-    state.len()
+    entries.len()
 }
 
 /// Deep-copy a string array (pico `z_string_array_clone`).
@@ -404,7 +459,9 @@ pub unsafe extern "C" fn z_string_array_clone(
 }
 
 /// Adopt a loaned string array into an owned one, emptying the source (pico
-/// `z_string_array_take_from_loaned`).
+/// `z_string_array_take_from_loaned`). An array that lends another object's strings (a scouted
+/// Hello's locators) is not the caller's to empty: the owned one is a copy of it, and it is left
+/// as it was.
 ///
 /// # Safety
 /// `dst` must be valid and writable; `src` must be null or a live loaned array.
@@ -415,6 +472,9 @@ pub unsafe extern "C" fn z_string_array_take_from_loaned(
 ) -> ZResult {
     if dst.is_null() || src.is_null() {
         return crate::result::Z_ERR_NULL;
+    }
+    if string_array_state(src).is_some_and(StringArrayState::is_lent) {
+        return z_string_array_clone(dst, src);
     }
     let slot = src as *mut z_owned_string_array_t;
     *dst = z_owned_string_array_t {
@@ -536,6 +596,81 @@ mod tests {
 
             let mut moved = z_moved_string_array_t { _this: arr };
             z_string_array_drop(&mut moved);
+        }
+    }
+    /// The views of a lent array, in the order lent, read the lender's strings in place.
+    fn lent_views(strings: &[&str]) -> Vec<z_loaned_string_t> {
+        strings
+            .iter()
+            .map(|text| z_loaned_string_t {
+                _start: text.as_ptr(),
+                _len: text.len(),
+            })
+            .collect()
+    }
+
+    /// A lent array reads the lender's bytes where they lie, and refuses a push: its strings are
+    /// the lender's. Turned red by a lent array that copies its strings or takes a push.
+    #[test]
+    fn a_lent_array_reads_the_lenders_strings_and_takes_no_push() {
+        let strings = ["tcp/10.0.0.1:7447", "udp/10.0.0.1:7447"];
+        let views = lent_views(&strings);
+        // SAFETY: `views` and `strings` outlive the array.
+        let mut state = unsafe { StringArrayState::lent(&views) };
+        let mut loaned = z_loaned_string_array_t {
+            handle: (&mut state as *mut StringArrayState).cast::<c_void>(),
+            _pad: [core::ptr::null_mut(); 3],
+        };
+        let pushed = z_loaned_string_t {
+            _start: "x".as_ptr(),
+            _len: 1,
+        };
+        // SAFETY: a live array over live strings, and a live view.
+        unsafe {
+            assert_eq!(z_string_array_len(&loaned), 2);
+            for (k, text) in strings.iter().enumerate() {
+                let view = &*z_string_array_get(&loaned, k);
+                assert_eq!(view._start, text.as_ptr(), "entry {k} is read in place");
+                assert_eq!(view._len, text.len());
+            }
+            assert!(z_string_array_get(&loaned, 2).is_null());
+            assert_eq!(z_string_array_push_by_copy(&mut loaned, &pushed), 2);
+            assert_eq!(z_string_array_len(&loaned), 2);
+        }
+        assert_eq!(state.to_strings(), strings);
+    }
+
+    /// Taking a lent array copies it and leaves it lent: the owned one holds strings of its own,
+    /// which outlive the lender's, and the lender's array is not emptied into a handle that would
+    /// free what it does not own.
+    #[test]
+    fn taking_a_lent_array_copies_it_and_leaves_it() {
+        let strings = ["tcp/10.0.0.1:7447"];
+        let views = lent_views(&strings);
+        // SAFETY: `views` and `strings` outlive the array.
+        let mut state = unsafe { StringArrayState::lent(&views) };
+        let lent = (&mut state as *mut StringArrayState).cast::<c_void>();
+        let mut loaned = z_loaned_string_array_t {
+            handle: lent,
+            _pad: [core::ptr::null_mut(); 3],
+        };
+        let mut owned = z_owned_string_array_t::null_value();
+        // SAFETY: a writable destination and a live lent array.
+        unsafe {
+            assert_eq!(
+                z_string_array_take_from_loaned(&mut owned, &mut loaned),
+                crate::result::Z_OK
+            );
+            assert_eq!(loaned.handle, lent, "the lent array is left as it was");
+            assert_ne!(owned.handle, lent);
+            let copy = &*z_string_array_get(z_string_array_loan(&owned), 0);
+            assert_ne!(
+                copy._start,
+                strings[0].as_ptr(),
+                "the owned array holds a copy"
+            );
+            assert_eq!(state.to_strings(), strings);
+            z_string_array_drop(z_string_array_move(&mut owned));
         }
     }
 }

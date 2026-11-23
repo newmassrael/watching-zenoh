@@ -613,6 +613,13 @@ def generate(src: pathlib.Path, out: pathlib.Path) -> list[str]:
 #: The example programs of upstream's `examples` package that the host parity matrix runs
 #: (docs/upstream-parity.md section 5b), each against upstream's `zenoh` and against the family.
 PARITY_EXAMPLES = ("z_put", "z_sub", "z_get", "z_queryable", "z_pub_thr", "z_sub_thr", "z_ping", "z_pong")
+#: The programs of the host comparison that are this repository's own rather than upstream's: built into
+#: the same package beside PARITY_EXAMPLES, so both arms compile each from one source, as they do
+#: upstream's. `wz_fanin` is the fan-in probe of `scripts/pico-compare.sh fanin`.
+WZ_PARITY_PROGRAMS = ("wz_fanin",)
+#: Where WZ_PARITY_PROGRAMS live, one `<name>.rs` each: under `conformance`, the root of the wz-authored
+#: source built over upstream's crates, which the store's citation validator scans.
+WZ_PARITY_SOURCES = ROOT / "conformance" / "host-bench"
 #: Dependencies of upstream's examples package that the generated package leaves out. `zenoh-ext` is
 #: named by the package but by none of PARITY_EXAMPLES nor its `src/lib.rs`: kept, it would bring an
 #: ecosystem crate into both arms that the programs measured do not call.
@@ -697,7 +704,7 @@ def examples_manifest(examples_text: str, deps: dict[str, str], profile: str, ar
                      f"default-features = false, features = [{feats}] }}")
     lines += ["", "[build-dependencies]"]
     lines += [f"{name} = {rhs}" for name, rhs in table_entries(examples_text, "build-dependencies")]
-    for name in PARITY_EXAMPLES:
+    for name in (*PARITY_EXAMPLES, *WZ_PARITY_PROGRAMS):
         lines += ["", "[[example]]", f'name = "{name}"', f'path = "examples/{name}.rs"']
     lines += ["", profile.rstrip()]
     if arm == "wz":
@@ -708,7 +715,8 @@ def examples_manifest(examples_text: str, deps: dict[str, str], profile: str, ar
 
 def generate_examples(src: pathlib.Path, out: pathlib.Path, arm: str, core_features: list[str]) -> None:
     """The examples package of one arm under `out`: upstream's example sources of PARITY_EXAMPLES, its
-    `src/lib.rs` and build script copied byte for byte, the manifest generated, and upstream's
+    `src/lib.rs` and build script copied byte for byte, this repository's WZ_PARITY_PROGRAMS beside
+    them, the manifest generated, and upstream's
     `Cargo.lock` as the starting lock of both arms, so the third-party crates they share resolve to the
     versions upstream released with."""
     provision(src)
@@ -725,6 +733,8 @@ def generate_examples(src: pathlib.Path, out: pathlib.Path, arm: str, core_featu
     shutil.copyfile(pkg / "build.rs", out / "build.rs")
     for name in (*(f"{n}.rs" for n in PARITY_EXAMPLES), "example.proto"):
         shutil.copyfile(pkg / "examples" / name, out / "examples" / name)
+    for name in WZ_PARITY_PROGRAMS:
+        shutil.copyfile(WZ_PARITY_SOURCES / f"{name}.rs", out / "examples" / f"{name}.rs")
     (out / "Cargo.toml").write_text(
         examples_manifest((pkg / "Cargo.toml").read_text(encoding="utf-8"), deps, profile, arm, core_features),
         encoding="utf-8",
@@ -1628,7 +1638,8 @@ def selftest() -> int:
     assert "zenoh-ext" not in examples.split("[dependencies]")[1].split("[build-dependencies]")[0], examples
     assert 'features = ["engine-tokio", "link-tcp"]' in examples and "[patch.crates-io]" in examples, examples
     assert 'which = "7.0.2"' in examples and 'lto = "fat"' in examples, examples
-    assert examples.count("[[example]]") == len(PARITY_EXAMPLES), examples
+    assert examples.count("[[example]]") == len(PARITY_EXAMPLES) + len(WZ_PARITY_PROGRAMS), examples
+    assert all((WZ_PARITY_SOURCES / f"{n}.rs").is_file() for n in WZ_PARITY_PROGRAMS), WZ_PARITY_SOURCES
     stock_examples = examples_manifest("[dependencies]\nzenoh = { workspace = true }\n", {}, "[profile.release]\n",
                                        "stock", [])
     assert "[patch.crates-io]" not in stock_examples and "wz-capi-core" not in stock_examples, stock_examples

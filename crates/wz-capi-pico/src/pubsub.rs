@@ -1358,7 +1358,7 @@ impl PlainPublisher {
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
-            .zip(key.whole_key_mapping(&*session.engine));
+            .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1419,7 +1419,7 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
-        let wire = self.key.wire(&*self.shared);
+        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
         publish_code(
             self.shared
@@ -1716,32 +1716,60 @@ unsafe fn publisher_put_options(
     if options.is_null() {
         return None;
     }
-    // The moved values are consumed FIRST, before any early return could skip
-    // them — the same consume-on-all-paths discipline `z_get` follows.
-    let attachment = take_moved_bytes((*options).attachment);
-    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
-    let timestamp = timestamp_hint_of((*options).timestamp);
-    let source_info = source_info_hint_of((*options).source_info());
-    if attachment.is_none() && encoding.is_none() && timestamp.is_none() && source_info.is_none() {
-        return None;
+    let (opts, carried) = PutCarried {
+        encoding: (*options).encoding,
+        timestamp: (*options).timestamp,
+        attachment: (*options).attachment,
+        source_info: (*options).source_info(),
     }
-    let mut opts = put_options();
-    if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment.to_vec());
+    .fold(put_options());
+    carried.then_some(opts)
+}
+
+/// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
+/// `z_publisher_put_options_t`: the moved encoding and attachment, the timestamp, and the source
+/// info (null where the struct has no such field).
+struct PutCarried {
+    encoding: *mut c_void,
+    timestamp: *mut z_timestamp_t,
+    attachment: *mut z_moved_bytes_t,
+    source_info: *mut z_source_info_t,
+}
+
+impl PutCarried {
+    /// `opts` with what the options carry, and whether they carried anything. The moved encoding
+    /// and attachment are consumed on every path. One body for both put doors, out of line so
+    /// that neither export holds a copy of it.
+    ///
+    /// # Safety
+    /// Each field must be null or valid as the options struct it was read from requires.
+    #[inline(never)]
+    unsafe fn fold(self, mut opts: PublishOptions) -> (PublishOptions, bool) {
+        let attachment = take_moved_bytes(self.attachment);
+        let encoding = crate::encoding::take_moved_encoding(self.encoding);
+        let timestamp = timestamp_hint_of(self.timestamp);
+        let source_info = source_info_hint_of(self.source_info);
+        let carried = attachment.is_some()
+            || encoding.is_some()
+            || timestamp.is_some()
+            || source_info.is_some();
+        if let Some(attachment) = attachment {
+            opts = opts.with_attachment(attachment.to_vec());
+        }
+        if let Some(hint) = encoding {
+            opts = opts.with_encoding(hint);
+        }
+        if let Some(ts) = timestamp {
+            opts = opts.with_timestamp(ts);
+        }
+        // A source info is read only where the option field exists, and the setter it reaches is
+        // linked only there: without the unstable API the field is pico's absent value.
+        #[cfg(feature = "unstable-api")]
+        if let Some(si) = source_info {
+            opts = opts.with_source_info(si);
+        }
+        (opts, carried)
     }
-    if let Some(hint) = encoding {
-        opts = opts.with_encoding(hint);
-    }
-    if let Some(ts) = timestamp {
-        opts = opts.with_timestamp(ts);
-    }
-    // A source info is read only where the option field exists, and the setter it reaches is
-    // linked only there: without the unstable API the field is pico's absent value.
-    #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info {
-        opts = opts.with_source_info(si);
-    }
-    Some(opts)
 }
 
 /// The options a put starts from: reliable, and the destination
@@ -1795,6 +1823,61 @@ mod put_options_tests {
             options.timestamp = &mut stamp;
             let carried = publisher_put_options(&options).expect("a timestamp is carried");
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+        }
+    }
+
+    /// Both put doors fold their options through one body: a moved attachment and a timestamp
+    /// are carried into the options a session's put and a publisher's put are sent with, the QoS
+    /// a session's put states beside them is kept, and the caller's moved bytes are spent.
+    #[test]
+    fn both_put_doors_carry_a_moved_attachment_and_spend_it() {
+        use super::{session_put_options, z_put_options_default, z_put_options_t};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        let moved = |bytes: &[u8]| {
+            let mut owned = z_owned_bytes_t::null_value();
+            // SAFETY: `owned` is writable and `bytes` readable for its length.
+            let copied = unsafe {
+                crate::bytes::z_bytes_copy_from_buf(&mut owned, bytes.as_ptr(), bytes.len())
+            };
+            assert_eq!(copied, crate::result::Z_OK);
+            z_moved_bytes_t { _this: owned }
+        };
+        let mut stamp = z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t {
+                id: [7; crate::zid::Z_ID_SIZE],
+            },
+            time: 42,
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut attachment = moved(b"session");
+            let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
+            z_put_options_default(put.as_mut_ptr());
+            let mut put = put.assume_init();
+            put.attachment = &mut attachment;
+            put.timestamp = &mut stamp;
+            put.is_express = true;
+            let carried = session_put_options(&put);
+            assert_eq!(carried.attachment.as_deref(), Some(&b"session"[..]));
+            assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+            assert_eq!(
+                carried.qos.map(|qos| qos.is_express()),
+                Some(true),
+                "the QoS beside the carried values is kept"
+            );
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
+
+            let mut attachment = moved(b"publisher");
+            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+            z_publisher_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            options.attachment = &mut attachment;
+            let carried = publisher_put_options(&options).expect("an attachment is carried");
+            assert_eq!(carried.attachment.as_deref(), Some(&b"publisher"[..]));
+            assert!(carried.timestamp.is_none());
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
         }
     }
 
@@ -2118,33 +2201,27 @@ pub(crate) unsafe fn source_info_hint_of(
 /// # Safety
 /// `options` must be null or a valid put-options struct.
 unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions {
-    let mut opts = put_options();
+    let opts = put_options();
     if options.is_null() {
         return opts;
     }
-    // Consumed FIRST, before any branch could skip them.
-    let attachment = take_moved_bytes((*options).attachment);
-    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
-    opts = opts
-        .with_priority(crate::qos::priority_from_pico((*options).priority))
+    // The moved values are consumed first, before anything else is read.
+    #[cfg(feature = "unstable-api")]
+    let source_info = (*options).source_info;
+    #[cfg(not(feature = "unstable-api"))]
+    let source_info = core::ptr::null_mut();
+    let (opts, _) = PutCarried {
+        encoding: (*options).encoding,
+        timestamp: (*options).timestamp,
+        attachment: (*options).attachment,
+        source_info,
+    }
+    .fold(opts);
+    opts.with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
         .with_reliability(reliability_from_pico((*options).reliability()))
-        .with_locality((*options).allowed_destination());
-    if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment.to_vec());
-    }
-    if let Some(hint) = encoding {
-        opts = opts.with_encoding(hint);
-    }
-    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-        opts = opts.with_timestamp(ts);
-    }
-    #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info_hint_of((*options).source_info) {
-        opts = opts.with_source_info(si);
-    }
-    opts
+        .with_locality((*options).allowed_destination())
 }
 
 /// Fold a caller's `z_delete_options_t` into wz's [`PublishOptions`], as the
@@ -2667,7 +2744,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // A peer or router-hat session retracts the subscription naming ITS key
@@ -2679,7 +2756,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
         // hold; the engine dropped the sink, so the closure's drop has run.
         let Some(id) =
-            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
+            engine.declare_subscriber_on_wire(&ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             })
@@ -2758,7 +2835,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // Named before the key is dropped: the entry keeps it alive through
@@ -2768,10 +2845,16 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         drop(key);
         // No handle will undeclare this one, so the session's close waits for it.
         state.keep_background(cclosure.release_latch());
-        match engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        }) {
+        match engine.declare_subscriber_on_wire(
+            &ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            },
+        ) {
             Some(_) => Z_OK,
             // As the owned form above refuses it.
             None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,

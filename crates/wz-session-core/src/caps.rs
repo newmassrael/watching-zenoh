@@ -258,6 +258,36 @@ pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
 /// payloads, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
 
+/// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
+/// the config object. A new key past them is refused at its insert.
+pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
+
+/// The bytes of value text one config of the pico C ABI holds, each value with its terminator, in
+/// one text fixed in the config object. A value that finds no room is refused at its insert.
+pub const CONFIG_TEXT_BYTES: usize = generated::CONFIG_TEXT_BYTES;
+
+/// The Hellos one scouting window records, in a table of that many rows
+/// (`scouting_host::HelloTable`). A Hello past them is counted and not recorded.
+pub const MAX_SCOUT_HELLOS: usize = generated::MAX_SCOUT_HELLOS;
+
+/// The locators a scouting window keeps of one Hello, each at most [`MAX_LOCATOR_LEN`] bytes, in a
+/// text of the Hello's row. One past them, or a longer one, is skipped and counted.
+pub const SCOUT_HELLO_LOCATORS: usize = generated::SCOUT_HELLO_LOCATORS;
+
+/// How deep the JSON5 document a config of the pico C ABI is handed may nest, the outermost object
+/// being 1. A deeper document is refused at its door.
+pub const CONFIG_DOCUMENT_DEPTH: usize = generated::CONFIG_DOCUMENT_DEPTH;
+
+const _: () = assert!(
+    CONFIG_DOCUMENT_DEPTH >= 3,
+    "a document's wz member reaches its policies and limits at a depth of 3"
+);
+
+const _: () = assert!(
+    CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
+    "a config holds at least one key, at most one row for each key but one, and some text"
+);
+
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
@@ -503,6 +533,19 @@ pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 /// machine of about 930 bytes, so the default is 0: an image that is never asked to open a peer
 /// by its zid declares none of it, and refuses the open.
 pub const MAX_PEER_NODES: usize = generated::MAX_PEER_NODES;
+
+/// Maximum number of faces a session that listens holds besides the one it dials (zenoh's
+/// `transport/unicast/max_sessions`): the links it accepts, those still in their handshake
+/// among them, and those it attaches. An engine that lends each face its tables from the
+/// session's arena lends this many sets and the dial role's, so the build's value is the ceiling
+/// a session's own value is held under, and a link past the session's value is closed unread.
+pub const MAX_FACES: usize = generated::MAX_FACES;
+
+/// Maximum number of inbound links a session that listens holds in their handshake at once
+/// (zenoh's `transport/unicast/accept_pending`), each one of [`MAX_FACES`]. An engine that lends
+/// each link its buffers from the session's arena lends this many beyond the faces' own, so that
+/// a link past either bound is taken off its port and closed rather than left waiting there.
+pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
 
 /// Maximum number of queries ONE declared querier has in flight at once, as a
 /// [`crate::quota::Quota`] states it: a query past it is refused, and a place comes back

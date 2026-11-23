@@ -142,9 +142,9 @@ const _: () = assert!(
 
 /// How many links a session whose open listens on `listen` (none for one that only dials) holds
 /// at most: one for a dial, and on the tokio engine no bound for a listener, which accepts every
-/// link that completes its handshake.
+/// link that completes its handshake whatever its limits state.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn links_of(listen: Option<&str>) -> Option<usize> {
+pub(crate) fn links_of(listen: Option<&str>, _limits: &SessionLimits) -> Option<usize> {
     match listen {
         None => Some(1),
         Some(_) => None,
@@ -152,10 +152,11 @@ pub(crate) fn links_of(listen: Option<&str>) -> Option<usize> {
 }
 
 /// How many links a session whose open listens on `listen` (none for one that only dials) holds
-/// at most on the cooperative engine: one for a dial; for a listener, the faces the open bounds it
-/// to and its dial; none for a group, which rejoins the messages of every member.
+/// at most on the cooperative engine under `limits`: one for a dial; for a listener, the faces its
+/// `MAX_FACES` admits and its dial, as the open bounds it; none for a group, which rejoins the
+/// messages of every member, nor for a value over the build's, which the open refuses.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn links_of(listen: Option<&str>) -> Option<usize> {
+pub(crate) fn links_of(listen: Option<&str>, limits: &SessionLimits) -> Option<usize> {
     let Some(endpoint) = listen else {
         return Some(1);
     };
@@ -165,7 +166,9 @@ pub(crate) fn links_of(listen: Option<&str>) -> Option<usize> {
     }
     #[cfg(not(feature = "peer"))]
     let _ = endpoint;
-    wz_capi_coop::DEFAULT_MAX_FACES.checked_add(1)
+    wz_capi_coop::arena::admitted_faces(limits)
+        .ok()?
+        .checked_add(1)
 }
 
 impl MemoryBasis {
@@ -384,19 +387,38 @@ mod tests {
     }
 
     /// A session that only dials holds one link; a listener on the tokio engine holds links to no
-    /// bound, and on the cooperative engine its faces' bound and its dial.
+    /// bound, and on the cooperative engine its faces' bound and its dial: the build's
+    /// `MAX_FACES` for a session that states none, and the value a session lowers it to.
     #[test]
     fn a_dial_holds_one_link_and_a_listener_its_engines_bound() {
-        assert_eq!(links_of(None), Some(1));
+        let limits = SessionLimits::defaults();
+        assert_eq!(links_of(None, &limits), Some(1));
         #[cfg(feature = "engine-tokio")]
-        assert_eq!(links_of(Some("tcp/127.0.0.1:7447")), None);
+        assert_eq!(links_of(Some("tcp/127.0.0.1:7447"), &limits), None);
         #[cfg(not(feature = "engine-tokio"))]
-        assert_eq!(
-            links_of(Some("tcp/127.0.0.1:7447")),
-            Some(wz_capi_coop::DEFAULT_MAX_FACES + 1)
-        );
+        {
+            assert_eq!(
+                links_of(Some("tcp/127.0.0.1:7447"), &limits),
+                Some(wz_session_core::caps::MAX_FACES + 1)
+            );
+            let mut lowered = SessionLimits::defaults();
+            if lowered
+                .select_max_faces(wz_session_core::limit_binding::Quota::at_most(10))
+                .is_ok()
+            {
+                assert_eq!(links_of(Some("tcp/127.0.0.1:7447"), &lowered), Some(11));
+                assert_eq!(
+                    links_of(None, &lowered),
+                    Some(1),
+                    "a dial holds one link still"
+                );
+            }
+        }
         #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
-        assert_eq!(links_of(Some("udp/224.0.0.224:7446#iface=lo")), None);
+        assert_eq!(
+            links_of(Some("udp/224.0.0.224:7446#iface=lo"), &limits),
+            None
+        );
     }
 
     /// A session whose open stated nothing reports the session core's rows, this ABI's four and

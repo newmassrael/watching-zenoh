@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, WireKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sink::SampleView;
@@ -18,7 +18,7 @@ use crate::CoopConfig;
 fn subscribe(engine: &Engine, key: &str) -> SubId {
     engine
         .declare_subscriber_on_wire(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             Locality::Any,
             None,

@@ -61,8 +61,9 @@ use core::net::IpAddr;
 
 use crate::prelude::*;
 
+use wz_session_core::caps;
 use wz_session_core::scouting_host::{
-    parse_multicast_locator, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
+    parse_multicast_locator, HelloFacts, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
     SCOUTING_WHAT_DEFAULT,
 };
 
@@ -70,6 +71,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_zid::SessionZid;
 
+use crate::abi::z_loaned_string_t;
 use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
 use crate::config_policy::PolicyStatements;
 use crate::pubsub::z_closure_drop_callback_t;
@@ -107,10 +109,167 @@ mod window {
 
     use wz_session_core::limits::SessionLimits;
     use wz_session_core::policy::SessionPolicy;
+    #[cfg(not(feature = "engine-tokio"))]
+    use wz_session_core::scouting_host::HelloRow;
     use wz_session_core::scouting_host::ScoutedHello;
     use wz_session_core::session_zid::SessionZid;
 
     use crate::config::ConfigState;
+    use crate::result::ZResult;
+    #[cfg(not(feature = "engine-tokio"))]
+    use crate::result::WZ_EXT_ERR_SCOUT_REENTERED;
+
+    /// The process's one table of a cooperative window's Hellos: in the library's static memory,
+    /// reserved when it is built, never on a stack and never on the heap. A window holds it for
+    /// its run and its delivery. A window that finds it held by another thread's window waits for
+    /// it, at most its own budget, on a condition variable the holder signals when it lets go; one
+    /// that finds it held by its own thread, a scout asked from inside a scout's callback, is
+    /// refused at once.
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(in crate::scout) mod table {
+        use core::cell::UnsafeCell;
+        use core::mem::MaybeUninit;
+
+        use wz_capi_port::os;
+        use wz_capi_port::sync::Lock;
+        use wz_session_core::scouting_host::HelloTable;
+
+        struct Region(UnsafeCell<HelloTable>);
+
+        // SAFETY: the table is reached only by the one holder of the claim, through it.
+        unsafe impl Sync for Region {}
+
+        static TABLE: Region = Region(UnsafeCell::new(HelloTable::new()));
+
+        /// Which thread holds the table, by its word, and the condition its waiters sleep on.
+        struct Holder {
+            thread: os::Mutex<Option<usize>>,
+            freed: os::Condvar,
+        }
+
+        /// Whether the holder is made yet.
+        enum Made {
+            No,
+            Making,
+            Yes,
+        }
+
+        /// The holder's place in static memory: the kernel's mutex and condition variable are made
+        /// at run time, so the first window that asks makes them, once.
+        struct HolderPlace {
+            made: Lock<Made>,
+            place: UnsafeCell<MaybeUninit<Holder>>,
+        }
+
+        // SAFETY: the place is written once, by the thread that moved `made` to `Making`, and read
+        // only once `made` reads `Yes`; the holder's own fields are a mutex and a condition
+        // variable.
+        unsafe impl Sync for HolderPlace {}
+
+        static HOLDER: HolderPlace = HolderPlace {
+            made: Lock::new(Made::No),
+            place: UnsafeCell::new(MaybeUninit::uninit()),
+        };
+
+        fn holder() -> &'static Holder {
+            loop {
+                let made = HOLDER.made.with(|made| match made {
+                    Made::No => {
+                        *made = Made::Making;
+                        None
+                    }
+                    Made::Making => Some(false),
+                    Made::Yes => Some(true),
+                });
+                match made {
+                    None => {
+                        // SAFETY: this thread alone moved `made` to `Making`, so it alone writes.
+                        unsafe {
+                            (*HOLDER.place.get()).write(Holder {
+                                thread: os::Mutex::new(None),
+                                freed: os::Condvar::new(),
+                            });
+                        }
+                        HOLDER.made.with(|made| *made = Made::Yes);
+                    }
+                    // Another thread makes the two kernel objects, once in the process's life.
+                    Some(false) => os::sleep_ms(1),
+                    // SAFETY: `Yes` is set only once the place is written, and it is never
+                    // written again.
+                    Some(true) => return unsafe { (*HOLDER.place.get()).assume_init_ref() },
+                }
+            }
+        }
+
+        /// Why a window has no table.
+        #[derive(Debug, PartialEq, Eq)]
+        pub(in crate::scout) enum Unclaimed {
+            /// The calling thread's own window holds it: a scout asked from a scout's callback.
+            Reentered,
+            /// Another thread's window held it for the whole of the caller's budget.
+            Expired,
+        }
+
+        /// The table, held by one window at a time and given back when the claim is dropped.
+        pub(in crate::scout) struct Claim(());
+
+        impl Claim {
+            /// The table, waiting while another thread's window holds it, for at most `budget_ms`
+            /// as `now_ms` reads the time: the claim, and what is left of the budget.
+            pub(in crate::scout) fn within(
+                budget_ms: u64,
+                now_ms: impl Fn() -> u64,
+            ) -> Result<(Self, u64), Unclaimed> {
+                let me = os::current_word();
+                let holder = holder();
+                let start = now_ms();
+                let mut thread = holder.thread.lock();
+                loop {
+                    match *thread {
+                        None => {
+                            *thread = Some(me);
+                            let waited = now_ms().saturating_sub(start);
+                            return Ok((Self(()), budget_ms.saturating_sub(waited)));
+                        }
+                        Some(owner) if owner == me => return Err(Unclaimed::Reentered),
+                        Some(_) => {}
+                    }
+                    let waited = now_ms().saturating_sub(start);
+                    if waited >= budget_ms {
+                        return Err(Unclaimed::Expired);
+                    }
+                    thread = holder.freed.wait_timeout_ms(thread, budget_ms - waited).0;
+                }
+            }
+
+            /// The table the claim holds.
+            pub(in crate::scout) fn table(&mut self) -> &mut HelloTable {
+                // SAFETY: one claim exists at a time, and it lends the table through `&mut self`.
+                unsafe { &mut *TABLE.0.get() }
+            }
+        }
+
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                let holder = holder();
+                *holder.thread.lock() = None;
+                holder.freed.notify_all();
+            }
+        }
+    }
+
+    /// The table for a window of `budget_ms` on `clock`, and what is left of the budget once it
+    /// is held; `None` when another thread's window held it for the whole budget, which is a window
+    /// nobody answered, and `WZ_EXT_ERR_SCOUT_REENTERED` for a scout asked from a scout's callback.
+    #[cfg(not(feature = "engine-tokio"))]
+    fn hold_table(clock: &Clock, budget_ms: u64) -> Result<Option<(table::Claim, u64)>, ZResult> {
+        use wz_capi_coop::ClockSource;
+        match table::Claim::within(budget_ms, || clock.now_us() / 1000) {
+            Ok(held) => Ok(Some(held)),
+            Err(table::Unclaimed::Expired) => Ok(None),
+            Err(table::Unclaimed::Reentered) => Err(WZ_EXT_ERR_SCOUT_REENTERED),
+        }
+    }
 
     /// The clock a window is timed by: the system's, or the time base the scout's config names
     /// (`time-base`), which a window then runs on as a session opened from that config does.
@@ -152,7 +311,8 @@ mod window {
     }
 
     /// Scout `group:port` for `budget_ms` of `clock`, handing each peer that answered to
-    /// `on_hello` after the window, last responder first; the number delivered.
+    /// `on_hello` after the window, last responder first; the number delivered, or the code of a
+    /// window that could not be run.
     #[cfg(feature = "engine-tokio")]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
@@ -165,10 +325,10 @@ mod window {
         policy: &SessionPolicy,
         _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
-    ) -> usize {
-        wz_capi_core::scouting::run_scout(
+    ) -> Result<usize, ZResult> {
+        Ok(wz_capi_core::scouting::run_scout(
             *clock, group, port, what, zid, budget_ms, policy, on_hello,
-        )
+        ))
     }
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
@@ -183,8 +343,10 @@ mod window {
         budget_ms: u64,
         policy: &SessionPolicy,
         _limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        wz_capi_core::scouting::scout_first(*clock, group, port, what, zid, budget_ms, policy)
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        Ok(wz_capi_core::scouting::scout_first(
+            *clock, group, port, what, zid, budget_ms, policy,
+        ))
     }
 
     // The cooperative engine on a host with `scout`: a socket for each interface.
@@ -199,11 +361,22 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
-        on_hello: impl FnMut(&ScoutedHello),
-    ) -> usize {
-        wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms, on_hello,
-        )
+        on_hello: impl FnMut(&HelloRow),
+    ) -> Result<usize, ZResult> {
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(0);
+        };
+        let delivered = wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            claim.table(),
+            on_hello,
+        );
+        Ok(delivered)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
@@ -217,10 +390,20 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms,
-        )
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(None);
+        };
+        let first = wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            claim.table(),
+        );
+        Ok(first)
     }
 
     // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links
@@ -236,9 +419,12 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
-        on_hello: impl FnMut(&ScoutedHello),
-    ) -> usize {
-        crate::coop_host::run_scout(
+        on_hello: impl FnMut(&HelloRow),
+    ) -> Result<usize, ZResult> {
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(0);
+        };
+        Ok(crate::coop_host::run_scout(
             clock,
             group,
             port,
@@ -246,8 +432,9 @@ mod window {
             zid,
             budget_ms,
             limits.pico_multicast_batch_bytes(),
+            claim.table(),
             on_hello,
-        )
+        ))
     }
 
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
@@ -261,8 +448,11 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        crate::coop_host::scout_first(
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(None);
+        };
+        Ok(crate::coop_host::scout_first(
             clock,
             group,
             port,
@@ -270,7 +460,8 @@ mod window {
             zid,
             budget_ms,
             limits.pico_multicast_batch_bytes(),
-        )
+            claim.table(),
+        ))
     }
 }
 
@@ -278,7 +469,7 @@ mod window {
 // z_owned_hello_t
 // ---------------------------------------------------------------------------
 
-/// The boxed payload behind a hello handle: one decoded `Hello`, plus the
+/// The payload behind a hello handle: one decoded `Hello`, plus the
 /// locator array it lends out.
 ///
 /// `locators_loan` is a PRE-BUILT loaned handle rather than something
@@ -288,26 +479,82 @@ mod window {
 pub(crate) struct HelloState {
     zid: z_id_t,
     whatami: z_whatami_t,
-    /// Owned, and the target of `locators_loan`'s handle. Boxed so its address
-    /// is stable when this state moves.
-    locators: Box<StringArrayState>,
+    /// The locators an owned hello keeps (`z_hello_clone`), the target of `locators_loan`'s
+    /// handle, boxed so its address is stable when this state moves; none for the hello a scout
+    /// lends its callback, whose array lends the scouted Hello's own strings.
+    _owned: Option<Box<StringArrayState>>,
     locators_loan: z_loaned_string_array_t,
 }
 
 impl HelloState {
+    /// A hello that owns copies of `locators`.
     fn new(zid: z_id_t, whatami: z_whatami_t, locators: Vec<String>) -> Box<Self> {
         let locators = StringArrayState::new(locators);
-        let handle = (&*locators) as *const StringArrayState as *mut c_void;
+        let locators_loan = loan_of(&locators);
         Box::new(Self {
             zid,
             whatami,
-            locators,
-            locators_loan: z_loaned_string_array_t {
-                handle,
-                _pad: [core::ptr::null_mut(); 3],
-            },
+            _owned: Some(locators),
+            locators_loan,
         })
     }
+
+    /// A hello over `locators`, an array its caller keeps for as long as it lends the hello.
+    fn lent(zid: z_id_t, whatami: z_whatami_t, locators: &StringArrayState) -> Self {
+        Self {
+            zid,
+            whatami,
+            _owned: None,
+            locators_loan: loan_of(locators),
+        }
+    }
+
+    /// The array the hello lends its locators in.
+    fn locators(&self) -> &StringArrayState {
+        // SAFETY: the loan's handle is the array the hello was made over: its own box, or the
+        // array the caller of `Self::lent` keeps for as long as it lends the hello.
+        unsafe { &*(self.locators_loan.handle as *const StringArrayState) }
+    }
+}
+
+/// The loaned handle of `locators`.
+fn loan_of(locators: &StringArrayState) -> z_loaned_string_array_t {
+    z_loaned_string_array_t {
+        handle: locators as *const StringArrayState as *mut c_void,
+        _pad: [core::ptr::null_mut(); 3],
+    }
+}
+
+/// Hand `on_hello` the scouted `hello` as pico's callback reads it, its locators lent from the
+/// Hello's own strings (the window's row, or the host's Hello), so a delivery copies none of them.
+/// A Hello with more locators than a table of views holds (`MAX_ADMIN_LOCATORS`) is handed through
+/// an array of its own copies.
+fn lend_hello(hello: &impl HelloFacts, on_hello: &mut impl FnMut(&mut HelloState)) {
+    let whatami = hello.whatami().map_or(0, |w| u32::from(w.to_api()));
+    let zid = z_id_t::from_wire(hello.zid());
+    let count = hello.locator_count();
+    if count > caps::MAX_ADMIN_LOCATORS {
+        let copies = (0..count)
+            .filter_map(|k| hello.locator(k))
+            .map(String::from)
+            .collect();
+        on_hello(&mut HelloState::new(zid, whatami, copies));
+        return;
+    }
+    let views: [z_loaned_string_t; caps::MAX_ADMIN_LOCATORS] =
+        core::array::from_fn(|k| match hello.locator(k) {
+            Some(locator) => z_loaned_string_t {
+                _start: locator.as_ptr(),
+                _len: locator.len(),
+            },
+            None => z_loaned_string_t {
+                _start: core::ptr::null(),
+                _len: 0,
+            },
+        });
+    // SAFETY: `views` and the Hello's strings outlive the array, which this frame keeps.
+    let array = unsafe { StringArrayState::lent(&views[..count]) };
+    on_hello(&mut HelloState::lent(zid, whatami, &array));
 }
 
 /// Owned hello (pico `z_owned_hello_t`, 56 B measured).
@@ -399,7 +646,7 @@ pub unsafe extern "C" fn z_hello_locators(
     if out.is_null() {
         return;
     }
-    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators.to_strings());
+    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators().to_strings());
     *out = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(items)) as *mut c_void,
         _pad: [core::ptr::null_mut(); 3],
@@ -498,7 +745,7 @@ pub unsafe extern "C" fn z_hello_clone(
         *dst = z_owned_hello_t::null_value();
         return crate::result::Z_ERR_INVALID;
     };
-    let cloned = HelloState::new(state.zid, state.whatami, state.locators.to_strings());
+    let cloned = HelloState::new(state.zid, state.whatami, state.locators().to_strings());
     *dst = z_owned_hello_t {
         handle: Box::into_raw(cloned) as *mut c_void,
         _pad: [core::ptr::null_mut(); 6],
@@ -710,22 +957,22 @@ fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
 /// `z_scout` with NULL options and `z_open`'s lookup read the same four keys
 /// (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_scout(`), so
 /// they read them here, once.
-struct ScoutConfig {
+struct ScoutConfig<'a> {
     what: u8,
     budget_ms: u64,
-    locator: String,
+    locator: &'a str,
     /// The id the config states for the session, read as `z_open` reads it
     /// (`crate::session::stated_zid`), or `None` when it states none.
     zid: Option<SessionZid>,
 }
 
-impl ScoutConfig {
+impl<'a> ScoutConfig<'a> {
     /// The config's scouting keys, or `Z_ERR_INVALID` when it states an id `z_open` refuses: a
     /// caller that named an identity and scouted as another, or as nobody, would not know it.
     /// pico reads whatever its fixed indexes land on there (`vendor/zenoh-pico/src/api/api.c` @
     /// `_z_uuid_to_bytes(zid.id, zid_str);`), which is no id the caller named.
-    fn read(cfg: Option<&ConfigState>) -> Result<Self, ZResult> {
-        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(|s| s.trim().to_string());
+    fn read(cfg: Option<&'a ConfigState>) -> Result<Self, ZResult> {
+        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(str::trim);
         Ok(Self {
             what: get(Z_CONFIG_SCOUTING_WHAT_KEY)
                 .and_then(|s| s.parse::<u8>().ok())
@@ -733,8 +980,7 @@ impl ScoutConfig {
             budget_ms: get(Z_CONFIG_SCOUTING_TIMEOUT_KEY)
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
-            locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY)
-                .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
+            locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY).unwrap_or(MULTICAST_LOCATOR_DEFAULT),
             zid: crate::session::stated_zid(cfg.and_then(|c| c.get(Z_CONFIG_SESSION_ZID_KEY)))?,
         })
     }
@@ -759,7 +1005,7 @@ pub(crate) fn locators_by_scout(
     limits: &SessionLimits,
 ) -> Result<Vec<String>, ZResult> {
     let read = ScoutConfig::read(Some(cfg))?;
-    let Some((group, port)) = parse_multicast_locator(&read.locator) else {
+    let Some((group, port)) = parse_multicast_locator(read.locator) else {
         return Err(crate::result::Z_ERR_INVALID);
     };
     let zid = read.zid.or_else(fresh_scout_zid);
@@ -775,7 +1021,7 @@ pub(crate) fn locators_by_scout(
         read.budget_ms,
         policy,
         limits,
-    )
+    )?
     .map(|hello| hello.locators)
     .filter(|locators| !locators.is_empty())
     .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -851,14 +1097,14 @@ pub unsafe extern "C" fn z_scout(
     };
     let ScoutConfig { locator, zid, .. } = read;
 
-    let Some((group, port)) = parse_multicast_locator(&locator) else {
+    let Some((group, port)) = parse_multicast_locator(locator) else {
         if let Some(drop_fn) = user_drop {
             drop_fn(user_ctx);
         }
         return crate::result::Z_ERR_INVALID;
     };
 
-    let hellos = run_scout(
+    let scouted = run_scout(
         &clock,
         group,
         port,
@@ -869,9 +1115,9 @@ pub unsafe extern "C" fn z_scout(
         &limits,
         |hello| {
             // The callback takes a MUTABLE loaned pointer (pico's signature), but
-            // this side keeps ownership: the state is dropped when `run_scout`'s
-            // per-hello box goes out of scope, matching upstream, where the hello
-            // is owned by the scouting task and only borrowed by the user.
+            // this side keeps ownership: the state lives in `lend_hello`'s frame
+            // for the call, matching upstream, where the hello is owned by the
+            // scouting task and only borrowed by the user.
             if let Some(call) = user_call {
                 let mut loaned = z_loaned_hello_t {
                     handle: hello as *mut HelloState as *mut c_void,
@@ -881,7 +1127,6 @@ pub unsafe extern "C" fn z_scout(
             }
         },
     );
-    let _ = hellos;
     drop(cfg);
 
     // The closure's `drop` runs exactly once, AFTER the last callback — the
@@ -890,11 +1135,15 @@ pub unsafe extern "C" fn z_scout(
     if let Some(drop_fn) = user_drop {
         drop_fn(user_ctx);
     }
-    crate::result::Z_OK
+    match scouted {
+        Ok(_) => crate::result::Z_OK,
+        Err(code) => code,
+    }
 }
 
 /// Drive one scouting window for `budget_ms` and hand each peer that answered
-/// to `on_hello`. Returns the number delivered.
+/// to `on_hello`. Returns the number delivered, or the code of a window that
+/// could not be run (the cooperative engine's table held by another window).
 ///
 /// DELEGATES to the window of the engine the build runs (`window::run`), whose rules are the
 /// session's. This function used to carry its own copy of that loop, and the copy is what let
@@ -921,7 +1170,7 @@ fn run_scout(
     policy: &SessionPolicy,
     limits: &SessionLimits,
     mut on_hello: impl FnMut(&mut HelloState),
-) -> usize {
+) -> Result<usize, ZResult> {
     window::run(
         clock,
         group,
@@ -931,15 +1180,7 @@ fn run_scout(
         budget_ms,
         policy,
         limits,
-        |hello| {
-            let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
-            let mut state = HelloState::new(
-                z_id_t::from_wire(&hello.zid),
-                whatami,
-                hello.locators.clone(),
-            );
-            on_hello(&mut state);
-        },
+        |hello| lend_hello(hello, &mut on_hello),
     )
 }
 
@@ -1004,7 +1245,8 @@ pub unsafe extern "C" fn z_closure_hello(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::string_array::z_string_array_len;
+    use crate::string_array::{z_string_array_get, z_string_array_len};
+    use wz_session_core::scouting_host::{HelloRow, ScoutedHello};
 
     /// The three C-allocated structs of this plane, pinned against the sizes
     /// MEASURED off the pinned zenoh-pico headers on a 64-bit host (56 / 32 / 24). A C
@@ -1176,6 +1418,198 @@ mod tests {
             assert_eq!(z_hello_whatami(&loaned), 2);
             assert_eq!(z_hello_zid(&loaned).id[0], 0xAB);
             assert_eq!(z_string_array_len(locs), 1);
+        }
+    }
+    /// The loaned form of the hello `state`, as a scout hands it to the callback.
+    fn lent_to_callback(state: &mut HelloState) -> z_loaned_hello_t {
+        z_loaned_hello_t {
+            handle: (state as *mut HelloState).cast::<c_void>(),
+            _pad: [core::ptr::null_mut(); 6],
+        }
+    }
+
+    /// A Hello of `count` locators from the node whose id is all `7`s.
+    fn scouted(count: usize) -> ScoutedHello {
+        ScoutedHello {
+            version: 9,
+            whatami: None,
+            zid: SessionZid::from([7; 16]),
+            locators: (0..count).map(|k| format!("tcp/10.0.0.{k}:7447")).collect(),
+        }
+    }
+
+    /// A scouted Hello is handed to the callback with its locators lent from its own strings:
+    /// each view the callback reads points at the bytes the window decoded, so a delivery copies
+    /// none of them. Turned red by a delivery that copies the locators.
+    #[test]
+    fn a_delivered_hello_lends_the_scouted_locators() {
+        let hello = scouted(caps::MAX_ADMIN_LOCATORS.min(2));
+        let mut seen = 0;
+        lend_hello(&hello, &mut |state: &mut HelloState| {
+            let loaned = lent_to_callback(state);
+            // SAFETY: a live hello, lent for this call.
+            unsafe {
+                let locators = zp_hello_locators(&loaned);
+                assert_eq!(z_string_array_len(locators), hello.locators.len());
+                for (k, locator) in hello.locators.iter().enumerate() {
+                    let view = &*z_string_array_get(locators, k);
+                    assert_eq!(view._start, locator.as_ptr(), "locator {k} is lent");
+                    assert_eq!(view._len, locator.len());
+                }
+                assert_eq!(z_hello_zid(&loaned).id[0], 7);
+                assert_eq!(z_hello_whatami(&loaned), 0);
+            }
+            seen += 1;
+        });
+        assert_eq!(seen, 1);
+    }
+
+    /// A Hello with more locators than the table of views holds is handed whole, through copies,
+    /// and a clone of a delivered hello, lent or not, owns copies that outlive the scouted Hello.
+    #[test]
+    fn a_long_hello_is_handed_whole_and_a_clone_outlives_the_scouted_one() {
+        for count in [
+            caps::MAX_ADMIN_LOCATORS.min(2),
+            caps::MAX_ADMIN_LOCATORS + 1,
+        ] {
+            let hello = scouted(count);
+            let mut cloned = z_owned_hello_t::null_value();
+            lend_hello(&hello, &mut |state: &mut HelloState| {
+                let loaned = lent_to_callback(state);
+                // SAFETY: a live hello, lent for this call, and a writable destination.
+                unsafe {
+                    assert_eq!(z_string_array_len(zp_hello_locators(&loaned)), count);
+                    assert_eq!(z_hello_clone(&mut cloned, &loaned), crate::result::Z_OK);
+                }
+            });
+            drop(hello);
+            // SAFETY: the clone is a live owned hello, dropped once.
+            unsafe {
+                let locators = zp_hello_locators(z_hello_loan(&cloned));
+                assert_eq!(z_string_array_len(locators), count, "{count} locators");
+                if count > 0 {
+                    let first = &*z_string_array_get(locators, 0);
+                    let bytes = core::slice::from_raw_parts(first._start, first._len);
+                    assert_eq!(bytes, b"tcp/10.0.0.0:7447");
+                }
+                z_hello_drop(z_hello_move(&mut cloned));
+            }
+        }
+    }
+    /// A window's row is lent as a host's Hello is: each view points into the row's own text, so a
+    /// scout over the cooperative engine copies no locator either. Turned red by a delivery that
+    /// copies the row's locators.
+    #[test]
+    fn a_window_row_lends_its_own_text() {
+        let hello = scouted(caps::MAX_ADMIN_LOCATORS.min(2));
+        let row = HelloRow::of(&hello);
+        let start = (&row as *const HelloRow).cast::<u8>();
+        let span = start..start.wrapping_add(core::mem::size_of::<HelloRow>());
+        let mut seen = 0;
+        lend_hello(&row, &mut |state: &mut HelloState| {
+            let loaned = lent_to_callback(state);
+            // SAFETY: a live hello, lent for this call.
+            unsafe {
+                let locators = zp_hello_locators(&loaned);
+                assert_eq!(z_string_array_len(locators), hello.locators.len());
+                for (k, locator) in hello.locators.iter().enumerate() {
+                    let view = &*z_string_array_get(locators, k);
+                    assert!(span.contains(&view._start), "locator {k} is the row's");
+                    let bytes = core::slice::from_raw_parts(view._start, view._len);
+                    assert_eq!(bytes, locator.as_bytes());
+                }
+            }
+            seen += 1;
+        });
+        assert_eq!(seen, 1);
+    }
+
+    /// The cooperative engine's table of Hellos is one: a scout asked on the thread whose window
+    /// holds it is refused at once, another thread's waits for it and has it once it is given back,
+    /// with what is left of its budget, and one whose budget runs out first goes without. Turned red
+    /// by a table claimed twice at once, a re-entered scout that waits, or a waiter that is not woken.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
+    #[test]
+    fn the_static_table_is_waited_for_and_refused_only_to_its_own_thread() {
+        use std::time::{Duration, Instant};
+
+        let epoch = Instant::now();
+        let now_ms = move || epoch.elapsed().as_millis() as u64;
+        let (held, _) = window::table::Claim::within(5_000, now_ms).expect("the table is had");
+        let started = Instant::now();
+        assert_eq!(
+            window::table::Claim::within(5_000, now_ms).err(),
+            Some(window::table::Unclaimed::Reentered)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "refused at once"
+        );
+
+        let short = std::thread::spawn(move || {
+            window::table::Claim::within(30, now_ms).map(|(_, left)| left)
+        });
+        assert_eq!(
+            short.join().expect("the thread"),
+            Err(window::table::Unclaimed::Expired)
+        );
+
+        let waiter = std::thread::spawn(move || {
+            window::table::Claim::within(5_000, now_ms).map(|(_, left)| left)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+        let left = waiter
+            .join()
+            .expect("the thread")
+            .expect("the table is given back");
+        assert!(left < 5_000, "the wait is taken from the budget");
+        assert!(left > 3_000, "the waiter was woken, not timed out");
+    }
+
+    /// Two threads that scout at once both complete: the second waits for the table the first
+    /// holds, within its own budget, and neither is refused. Over the host's sockets, on a group
+    /// nobody answers. Turned red by a scout refused because another thread scouts.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
+    #[test]
+    fn two_threads_that_scout_at_once_both_complete() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count_drop(context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn scout() -> (ZResult, usize) {
+            let mut cfg = ConfigState::default();
+            cfg.insert(Z_CONFIG_MULTICAST_LOCATOR_KEY, "udp/239.255.91.79:47479");
+            cfg.insert(Z_CONFIG_SCOUTING_TIMEOUT_KEY, "150");
+            let mut config = crate::abi::z_moved_config_t {
+                _this: crate::abi::z_owned_config_t {
+                    handle: Box::into_raw(Box::new(cfg)) as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 3],
+                },
+            };
+            let drops = AtomicUsize::new(0);
+            let mut closure = z_moved_closure_hello_t {
+                _this: z_owned_closure_hello_t {
+                    context: &drops as *const AtomicUsize as *mut c_void,
+                    call: None,
+                    drop: Some(count_drop),
+                },
+            };
+            // SAFETY: both values are live locals, and `z_scout` consumes them.
+            let rc = unsafe { z_scout(&mut config, &mut closure, core::ptr::null()) };
+            (rc, drops.load(Ordering::SeqCst))
+        }
+
+        let first = std::thread::spawn(scout);
+        let second = std::thread::spawn(scout);
+        for scouted in [first, second] {
+            assert_eq!(
+                scouted.join().expect("the thread"),
+                (crate::result::Z_OK, 1),
+                "the scout completed and its drop ran once"
+            );
         }
     }
 }

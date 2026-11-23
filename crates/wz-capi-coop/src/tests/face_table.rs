@@ -55,7 +55,7 @@ fn a_declaration_and_a_put_reach_every_face() {
     let engine = open(&first);
     let subscribe = |keyexpr: &str| {
         engine.declare_subscriber_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             WireKey::literal(),
             Locality::Any,
             None,
@@ -181,14 +181,14 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
     let into = told.clone();
     engine.declare_matching_listener(
         plane,
-        "demo/m/x".to_owned(),
+        "demo/m/x",
         Arc::new(move |matching| into.lock().unwrap().push(matching)),
         false,
     );
     let filter = engine
         .declare_write_filter(
             plane,
-            "demo/m/x".to_owned(),
+            "demo/m/x",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -242,7 +242,7 @@ fn a_query_is_answered_to_its_face_and_a_lost_face_leaves_the_other() {
     let engine = on_two_faces(&first, &second);
     engine
         .declare_queryable_on_wire(
-            "demo/q/**".to_owned(),
+            "demo/q/**",
             WireKey::literal(),
             false,
             Locality::Remote,
