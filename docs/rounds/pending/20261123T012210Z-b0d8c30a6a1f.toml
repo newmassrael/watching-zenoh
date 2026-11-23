@@ -1,0 +1,19 @@
+impact = ["watching-zenoh/local-ci-gates", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"]
+decision = '''
+Pay Layer C1cc's red on hosted run 45051019628 and every run since 4596: the promotion differential of zenoh_c_shm_session_keys_twice_and_diff read shm=no for both puts of 4096 bytes from the REFERENCE sender, so the case could not adjudicate wz. Cause, from the sources at the pin: upstream builds the session's provider pool (16 MiB by default) and mlocks it whole, and a hosted runner grants 8 MiB of lockable memory, so the build fails, the provider reads ERROR (not INITIALIZING), the test's wait accepted any state that was not initializing, and every message went plain. The lane now raises RLIMIT_MEMLOCK itself, as E18 does for the same reason, so its precondition holds wherever it runs; the sender ends unless its provider is READY and prints the state it saw, so a host that cannot make the pool is named instead of read as a promotion difference. The maps probe's 500 ms wait is gone: both libraries make the shared-memory subsystem before the open returns (upstream at the end of its runtime's build, wz on the opening thread), so the wait carried nothing (Round 4596's carry). Upstream 1.10.2's blocking z_obtain_shm_provider defect is recorded in docs/upstream-parity.md section 8 (Round 4596's carry). Duplicates of work other sessions landed first were dropped: the tcp gate of the dyn drive doors (Round 4611), the cost-dealt C1bnl shards (Round 4612), the cooperative app link wait and the capic-router-node budget (Round 4610), and the pico ratio rows, which the next size-gate landing re-reads.
+'''
+changes = '''
+- scripts/run-ci.sh: layer_c1cc raises RLIMIT_MEMLOCK to 64 MiB with uring_raise_memlock and prints the limit.
+- crates/wz-integration-tests/tests/it/files/zenoh_c_shm_session_keys_twice_and_diff.rs: the sender ends (11) unless its provider is READY; the maps probe reads at once after the open.
+- docs/upstream-parity.md: a section 8 row for zenoh-c 1.10.2's blocking z_obtain_shm_provider, which takes the one message the transport's lazy provider waits for.
+'''
+verification = '''
+- Layer C1cc locally with WZ_C1CC_REQUIRE=1 against this machine's shared-memory-arm zenoh-c oracle: the three shared-memory tests pass (threshold, promoted messages, mode), and the lane went on to a later test, which failed (carry).
+- upstream_citation_anchor_gate --check and --resolve-if-pinned: OK, bare citations at budget.
+- bash -n scripts/run-ci.sh: OK.
+'''
+carry = '''
+- C1cc's next test, zenoh_c_tx_batching_twice_and_diff, fails on this machine at every commit since it was added (9258deb5e) and was never reached on hosted while the shared-memory test failed before it: with batching on, wz writes a 4,000-put burst as one put per batch (libzenohc about 105). Read in the code, not yet measured: the session does turn batching on; the writer queue's inline flush (writer_queue.rs, LONE_STAGED_MAX and INLINE_MIN_QUIET_NS) has the sending thread write its own message whenever 8 us passed since the last flush, which a debug build's put always exceeds, so no batch forms.
+- SwappableLink and LocalSwappableLink (wz-session-core reconnect.rs) do not forward set_idle_flush, tx_staged, try_reserve_rooms_for, link_subject and link_endpoints, so a session opened with reconnect never batches.
+- From Round 4609: the debug frames of FaceLoopIo::new (84,168), dial_locator_on (80,824) and the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage (151,944); whether drive_multicast_session_running joins a shared drive.
+'''
