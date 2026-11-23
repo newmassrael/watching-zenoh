@@ -22,7 +22,6 @@ use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionData
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
-use wz_session_mcu::dial::McuActions;
 
 use crate::prelude::*;
 

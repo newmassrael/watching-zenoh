@@ -1827,20 +1827,11 @@ fn the_arena_of_a_session_by_row_measured() {
 #[test]
 #[ignore = "a measurement: prints the arena a listener reserves at each default"]
 fn print_the_arena_a_listener_reserves_at_each_default() {
-    use crate::arena::{admitted_faces, admitted_handshakes};
-
     for (name, limits) in [
         ("build defaults", SessionLimits::defaults()),
         ("pico preset", pico_preset_limits()),
     ] {
-        let config = CoopConfig {
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            max_faces: admitted_faces(&limits).expect("the limits admit their own faces"),
-            accept_pending: admitted_handshakes(&limits)
-                .expect("the limits admit their own handshakes"),
-            limits,
-            ..client_config()
-        };
+        let config = listener_config(limits).expect("the limits admit their own faces");
         let plan = host_plan(&config).expect("the limits lay an arena out");
         std::println!(
             "{name}: {} faces, {} pending: {} B",
@@ -1858,11 +1849,114 @@ fn print_the_arena_a_listener_reserves_at_each_default() {
             );
         }
     }
+
+    // What one more of each kind adds at the pico preset: its rows in the engine's tables, and in
+    // the tables it is counted in with other kinds (filters, interests). The ABI's own object for
+    // the entity, in its place of the arena, comes on top, as the key arena does for its key.
+    let preset = pico_preset_limits();
+    let at_preset = listener_bytes(preset).expect("the pico preset lays an arena out");
+    std::println!("one more of each kind at the pico preset ({at_preset} B):");
+    let mut each = Vec::new();
+    for id in ENTITY_LIMITS {
+        let Some(held) = held_count(&preset, id) else {
+            std::println!("  {id:<30} not read by this build");
+            continue;
+        };
+        match selecting(preset, id, held.saturating_add(1)).and_then(listener_bytes) {
+            Some(bytes) => {
+                let one = bytes.saturating_sub(at_preset);
+                each.push((id, held, one));
+                std::println!("  {id:<30} {held:>4} held: {one:>7} B each");
+            }
+            None => std::println!("  {id:<30} {held:>4} held: this build admits no more"),
+        }
+    }
+
+    // The preset raised to the counts it is to hold: what the plan lays out when the build's
+    // capacities admit it, and what the bytes of one of each above make of it in any build.
+    let projected = RAISED_PRESET.iter().fold(at_preset, |sum, &(id, value)| {
+        each.iter()
+            .find(|(kind, _, _)| *kind == id)
+            .map_or(sum, |&(_, held, one)| {
+                sum.saturating_add(value.saturating_sub(held).saturating_mul(one))
+            })
+    });
+    std::println!("pico preset raised to {RAISED_PRESET:?}:");
+    std::println!("  by the bytes of one of each: {projected} B");
+    let raised = RAISED_PRESET
+        .iter()
+        .try_fold(preset, |limits, &(id, value)| selecting(limits, id, value));
+    match raised.and_then(listener_bytes) {
+        Some(bytes) => std::println!("  as the plan lays it out: {bytes} B"),
+        None => {
+            std::println!("  as the plan lays it out: past this build's capacities (WZ_LIMIT_*)")
+        }
+    }
+}
+
+/// The counts of each kind the pico preset is to be raised to, by the limit that counts it.
+const RAISED_PRESET: [(&str, usize); 4] = [
+    ("MAX_PUBLISHERS", 100),
+    ("MAX_SUBSCRIPTIONS", 100),
+    ("MAX_QUERYABLES", 100),
+    ("MAX_DECLARED_KEYEXPRS", 200),
+];
+
+/// The limits that count the session's own declarations, a kind each.
+const ENTITY_LIMITS: [&str; 8] = [
+    "MAX_PUBLISHERS",
+    "MAX_SUBSCRIPTIONS",
+    "MAX_QUERYABLES",
+    "MAX_LOCAL_TOKENS",
+    "MAX_LIVELINESS_SUBSCRIPTIONS",
+    "MAX_QUERIERS",
+    "MAX_MATCHING_LISTENERS",
+    "MAX_DECLARED_KEYEXPRS",
+];
+
+/// A session that listens, with the faces and handshakes `limits` admit, `None` when the build's
+/// capacities admit fewer.
+fn listener_config(limits: SessionLimits) -> Option<CoopConfig> {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    Some(CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: admitted_faces(&limits).ok()?,
+        accept_pending: admitted_handshakes(&limits).ok()?,
+        limits,
+        ..client_config()
+    })
+}
+
+/// The bytes the arena of a session that listens under `limits` reserves, `None` when the build
+/// lays none out for them.
+fn listener_bytes(limits: SessionLimits) -> Option<usize> {
+    host_plan(&listener_config(limits)?).ok()?.reserved_bytes()
+}
+
+/// How many of the kind the limit `id` counts `limits` holds, `None` for a limit the build does
+/// not read.
+fn held_count(limits: &SessionLimits, id: &str) -> Option<usize> {
+    let entry = SESSION_LIMITS.iter().find(|entry| entry.id() == id)?;
+    match entry.value_in(limits) {
+        LimitValue::Integer(held) => Some(held),
+        LimitValue::Unbounded => None,
+    }
+}
+
+/// `limits` with `value` selected for the limit `id`, `None` when the build reads no such limit or
+/// refuses the value.
+fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<SessionLimits> {
+    let entry = SESSION_LIMITS.iter().find(|entry| entry.id() == id)?;
+    entry
+        .select(&mut limits, LimitValue::Integer(value))?
+        .ok()?;
+    Some(limits)
 }
 
 /// A plan with every row of the build, the links' cells, their gates', their actions' and the
-/// ABI's handle among them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
-/// whichever build. A group that puts a row it does not count, or counts one it does not put,
+/// ABI's handle among them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the
+/// plan puts, in whichever build. A group that puts a row it does not count, or counts one it does not put,
 /// turns this red.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
