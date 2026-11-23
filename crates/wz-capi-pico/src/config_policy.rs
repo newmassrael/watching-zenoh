@@ -52,18 +52,18 @@ use wz_session_core::json5_lex::{Json5Error, Json5Keyword, Json5Str, Lexer};
 use wz_session_core::limit_binding::{LimitValue, UNBOUNDED};
 use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "config-document")]
-use wz_session_core::limits::{RuntimeLimits, SESSION_LIMITS, SESSION_LIMIT_COUNT};
+use wz_session_core::limits::{RuntimeLimits, SESSION_LIMITS};
 use wz_session_core::policy::SessionPolicy;
+#[cfg(any(feature = "config-document", all(test, feature = "config-policy")))]
+use wz_session_core::policy::POLICIES;
 #[cfg(feature = "config-document")]
 use wz_session_core::policy::PROFILES;
-#[cfg(feature = "config-policy")]
-use wz_session_core::policy::{POLICIES, POLICY_COUNT};
 #[cfg(any(test, feature = "config-document"))]
 use wz_session_core::policy_document::Resolved;
 #[cfg(feature = "config-policy")]
-use wz_session_core::policy_document::{self, Overrides, Profile, Statement};
+use wz_session_core::policy_document::{self, Overrides, PolicySet, Profile, Stated, Statement};
 #[cfg(feature = "config-document")]
-use wz_session_core::policy_document::{DocumentLayers, LimitStatement};
+use wz_session_core::policy_document::{DocumentLayers, LimitSet, LimitStatement, StatedLimits};
 
 #[cfg(feature = "config-policy")]
 use crate::abi::z_loaned_config_t;
@@ -133,65 +133,8 @@ pub(crate) struct PolicyStatements {
     /// What the `wz` member of the document `wz_ext_config_document` was handed states.
     #[cfg(feature = "config-document")]
     document: DocumentRows,
-    /// The statements of `wz_ext_config_policy`.
-    api: ApiStatements,
-}
-
-/// The statements of `wz_ext_config_policy`, a policy's id and a value's id, one per policy, in
-/// the order each policy was first stated: at most one row for each policy the build has.
-#[cfg(feature = "config-policy")]
-#[derive(Clone, Copy)]
-struct ApiStatements {
-    rows: [Statement<'static>; POLICY_COUNT],
-    held: usize,
-}
-
-#[cfg(feature = "config-policy")]
-impl Default for ApiStatements {
-    fn default() -> Self {
-        Self {
-            rows: [Statement::new("", ""); POLICY_COUNT],
-            held: 0,
-        }
-    }
-}
-
-#[cfg(feature = "config-policy")]
-impl ApiStatements {
-    fn as_slice(&self) -> &[Statement<'static>] {
-        &self.rows[..self.held]
-    }
-
-    /// Whether a statement of `policy` is held.
-    #[cfg(feature = "config-document")]
-    fn holds(&self, policy: &str) -> bool {
-        self.as_slice().iter().any(|held| held.policy == policy)
-    }
-
-    /// `statement` in place of a held statement of its policy, or after the others. A policy is
-    /// held once, so the rows hold every policy the build has.
-    fn state(&mut self, statement: Statement<'static>) {
-        match self.rows[..self.held]
-            .iter_mut()
-            .find(|held| held.policy == statement.policy)
-        {
-            Some(held) => *held = statement,
-            None => {
-                self.rows[self.held] = statement;
-                self.held += 1;
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.held
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.held == 0
-    }
+    /// The statements of `wz_ext_config_policy`, by the build's table.
+    api: PolicySet,
 }
 
 #[cfg(feature = "config-policy")]
@@ -214,8 +157,8 @@ impl PolicyStatements {
     ) -> Result<(), ZResult> {
         let overrides = Overrides {
             profile: self.profile,
-            statements: self.api.as_slice(),
-            limits: &[],
+            statements: Stated::Set(&self.api),
+            ..Overrides::default()
         };
         // The layers of a document resolve into a record of where each value came from; the two
         // snapshots are taken from it.
@@ -245,8 +188,8 @@ impl PolicyStatements {
         let base = policy_document::Base::session(base);
         let overrides = Overrides {
             profile: self.profile,
-            statements: self.api.as_slice(),
-            limits: &[],
+            statements: Stated::Set(&self.api),
+            ..Overrides::default()
         };
         #[cfg(feature = "config-document")]
         if !self.document.states_nothing() {
@@ -275,18 +218,9 @@ impl PolicyStatements {
     /// replaced. A policy the build does not have, or a value the policy does not have, is
     /// `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it.
     fn state_policy(&mut self, policy: &str, value: &str) -> Result<(), ZResult> {
-        let entry = POLICIES
-            .iter()
-            .find(|entry| entry.id() == policy)
-            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        let value = entry
-            .values()
-            .iter()
-            .copied()
-            .find(|known| *known == value)
-            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        self.api.state(Statement::new(entry.id(), value));
-        Ok(())
+        self.api
+            .state(Statement::new(policy, value))
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
     /// The profile of the build whose id is `id` is the one the sessions start from; a profile
@@ -298,12 +232,28 @@ impl PolicyStatements {
         Ok(())
     }
 
-    /// A statement no door would keep, for a test of what the open does with one.
+    /// Statements of the API layer that the set holds and the resolution refuses, for a test of
+    /// what the open does with them: a policy only the build decides, or a value the build's
+    /// domain leaves out. `None` for a build with neither; a policy or a value the build does not
+    /// have the set cannot hold.
     #[cfg(test)]
-    pub(crate) fn unchecked(policy: &'static str, value: &'static str) -> Self {
+    pub(crate) fn refused_by_the_resolution() -> Option<Self> {
+        use wz_session_core::policy_binding::Binding;
+        let (policy, value) = POLICIES.iter().find_map(|entry| {
+            let value = if entry.binding() == Binding::Build {
+                entry.values().first().copied()
+            } else {
+                entry
+                    .values()
+                    .iter()
+                    .copied()
+                    .find(|value| !entry.domain().contains(value))
+            }?;
+            Some((entry.id(), value))
+        })?;
         let mut statements = Self::default();
-        statements.api.state(Statement::new(policy, value));
-        statements
+        statements.api.state(Statement::new(policy, value)).ok()?;
+        Some(statements)
     }
 }
 
@@ -324,58 +274,15 @@ fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
     ))
 }
 
-/// The statements of a document's `wz/limits`, each a limit of a session by the build's own id
-/// and its value, in the document's order: at most one row for each such limit.
-#[cfg(feature = "config-document")]
-#[derive(Clone, Copy)]
-struct LimitRows {
-    rows: [LimitStatement<'static>; SESSION_LIMIT_COUNT],
-    held: usize,
-}
-
-#[cfg(feature = "config-document")]
-impl Default for LimitRows {
-    fn default() -> Self {
-        Self {
-            rows: [LimitStatement::new("", LimitValue::Unbounded); SESSION_LIMIT_COUNT],
-            held: 0,
-        }
-    }
-}
-
-#[cfg(feature = "config-document")]
-impl LimitRows {
-    fn as_slice(&self) -> &[LimitStatement<'static>] {
-        &self.rows[..self.held]
-    }
-
-    /// `statement` after the others, or `Refused` for a limit already stated, as the document's
-    /// resolution refuses one stated twice. A limit is held once, so the rows hold every limit of
-    /// a session.
-    fn push(&mut self, statement: LimitStatement<'static>) -> Result<(), Refused> {
-        if self
-            .as_slice()
-            .iter()
-            .any(|held| held.limit == statement.limit)
-        {
-            return Err(Refused);
-        }
-        self.rows[self.held] = statement;
-        self.held += 1;
-        Ok(())
-    }
-}
-
 /// What the `wz` member of the document `wz_ext_config_document` was handed states, read by the
-/// door into rows of the build's own ids with no tree kept: the profile, the statements of
-/// `wz/policies` and those of `wz/limits`, each in the document's order, and the key ids of
-/// `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
+/// door into the build's own ids with no tree kept: the profile, the statements of `wz/policies`
+/// and those of `wz/limits`, each held by the build's table, and the key ids of `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
 #[cfg(feature = "config-document")]
 #[derive(Clone, Default)]
 struct DocumentRows {
     profile: Option<&'static str>,
-    statements: ApiStatements,
-    limits: LimitRows,
+    statements: PolicySet,
+    limits: LimitSet,
     #[cfg(feature = "shared-key-ids")]
     key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
 }
@@ -459,7 +366,8 @@ fn after_member(lex: &mut Lexer<'_>) -> Result<(), Refused> {
 impl DocumentRows {
     /// Whether the document states nothing, so a config resolves as one handed none.
     fn states_nothing(&self) -> bool {
-        let stated = self.profile.is_some() || self.statements.held > 0 || self.limits.held > 0;
+        let stated =
+            self.profile.is_some() || !self.statements.is_empty() || !self.limits.is_empty();
         #[cfg(feature = "shared-key-ids")]
         let stated =
             stated || self.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
@@ -476,8 +384,8 @@ impl DocumentRows {
     ) -> Result<Resolved, ZResult> {
         let layers = DocumentLayers {
             profile: self.profile,
-            statements: self.statements.as_slice(),
-            limits: self.limits.as_slice(),
+            statements: Stated::Set(&self.statements),
+            limits: StatedLimits::Set(&self.limits),
         };
         let resolved = policy_document::resolve_layers_under(base, layers, overrides)
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
@@ -494,8 +402,8 @@ impl DocumentRows {
     /// `CONFIG_DOCUMENT_DEPTH` deep, the outermost object being 1.
     fn read(&mut self, text: &str) -> Result<(), ZResult> {
         self.profile = None;
-        self.statements.held = 0;
-        self.limits.held = 0;
+        self.statements = PolicySet::new();
+        self.limits = LimitSet::new();
         #[cfg(feature = "shared-key-ids")]
         {
             self.key_ids = Default::default();
@@ -608,7 +516,9 @@ impl DocumentRows {
             if self.statements.holds(entry.id()) {
                 return Err(Refused);
             }
-            self.statements.state(Statement::new(entry.id(), value));
+            self.statements
+                .state(Statement::new(entry.id(), value))
+                .map_err(|_| Refused)?;
             after_member(lex)?;
         }
         Ok(())
@@ -634,7 +544,9 @@ impl DocumentRows {
                 .iter()
                 .find(|entry| limit.eq_str(entry.id()))
                 .ok_or(Refused)?;
-            self.limits.push(LimitStatement::new(entry.id(), value))?;
+            self.limits
+                .state(LimitStatement::new(entry.id(), value))
+                .map_err(|_| Refused)?;
             after_member(lex)?;
         }
         Ok(())
@@ -978,7 +890,10 @@ mod tests {
             resolve_snapshots(&config.state().policies),
             Ok((recorded.policy, recorded.limits.session))
         );
-        let refused = PolicyStatements::unchecked("no-such-policy", value);
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(refused) = PolicyStatements::refused_by_the_resolution() else {
+            return;
+        };
         assert_eq!(
             resolve_policy(&refused).map(|_| ()),
             Err(Z_ERR_CONFIG_INVALID_VALUE),
@@ -1094,12 +1009,16 @@ mod tests {
         let (entry, value) = one_allowed();
         let mut config = Config::new();
         assert_eq!(config.policy(entry.id(), value), Z_OK);
-        let held = config.state().policies.api.as_slice()[0];
-        assert!(core::ptr::eq(held.policy, entry.id()));
+        let held = config
+            .state()
+            .policies
+            .api
+            .value_of(entry.id())
+            .expect("a statement kept");
         assert!(entry
             .values()
             .iter()
-            .any(|known| core::ptr::eq(*known, held.value)));
+            .any(|known| core::ptr::eq(*known, held)));
         if upstream_allowed().is_some() {
             assert_eq!(config.profile("upstream"), Z_OK);
             let kept = config.state().policies.profile.expect("a profile kept");
@@ -1258,26 +1177,28 @@ mod tests {
         );
         assert_eq!(config.document(&text), Z_OK);
         let document = &config.state().policies.document;
-        let statement = document.statements.as_slice()[0];
-        assert!(core::ptr::eq(statement.policy, entry.id()));
+        let statement = document
+            .statements
+            .value_of(entry.id())
+            .expect("a statement kept");
         assert!(entry
             .values()
             .iter()
-            .any(|known| core::ptr::eq(*known, statement.value)));
-        let limit = document.limits.as_slice()[0];
-        let declared = SESSION_LIMITS
-            .iter()
-            .find(|limit| limit.id() == "MAX_SUBSCRIPTIONS")
-            .expect("declared");
-        assert!(core::ptr::eq(limit.limit, declared.id()));
-        assert_eq!(limit.value, LimitValue::Integer(1));
+            .any(|known| core::ptr::eq(*known, statement)));
+        assert_eq!(
+            document.limits.value_of("MAX_SUBSCRIPTIONS"),
+            Some(LimitValue::Integer(1))
+        );
         assert_eq!(
             config.document("{ wz: { limits: { MAX_SUBSCRIPTIONS: 1, MAX_SUBSCRIPTIONS: 1 } } }"),
             Z_ERR_CONFIG_INVALID_VALUE
         );
         let kept = &config.state().policies.document;
         assert_eq!(kept.statements.len(), 1, "the config keeps what it held");
-        assert_eq!(kept.limits.as_slice().len(), 1);
+        assert_eq!(
+            kept.limits.value_of("MAX_SUBSCRIPTIONS"),
+            Some(LimitValue::Integer(1))
+        );
     }
 
     /// A document nested `CONFIG_DOCUMENT_DEPTH` deep is read, and one a level deeper is refused
@@ -1349,6 +1270,63 @@ mod tests {
             };
             assert_eq!(origin, expected, "{}", policy.id());
         }
+    }
+
+    /// A document handed in place of an earlier one replaces the document layer alone: the door's
+    /// statement stays on top, a policy only the earlier document stated falls back to the build
+    /// default, and the result is the one of the same layers stated in the other order. Turned red
+    /// by a document door that clears the door's statements, or keeps the earlier document's.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_replaced_document_leaves_the_doors_statement_on_top() {
+        let Some((entry, in_document, in_door)) = two_allowed() else {
+            // The build allows one value of every policy.
+            return;
+        };
+        let (other, other_value) = decidable()
+            .filter(|candidate| candidate.id() != entry.id())
+            .find_map(|candidate| Some((candidate, candidate.domain().iter().next()?)))
+            .expect("a second policy a document may state");
+        let replacing = policies_document(&[(entry.id(), in_document)]);
+        let mut config = Config::new();
+        assert_eq!(config.policy(entry.id(), in_door), Z_OK);
+        assert_eq!(
+            config.document(&policies_document(&[
+                (entry.id(), in_document),
+                (other.id(), other_value)
+            ])),
+            Z_OK
+        );
+        assert_eq!(
+            config.resolved().provenance.origin(other.id()),
+            Some(Origin::Document),
+            "CONTROL: the earlier document is a layer"
+        );
+        assert_eq!(config.document(&replacing), Z_OK);
+        let resolved = config.resolved();
+        assert_eq!(entry.value_in(&resolved.policy), in_door);
+        assert_eq!(resolved.provenance.origin(entry.id()), Some(Origin::Api));
+        assert_eq!(
+            resolved.provenance.origin(other.id()),
+            Some(Origin::BuildDefault)
+        );
+        assert_eq!(
+            other.value_in(&resolved.policy),
+            other.value_in(&SessionPolicy::defaults())
+        );
+        let mut reversed = Config::new();
+        assert_eq!(reversed.document(&replacing), Z_OK);
+        assert_eq!(reversed.policy(entry.id(), in_door), Z_OK);
+        let again = reversed.resolved();
+        assert_eq!(again.policy, resolved.policy);
+        let origins = |resolved: &Resolved| {
+            resolved
+                .provenance
+                .iter()
+                .map(|(_, origin)| origin)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(origins(&again), origins(&resolved));
     }
 
     /// With no profile door, the profile the document names is the layer below its policies.
@@ -1595,11 +1573,14 @@ mod tests {
     /// opens nothing.
     #[test]
     fn a_refused_statement_fails_the_open_and_opens_nothing() {
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(refused) = PolicyStatements::refused_by_the_resolution() else {
+            return;
+        };
         let mut config = Config::new();
         // SAFETY: the owned config is live and holds a `ConfigState`.
         unsafe {
-            (*(config.0.handle as *mut ConfigState)).policies =
-                PolicyStatements::unchecked("no-such-policy", "on");
+            (*(config.0.handle as *mut ConfigState)).policies = refused;
         }
         let mut session = crate::session::z_owned_session_t {
             _val: core::ptr::null_mut(),

@@ -178,8 +178,8 @@ impl Config {
         )];
         judge_alone(wz_session_core::policy_document::Overrides {
             profile: None,
-            statements: &statement,
-            limits: &[],
+            statements: wz_session_core::policy_document::Stated::Read(&statement),
+            limits: wz_session_core::policy_document::StatedLimits::Read(&[]),
         })?;
         match self
             .1
@@ -201,8 +201,7 @@ impl Config {
     pub fn state_profile(&mut self, profile: &str) -> ZResult<()> {
         judge_alone(wz_session_core::policy_document::Overrides {
             profile: Some(profile),
-            statements: &[],
-            limits: &[],
+            ..wz_session_core::policy_document::Overrides::default()
         })?;
         self.1.profile = Some(profile.to_owned());
         Ok(())
@@ -364,7 +363,7 @@ impl WzStatements {
     fn resolve(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         use wz_session_core::{
             policy::SessionPolicy,
-            policy_document::{resolve_document_under, Overrides, Statement},
+            policy_document::{resolve_document_under, Overrides, Stated, Statement},
         };
 
         let tree = self.tree();
@@ -375,8 +374,8 @@ impl WzStatements {
             .collect();
         let overrides = Overrides {
             profile: self.profile.as_deref(),
-            statements: &statements,
-            limits: &[],
+            statements: Stated::Read(&statements),
+            ..Overrides::default()
         };
         resolve_document_under(SessionPolicy::defaults(), &tree, overrides)
             .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())

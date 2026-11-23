@@ -12899,7 +12899,7 @@ mod multicast_max_sessions_flag_tests {
 mod transport_tuning_policy_tests {
     use super::*;
     use wz::runtime_tokio::policy::SessionPolicy;
-    use wz::runtime_tokio::policy_document::{resolve, Layer, Origin, Statement};
+    use wz::runtime_tokio::policy_document::{resolve, Layer, Origin, Stated, Statement};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
@@ -12915,7 +12915,7 @@ mod transport_tuning_policy_tests {
                 let statements = [Statement::new("sn-resolution", width)];
                 let layer = Layer {
                     origin: Origin::Document,
-                    statements: &statements,
+                    statements: Stated::Read(&statements),
                 };
                 resolve(defaults, &[layer]).ok()
             })

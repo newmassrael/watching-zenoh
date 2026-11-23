@@ -259,7 +259,9 @@ mod tests {
     #[test]
     fn a_statement_holds_the_rows_a_layer_stated_and_nothing_else() {
         use crate::policy::SessionPolicy;
-        use crate::policy_document::{resolve_under, Base, LimitStatement, Overrides};
+        use crate::policy_document::{
+            resolve_under, Base, LimitStatement, Overrides, StatedLimits,
+        };
 
         assert_eq!(
             ProcessStatement::of(&ResolvedLimits::unchanged(
@@ -278,7 +280,7 @@ mod tests {
         let Ok(resolved) = resolve_under(
             Base::node(SessionPolicy::defaults()),
             Overrides {
-                limits: &stated,
+                limits: StatedLimits::Read(&stated),
                 ..Overrides::default()
             },
         ) else {
