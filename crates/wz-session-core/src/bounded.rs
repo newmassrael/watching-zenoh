@@ -1438,12 +1438,31 @@ impl Arena {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        if rows > N {
-            return Err(LendRefused::OverCeiling { rows, ceiling: N });
+        let (at, room) = self.lend_rows(rows, N, Self::table_bytes::<T>(rows))?;
+        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
+        // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        // (asserted above).
+        let inner = unsafe { LentSeq::lent(at.cast::<T>(), room) };
+        Ok(BoundedVec { inner })
+    }
+
+    /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
+    /// rows taking `bytes` (`None` past the address space), at most `ceiling`, and the rows
+    /// counted in 32 bits. Refused, taking nothing, past the ceiling, past what is left or past a
+    /// 32-bit count.
+    #[inline(never)]
+    fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> Result<(NonNull<u8>, u32), LendRefused> {
+        if rows > ceiling {
+            return Err(LendRefused::OverCeiling { rows, ceiling });
         }
         // `lent` never passes `bytes`.
         let left = self.bytes.wrapping_sub(self.lent);
-        let span = match Self::table_bytes::<T>(rows) {
+        let span = match bytes {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
         };
@@ -1456,14 +1475,11 @@ impl Arena {
             });
         };
         // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
-        // base aligned to it, so it is aligned for `T` (asserted above); it lies inside the
-        // arena, and no table was lent it before, as `lent` only grows.
-        let inner = unsafe {
-            let at = NonNull::new_unchecked(self.base.as_ptr().add(self.lent)).cast::<T>();
-            LentSeq::lent(at, room)
-        };
+        // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
+        // only grows.
+        let at = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) };
         self.lent = self.lent.wrapping_add(span);
-        Ok(BoundedVec { inner })
+        Ok((at, room))
     }
 
     /// Lend a key arena of `bytes` bytes of blocks: the next span of the arena, its state first,
