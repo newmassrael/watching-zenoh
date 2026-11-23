@@ -545,8 +545,6 @@ pub mod event_ring;
 // provide one (the same split `session_actions` makes); a bare cross-compile of the crate for a
 // core with neither (`thumbv7em`, `thumbv6m`) does not carry it.
 #[cfg(any(target_has_atomic = "64", feature = "no_std"))]
-// Totality debt TD-121 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod hlc;
 
 // Whether a span of ticks has passed over a counter that wraps at 2^32: the comparison a
