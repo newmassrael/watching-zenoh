@@ -566,8 +566,6 @@ pub mod e2e_sender;
 pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
-// Totality debt TD-172 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod encoding;
 // zenoh-pico's reading of an endpoint's text, for the cooperative engine's open and the link a
 // group is reported by.

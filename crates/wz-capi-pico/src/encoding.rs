@@ -386,7 +386,10 @@ pub unsafe extern "C" fn z_encoding_to_string(
         }
         let rendered = match encoding_view(encoding) {
             Some(view) => view.to_bytes(),
-            None => ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)]
+            None => ENCODING_ID_TO_STR
+                .get(usize::from(ENCODING_ID_DEFAULT))
+                .copied()
+                .unwrap_or_default()
                 .as_bytes()
                 .to_vec(),
         };
