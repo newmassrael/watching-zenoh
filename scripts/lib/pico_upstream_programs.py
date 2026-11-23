@@ -892,6 +892,16 @@ def export_pico(into: pathlib.Path) -> pathlib.Path:
     return into
 
 
+# A switch the reference is built with otherwise than the declaration answers, because at the pinned
+# version zenoh-pico is wrong with it on in a way its own programs find: with `Z_FEATURE_RX_CACHE` a
+# sample received before any matching subscriber caches the empty lookup, a subscriber registered
+# after it does not invalidate the cache, and `z_api_advanced_pubsub_test`'s history cases receive
+# nothing (eclipse-zenoh/zenoh-pico PR 1243, open at 1.10.2). Its default and its own CI build have it
+# off, and the reference is the program's judge, so it is built as zenoh-pico is right. wz keeps its
+# receive memo (`MatchMemo`) on, so a pass of the library there is also the case pico gets wrong.
+REFERENCE_CORRECTIONS = {"Z_FEATURE_RX_CACHE": 0}
+
+
 def reference_library(host, features: list[str], scratch: pathlib.Path) -> Library:
     """zenoh-pico built as the same build as the library of `features`: every switch the declaration
     answers set from those features (`wz_config.pico_reference`), a shared library, no examples and
@@ -901,7 +911,7 @@ def reference_library(host, features: list[str], scratch: pathlib.Path) -> Libra
         enabled = wz_config.enabled_features(table, features)
     except KeyError as err:
         raise Refusal(f"the library names a feature this tree's wz-capi-pico does not have: {err}") from None
-    switches = wz_config.pico_reference(wz_config.load_decl(), enabled)
+    switches = {**wz_config.pico_reference(wz_config.load_decl(), enabled), **REFERENCE_CORRECTIONS}
     src = export_pico(scratch / "pico-src")
     build = scratch / "pico-build"
     configure = ["cmake", "-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
@@ -1522,6 +1532,9 @@ def selftest() -> int:
            and all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].name == "z_scout")
            and all(sc.scouts for sc in SCENARIOS if sc.id == "c99/z_pong")
            and not any(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "tests"))
+    config_in = (PICO / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
+    expect("every correction of the reference names a switch zenoh-pico's config has",
+           all(f"#define {name} @{name}@" in config_in for name in REFERENCE_CORRECTIONS))
     expect("a Hello is read as zenoh-pico renders a router, \"Router\"",
            missing_witnesses(scout, {"subject": hello.replace('"Router"', '"Peer"')}, 7447) != [])
     expect("every scenario that scouts needs a network of its own, and says why",
