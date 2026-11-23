@@ -932,10 +932,10 @@ fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
 }
 
 /// Whether a session `config` opens gives its dial role's face a link: it does when it lists an
-/// endpoint to dial, and when it lists none and has neither a port to listen on nor a group to join,
-/// whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks this). A session
-/// that only listens or only joins groups never dials from that face: a face it attaches later is
-/// one of `max_faces`.
+/// endpoint to dial, and when it lists none and has neither a port to listen on nor a group to
+/// join, whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks
+/// this). A session that only listens or only joins groups never dials from that face: a face it
+/// attaches later is one of `max_faces`.
 pub(crate) fn dials(config: &CoopConfig) -> bool {
     !(config.endpoints.is_empty() && (!config.listen.is_empty() || !config.groups.is_empty()))
 }
@@ -949,12 +949,13 @@ fn faces_of(config: &CoopConfig) -> Option<usize> {
         .checked_add(config.groups.len())
 }
 
-/// The links a session `config` opens may hold at once: the dial role's when it dials
-/// (`dials`), as many besides as `max_faces` admits (each a link it attaches or accepts), and
-/// for a listener as many in their handshake as `accept_pending` admits. `None` past the address
-/// space. The runtime's task cells are reserved for as many (`engine::RuntimeTables`), a link's
-/// session being one task.
-pub(crate) fn links_of(config: &CoopConfig) -> Option<usize> {
+/// The links a session `config` opens may hold at once, whose buffers its open reserves: the dial
+/// role's when it dials (the endpoints it lists, or none with neither a port nor a group), as many
+/// besides as `max_faces` admits (each a link it attaches or accepts), and for a listener as many
+/// in their handshake as `accept_pending` admits. `None` past the address space. The one count
+/// of them: the plan's link rows and the runtime's task cells are both sized by it, a link's
+/// session being one task, and an ABI that reports the session's memory reads it here.
+pub fn links_of(config: &CoopConfig) -> Option<usize> {
     let handshakes = if config.listen.is_empty() {
         0
     } else {
