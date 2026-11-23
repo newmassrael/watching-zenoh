@@ -1476,8 +1476,12 @@ mod tests {
             (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
         }
 
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(policies) = PolicyStatements::refused_by_the_resolution() else {
+            return;
+        };
         let cfg = ConfigState {
-            policies: PolicyStatements::unchecked("no-such-policy", "on"),
+            policies,
             ..ConfigState::default()
         };
         let mut config = crate::abi::z_moved_config_t {

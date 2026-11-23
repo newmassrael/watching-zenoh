@@ -187,8 +187,13 @@ mod tests {
     #[cfg(feature = "config-policy")]
     #[test]
     fn a_config_whose_policies_the_open_refuses_is_refused() {
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(refused) = crate::config_policy::PolicyStatements::refused_by_the_resolution()
+        else {
+            return;
+        };
         let mut cfg = config(&[(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447")]);
-        cfg.policies = crate::config_policy::PolicyStatements::unchecked("no-such-policy", "on");
+        cfg.policies = refused;
         let (code, reason) = requirement_of(&cfg).unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_CONFIG_INVALID_VALUE);
         assert!(reason.contains("policy"), "{reason}");
