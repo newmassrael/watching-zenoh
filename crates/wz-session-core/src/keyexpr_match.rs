@@ -17,7 +17,8 @@
 //! most, the relation is a greedy walk with one backtrack frame (`keyexpr_walk.scxml`), which is
 //! exact when only one side can take several chunks. With `**` on both sides it is a dynamic
 //! programme over the two keys' prefixes whose rows are `uint64` bit sets, two of them at a time
-//! (`keyexpr_intersects_dp.scxml`, `keyexpr_includes_dp.scxml`); the side the bits stand for has
+//! (`keyexpr_relation_dp.scxml`, one programme for both relations: which side's `**` stretches
+//! and which chunk step relates two chunks are its arguments); the side the bits stand for has
 //! at most 63 chunks, and two such keys of more than 63 chunks each are refused. Until 2026-11-19
 //! this module held the matcher by hand, a descent that remembered the suffix pairs it had
 //! refuted, over keys split into a chunk view.
@@ -92,12 +93,11 @@ mod generated {
             generated!(#[cfg(all())] $($name),*);
         };
     }
-    // The directional relation and the programme only it fills, under its own catalog switch.
-    // Its chunk step is the walk's too, so it is not gated.
+    // The directional relation, under its own catalog switch. The programme it fills is the
+    // symmetric relation's too, and its chunk step is the walk's, so neither is gated.
     generated!(
         #[cfg(feature = "keyexpr-includes")]
         keyexpr_includes,
-        keyexpr_includes_dp,
     );
     generated!(
         key_facts,
@@ -105,7 +105,7 @@ mod generated {
         keyexpr_intersects,
         keyexpr_matches,
         keyexpr_walk,
-        keyexpr_intersects_dp,
+        keyexpr_relation_dp,
         keyexpr_chunk_intersects,
         keyexpr_chunk_includes,
         keyexpr_chunk_matches,
@@ -767,6 +767,54 @@ mod tests {
         assert!(keyexpr_intersects(&deep, "a/**"));
         assert!(keyexpr_intersects(&("a/".repeat(62) + "**"), &deep));
         assert!(!keyexpr_intersects(&deep, &deep.replace("a/a/", "a/b/")));
+    }
+
+    /// The inclusion programme with its bits over the covering side: a covered key of more than
+    /// 63 chunks against a covering one of at most 63, both holding `**`, puts the covered key on
+    /// the rows, where its `**` does not stretch and the covering one's does. Each answer is the
+    /// reference descent's, and two such keys of more than 63 chunks each are refused.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        feature = "keyexpr-wildcard-double",
+        feature = "keyexpr-includes"
+    ))]
+    #[test]
+    fn inclusion_answers_with_its_bits_over_the_covering_side() {
+        fn chunks<'a>(text: &'a str, out: &mut [&'a str; 80]) -> usize {
+            let mut len = 0;
+            for (index, chunk) in text.split('/').enumerate() {
+                out[index] = chunk;
+                len = index + 1;
+            }
+            len
+        }
+        let deep = "a/".repeat(70) + "**";
+        let deep_verbatim = "a/".repeat(70) + "**/@v";
+        let shallow = "a/".repeat(62) + "**";
+        let cases = [
+            ("a/**", deep.as_str(), true),
+            ("b/**", deep.as_str(), false),
+            (shallow.as_str(), deep.as_str(), true),
+            ("a/**/@v", deep_verbatim.as_str(), true),
+            ("a/**", deep_verbatim.as_str(), false),
+            (deep.as_str(), "a/**", false),
+        ];
+        for (superset, subset, want) in cases {
+            assert_eq!(
+                keyexpr_includes(superset, subset),
+                want,
+                "{superset:?} includes {subset:?}"
+            );
+            let (mut sup, mut sub) = ([""; 80], [""; 80]);
+            let (sup_len, sub_len) = (chunks(superset, &mut sup), chunks(subset, &mut sub));
+            assert_eq!(
+                reference::includes_by_descent(&sup[..sup_len], &sub[..sub_len]),
+                want,
+                "the reference on {superset:?} and {subset:?}"
+            );
+        }
+        assert!(!keyexpr_includes(&deep, &deep));
     }
 
     #[test]

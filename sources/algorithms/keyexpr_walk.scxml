@@ -14,7 +14,7 @@
   The answer is 1 (they relate), 0 (they do not), or 2: t has a `**` the
   relation reads as a wildcard, which this walk does not answer for. With
   `**` in p alone the greedy walk answers what the table of the prefixes would
-  (keyexpr_intersects_dp): every chunk of t meets exactly one chunk of p, and
+  (keyexpr_relation_dp): every chunk of t meets exactly one chunk of p, and
   the last `**` is the one whose reach decides. A 0 given before a `**` of t is
   reached is still the answer: everything up to it was a walk over chunks that
   each meet one chunk, and the mismatch it stopped at came before the `**`.

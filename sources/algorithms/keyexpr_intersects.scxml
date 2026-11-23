@@ -14,7 +14,7 @@
     same text.
   * With `**` on one side at most, keyexpr_walk walks the other side's chunks
     from the side that holds it (keyexpr_chunk_intersects at each step).
-  * With `**` on both sides, keyexpr_intersects_dp fills the table of their
+  * With `**` on both sides, keyexpr_relation_dp fills the table of their
     prefixes, its bits over the side of at most 63 chunks; two such texts of
     more than 63 chunks each are refused, the bound of a uint64 row.
 
@@ -33,7 +33,7 @@
   <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
   <sce:import kind="algorithm" src="keyexpr_range_equal.scxml" as="keyexpr_range_equal"/>
   <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
-  <sce:import kind="algorithm" src="keyexpr_intersects_dp.scxml" as="keyexpr_intersects_dp"/>
+  <sce:import kind="algorithm" src="keyexpr_relation_dp.scxml" as="keyexpr_relation_dp"/>
   <sce:signature>
     <sce:param name="a" type="bytes"/>
     <sce:param name="b" type="bytes"/>
@@ -72,10 +72,10 @@
     <sce:var name="db" type="bool" init="wild_double &amp;&amp; sb.double_star"/>
     <sce:if cond="da &amp;&amp; db">
       <sce:if cond="sb.chunks &lt;= 63">
-        <sce:return expr="keyexpr_intersects_dp(a, b, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(a, b, true, true, false, wild_single, dsl)"/>
       </sce:if>
       <sce:if cond="sa.chunks &lt;= 63">
-        <sce:return expr="keyexpr_intersects_dp(b, a, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(b, a, true, true, false, wild_single, dsl)"/>
       </sce:if>
       <sce:return expr="false"/>
     </sce:if>

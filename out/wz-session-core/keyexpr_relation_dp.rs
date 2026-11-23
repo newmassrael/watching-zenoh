@@ -1,7 +1,7 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 7ecd5ef717e8ce8738d701433d924f5e837cee1e93f5ec2fcb0ac0e89df19b9a
-// source: keyexpr_intersects_dp.scxml
-// SCE-MAP: keyexpr_intersects_dp.scxml:23 :: _forge_body
+// source-hash: fd580feb56346aee457e031610a4f1ed1ac81ad04364e98242eec177d0c0d129
+// source: keyexpr_relation_dp.scxml
+// SCE-MAP: keyexpr_relation_dp.scxml:36 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none
@@ -14,10 +14,11 @@
 use super::keyexpr_chunk_end;
 use super::keyexpr_chunk_kind;
 use super::keyexpr_chunk_intersects;
+use super::keyexpr_chunk_includes;
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
-pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bool) -> bool {
+pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, includes: bool, wild_single: bool, wild_dsl: bool) -> bool {
     let rn: u32 = (r).len() as u32;
     let cn: u32 = (c).len() as u32;
     let mut prev: u64 = 1;
@@ -30,7 +31,7 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
             return false;
         }
         m = m + 1;
-        if keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs0, ce0) == 2 {
+        if col_star && keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs0, ce0) == 2 {
             let below0: u32 = m - 1;
             if prev >> below0 & 1 == 1 {
                 prev = prev | 1u64 << m;
@@ -48,7 +49,7 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
         let re: u32 = keyexpr_chunk_end::keyexpr_chunk_end(r, rs);
         let rkind: u8 = keyexpr_chunk_kind::keyexpr_chunk_kind(r, rs, re);
         let mut cur: u64 = 0;
-        if rkind == 2 && prev & 1 == 1 {
+        if row_star && rkind == 2 && prev & 1 == 1 {
             cur = 1;
         }
         let mut j: u32 = 0;
@@ -62,14 +63,22 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
             let left: bool = cur >> j & 1 == 1;
             let diag: bool = prev >> j & 1 == 1;
             let mut v: bool = false;
-            if rkind == 2 {
+            if row_star && rkind == 2 {
                 v = up || ckind != 3 && left;
             } else {
-                if ckind == 2 {
+                if col_star && ckind == 2 {
                     v = left || rkind != 3 && up;
                 } else {
-                    if diag {
-                        v = keyexpr_chunk_intersects::keyexpr_chunk_intersects(r, rs, re, c, cs, ce, wild_single, wild_dsl);
+                    if rkind != 2 && ckind != 2 && diag {
+                        if includes {
+                            if row_star {
+                                v = keyexpr_chunk_includes::keyexpr_chunk_includes(r, rs, re, c, cs, ce, wild_single, wild_dsl);
+                            } else {
+                                v = keyexpr_chunk_includes::keyexpr_chunk_includes(c, cs, ce, r, rs, re, wild_single, wild_dsl);
+                            }
+                        } else {
+                            v = keyexpr_chunk_intersects::keyexpr_chunk_intersects(r, rs, re, c, cs, ce, wild_single, wild_dsl);
+                        }
                     }
                 }
             }
