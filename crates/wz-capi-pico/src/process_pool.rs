@@ -1527,6 +1527,17 @@ mod tests {
             Kind::Hello,
             core::mem::size_of::<crate::scout::KeptHello>(),
         );
+        // What a config is made of, the largest object: its entries' rows and text, and the
+        // statements of wz's own doors beside them.
+        let config = crate::config::ConfigState::default();
+        std::println!(
+            "config-part: whole={} entries={} policies={} config_entries={} config_text_bytes={}",
+            core::mem::size_of_val(&config),
+            core::mem::size_of_val(&config.entries),
+            core::mem::size_of_val(&config.policies),
+            caps::CONFIG_ENTRIES,
+            caps::CONFIG_TEXT_BYTES,
+        );
         let marks = Blocks::marks_bytes(plan.area);
         std::println!(
             "slot-total: slots={laid} unused={left} unused_exact={left_exact} area={} marks={marks} \
