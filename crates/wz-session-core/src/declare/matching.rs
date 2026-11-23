@@ -92,7 +92,7 @@ impl MatchingSink for BoxedMatchingSink {
 
 /// One registered watch: the watched CRITERION, the last delivered
 /// verdict, and the sink to fire on a flip.
-struct MatchingWatch<C: MatchingSink, K> {
+struct MatchingWatch<C, K> {
     id: u64,
     criterion: K,
     last: bool,
@@ -114,7 +114,7 @@ struct MatchingWatch<C: MatchingSink, K> {
 /// `is_complete` side by side and both are read on every re-evaluation
 /// (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h:56-66`), so the
 /// watch key is a criterion rather than a keyexpr in upstream too.
-pub struct MatchingWatchList<C: MatchingSink, K> {
+pub struct MatchingWatchList<C, K> {
     watches: Vec<MatchingWatch<C, K>>,
     next_id: u64,
 }

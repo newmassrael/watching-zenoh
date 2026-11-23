@@ -560,7 +560,11 @@ fn rx_capacity(kind: AppLinkKind, queue: Quota) -> usize {
 
 /// The storage a link held to `queue` takes for the bytes a writer that cannot wait hands over
 /// ([`AppLinkTable::hold_remainder`]): the bound, read as 1 when it is 0.
-fn remainder_capacity(queue: Quota) -> usize {
+fn remainder_capacity(kind: AppLinkKind, queue: Quota) -> usize {
+    // A listener hands no byte to the program, and a group's sends do not wait: neither holds one.
+    if kind.is_listener() || kind == AppLinkKind::Group {
+        return 0;
+    }
     queue.most().map_or(0, |most| most.max(1))
 }
 
@@ -655,7 +659,7 @@ impl Link {
     /// Whether the row's storage holds what a link of `kind` held to `queue` takes.
     fn fits(&self, kind: AppLinkKind, queue: Quota) -> bool {
         self.rx.capacity() >= rx_capacity(kind, queue)
-            && self.remainder.capacity() >= remainder_capacity(queue)
+            && self.remainder.capacity() >= remainder_capacity(kind, queue)
     }
 
     /// Make the row a new link of `kind` held to `queue`, Opening, its storage kept. What is
@@ -829,7 +833,7 @@ impl AppLinkTable {
                 provisioned: true,
                 link: Link::with_storage(
                     rx_capacity(AppLinkKind::DatagramAccepted, queue),
-                    remainder_capacity(queue),
+                    remainder_capacity(AppLinkKind::DatagramAccepted, queue),
                 ),
             });
         }
@@ -944,7 +948,7 @@ impl AppLinkTable {
             }
             None => {
                 let mut link =
-                    Link::with_storage(rx_capacity(kind, queue), remainder_capacity(queue));
+                    Link::with_storage(rx_capacity(kind, queue), remainder_capacity(kind, queue));
                 link.reset(kind, queue);
                 self.rows.push(Row {
                     handle,
@@ -1389,7 +1393,8 @@ impl AppLinkTable {
         if !link.admits(link.remainder.len().saturating_add(bytes.len())) {
             return Err(InboundRefusal::Full);
         }
-        // The bound is checked above; a link of no bound grows its storage.
+        // The bound is checked above. A link of no bound grows its storage where the build's storage
+        // grows; a fixed build (`bounded-heapless`) holds what the row's storage holds.
         if !link.remainder.push(bytes, link.queue.most().is_none()) {
             return Err(InboundRefusal::Full);
         }

@@ -54,6 +54,7 @@ use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
 use crate::declare::declared_intersects;
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
+use crate::declare::{DefaultMatchingReport, MatchingReport};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::DriverLoopOutcome;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
@@ -161,7 +162,12 @@ pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink, P: Storage = Pro
 
 /// The application's half of [`RemoteSubscriberRegistry`]: the observer lists and
 /// the matching watches. Nothing a peer writes is here.
-pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
+pub struct RemoteSubscriberTable<
+    D: DeclSink,
+    U: UndeclSink,
+    P: Storage = Profile,
+    M: MatchingReport = DefaultMatchingReport,
+> {
     /// R311gb (Track 2) — the shared 2-list observer machinery
     /// (`on_decl` + `on_undecl`, install + fire), composed from
     /// [`crate::decl_sink::DeclObserverPair`] so the fan-out logic lives
@@ -179,7 +185,10 @@ pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink, P: Storage = Profil
     /// listener is a single-session facility, and no image that holds more than
     /// one session selects `session-matching` (its sinks are heap closures).
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    matching_watches: MatchingWatchList<BoxedMatchingSink, PublisherCriterion>,
+    matching_watches: MatchingWatchList<M, PublisherCriterion>,
+    /// The sink type of a build with no matching listener, which keeps none.
+    #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+    matching_watches: core::marker::PhantomData<M>,
 }
 
 /// What ONE peer has declared as subscribers to this session: the table a peer
@@ -527,12 +536,16 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteSubscriberRegistr
     }
 }
 
-impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteSubscriberTable<D, U, P> {
+impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> Default
+    for RemoteSubscriberTable<D, U, P, M>
+{
     fn default() -> Self {
         Self {
             observers: DeclObserverPair::default(),
             #[cfg(all(feature = "session-matching", feature = "alloc"))]
             matching_watches: MatchingWatchList::new(),
+            #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+            matching_watches: core::marker::PhantomData,
         }
     }
 }
@@ -774,7 +787,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Profile> {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Lent> {
+impl<D: DeclSink, U: UndeclSink, M: MatchingReport> RemoteSubscriberTable<D, U, Lent, M> {
     /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
     /// ([`DeclObserverPair::lent`]). Refused as that refuses.
     pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
@@ -782,6 +795,8 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Lent> {
             observers: DeclObserverPair::lent(arena, rows)?,
             #[cfg(all(feature = "session-matching", feature = "alloc"))]
             matching_watches: MatchingWatchList::new(),
+            #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+            matching_watches: core::marker::PhantomData,
         })
     }
 
@@ -791,7 +806,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Lent> {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
+impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriberTable<D, U, P, M> {
     /// Hold each observer list to the `MAX_DECL_OBSERVERS` its creator resolved
     /// ([`crate::decl_sink::DeclObserverPair::limit_to`]).
     pub fn limit_observers_to(&mut self, quota: crate::limits::MaxDeclObserversHeld) {
@@ -860,7 +875,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         &mut self,
         peer: &RemoteSubscriberPeer<Q>,
         keyexpr: &str,
-        sink: BoxedMatchingSink,
+        sink: M,
     ) -> u64 {
         self.declare_matching_listener_seeded(
             peer,
@@ -891,7 +906,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         peer: &RemoteSubscriberPeer<Q>,
         criterion: PublisherCriterion,
         local_matching: bool,
-        sink: BoxedMatchingSink,
+        sink: M,
     ) -> u64 {
         let initial = peer.has_matching_for(&criterion) || local_matching;
         self.matching_watches.register(criterion, initial, sink)
@@ -1690,6 +1705,38 @@ mod tests {
         );
         reg.dispatch_declare(&declare(2), &HashMap::new());
         assert_eq!(*declared.lock().unwrap(), vec![1, 2]);
+    }
+
+    /// A table whose holder names its own matching sink keeps that value for each listener, with
+    /// no box: a registration already matching hands it `true`, as it hands a boxed one.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_table_hands_flips_to_the_sink_type_its_holder_names() {
+        struct Counted(Arc<Mutex<Vec<bool>>>);
+        impl crate::declare::matching::MatchingSink for Counted {
+            fn on_matching_changed(&mut self, matching: bool) {
+                self.0.lock().unwrap().push(matching);
+            }
+        }
+        let mut table: RemoteSubscriberTable<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+            crate::bounded::Profile,
+            Counted,
+        > = RemoteSubscriberTable::default();
+        let peer: RemoteSubscriberPeer = RemoteSubscriberPeer::default();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        // Already matching by the seed, so the registration hands the sink `true`.
+        let id = table.declare_matching_listener_seeded(
+            &peer,
+            PublisherCriterion::any_locality("home/temp"),
+            true,
+            Counted(log.clone()),
+        );
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+        assert_eq!(table.matching_listener_len(), 1);
+        assert!(table.undeclare_matching_listener(id));
+        assert_eq!(table.matching_listener_len(), 0);
     }
 
     /// R311kh — matching listener flip-fires through the production

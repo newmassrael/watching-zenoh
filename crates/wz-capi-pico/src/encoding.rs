@@ -360,7 +360,7 @@ pub unsafe extern "C" fn z_encoding_from_substr(
         if s.is_null() {
             return Z_OK;
         }
-        let bytes = core::slice::from_raw_parts(s as *const u8, len);
+        let bytes = core::slice::from_raw_parts(s.cast::<u8>(), len);
         store_encoding(
             encoding,
             wz_session_core::encoding_hint::hint_from_bytes(bytes),
@@ -386,7 +386,10 @@ pub unsafe extern "C" fn z_encoding_to_string(
         }
         let rendered = match encoding_view(encoding) {
             Some(view) => view.to_bytes(),
-            None => ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)]
+            None => ENCODING_ID_TO_STR
+                .get(usize::from(ENCODING_ID_DEFAULT))
+                .copied()
+                .unwrap_or_default()
                 .as_bytes()
                 .to_vec(),
         };
@@ -442,7 +445,7 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         let bytes: &[u8] = if schema.is_null() || len == 0 {
             &[]
         } else {
-            core::slice::from_raw_parts(schema as *const u8, len)
+            core::slice::from_raw_parts(schema.cast::<u8>(), len)
         };
         (*state).set_schema(bytes);
         Z_OK

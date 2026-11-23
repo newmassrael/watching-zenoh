@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{
+    BatchStep, FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
@@ -328,23 +330,45 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
+/// A session told to join a group past its task cells is refused for want of a task cell, as its
+/// spawn would be, whether a face set is left for the group or not: `max_faces` of none leaves
+/// none past the groups the cells hold, one leaves a set and the spawn refuses. The CONTROL is the
+/// session told to join as many groups as the cells hold, which opens.
+#[test]
+fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
+    use wz_runtime_coop::executor::SpawnRefusal;
+    use wz_session_core::caps::MAX_TASKS;
+
+    let network = Arc::new(Network::default());
+    let told = |groups: usize, max_faces: usize| {
+        let mut config = member_config(1, GROUP);
+        let join = config.groups[0].clone();
+        config.groups = vec![join; groups];
+        config.max_faces = max_faces;
+        config
+    };
+    let held = open_member(&network, 1, told(MAX_TASKS, 0)).expect("CONTROL: the cells hold them");
+    SessionDrive::close(&*held);
+    for max_faces in [0, 1] {
+        assert_eq!(
+            open_member(&network, 2, told(MAX_TASKS + 1, max_faces)).err(),
+            Some(OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+            "max_faces {max_faces}"
+        );
+    }
+}
+
 /// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
 fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = Arc::clone(&heard);
     engine
-        .declare_subscriber_on_wire(
-            keyexpr,
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(keyexpr, WireKey::literal(), Locality::Any, None, {
+            let into = Arc::clone(&into);
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }
@@ -431,7 +455,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
         .expect("a session with ids left declares");
     eventually("the announcement to open the first's filter", || {
@@ -504,13 +528,13 @@ mod asked {
         let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, None, &mut || {
             into.lock().unwrap().open += 1;
             let ends = Ends(Arc::clone(&into));
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 ends.0.lock().unwrap().replies.push((
                     view.kind(),
                     view.keyexpr().to_owned(),
                     view.payload().to_vec(),
                 ));
-            }) as ReplyCallback
+            })
         });
         (issued, seen)
     }
@@ -753,13 +777,10 @@ mod alive {
     fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
         let heard: Heard = Arc::default();
         let into = heard.clone();
-        let sink: LivelinessSink = Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: LivelinessSample<'_>| {
-                into.lock()
-                    .unwrap()
-                    .push((sample.kind, sample.keyexpr.to_owned()));
-            })
+        let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+            into.lock()
+                .unwrap()
+                .push((sample.kind, sample.keyexpr.to_owned()));
         });
         let id = engine
             .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
@@ -862,7 +883,7 @@ mod mapped {
             &WireKey::aliased(id, None),
             &opts,
             None,
-            &mut || Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback,
+            &mut || ReplyCallback::shared(|_view: &dyn ReplyView| {}),
         );
         assert!(issued.is_ok(), "the get was asked");
         // The query is the first datagram after the clear that is not a beacon.
@@ -1740,12 +1761,16 @@ mod woken {
         let (member, stack, _transport) = open_alone(PosixClock, 5_000);
         let sent = || stack.sent.lock().unwrap().clone();
         let before = sent().len();
-        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+        assert_eq!(
+            member.batch_all(BatchStep::Start),
+            1,
+            "the group opens a window"
+        );
         put(&member, "demo/group/a", b"batched-first");
         put(&member, "demo/group/b", b"batched-second");
         assert_eq!(sent().len(), before, "the window holds both");
 
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         let flushed = sent();
         assert_eq!(flushed.len(), before + 1, "one datagram for both");
         let frame = flushed.last().expect("the window's frame");
@@ -1774,7 +1799,7 @@ mod woken {
 
         put(&member, "demo/group/e", b"batched-fourth");
         assert_eq!(sent().len(), before + 2, "held again");
-        assert_eq!(member.batch_stop_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Stop), 1);
         let stopped = sent();
         assert_eq!(stopped.len(), before + 3, "the stop writes what is left");
         assert!(stopped
@@ -1813,15 +1838,19 @@ mod woken {
         let payload = |at: usize| format!("{at:08}").into_bytes();
         let key = "demo/group/thr";
         let budget = usize::from(profile().batch_size);
-        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+        assert_eq!(
+            member.batch_all(BatchStep::Start),
+            1,
+            "the group opens a window"
+        );
 
         // The bytes one put adds to a frame, and the frame's head: a frame of one and one of two.
         let base = sent().len();
         put(&member, key, &payload(0));
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         put(&member, key, &payload(1));
         put(&member, key, &payload(2));
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         let calibration = sent();
         assert_eq!(calibration.len(), base + 2);
         let (one, two) = (calibration[base].len(), calibration[base + 1].len());
@@ -1845,7 +1874,7 @@ mod woken {
             puts,
             "one take of the session a put"
         );
-        assert_eq!(member.batch_stop_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Stop), 1);
         let frames = sent().split_off(base);
         assert_eq!(frames.len(), puts.div_ceil(fits));
         for (at, frame) in frames.iter().enumerate() {

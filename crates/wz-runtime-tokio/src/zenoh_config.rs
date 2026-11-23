@@ -15666,7 +15666,7 @@ mod wz_member_tests {
                 SessionPolicy::defaults(),
                 &[Layer {
                     origin: Origin::Api,
-                    statements: &stated,
+                    statements: crate::policy_document::Stated::Read(&stated),
                 }],
             )
             .expect("a value the build allows"),

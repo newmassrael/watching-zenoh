@@ -441,11 +441,7 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
         return read.locator.to_owned();
     }
     // pico writes no separator between the locator and the config.
-    let mut len = 0usize;
-    read.write_text("", |piece| len = len.saturating_add(piece.len()));
-    let mut text = String::with_capacity(len);
-    read.write_text("", |piece| text.push_str(piece));
-    text
+    read.text("")
 }
 
 /// The link pico reports for one link of an established face.

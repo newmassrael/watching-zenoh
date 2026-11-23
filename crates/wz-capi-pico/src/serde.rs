@@ -241,21 +241,22 @@ pub unsafe extern "C" fn z_bytes_writer_append(
 ) -> ZResult {
     guarded(|| {
         // Consume the moved payload FIRST, so an invalid writer still frees it
-        // (pico's move is unconditional once the call is made).
-        let taken = crate::pubsub::take_moved_bytes(bytes);
+        // (pico's move is unconditional once the call is made). A payload a delivered sample
+        // lent is read where its marshal holds it, which this call outlives: its bytes are
+        // copied once, into the writer, and never into a clone first.
+        let taken = crate::pubsub::read_moved_bytes(bytes);
         let buf = match writer_mut(writer as *mut c_void) {
             Some(b) => b,
             None => return Z_ERR_NULL,
         };
-        match taken {
-            // APPEND, not write: pico moves the source payload in as its
-            // own slice(s), and `z_bytes.c` walks the result expecting to
-            // see them back.
-            Ok(Some(payload)) => match buf.append_segments(&payload) {
-                Ok(()) => Z_OK,
-                Err(no_room) => no_room.code(),
-            },
-            Ok(None) => Z_ERR_NULL,
+        let Some(payload) = taken else {
+            return Z_ERR_NULL;
+        };
+        // APPEND, not write: pico moves the source payload in as its
+        // own slice(s), and `z_bytes.c` walks the result expecting to
+        // see them back.
+        match buf.append_segments(&payload) {
+            Ok(()) => Z_OK,
             Err(no_room) => no_room.code(),
         }
     })
@@ -398,7 +399,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_substr(
     start: *const c_char,
     len: usize,
 ) -> ZResult {
-    ze_serializer_serialize_buf(serializer, start as *const u8, len)
+    ze_serializer_serialize_buf(serializer, start.cast::<u8>(), len)
 }
 
 /// Write a length-prefixed NUL-terminated string (pico
@@ -433,7 +434,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_string(
 ) -> ZResult {
     let data = crate::bytes::z_string_data(val);
     let len = crate::bytes::z_string_len(val);
-    ze_serializer_serialize_buf(serializer, data as *const u8, len)
+    ze_serializer_serialize_buf(serializer, data.cast::<u8>(), len)
 }
 
 // --- reader ----------------------------------------------------------------
@@ -882,7 +883,7 @@ pub unsafe extern "C" fn ze_serialize_substr(
     start: *const core::ffi::c_char,
     len: usize,
 ) -> ZResult {
-    one_shot(bytes, start as *const u8, len)
+    one_shot(bytes, start.cast::<u8>(), len)
 }
 
 /// Serialize a loaned string as a whole payload (pico `ze_serialize_string`).
@@ -897,7 +898,7 @@ pub unsafe extern "C" fn ze_serialize_string(
 ) -> ZResult {
     one_shot(
         bytes,
-        crate::bytes::z_string_data(s) as *const u8,
+        crate::bytes::z_string_data(s).cast::<u8>(),
         crate::bytes::z_string_len(s),
     )
 }
@@ -1086,6 +1087,47 @@ mod tests {
             0,
             "pico's inline deserialize helpers pass &deserializer->_reader"
         );
+    }
+
+    /// An appended payload a delivered sample lent is read where its marshal holds it: its bytes
+    /// land in the writer as a segment of their own and the moved slot is spent. A payload moved
+    /// to a writer that is not there is spent all the same.
+    #[test]
+    fn an_appended_lent_payload_is_read_where_it_lies() {
+        let lent_bytes = *b"lent";
+        // SAFETY: `lent_bytes` outlives `held`, and every pointer handed over is null or points
+        // at a live value of its type that outlives the call.
+        unsafe {
+            let held = ByteBuf::lent(&lent_bytes);
+            let mut writer = z_owned_bytes_writer_t::null_value();
+            assert_eq!(z_bytes_writer_empty(&mut writer), Z_OK);
+            let loaned = &mut writer as *mut _ as *mut z_loaned_bytes_writer_t;
+            let mut lent = z_moved_bytes_t {
+                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+            };
+            assert_eq!(z_bytes_writer_append(loaned, &mut lent), Z_OK);
+            assert!(lent._this.handle.is_null(), "the borrow is spent");
+            let mut bytes = core::mem::zeroed();
+            z_bytes_writer_finish(
+                &mut writer as *mut _ as *mut z_moved_bytes_writer_t,
+                &mut bytes,
+            );
+            let buf = bytes_ref(crate::bytes::z_bytes_loan(&bytes)).expect("payload");
+            assert_eq!(buf.as_slice(), b"lent");
+            assert_eq!(buf.segment(0), Some(&b"lent"[..]));
+            assert_eq!(buf.segment(1), None);
+            crate::bytes::z_bytes_drop(crate::bytes::z_bytes_move(&mut bytes));
+
+            let mut owned = z_owned_bytes_t::null_value();
+            let copied = crate::bytes::z_bytes_copy_from_buf(&mut owned, b"own".as_ptr(), 3);
+            assert_eq!(copied, Z_OK);
+            let mut moved = z_moved_bytes_t { _this: owned };
+            assert_eq!(
+                z_bytes_writer_append(core::ptr::null_mut(), &mut moved),
+                Z_ERR_NULL
+            );
+            assert!(moved._this.handle.is_null(), "the payload is spent");
+        }
     }
 
     /// A serializer handle and a writer handle must be interchangeable at the

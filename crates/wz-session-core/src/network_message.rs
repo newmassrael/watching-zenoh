@@ -3072,6 +3072,20 @@ where
     )
 }
 
+/// [`plain_put_stats_class`] for a sender that holds the key's whole text: the space is the
+/// key's own, as a literal key's is, whatever declaration names the key on the wire, so no alias
+/// is resolved to classify it.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn named_put_stats_class(keyexpr: &str, pl_bytes: usize) -> crate::stats::NetworkStatsClass {
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+    NetworkStatsClass::net(
+        MessageLabel::Put,
+        StatMessage::Put,
+        StatSpace::of_keyexpr(keyexpr),
+        pl_bytes,
+    )
+}
+
 /// Fold a classified body into a class, selecting the `shm` medium when the
 /// body's extension chain carries the SHM descriptor marker — the wz twin of
 /// upstream's `labels.shm`.
@@ -5438,6 +5452,24 @@ mod payload_size_tests {
         let class = push_stats_class(&push, |_| None);
         assert_eq!(class.kind, Some(crate::stats::MessageLabel::Put));
         assert_eq!(class.payload.map(|p| p.pl_bytes), Some(12 + 8));
+    }
+
+    /// A Put whose sender holds the key's whole text classifies as the literal Put of that key,
+    /// in the user space and the admin space, whatever declaration names the key on the wire.
+    #[test]
+    fn a_named_put_classifies_as_the_literal_put_of_its_key() {
+        for key in ["demo/plain", "@/admin/key", "@/router/abc/tail"] {
+            assert_eq!(
+                named_put_stats_class(key, 13),
+                plain_put_stats_class(0, Some(key), 13, |_| None),
+                "{key}"
+            );
+        }
+        assert_ne!(
+            named_put_stats_class("@/router/abc", 13),
+            named_put_stats_class("demo/declared", 13),
+            "the admin space is told from the user space by the text"
+        );
     }
 
     /// A plain Put a sender holds as borrowed parts classifies as the owned message of the same

@@ -35,6 +35,9 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+#[cfg(feature = "liveliness")]
+use wz_session_core::session_tables::TokenHandle;
+use wz_session_core::session_tables::{KeyexprHandle, SubscriberHandle};
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -158,7 +161,9 @@ impl Replay {
         TurnEnd::Kept
     }
 
-    /// How a link's declarations go out.
+    /// How a link's declarations go out: what a face added beside the dial role's is told its
+    /// declarations at, and what a test reads.
+    #[cfg(any(feature = "listen", all(test, feature = "std")))]
     pub(super) fn pacing(&self) -> Option<ReplayPacing> {
         self.pacing
     }
@@ -189,13 +194,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// How many declarations of `kind` the session holds.
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
-            Kind::Keyexpr => self.keyexprs.borrow().len(),
-            Kind::Subscriber => self.registry.borrow().app.subscribers.len(),
+            Kind::Keyexpr => super::tables(&self.registry).keyexprs().len(),
+            Kind::Subscriber => super::tables(&self.registry).subscribers().len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
             Kind::Queryable => self.queryables.len(),
             #[cfg(feature = "liveliness")]
-            Kind::Token => self.tokens.len(),
+            Kind::Token => super::tables(&self.registry).tokens().len(),
             #[cfg(feature = "liveliness")]
             Kind::LiveSub => self.live_subs.len(),
         }
@@ -231,21 +236,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             return match kind {
                 Kind::Keyexpr => {
-                    let keyexprs = self.keyexprs.borrow();
-                    let entry = &keyexprs[left];
-                    actions
-                        .send_declare_keyexpr(entry.id, &entry.keyexpr)
-                        .is_ok()
+                    let tables = super::tables(&self.registry);
+                    let row = tables.keyexprs().iter().nth(left);
+                    row.map_or(true, |(_, row)| {
+                        actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
+                    })
                 }
-                Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
-                    Some((keyexpr, row)) => row.declare(keyexpr, actions),
-                    None => true,
-                },
+                Kind::Subscriber => {
+                    let tables = super::tables(&self.registry);
+                    let row = tables.subscribers().iter().nth(left);
+                    let told = row.map_or(true, |(_, row)| {
+                        tables
+                            .named(row.key())
+                            .is_some_and(|key| row.callback().declare(key, actions))
+                    });
+                    told
+                }
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
-                Kind::Queryable => self.queryables[left].declare(actions),
+                Kind::Queryable => {
+                    let entry = &self.queryables[left];
+                    let named = entry.named(&super::tables(&self.registry));
+                    named.is_some_and(|key| entry.declare(key, actions))
+                }
                 #[cfg(feature = "liveliness")]
-                Kind::Token => self.tokens[left].declare(actions),
+                Kind::Token => {
+                    let tables = super::tables(&self.registry);
+                    let row = tables.tokens().iter().nth(left);
+                    let told = row.map_or(true, |(_, row)| {
+                        tables.named(row.key()).is_some_and(|key| {
+                            super::liveliness::declare_token(actions, row.id(), key)
+                        })
+                    });
+                    told
+                }
                 #[cfg(feature = "liveliness")]
                 Kind::LiveSub => self.live_subs[left].ask(actions),
             };
@@ -324,45 +348,114 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.announce_with(place, OnRefusal::Forget, send, |_| {});
     }
 
-    /// Tell each face that is up of the subscriber at `index` of the session core's table, as
-    /// [`Self::announce`] tells a declaration: the row is the declaration itself, so the table
-    /// stored it before any link is told of it, and each link is told from the row.
-    pub(super) fn announce_subscriber(&mut self, index: usize) {
-        let place = self.start_of(Kind::Subscriber) + index;
+    /// The place in the replay's order of the subscriber `handle` names, the one past the last for
+    /// a handle that names none: its rank in the table's slot order, which the replay tells them
+    /// in.
+    pub(super) fn subscriber_place(&self, handle: SubscriberHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let subscribers = tables.subscribers();
+        let rank = subscribers
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(subscribers.len());
+        self.start_of(Kind::Subscriber) + rank
+    }
+
+    /// Tell each face that is up of the subscriber `handle` names, as [`Self::announce`] tells a
+    /// declaration: the row is the declaration itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    pub(super) fn announce_subscriber(&mut self, handle: SubscriberHandle) {
+        let place = self.subscriber_place(handle);
         let registry = &self.registry;
         announce_on(
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
             |actions| {
-                registry
-                    .borrow()
-                    .app
-                    .subscribers
-                    .row_at(index)
-                    .is_some_and(|(keyexpr, row)| row.declare(keyexpr, actions))
+                let tables = super::tables(registry);
+                let told = tables.subscribers().get(handle).is_some_and(|row| {
+                    tables
+                        .named(row.key())
+                        .is_some_and(|key| row.callback().declare(key, actions))
+                });
+                told
             },
             |_| {},
         );
     }
 
-    /// [`Self::announce_with`] for a declaration that is not made when a link refuses it: whether
-    /// it was made.
-    pub(super) fn announce_or_undo(
+    /// [`Self::announce_with`] for a declaration stored at `place` that is not made when a link
+    /// refuses it: whether it was made.
+    pub(super) fn announce_or_undo_at(
         &mut self,
-        kind: Kind,
+        place: usize,
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        let place = self.end_of(kind);
         self.announce_with(place, OnRefusal::Undo, send, undo)
     }
 
+    /// The place in the replay's order of the key expression `handle` names, the one past the last
+    /// for a handle that names none. The table's rows are walked in their slot order, which is the
+    /// order the replay tells them in.
+    pub(super) fn keyexpr_place(&self, handle: KeyexprHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let keyexprs = tables.keyexprs();
+        let rank = keyexprs
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(keyexprs.len());
+        self.start_of(Kind::Keyexpr) + rank
+    }
+
+    /// The place in the replay's order of the token `handle` names, the one past the last for a
+    /// handle that names none: its rank in the table's slot order, which the replay tells them in.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn token_place(&self, handle: TokenHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let tokens = tables.tokens();
+        let rank = tokens
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(tokens.len());
+        self.start_of(Kind::Token) + rank
+    }
+
+    /// Tell each face that is up of the token `handle` names, as [`Self::announce`] tells a
+    /// declaration: the row is the declaration itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn announce_token(&mut self, handle: TokenHandle) {
+        let place = self.token_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                let tables = super::tables(registry);
+                let taken = tables.tokens().get(handle).is_some_and(|row| {
+                    tables
+                        .named(row.key())
+                        .is_some_and(|key| super::liveliness::declare_token(actions, row.id(), key))
+                });
+                taken
+            },
+            |_| {},
+        );
+    }
+
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
-    /// over, which are those of the faces that are up and whose peers were told of it. Call it
-    /// once, before the removal.
+    /// over ([`Self::retract_at`]). Call it once, before the removal.
     pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<SessionHandle<C>> {
         let place = self.start_of(kind) + index;
+        self.retract_at(place)
+    }
+
+    /// The declaration at `place` in the replay's order is about to be removed: the links to
+    /// retract it over, which are those of the faces that are up and whose peers were told of it.
+    /// Call it once, before the removal.
+    pub(super) fn retract_at(&mut self, place: usize) -> Vec<SessionHandle<C>> {
         let mut links = Vec::new();
         for face in self.links.faces_mut() {
             let Link::Up(wire) = &face.link else {

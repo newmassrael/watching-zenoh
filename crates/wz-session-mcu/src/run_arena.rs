@@ -62,7 +62,9 @@ impl<const BYTES: usize> RunArena<BYTES> {
             )
         };
         let align = core::mem::align_of::<V>();
-        let start = self.used.get().checked_add(align - 1)? & !(align - 1);
+        // An alignment is a power of two, so it is one or more.
+        let up = align.wrapping_sub(1);
+        let start = self.used.get().checked_add(up)? & !up;
         let end = start.checked_add(core::mem::size_of::<V>())?;
         if end > BYTES {
             return None;
@@ -88,13 +90,15 @@ impl<const BYTES: usize> Default for RunArena<BYTES> {
 /// The bytes of a [`RunArena`] that hold `parts` (size and alignment of each, in the order they
 /// are built), for a `const` that holds an image's number to what its loop builds.
 pub const fn run_bytes_needed(parts: &[(usize, usize)]) -> usize {
-    let mut used = 0;
-    let mut at = 0;
-    while at < parts.len() {
-        let (size, align) = parts[at];
-        used = (used + align - 1) & !(align - 1);
-        used += size;
-        at += 1;
+    // A sum past the address space stays at its largest, which no arena holds, so the image's
+    // check against it refuses the build.
+    let mut used = 0usize;
+    let mut rest = parts;
+    while let [(size, align), tail @ ..] = rest {
+        let up = (*align).saturating_sub(1);
+        used = used.saturating_add(up) & !up;
+        used = used.saturating_add(*size);
+        rest = tail;
     }
     used
 }

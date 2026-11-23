@@ -412,7 +412,9 @@ impl State {
             zid: [0; ZID_MAX],
         };
         if let Some(zid) = from {
-            sample.zid[..zid.len()].copy_from_slice(zid);
+            for (to, byte) in sample.zid.iter_mut().zip(zid) {
+                *to = *byte;
+            }
             // A row's zenoh id is at most `ZID_MAX` bytes.
             sample.zid_len = zid.len() as u8;
         }
@@ -441,7 +443,7 @@ impl State {
             let Some(len) = round.pop_released(&mut self.released) else {
                 return;
             };
-            let frame = self.released[..len].to_vec();
+            let frame = self.released.get(..len).unwrap_or_default().to_vec();
             self.hand_on(&frame, None, now);
         }
     }
@@ -454,7 +456,9 @@ impl State {
             return None;
         }
         let mut padded = [0u8; ZID_MAX];
-        padded[..zid.len()].copy_from_slice(zid);
+        for (to, from) in padded.iter_mut().zip(zid) {
+            *to = *from;
+        }
         Some((padded, zid.len()))
     }
 
@@ -544,7 +548,7 @@ impl Shared {
                 state.dropped.duplicates = state.dropped.duplicates.saturating_add(1);
             }
             Admission::Stale => state.dropped.stale = state.dropped.stale.saturating_add(1),
-            Admission::Judge => state.hand_on(frame, Some(&zid[..zid_len]), now),
+            Admission::Judge => state.hand_on(frame, zid.get(..zid_len), now),
         }
     }
 
@@ -701,7 +705,10 @@ unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const wz_ext_d
     let shared = ManuallyDrop::new(Arc::from_raw(context.cast_const().cast::<Shared>()));
     let _ = catch(|| {
         let event = &*event;
-        let zid = &event.zid[..usize::from(event.zid_len).min(ZID_MAX)];
+        let zid = event
+            .zid
+            .get(..usize::from(event.zid_len).min(ZID_MAX))
+            .unwrap_or_default();
         match event.kind {
             WZ_EXT_DECL_DECLARED => {
                 if event.keyexpr.is_null() {

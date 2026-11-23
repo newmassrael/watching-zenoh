@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sink::SampleView;
@@ -22,7 +22,7 @@ fn subscribe(engine: &Engine, key: &str) -> SubId {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
         .expect("a session with ids left declares")
 }

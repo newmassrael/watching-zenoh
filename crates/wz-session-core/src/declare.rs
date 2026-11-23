@@ -147,6 +147,28 @@ where
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 pub mod matching;
 
+/// What the remote-declaration tables, and the observer that holds them, hand a matching
+/// listener's flips to: a [`matching::MatchingSink`] in a build with matching listeners, any type
+/// in one without, whose tables keep no listener. A holder that reports flips its own way (an
+/// engine that queues them by id) names its own sink and keeps no box per listener.
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+pub trait MatchingReport: matching::MatchingSink {}
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+impl<T: matching::MatchingSink> MatchingReport for T {}
+/// See the form with matching listeners.
+#[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+pub trait MatchingReport {}
+#[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+impl<T> MatchingReport for T {}
+
+/// The sink a table keeps when its holder names none: the heap closure where there are matching
+/// listeners, nothing where there are none.
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+pub type DefaultMatchingReport = matching::BoxedMatchingSink;
+/// See the form with matching listeners.
+#[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+pub type DefaultMatchingReport = ();
+
 /// S9e -- the text of a matching criterion's keyexpr: an owned `String` on the heap
 /// profile, where a watch owns its key, and the bounded buffer of a keyexpr with no
 /// allocator. The criterion is the argument the registries' re-evaluation hands the

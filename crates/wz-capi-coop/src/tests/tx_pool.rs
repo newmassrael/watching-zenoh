@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -35,7 +35,7 @@ const STILL: Duration = Duration::from_millis(300);
 /// `wait_before_drop`, where the pico profile's waits as long as a blocking one.
 const DROP_WAIT_US: u64 = 1_000;
 
-fn publish(congestion: CongestionControl) -> PublishOptions {
+fn publish(congestion: CongestionControl) -> PublishOptions<'static> {
     PublishOptions::put()
         .with_locality(Locality::Remote)
         .with_congestion_control(congestion)
@@ -100,13 +100,10 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
         WireKey::literal(),
         Locality::Any,
         None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                if sample.payload().len() < PAYLOAD {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                }
-            })
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            if sample.payload().len() < PAYLOAD {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            }
         }),
     )
     .expect("the good peer declares its subscriber");

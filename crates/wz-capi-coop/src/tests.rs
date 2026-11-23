@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{
+    FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+};
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -22,7 +24,7 @@ use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
@@ -84,6 +86,9 @@ enum Command {
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
+    /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
+    /// payload of each is its index.
+    PushBatch(&'static str, u8),
     /// [`Command::Push`] stamped with a time by the router.
     PushStamped(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
@@ -525,10 +530,17 @@ fn run_router(
         local.run_until_idle();
         match inbox.try_recv() {
             Ok(Command::DeclareSubscriber(id, key)) => {
-                let _ = actions.send_declare_subscriber(id, 0, Some(key));
+                let _ = actions.send_declare_subscriber(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             Ok(Command::DeclareQueryable(id, key, complete)) => {
-                let _ = actions.send_declare_queryable(id, 0, Some(key), complete);
+                let _ = actions.send_declare_queryable(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    complete,
+                );
             }
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
@@ -543,7 +555,10 @@ fn run_router(
                 let _ = holding
                     .borrow_mut()
                     .with_app(|app| app.local_tokens.register(u64::from(id), key));
-                let _ = actions.send_declare_token(id, 0, Some(key));
+                let _ = actions.send_declare_token(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::UndeclareToken(id)) => {
@@ -562,9 +577,17 @@ fn run_router(
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
             }
+            Ok(Command::PushBatch(key, count)) => {
+                let _ = actions.batch_start();
+                for index in 0..count {
+                    let _ = actions.send_push_literal(key, &[index], true);
+                }
+                let _ = actions.batch_stop();
+            }
             Ok(Command::PushStamped(key, value)) => {
+                let stamp = router_stamp(zid);
                 let meta = wz_session_core::metadata::PushMetadata {
-                    timestamp: Some(router_stamp(zid)),
+                    timestamp: Some(&stamp),
                     ..Default::default()
                 };
                 let _ = actions.send_push_with_meta_literal(key, value, true, &meta);
@@ -854,19 +877,13 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    assert_eq!(sample.payload(), b"hello");
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                assert_eq!(sample.payload(), b"hello");
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -1004,49 +1021,6 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
     until(&engine, "the step to end the chain", || open_chains() == 0);
 }
 
-/// The samples a link lends are handed the callback their subscriber's row holds, copied out of the
-/// row with each of them under the session's lock: the table of callbacks is not searched for
-/// them, however many steps they arrive in. The CONTROL is the count of the samples handed.
-#[test]
-fn the_samples_a_link_lends_take_their_callback_from_the_row() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let received = Arc::new(AtomicUsize::new(0));
-    let count = received.clone();
-    let declares_before = router.seen(|s| s.declares);
-    engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
-        .expect("the session declares the subscriber");
-    until(&engine, "the router to see the subscriber", || {
-        router.seen(|s| s.declares) > declares_before
-    });
-    let looks = engine.takes.callbacks.load(Ordering::SeqCst);
-    for _ in 0..8 {
-        router.send(Command::Push("demo/a", b"x"));
-    }
-    // Every push reaches the session's socket before the session reads one.
-    std::thread::sleep(Duration::from_millis(200));
-    until(&engine, "the pushes", || {
-        received.load(Ordering::SeqCst) == 8
-    });
-    let found = engine.takes.callbacks.load(Ordering::SeqCst) - looks;
-    assert_eq!(
-        found, 0,
-        "no look in the table for 8 samples: each carries its row's callback"
-    );
-}
-
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
 /// subscriber's callback where they lie: the samples of each datagram are handed on through the
 /// delivery lane, which has no lock, as one record, its payloads read in the datagram, which is
@@ -1061,18 +1035,12 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -1081,15 +1049,15 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         engine.declarations_synced()
     });
     let (handed, lent, list) = (
-        engine.lane_handed(),
-        engine.lane_lent(),
+        engine.rounds_handed(),
+        engine.samples_lent(),
         engine.delivery_list_takes(),
     );
     for _ in 0..4 {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        (engine.lane_handed(), engine.lane_lent()),
+        (engine.rounds_handed(), engine.samples_lent()),
         (handed, lent),
         "a read with nothing to read handed something out"
     );
@@ -1102,11 +1070,11 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     assert_eq!(
-        engine.lane_lent() - lent,
+        engine.samples_lent() - lent,
         SAMPLES,
         "each sample handed where its datagram lies, none copied into the lane"
     );
-    let records = engine.lane_handed() - handed;
+    let records = engine.rounds_handed() - handed;
     assert!(
         (1..=SAMPLES).contains(&records),
         "{records} records handed on: one for each datagram the samples came in"
@@ -1130,18 +1098,12 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -1185,25 +1147,19 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     let session = Arc::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     let id = engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                let own_id = own_id.clone();
-                let session = session.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
-                        let id = own_id.lock().unwrap().take();
-                        if let (Some(id), Some(engine)) = (id, session.upgrade()) {
-                            engine.undeclare_subscriber(id);
-                        }
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            let own_id = own_id.clone();
+            let session = session.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                    let id = own_id.lock().unwrap().take();
+                    if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                        engine.undeclare_subscriber(id);
                     }
-                })
-            }),
-        )
+                }
+            })
+        })
         .expect("declared");
     *own.lock().unwrap() = Some(id);
     until(&engine, "the router to see the subscriber", || {
@@ -1333,9 +1289,9 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1378,6 +1334,79 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+/// The one entry a declared entity's write goes through (`publish_filtered`) holds a write back
+/// while its filter says nothing matches, and once a subscriber opens the filter sends one with
+/// options the general way and one with none the plain way its row keeps, or answers `NotPlain`
+/// with nothing sent when the row keeps none.
+#[test]
+fn a_filtered_publish_is_held_back_then_sent() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/x",
+            &WireKey::literal(),
+            Some(InterestAsk {
+                mapping_id: 0,
+                suffix: Some("demo/x"),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) > 0
+    });
+    let opts = PublishOptions::put();
+    let literal = WireKey::literal();
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", Some(&opts)),
+        FilteredPut::Suppressed,
+        "no subscriber yet: the put is held back"
+    );
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::Suppressed,
+        "a bare put is held back the same"
+    );
+    for _ in 0..20 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        router.seen(|s| s.pushes),
+        0,
+        "CONTROL: a held-back put never reaches the wire"
+    );
+
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", Some(&opts)),
+        FilteredPut::Sent(Ok(_))
+    ));
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.pushes) == 1
+    });
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::NotPlain,
+        "a row that keeps no plain form sends nothing itself"
+    );
+    let params = opts.plain_put_params().expect("a plain put");
+    engine.keep_write_filter_plain(filter, Some((params, 0)));
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::Sent(Ok(_))
+    ));
+    until(&engine, "the router to receive the plain put", || {
+        router.seen(|s| s.pushes) == 2
+    });
+    SessionDrive::close(&*engine);
+}
+
 /// A matching listener records each verdict it is told.
 fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -1412,9 +1441,9 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
             plane,
             "demo/q",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/q".to_owned()),
+                suffix: Some("demo/q"),
                 aggregate: false,
             }),
             false,
@@ -1451,9 +1480,9 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let ask = || {
-        Some(InterestForm {
+        Some(InterestAsk {
             mapping_id: 0,
-            suffix: Some("demo/q".to_owned()),
+            suffix: Some("demo/q"),
             aggregate: false,
         })
     };
@@ -1553,9 +1582,9 @@ fn a_listener_declared_on_a_match_is_told_once() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1601,27 +1630,21 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1714,18 +1737,12 @@ fn a_stepped_session_keeps_its_lease() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     let quiet = Instant::now() + Duration::from_millis(3 * lease_ms);
     while Instant::now() < quiet {
@@ -1766,18 +1783,12 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     let arrived = Arc::new(Mutex::new(None));
     let stamp = arrived.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let stamp = stamp.clone();
-                Box::new(move |_: &dyn SampleView| {
-                    stamp.lock().unwrap().get_or_insert(Instant::now());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+            let stamp = stamp.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                stamp.lock().unwrap().get_or_insert(Instant::now());
+            })
+        })
         .expect("the session declares the subscriber");
     SessionDrive::start_read_task(&*engine).expect("a read task");
     // The read task's first wait is under way before the push is sent.
@@ -1876,7 +1887,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        Some(layout),
+        crate::arena::HeldPlaces::handle(layout),
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -1915,10 +1926,96 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
 
     let plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
     assert_eq!(
-        plan.holding(Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")),
+        plan.holding(&crate::arena::HeldPlaces::handle(
+            Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")
+        )),
         Err(ArenaRefused::TooLarge),
         "a handle aligned past a span has no place"
     );
+}
+
+/// An open asked for places of an entity kind lends one for each row the session keeps of the kind,
+/// from its own arena: every one is lent once and the one past them is refused, a place given back
+/// is lent again, and another session's places are its own, so one session at its limit refuses
+/// nothing to the other. Turned red by places shared between sessions, or counted by anything but
+/// the session's own limit.
+#[test]
+fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
+    use crate::arena::{AllocatorMemory, ArenaPlan, EntityKind, HeldPlaces};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_capi_port::PlaceLender;
+    use wz_session_core::bounded::ARENA_ALIGN;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(48, 8).expect("a layout");
+    let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
+    let open = |router: &Router| {
+        Engine::open_made_in(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            || config(router),
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            &AllocatorMemory,
+            held,
+        )
+        .expect("the session opens")
+    };
+    let (router, other_router) = (Router::start(CatchAll::None), Router::start(CatchAll::None));
+    let (one, other) = (open(&router), open(&other_router));
+    let rows = ArenaPlan::of(&config(&router), &config(&router).limits)
+        .expect("a plan")
+        .entities()
+        .of_kind(EntityKind::Subscriber);
+    assert!(rows > 0, "the session keeps subscribers");
+    assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
+    assert_eq!(
+        one.place_counts(EntityKind::Publisher),
+        (0, 0),
+        "a kind the open was asked for no place of has none"
+    );
+    assert_eq!(one.claim_place(EntityKind::Publisher), None);
+
+    let mut lent: Vec<_> = (0..rows)
+        .map(|_| {
+            one.claim_place(EntityKind::Subscriber)
+                .expect("a place for each row")
+        })
+        .collect();
+    assert!(lent.iter().all(|place| {
+        place.kind() == EntityKind::Subscriber
+            && place.as_ptr().as_ptr() as usize % ARENA_ALIGN == 0
+    }));
+    assert_eq!(
+        one.claim_place(EntityKind::Subscriber),
+        None,
+        "none past them"
+    );
+    let theirs = other
+        .claim_place(EntityKind::Subscriber)
+        .expect("the other session's places are its own");
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (1, rows));
+    let theirs = one
+        .give_back_place(theirs)
+        .expect_err("a session takes back no place another lent");
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (1, rows));
+
+    let first = lent.pop().expect("a lent place");
+    let at = first.as_ptr();
+    assert_eq!(one.give_back_place(first), Ok(()));
+    let again = one
+        .claim_place(EntityKind::Subscriber)
+        .expect("a place given back is lent again");
+    assert_eq!(again.as_ptr(), at);
+    lent.push(again);
+    for place in lent {
+        assert_eq!(one.give_back_place(place), Ok(()));
+    }
+    assert_eq!(other.give_back_place(theirs), Ok(()));
+    assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
 }
 
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
@@ -1967,15 +2064,15 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
             WireKey::aliased(id, None),
             Locality::Any,
             None,
-            Arc::new(move || {
+            {
                 let record = record.clone();
-                Box::new(move |sample: &dyn SampleView| {
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
                     record
                         .lock()
                         .unwrap()
                         .push((sample.keyexpr().to_string(), sample.payload().to_vec()));
                 })
-            }),
+            },
         )
         .expect("the session declares the subscriber");
     until(&engine, "the router to see the declarations", || {
@@ -2324,14 +2421,18 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
         ),
         "{refused:?}"
     );
-    let engine = open(&router);
-    assert_eq!(
-        engine.attach_face(&long).err(),
-        Some(OpenError::Unreachable(EndpointRefusal::new(
-            &long,
-            Refusal::TextTooLong
-        )))
-    );
+    // A face is attached beside the dial role's only in a build that adds faces (`listen`).
+    #[cfg(feature = "listen")]
+    {
+        let engine = open(&router);
+        assert_eq!(
+            engine.attach_face(&long).err(),
+            Some(OpenError::Unreachable(EndpointRefusal::new(
+                &long,
+                Refusal::TextTooLong
+            )))
+        );
+    }
 }
 
 /// What the open of `config` was refused with, `None` when it opened.
@@ -2368,7 +2469,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        None,
+        crate::arena::HeldPlaces::NONE,
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2410,7 +2511,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        None,
+        crate::arena::HeldPlaces::NONE,
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());
@@ -2464,7 +2565,12 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod entity_tables;
-#[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "local-queryable"
+))]
 mod face_table;
 #[cfg(feature = "connectivity")]
 mod faces;
@@ -2476,7 +2582,6 @@ mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;
-mod lane;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;
@@ -2495,6 +2600,7 @@ mod queryable;
 mod redial_heap;
 mod redial_wait;
 mod replay;
+mod round;
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

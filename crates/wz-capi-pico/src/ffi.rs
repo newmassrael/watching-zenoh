@@ -232,7 +232,7 @@ mod callback_depth {
     pub(super) struct Entered;
 
     pub(super) fn enter() -> Entered {
-        IN_CALLBACK.with(|depth| depth.set(depth.get() + 1));
+        IN_CALLBACK.with(|depth| depth.set(depth.get().saturating_add(1)));
         Entered
     }
 
@@ -242,7 +242,8 @@ mod callback_depth {
 
     impl Drop for Entered {
         fn drop(&mut self) {
-            IN_CALLBACK.with(|depth| depth.set(depth.get() - 1));
+            // This callback entered, so the count is one or more.
+            IN_CALLBACK.with(|depth| depth.set(depth.get().saturating_sub(1)));
         }
     }
 }

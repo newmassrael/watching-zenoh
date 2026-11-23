@@ -749,11 +749,12 @@ mod forward_stamp {
     /// A Put carrying `time` paired with `zid`.
     #[cfg(feature = "time-hlc")]
     fn stamped_put(time: u64, zid: &[u8]) -> wz_session_core::wire::PushOwned {
+        let stamp = wz_session_core::sample::TimestampHint {
+            time,
+            zid: zid.to_vec(),
+        };
         let meta = wz_session_core::metadata::PushMetadata {
-            timestamp: Some(wz_session_core::sample::TimestampHint {
-                time,
-                zid: zid.to_vec(),
-            }),
+            timestamp: Some(&stamp),
             ..Default::default()
         };
         build_push_literal_with_meta("demo/hlc", b"v", &meta).expect("build stamped put")

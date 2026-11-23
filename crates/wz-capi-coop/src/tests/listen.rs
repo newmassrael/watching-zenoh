@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    BatchStep, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -115,18 +116,12 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener
-        .declare_subscriber_on_wire(
-            "demo/l/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/l/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
@@ -185,10 +180,10 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock().unwrap().push(view.payload().to_vec());
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
@@ -286,11 +281,8 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
         WireKey::literal(),
         Locality::Any,
         None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
         }),
     )
     .expect("the session declares the subscriber");
@@ -414,18 +406,12 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener
-        .declare_subscriber_on_wire(
-            "demo/u/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/u/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
@@ -515,18 +501,12 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/s/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     // The client's open waits for the listener's answer, and this thread is what steps the
     // listener: the client opens on a thread of its own meanwhile.
@@ -541,7 +521,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 
     const PUTS: usize = 32;
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
@@ -555,22 +535,22 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         .expect("a put the window holds");
     }
     assert_eq!(
-        peer.batch_stop_all(),
+        peer.batch_all(BatchStep::Stop),
         1,
         "the window is written as it closes"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let (handed, lent) = (engine.lane_handed(), engine.lane_lent());
+    let (handed, lent) = (engine.rounds_handed(), engine.samples_lent());
     let reads = reads_until(&engine, "the puts", || {
         received.load(Ordering::SeqCst) == PUTS
     });
     assert_eq!(
-        engine.lane_lent() - lent,
+        engine.samples_lent() - lent,
         PUTS,
         "each put handed where it lies in the stream link's buffer, none copied into the lane"
     );
     assert_eq!(
-        engine.lane_handed() - handed,
+        engine.rounds_handed() - handed,
         1,
         "one record of the lane for the batch's puts"
     );
@@ -596,18 +576,12 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/s/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
@@ -628,18 +602,26 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
         .expect("a put the window holds");
     };
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_flush_all(), 1, "the first batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Flush),
+        1,
+        "the first batch is written"
+    );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_stop_all(), 1, "the second batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Stop),
+        1,
+        "the second batch is written"
+    );
     std::thread::sleep(Duration::from_millis(100));
     let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
     let before = takes(&engine);
@@ -669,18 +651,12 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
     let peer = client(&endpoint, 0xc1);
     let heard = Arc::new(AtomicUsize::new(0));
     let count = heard.clone();
-    peer.declare_subscriber_on_wire(
-        "demo/rt/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    )
+    peer.declare_subscriber_on_wire("demo/rt/**", WireKey::literal(), Locality::Any, None, {
+        let count = count.clone();
+        SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    })
     .expect("the session declares the subscriber");
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1

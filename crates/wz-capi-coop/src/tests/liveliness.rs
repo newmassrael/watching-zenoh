@@ -23,13 +23,10 @@ type Heard = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
 fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
     let heard: Heard = Arc::default();
     let into = heard.clone();
-    let sink: LivelinessSink = Arc::new(move || {
-        let into = into.clone();
-        Box::new(move |sample: LivelinessSample<'_>| {
-            into.lock()
-                .unwrap()
-                .push((sample.kind, sample.keyexpr.to_owned()));
-        })
+    let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+        into.lock()
+            .unwrap()
+            .push((sample.kind, sample.keyexpr.to_owned()));
     });
     let id = engine
         .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
@@ -87,6 +84,56 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
     });
     // Retracting one already retracted does nothing.
     engine.undeclare_liveliness_token(bare);
+}
+
+/// A token named by a key expression the program declared holds that declaration while it stands:
+/// the program letting go of the key leaves it declared, and the token's retraction takes it with
+/// it, after the token. The CONTROL is the declaration held by the program alone, which goes as
+/// soon as it is let go of.
+#[test]
+fn a_token_holds_the_declaration_its_key_is_named_by() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let declared = |engine: &Engine| -> Vec<String> {
+        engine
+            .keyexpr_declarations()
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect()
+    };
+    let alone = engine.acquire_keyexpr("demo/alone").expect("a row is free");
+    engine.release_keyexpr(alone);
+    assert!(declared(&engine).is_empty(), "CONTROL: let go of, it goes");
+
+    let prefix = engine.acquire_keyexpr("demo/alive").expect("a row is free");
+    let token = engine
+        .declare_liveliness_token_on_wire(
+            "demo/alive/x",
+            WireKey::aliased(prefix, Some("/x".to_owned())),
+            Some(RetractionKey {
+                mapping_id: prefix,
+                suffix: "/x".to_owned(),
+            }),
+        )
+        .expect("the engine has liveliness");
+    let on_wire = u64::from(token);
+    until(&engine, "the router to hold the token", || {
+        router.seen(|s| s.tokens == [(on_wire, "demo/alive/x".to_owned())])
+    });
+    engine.release_keyexpr(prefix);
+    assert_eq!(
+        declared(&engine),
+        ["demo/alive".to_owned()],
+        "the token holds the declaration"
+    );
+    engine.undeclare_liveliness_token(token);
+    assert!(
+        declared(&engine).is_empty(),
+        "and lets go of it with itself"
+    );
+    until(&engine, "the retraction to reach the router", || {
+        router.seen(|s| s.tokens.is_empty())
+    });
 }
 
 /// A liveliness subscriber hears the router's token appear and go, and only on its key; once it

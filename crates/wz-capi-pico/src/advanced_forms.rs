@@ -100,7 +100,7 @@ impl PicoSubscriberForms {
         // Held across the declaration, so two faces asking at once cannot both
         // declare: the second finds the first's answer.
         let mut answered = self.answered.lock();
-        if let Some(held) = answered[entity as usize].upgrade() {
+        if let Some(held) = answered.get(entity as usize).and_then(Weak::upgrade) {
             return Some(held);
         }
         // The key the entity's own derives from. The subscriber is on the
@@ -126,7 +126,9 @@ impl PicoSubscriberForms {
             }
         };
         let anchor = Arc::new(Anchor { key, announced });
-        answered[entity as usize] = Arc::downgrade(&anchor);
+        if let Some(slot) = answered.get_mut(entity as usize) {
+            *slot = Arc::downgrade(&anchor);
+        }
         Some(anchor)
     }
 

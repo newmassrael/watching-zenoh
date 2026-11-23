@@ -189,7 +189,9 @@ local-subscriber = []
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
 # feature asks the runtime for it: without that an acceptor would start on no event. It asks the
 # runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
-# peers each take a face of their own.
+# peers each take a face of their own. A face dialled beside the dial role's (`attach_face`) is
+# this build's too: every build of more faces than one shares the faces' rows in the session's
+# pools (`peer-row-pools`), so a face that goes gives its set back at once.
 listen = [
     "wz-runtime-coop/session-unicast-accept",
     "wz-runtime-coop/udp-listen",

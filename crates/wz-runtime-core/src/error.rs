@@ -108,6 +108,10 @@ pub enum RuntimeError {
     /// stop-the-world). Surfaces only on operations attempted
     /// after the shutdown begins.
     Shutdown,
+    /// The awaited task can never finish: its handle is pending while nothing is ready, no task
+    /// lives and no timer is pending, so nothing is left to wake it. A cooperative runtime that
+    /// drives a handle to its end answers this instead of waiting forever.
+    Stalled,
 }
 
 impl RuntimeError {
@@ -212,6 +216,7 @@ impl fmt::Display for RuntimeError {
             Self::Shutdown => {
                 f.write_str("RuntimeError: runtime is shutting down; new work refused")
             }
+            Self::Stalled => f.write_str("RuntimeError: the awaited task can never be woken"),
         }
     }
 }
@@ -317,6 +322,13 @@ mod alloc_error_tests {
         assert!(cancel.source().is_none());
         let panic_no_payload = RuntimeError::join_failed();
         assert!(panic_no_payload.source().is_none());
+    }
+
+    #[test]
+    fn a_stall_is_named_and_carries_no_payload() {
+        let stalled = RuntimeError::Stalled;
+        assert!(stalled.panic_payload().is_none());
+        assert!(stalled.to_string().contains("can never be woken"));
     }
 
     #[test]

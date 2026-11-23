@@ -10,12 +10,13 @@
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, WireKey,
+    FilterPlane, FilteredPut, QueryCallback, QueryHolder, ReplyCallback, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::{KeyWireForm, SessionPolicy};
@@ -144,23 +145,17 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
     engine
-        .declare_subscriber_on_wire(
-            pattern,
-            wire,
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.keyexpr().to_owned());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(pattern, wire, Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.keyexpr().to_owned());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }
 
-fn remote() -> PublishOptions {
+fn remote() -> PublishOptions<'static> {
     PublishOptions::put().with_locality(Locality::Remote)
 }
 
@@ -303,12 +298,12 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock()
                     .unwrap()
                     .push((view.keyexpr().to_owned(), view.payload().to_vec()));
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Ok(1), "one leg for the one face");
@@ -346,11 +341,11 @@ fn a_session_says_when_its_links_may_name_keys_their_own_way() {
     );
 }
 
-/// What a client that holds no dictionary hears of a put on `lab/rig/alpha` from a listener whose
-/// session form is `shared`, when the listener's endpoint is stated `endpoint_form` or not stated,
-/// followed by a put on `lab/mark`, which no dictionary entry covers and which every form sends as
-/// the literal.
-fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<String> {
+/// What a client that holds no dictionary hears of a put on `lab/rig/alpha`, which the listener's
+/// ABI names as `alpha` says, from a listener whose session form is `shared`, when the listener's
+/// endpoint is stated `endpoint_form` or not stated, followed by a put on `lab/mark`, which no
+/// dictionary entry covers and which every form sends as the literal.
+fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>, alpha: WireKey) -> Vec<String> {
     let at_open = KeyIdsAtOpen {
         ids: Some(dictionary()),
         links: endpoint_form
@@ -365,9 +360,9 @@ fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<Strin
         KeyWireForm::Declared,
     );
     let heard = hear(&client, "lab/**", WireKey::literal());
-    for key in ["lab/rig/alpha", "lab/mark"] {
+    for (key, wire) in [("lab/rig/alpha", alpha), ("lab/mark", WireKey::literal())] {
         listener
-            .publish_on_wire_all(key, &WireKey::literal(), b"value", &remote())
+            .publish_on_wire_all(key, &wire, b"value", &remote())
             .expect("a put the link carries");
     }
     eventually("the client to hear the literal put", || {
@@ -380,7 +375,7 @@ fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<Strin
 #[test]
 fn a_link_stated_literal_names_its_keys_whole_under_a_shared_session() {
     assert_eq!(
-        heard_from_a_shared_listener(Some(KeyWireForm::Literal)),
+        heard_from_a_shared_listener(Some(KeyWireForm::Literal), WireKey::literal()),
         ["lab/rig/alpha", "lab/mark"]
     );
 }
@@ -388,10 +383,79 @@ fn a_link_stated_literal_names_its_keys_whole_under_a_shared_session() {
 #[test]
 fn a_link_left_to_the_shared_session_names_its_keys_by_the_dictionary() {
     assert_eq!(
-        heard_from_a_shared_listener(None),
+        heard_from_a_shared_listener(None, WireKey::literal()),
         ["lab/mark"],
         "CONTROL: the shared form sent the dictionary's id, which a client without it drops"
     );
+}
+
+/// A link stated `declared` sends what a build without the dictionary sends, so a key the ABI names
+/// by the dictionary's id goes as the literal there, which a client without the dictionary reads.
+#[test]
+fn a_link_stated_declared_names_a_key_the_abi_named_by_a_shared_id_whole() {
+    assert_eq!(
+        heard_from_a_shared_listener(Some(KeyWireForm::Declared), WireKey::aliased(41, None)),
+        ["lab/rig/alpha", "lab/mark"]
+    );
+}
+
+/// The CONTROL of [`a_link_stated_declared_names_a_key_the_abi_named_by_a_shared_id_whole`]: a
+/// link left to the shared session sends the same key by the dictionary's id, which a client
+/// without the dictionary drops.
+#[test]
+fn a_link_left_to_the_shared_session_names_a_key_the_abi_named_by_a_shared_id_by_it() {
+    assert_eq!(
+        heard_from_a_shared_listener(None, WireKey::aliased(41, None)),
+        ["lab/mark"]
+    );
+}
+
+/// A plain put a write filter lets through names its key as the link's key-wire form says, as the
+/// general publish does: a link stated `literal` is sent the whole key though the put names it by
+/// the dictionary's id, which the client at the other end, holding no dictionary, cannot read. The
+/// CONTROL is the put on a key no entry covers, which every form sends whole.
+#[test]
+fn a_filtered_plain_put_names_its_key_as_the_links_form_says() {
+    let at_open = KeyIdsAtOpen {
+        ids: Some(dictionary()),
+        links: vec![(LISTEN.to_owned(), KeyWireForm::Literal)],
+    };
+    let (listener, endpoint) = listener_with(OpenKeyIds::new(at_open), KeyWireForm::Shared);
+    let client = dialler_with(
+        &listener,
+        &endpoint,
+        OpenKeyIds::none(),
+        KeyWireForm::Declared,
+    );
+    let heard = hear(&client, "lab/**", WireKey::literal());
+    let filter = listener
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "lab/**",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
+    eventually("the client's subscriber to open the filter", || {
+        !listener.write_filter_active(filter)
+    });
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    for (key, mapping) in [("lab/rig/alpha", 41), ("lab/mark", 0)] {
+        assert!(
+            matches!(
+                listener.put_plain_filtered(filter, key, mapping, b"value", &params),
+                FilteredPut::Sent(Ok(_))
+            ),
+            "{key} goes plain"
+        );
+    }
+    eventually("the client to hear the literal put", || {
+        heard.lock().unwrap().iter().any(|key| key == "lab/mark")
+    });
+    assert_eq!(*heard.lock().unwrap(), ["lab/rig/alpha", "lab/mark"]);
 }
 
 #[test]
@@ -595,7 +659,7 @@ fn filter_by(engine: &Engine, declared: ExprId) {
             FilterPlane::Subscribers,
             ASKED,
             &WireKey::aliased(declared, None),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: declared,
                 suffix: None,
                 aggregate: false,
@@ -632,10 +696,7 @@ fn a_write_filters_interest_on_a_declared_link_names_the_declaration() {
 fn tokens_by(engine: &Engine, declared: ExprId) {
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-    let sink: wz_capi_port::LivelinessSink = Arc::new(|| {
-        Box::new(|_: LivelinessSample<'_>| {})
-            as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
-    });
+    let sink = wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {});
     engine
         .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
         .expect("the engine has liveliness");
@@ -658,7 +719,7 @@ fn alive_by(engine: &Engine, declared: ExprId) {
         &WireKey::aliased(declared, None),
         5_000,
         None,
-        &mut || Box::new(|_: &dyn ReplyView| {}) as ReplyCallback,
+        &mut || ReplyCallback::shared(|_: &dyn ReplyView| {}),
     );
     assert_eq!(issued, Ok(1), "one leg for the one face");
 }

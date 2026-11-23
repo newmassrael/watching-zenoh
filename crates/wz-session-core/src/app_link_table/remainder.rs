@@ -56,6 +56,9 @@ impl Cells {
         }
     }
 
+    // Read back only when what is held moves to new storage, which a fixed build never does, and
+    // by the tests.
+    #[cfg(any(test, not(feature = "bounded-heapless")))]
     fn read(&self, at: usize) -> u8 {
         let Some(cell) = self.cell(at) else {
             return 0;
@@ -96,7 +99,8 @@ pub(super) struct Remainder {
     /// The length of the front run lent to a writer, while one is.
     lent: Option<usize>,
     /// The storage a remainder of no bound left while its front was lent, kept until the run
-    /// comes back.
+    /// comes back. A fixed build (`bounded-heapless`) never grows a remainder.
+    #[cfg(not(feature = "bounded-heapless"))]
     retired: Option<Cells>,
 }
 
@@ -108,6 +112,7 @@ impl Remainder {
             head: 0,
             len: 0,
             lent: None,
+            #[cfg(not(feature = "bounded-heapless"))]
             retired: None,
         }
     }
@@ -144,16 +149,25 @@ impl Remainder {
     }
 
     /// Hold `bytes` behind what is held: `false`, with nothing held, when the storage has no room
-    /// for them and `grow` is not set. A remainder that may grow moves to storage that holds them.
+    /// for them and `grow` is not set. A remainder that may grow moves to storage that holds them,
+    /// except on a fixed build (`bounded-heapless`), whose storage is what the row took when the
+    /// session opened, and which allocates nothing after.
     pub(super) fn push(&mut self, bytes: &[u8], grow: bool) -> bool {
         let Some(need) = self.len.checked_add(bytes.len()) else {
             return false;
         };
         if need > self.cells.len {
-            if !grow {
+            #[cfg(not(feature = "bounded-heapless"))]
+            if grow {
+                self.grow_to(need.max(self.cells.len.saturating_mul(2)));
+            } else {
                 return false;
             }
-            self.grow_to(need.max(self.cells.len.saturating_mul(2)));
+            #[cfg(feature = "bounded-heapless")]
+            {
+                let _ = grow;
+                return false;
+            }
         }
         for (offset, &byte) in bytes.iter().enumerate() {
             self.cells
@@ -165,6 +179,7 @@ impl Remainder {
 
     /// Move what is held to new storage of `capacity` bytes, from its start. The old storage is
     /// kept while a run of it is lent.
+    #[cfg(not(feature = "bounded-heapless"))]
     fn grow_to(&mut self, capacity: usize) {
         let cells = Cells::new(capacity);
         for offset in 0..self.len {
@@ -196,7 +211,10 @@ impl Remainder {
         let Some(run) = self.lent.take() else {
             return 0;
         };
-        self.retired = None;
+        #[cfg(not(feature = "bounded-heapless"))]
+        {
+            self.retired = None;
+        }
         let taken = taken.min(run).min(self.len);
         self.head = self.at(taken);
         self.len = self.len.saturating_sub(taken);
@@ -255,9 +273,32 @@ mod tests {
         assert!(remainder.is_empty());
     }
 
+    /// Pushes while the front is lent fill the ring's free part exactly, around the lent run, and
+    /// leave it as it was; one past the free part is refused with nothing held. Turned red by a
+    /// push that writes into the lent run, or counts it as free.
+    #[test]
+    fn pushes_while_the_front_is_lent_fill_only_the_free_part() {
+        let mut remainder = Remainder::with_capacity(8);
+        assert!(remainder.push(b"xxab", false));
+        assert_eq!(remainder.give_back(3), 0, "nothing lent, nothing taken");
+        assert_eq!(remainder.to_vec(), b"xxab");
+        let (base, len) = remainder.lend().expect("a run");
+        assert_eq!(len, 4);
+        assert!(remainder.push(b"cdef", false), "the free part");
+        assert!(!remainder.push(b"g", false), "no free byte left");
+        // SAFETY: the run is lent; nothing writes it before it is given back below.
+        let read = unsafe { core::slice::from_raw_parts(base.as_ptr(), len) };
+        assert_eq!(read, b"xxab");
+        assert_eq!(remainder.give_back(2), 2);
+        assert_eq!(remainder.to_vec(), b"abcdef");
+        assert!(remainder.push(b"gh", false), "what was taken is free again");
+        assert_eq!(remainder.to_vec(), b"abcdefgh");
+    }
+
     /// Bytes pushed while the front is lent go around the lent run and leave it as it was; a
-    /// remainder of no bound that grows while its front is lent keeps the lent run readable where
-    /// it was. Turned red by a push that writes over a lent run, or a grow that frees it.
+    /// remainder of no bound that grows while its front is lent, twice, keeps the lent run readable
+    /// where it was. Turned red by a push that writes over a lent run, or a grow that frees it.
+    #[cfg(not(feature = "bounded-heapless"))]
     #[test]
     fn a_push_while_the_front_is_lent_leaves_the_lent_run_as_it_was() {
         let mut remainder = Remainder::with_capacity(4);
@@ -265,11 +306,20 @@ mod tests {
         let (base, len) = remainder.lend().expect("a run");
         assert!(remainder.push(b"cd", true), "room in the ring");
         assert!(remainder.push(b"efgh", true), "grows, the old storage kept");
-        // SAFETY: the run is lent, and the old storage it lies in is kept until it comes back.
+        assert!(
+            remainder.push(&[b'i'; 64], true),
+            "grows again, the first storage still kept"
+        );
+        // SAFETY: the run is lent, and the storage it lies in is kept until it comes back.
         let read = unsafe { core::slice::from_raw_parts(base.as_ptr(), len) };
         assert_eq!(read, b"ab");
         assert_eq!(remainder.give_back(2), 2);
-        assert_eq!(remainder.to_vec(), b"cdefgh");
-        assert!(remainder.capacity() >= 6);
+        assert!(
+            remainder.retired.is_none(),
+            "the old storage goes with the run"
+        );
+        assert_eq!(remainder.len(), 70);
+        assert_eq!(remainder.to_vec().get(..6), Some(&b"cdefgh"[..]));
+        assert!(remainder.capacity() >= 70);
     }
 }

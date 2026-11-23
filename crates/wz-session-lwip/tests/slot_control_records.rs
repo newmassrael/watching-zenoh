@@ -900,9 +900,10 @@ fn what_the_owned_builders_of_the_control_sends_cost_is_bounded() {
     let mut costs: Vec<(&str, usize, usize)> = Vec::new();
 
     let (sent, n) = measure.count("send_declare_subscriber", || {
-        initiator
-            .actions
-            .send_declare_subscriber(41, 0, Some("tx/k"))
+        initiator.actions.send_declare_subscriber(
+            41,
+            wz_session_core::named_key::NamedKey::literal("tx/k").expect("a key"),
+        )
     });
     sent.expect("the declaration leaves");
     costs.push(("send_declare_subscriber", n, DECLARE_SUBSCRIBER));

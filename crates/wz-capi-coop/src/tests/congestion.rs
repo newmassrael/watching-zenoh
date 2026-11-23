@@ -223,7 +223,7 @@ mod stalled_link {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use wz_capi_port::{FanoutError, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FanoutError, SessionDrive, SessionEngine, SubscriberSink, WireKey};
     use wz_session_core::locality::Locality;
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::publish_options::PublishOptions;
@@ -246,7 +246,7 @@ mod stalled_link {
     /// The most blocking publishes the link is given to fill.
     const FILL_AT_MOST: usize = 4_096;
 
-    fn publish(congestion: CongestionControl) -> PublishOptions {
+    fn publish(congestion: CongestionControl) -> PublishOptions<'static> {
         PublishOptions::put()
             .with_locality(Locality::Remote)
             .with_congestion_control(congestion)
@@ -527,20 +527,14 @@ mod stalled_link {
         let heard = Arc::new(AtomicUsize::new(0));
         let into = Arc::clone(&heard);
         reading
-            .declare_subscriber_on_wire(
-                "demo/beside",
-                WireKey::literal(),
-                Locality::Any,
-                None,
-                Arc::new(move || {
-                    let into = Arc::clone(&into);
-                    Box::new(move |sample: &dyn SampleView| {
-                        if sample.payload() == b"beside" {
-                            into.fetch_add(1, Ordering::SeqCst);
-                        }
-                    })
-                }),
-            )
+            .declare_subscriber_on_wire("demo/beside", WireKey::literal(), Locality::Any, None, {
+                let into = Arc::clone(&into);
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    if sample.payload() == b"beside" {
+                        into.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
             .expect("the session declares the subscriber");
         SessionDrive::start_read_task(&*reading).expect("the reading client's read task starts");
         let started = Instant::now();

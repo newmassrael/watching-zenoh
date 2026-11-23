@@ -442,6 +442,14 @@ pub trait ReplySink {
         self.on_reply(&timeout_reply(rid));
         self.on_final(rid);
     }
+
+    /// [`Self::on_reply`] for a reply its caller owns and gives up: a sink that keeps a reply
+    /// past the call takes this one whole instead of copying it. [`ConsolidatingSink`] hands its
+    /// held replies so when it flushes them. The default lends it to [`Self::on_reply`].
+    #[cfg(feature = "alloc")]
+    fn on_reply_owned(&mut self, reply: crate::reply::InboundReply) {
+        self.on_reply(&reply);
+    }
 }
 
 /// R311y323 — the synthetic `Err("Timeout")` reply a sweep delivers for an
@@ -665,11 +673,12 @@ impl<S: ReplySink, H: ReplyHold> ReplySink for ConsolidatingSink<S, H> {
     /// timeout error and THEN the data it had already earned.
     ///
     /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
-    /// normal-final path and this one cannot disagree about when a flush is due.
+    /// normal-final path and this one cannot disagree about when a flush is due. The error and
+    /// the final are the inner sink's own timeout: its default is that pair, and a sink that
+    /// delivers after its caller lets go of the session knows the leg timed out.
     fn on_timeout(&mut self, rid: crate::wire_id::RequestId) {
         self.flush_latest();
-        self.inner.on_reply(&timeout_reply(rid));
-        self.inner.on_final(rid);
+        self.inner.on_timeout(rid);
     }
 
     fn on_final(&mut self, rid: crate::wire_id::RequestId) {
@@ -1199,6 +1208,72 @@ mod consolidating_sink_tests {
             "a timeout must announce itself"
         );
         assert_eq!(timed.finals, alloc::vec![7]);
+    }
+
+    /// What an inner sink that keeps what it is handed records: the replies it took whole, the
+    /// ones it was lent, and the timeouts it was told of, in order.
+    #[derive(Default)]
+    struct Keeper {
+        events: Vec<(&'static str, Vec<u8>)>,
+    }
+
+    impl ReplySink for &mut Keeper {
+        fn on_reply(&mut self, reply: &dyn ReplyView) {
+            self.events.push(("lent", reply.payload().to_vec()));
+        }
+        fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+            self.events.push(("final", Vec::new()));
+        }
+        fn on_timeout(&mut self, _rid: crate::wire_id::RequestId) {
+            self.events.push(("timeout", Vec::new()));
+        }
+        fn on_reply_owned(&mut self, reply: InboundReply) {
+            self.events.push(("owned", reply.payload().to_vec()));
+        }
+    }
+
+    /// A `Latest` flush hands each held reply on from the hold that keeps it, at the final and at a
+    /// timeout alike, and a timeout reaches the inner sink as its own timeout, after the flush; a
+    /// reply forwarded as it arrives is lent as it came.
+    #[test]
+    fn a_flush_hands_its_replies_on_and_a_timeout_reaches_the_inner_sink() {
+        let mut kept = Keeper::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut kept);
+            sink.on_reply(&put("a/b", b"held", Some(ts(10))));
+            sink.on_reply(&err("a/b", b"boom"));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            kept.events,
+            alloc::vec![
+                ("lent", b"boom".to_vec()),
+                ("lent", b"held".to_vec()),
+                ("final", Vec::new())
+            ]
+        );
+        let mut timed = Keeper::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut timed);
+            sink.on_reply(&put("a/b", b"held", Some(ts(10))));
+            sink.on_timeout(1);
+        }
+        assert_eq!(
+            timed.events,
+            alloc::vec![("lent", b"held".to_vec()), ("timeout", Vec::new())],
+            "the flush first, then the inner sink's own timeout"
+        );
+        let mut passed = Keeper::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::None, &mut passed);
+            sink.on_reply(&put("a/b", b"now", None));
+            sink.on_final(1);
+        }
+        assert_eq!(
+            passed.events,
+            alloc::vec![("lent", b"now".to_vec()), ("final", Vec::new())],
+            "CONTROL: what is forwarded as it arrives is lent"
+        );
     }
 
     /// R311y323 — the DEFAULT `on_timeout`, which is what the LIVELINESS get

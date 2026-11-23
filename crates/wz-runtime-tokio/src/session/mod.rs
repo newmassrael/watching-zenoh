@@ -1998,16 +1998,17 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 && meta.is_plain_apart_from_qos()
                 && !self.egress_policy_active()
             {
-                match Tp::send_plain_put_qos(
-                    &self.transport,
-                    wire.mapping_id,
-                    wire.suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    priority,
-                ) {
+                match Tp::named_by(&self.transport, keyexpr, wire.mapping_id).and_then(|key| {
+                    Tp::send_plain_put_qos(
+                        &self.transport,
+                        key,
+                        payload,
+                        meta.qos,
+                        reliable,
+                        express,
+                        priority,
+                    )
+                }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -5200,15 +5201,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 && !self.egress_policy_active()
             {
                 // This body is the unicast session's, so the bundle is the send seam.
-                match self.actions().send_plain_put_qos(
-                    mapping_id,
-                    inline_suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    opts.priority_band(),
-                ) {
+                // The bundle names the key from its record of the session's declarations: the
+                // declared literal and the suffix the caller names, or the whole key.
+                let actions = self.actions();
+                match actions
+                    .named_by(loopback_keyexpr, mapping_id)
+                    .and_then(|key| {
+                        actions.send_plain_put_qos(
+                            key,
+                            payload,
+                            meta.qos,
+                            reliable,
+                            express,
+                            opts.priority_band(),
+                        )
+                    }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -5737,6 +5744,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// refusal and not a send.
     pub fn publish_plain_declared(
         &self,
+        keyexpr: &str,
         mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &PlainPutParams,
@@ -5751,22 +5759,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(feature = "codec-push")]
         {
-            match self.actions().send_plain_put_qos(
-                mapping_id,
-                None,
-                payload,
-                params.qos,
-                params.reliable,
-                params.express,
-                params.priority,
-            ) {
+            // `keyexpr` is the whole key the declaration names; the bundle names it by that
+            // declaration from its own record.
+            let actions = self.actions();
+            match actions.named_by(keyexpr, mapping_id).and_then(|key| {
+                actions.send_plain_put_qos(
+                    key,
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+            }) {
                 Some(sent) => Ok(sent?),
                 None => Err(PublishError::ExceedsCapacity),
             }
         }
         #[cfg(not(feature = "codec-push"))]
         {
-            let _ = (mapping_id, payload, params);
+            let _ = (keyexpr, mapping_id, payload, params);
             Err(PublishError::ExceedsCapacity)
         }
     }
@@ -6842,7 +6854,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn declare_publisher(
         &self,
         keyexpr: impl Into<String>,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> Publisher<R, T> {
         let keyexpr = keyexpr.into();
         // R2577 — ASK THE NEIGHBOUR FOR THE DECLARATIONS THIS PUBLISHER'S
@@ -7040,7 +7052,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> PublisherAliased<R, T> {
         PublisherAliased {
             session: self.clone(),
@@ -7958,7 +7970,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(id.entity_id(), mapping_id, suffix, options.complete)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_queryable(id.entity_id(), key, options.complete)
+                })
                 .map_err(map_queryable_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step, like declare_subscriber.
@@ -8464,7 +8478,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_subscriber(id.entity_id(), mapping_id, suffix)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_subscriber(id.entity_id(), key)
+                })
                 .map_err(map_subscribe_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step: a declaration made while a paced replay is walking the cache is replayed in its
@@ -8636,8 +8652,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place =
                 liveliness::TokenPlace::take(self, u64::from(token_id), keyexpr_string.clone())
                     .map_err(LivelinessAliasError::Refused)?;
-            let declare = actions
-                .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+            let declare = wz_session_core::named_key::NamedKey::literal(&keyexpr_string)
+                .ok_or(SendDeclareError::MissingKeyexpr)
+                .and_then(|key| actions.prepare_declare_token(token_id, key))
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.
@@ -8800,7 +8817,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place = liveliness::TokenPlace::take(self, u64::from(token_id), resolved)
                 .map_err(LivelinessAliasError::Refused)?;
             let declare = actions
-                .prepare_declare_token(token_id, mapping_id, inline_suffix)
+                .with_outbound_key(mapping_id, inline_suffix, |key| {
+                    actions.prepare_declare_token(token_id, key)
+                })
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.

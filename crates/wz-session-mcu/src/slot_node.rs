@@ -268,13 +268,14 @@ pub fn documents_of<const N: usize, const MAX: usize>(
     chosen: &[Option<(&'static str, usize)>; N],
 ) -> Result<([Document; N], usize), &'static str> {
     let mut out = [Document { key: "", body: "" }; N];
-    let mut taken = 0;
-    for (key, bytes) in chosen.iter().flatten() {
+    // As many chosen documents as `chosen` has cells, so at most `N`.
+    let mut taken = 0usize;
+    for (slot, (key, bytes)) in out.iter_mut().zip(chosen.iter().flatten()) {
         let body = pool
             .text(*bytes)
             .ok_or("wz: FAIL - a document is longer than the body pool")?;
-        out[taken] = Document { key, body };
-        taken += 1;
+        *slot = Document { key, body };
+        taken = taken.wrapping_add(1);
     }
     Ok((out, taken))
 }
@@ -447,13 +448,14 @@ impl<const N: usize> Declared<N> {
     /// Add a declaration. `false` when the list is full.
     fn push(&self, declaration: Declaration) -> bool {
         let at = self.len.get();
-        if at == N {
-            return false;
-        }
         // SAFETY: nothing holds a reference into the list yet (`all` is called after the last
         // push), and one thread runs the program.
-        unsafe { (*self.items.get())[at] = MaybeUninit::new(declaration) };
-        self.len.set(at + 1);
+        let Some(cell) = (unsafe { &mut *self.items.get() }).get_mut(at) else {
+            return false;
+        };
+        *cell = MaybeUninit::new(declaration);
+        // Below `N`, the cell just written.
+        self.len.set(at.wrapping_add(1));
         true
     }
 
@@ -678,16 +680,16 @@ pub fn install_entities<const N: usize>(
 #[derive(Clone)]
 pub struct NodeIdentity {
     zid: SessionZid,
-    key: [u8; SIGNING_KEY_BYTES],
+    key: SigningKey,
 }
 
 impl NodeIdentity {
     /// An identity from `zid` (1 to [`ZID_MAX`] bytes) and the signing secret. `None` when the
-    /// zenoh id does not fit.
+    /// zenoh id does not fit, or the secret is not a key.
     pub fn new(zid: &[u8], key: [u8; SIGNING_KEY_BYTES]) -> Option<Self> {
         Some(Self {
             zid: SessionZid::new(zid).ok()?,
-            key,
+            key: SigningKey::from_slice(&key).ok()?,
         })
     }
 
@@ -750,7 +752,7 @@ impl NodeIdentity {
             link_rx: LinkRxConf::default(),
             policy: *policy,
             limits: *limits,
-            cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
+            cookie_signing_key: self.key.clone(),
         }
     }
 }
@@ -908,12 +910,12 @@ impl<R: Copy + PartialEq> RoundWatch<R> {
             if self.reported_ms != 0 {
                 out.loop_report = Some(LoopReport {
                     rounds: self.rounds,
-                    ms: now_ms - self.reported_ms,
+                    ms: now_ms.saturating_sub(self.reported_ms),
                 });
             }
             self.rounds = 0;
             self.reported_ms = now_ms;
-            self.next_report_ms = now_ms + self.report_every_ms;
+            self.next_report_ms = now_ms.saturating_add(self.report_every_ms);
         }
         if refused != self.refused {
             self.refused = refused;
@@ -1212,7 +1214,10 @@ where
         // The plane advertises the node's zid, which the factory is about to take with the identity.
         let mut zid = [0u8; ZID_MAX];
         let zid_len = identity.zid().len();
-        zid[..zid_len].copy_from_slice(identity.zid());
+        // A zid is at most `ZID_MAX` bytes by its type.
+        if let Some(into) = zid.get_mut(..zid_len) {
+            into.copy_from_slice(identity.zid());
+        }
 
         // The verbs are the node's own, so their key names it: its zid, and the mode it is (a
         // client, which `NodeIdentity::params` presents; the peer it shows a node that opened a
@@ -1276,7 +1281,7 @@ where
         let plane = plane.start(PlaneContext {
             runtime: runtime.clone(),
             observer,
-            zid: &zid[..zid_len],
+            zid: zid.get(..zid_len).unwrap_or_default(),
             policy: &policy,
             limits,
         });

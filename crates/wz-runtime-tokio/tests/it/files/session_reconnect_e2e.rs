@@ -254,11 +254,18 @@ async fn assert_declare_replays_after_link_loss(
             match kind {
                 ReplayDeclareKind::Subscriber => session
                     .actions()
-                    .send_declare_subscriber(10, 0, Some(keyexpr))
+                    .send_declare_subscriber(
+                        10,
+                        wz_session_core::named_key::NamedKey::literal(keyexpr).expect("a key"),
+                    )
                     .expect("declare subscriber"),
                 ReplayDeclareKind::Queryable => session
                     .actions()
-                    .send_declare_queryable(10, 0, Some(keyexpr), /*complete=*/ false)
+                    .send_declare_queryable(
+                        10,
+                        wz_session_core::named_key::NamedKey::literal(keyexpr).expect("a key"),
+                        /*complete=*/ false,
+                    )
                     .expect("declare queryable"),
             };
             session
@@ -417,7 +424,10 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
     // The acceptor announces a token, then the client drives until it lands.
     server
         .actions
-        .send_declare_token(21, 0, Some(KEYEXPR))
+        .send_declare_token(
+            21,
+            wz_session_core::named_key::NamedKey::literal(KEYEXPR).expect("a key"),
+        )
         .expect("acceptor declares a liveliness token");
     let dispatch_session = session.clone();
     let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
@@ -578,7 +588,10 @@ async fn a_dying_link_takes_its_tokens_out_of_the_admin_introspection_answer() {
 
     server
         .actions
-        .send_declare_token(31, 0, Some(KEYEXPR))
+        .send_declare_token(
+            31,
+            wz_session_core::named_key::NamedKey::literal(KEYEXPR).expect("a key"),
+        )
         .expect("acceptor declares a liveliness token");
     let dispatch_session = session.clone();
     let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
@@ -723,7 +736,10 @@ async fn a_dying_link_flips_the_dialers_matching_listener_to_false() {
     // listener has been told `true`.
     server
         .actions
-        .send_declare_subscriber(31, 0, Some(KEYEXPR))
+        .send_declare_subscriber(
+            31,
+            wz_session_core::named_key::NamedKey::literal(KEYEXPR).expect("a key"),
+        )
         .expect("acceptor declares a matching subscriber");
     let dispatch_session = session.clone();
     let mut dispatch = |e: IterationEvent<'_, '_>| dispatch_session.dispatch_iteration_event(e);
@@ -945,7 +961,11 @@ async fn assert_paced_replay_tells_the_peer_everything(
             for id in 0..DECLARED as u32 {
                 session
                     .actions()
-                    .send_declare_subscriber(10 + id, 0, Some(&format!("paced/k{id}")))
+                    .send_declare_subscriber(
+                        10 + id,
+                        wz_session_core::named_key::NamedKey::literal(&format!("paced/k{id}"))
+                            .expect("a key"),
+                    )
                     .expect("declare subscriber");
             }
             session
@@ -1125,7 +1145,10 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
             .expect("client reaches Established");
             session
                 .actions()
-                .send_declare_subscriber(10, 0, Some("home/resume"))
+                .send_declare_subscriber(
+                    10,
+                    wz_session_core::named_key::NamedKey::literal("home/resume").expect("a key"),
+                )
                 .expect("declare subscriber");
             session
         },
@@ -1300,7 +1323,11 @@ mod tls_reconnect {
                 .expect("client reaches Established over tls");
                 session
                     .actions()
-                    .send_declare_subscriber(10, 0, Some("home/tls-reconnect"))
+                    .send_declare_subscriber(
+                        10,
+                        wz_session_core::named_key::NamedKey::literal("home/tls-reconnect")
+                            .expect("a key"),
+                    )
                     .expect("declare subscriber");
                 session
             },
@@ -1447,7 +1474,11 @@ mod ws_reconnect {
                 .expect("client reaches Established over ws");
                 session
                     .actions()
-                    .send_declare_subscriber(10, 0, Some("home/ws-reconnect"))
+                    .send_declare_subscriber(
+                        10,
+                        wz_session_core::named_key::NamedKey::literal("home/ws-reconnect")
+                            .expect("a key"),
+                    )
                     .expect("declare subscriber");
                 session
             },

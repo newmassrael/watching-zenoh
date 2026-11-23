@@ -48,6 +48,8 @@ use crate::prelude::*;
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQuery, QblId, QueryHolder};
+
+use super::QueryableCallback;
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, Static};
@@ -456,8 +458,8 @@ pub(super) struct QueryPlane {
     asking: AtomicBool,
     pub(super) holds: Mutex<FinalHolds>,
     /// The queries waiting for their callbacks, in the order they arrived: the queryable they
-    /// matched, the query, and the generation of its link.
-    pub(super) queries: Queued<VecDeque<(QblId, OwnedQuery, u64)>>,
+    /// matched and its callback, the query, and the generation of its link.
+    pub(super) queries: Queued<VecDeque<(QblId, QueryableCallback, OwnedQuery, u64)>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -470,7 +472,7 @@ pub(super) struct QueryPlane {
 
 /// The queryables of the session one of its own gets reached, as many as the session can declare.
 #[cfg(feature = "local-queryable")]
-pub(super) type Asked = BoundedVec<QblId, { caps::MAX_QUERYABLES }, Static>;
+pub(super) type Asked = BoundedVec<(QblId, QueryableCallback), { caps::MAX_QUERYABLES }, Static>;
 
 impl QueryPlane {
     /// A plane that holds the Finals of at most `rows` queries at once ([`FinalHolds`]).
@@ -491,7 +493,7 @@ impl QueryPlane {
     /// What the observer's queryable `id` does with a query: copy it out and hold its Final, or,
     /// with no row left for its Final, refuse it ([`FinalHolds::admit`]): no callback runs for it,
     /// nothing answers it and it is counted.
-    pub(super) fn arrive(&self, id: QblId, view: &dyn QueryView) {
+    pub(super) fn arrive(&self, id: QblId, callback: &QueryableCallback, view: &dyn QueryView) {
         let generation = self.arriving_on();
         if !lock(&self.holds).admit(generation, view.rid()) {
             self.refused.fetch_add(1, Ordering::Relaxed);
@@ -500,12 +502,12 @@ impl QueryPlane {
         // The session's own get is handed to the queryables it matched by the get itself, from its
         // own view, so this notes only which; one past the list waits as a link's query does.
         #[cfg(feature = "local-queryable")]
-        if generation == LOCAL_QUERY && lock(&self.asked).push(id).is_ok() {
+        if generation == LOCAL_QUERY && lock(&self.asked).push((id, Arc::clone(callback))).is_ok() {
             return;
         }
         self.queries
             .lock()
-            .push_back((id, OwnedQuery::of(view), generation));
+            .push_back((id, Arc::clone(callback), OwnedQuery::of(view), generation));
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty.

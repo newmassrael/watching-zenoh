@@ -58,7 +58,9 @@ pub(crate) fn congestion_from_pico(
 /// [`Priority`]: wz_session_core::qos::Priority
 pub(crate) fn priority_from_pico(p: z_priority_t) -> wz_session_core::qos::Priority {
     use wz_session_core::qos::Priority;
-    match u8::try_from(p) {
+    // Widened first: a pico enum is one byte on a bare Arm core and a word elsewhere, and the
+    // widening is a conversion on every target.
+    match u8::try_from(i64::from(p)) {
         Ok(byte) if byte <= 7 => Priority::from_wire(byte),
         _ => Priority::DEFAULT,
     }

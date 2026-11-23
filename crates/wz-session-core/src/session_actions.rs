@@ -2228,8 +2228,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `_z_session_t._local_resources`): what a later aliased publish, a loopback delivery and
     /// a received `M=0` alias resolve against. Either this link keeps them, recorded as
     /// `Self::send_declare_keyexpr` sends each and forgotten as `Self::send_undeclare_kexpr`
-    /// retracts it, or the session keeps one table for all its links and this link reads it
-    /// through the handle the session installed (`Self::install_session_keyexprs`).
+    /// retracts it, or the session keeps one table for all its links and this link keeps none
+    /// and reads none (`Self::keep_no_keyexprs`).
     ///
     /// A mutex rather than a read-write lock: it is written when a key is declared (rare) and
     /// read one id at a time on the publish path, where a read-write lock's write penalty would
@@ -3154,21 +3154,6 @@ enum DispatchStage {
     ReservedChain,
 }
 
-/// The storage a retraction written from its parts writes its `ext_keyexpr` body into: the body's
-/// header, an id of at most ten VLE bytes, and a suffix up to the longest keyexpr the build names
-/// (`MAX_KEYEXPR_BYTES`). A key past it is retracted by its id alone, as the owned retraction
-/// falls back when its key does not encode.
-#[cfg(all(
-    feature = "tx-lend-only",
-    feature = "declare-undeclare",
-    any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token"
-    )
-))]
-const NAMED_KEY_BODY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
-
 /// A declaration written from its parts, as the arguments of the writer of
 /// [`crate::lent_control`] that makes it: every one a session with no allocator sends, and every
 /// one a lend-only session (`tx-lend-only`) sends, where an owned `DeclareOwned` would be built
@@ -3234,25 +3219,34 @@ enum LentDeclaration<'a> {
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
-    /// A retraction, naming its key when `key` holds the `ext_keyexpr` body.
+    /// A retraction, naming its key when `key` holds it.
     #[cfg(all(
         feature = "alloc",
         feature = "declare-subscriber",
         feature = "declare-undeclare"
     ))]
-    UndeclareSubscriber { id: u64, key: Option<&'a [u8]> },
+    UndeclareSubscriber {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-queryable",
         feature = "declare-undeclare"
     ))]
-    UndeclareQueryable { id: u64, key: Option<&'a [u8]> },
+    UndeclareQueryable {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-token",
         feature = "declare-undeclare"
     ))]
-    UndeclareToken { id: u64, key: Option<&'a [u8]> },
+    UndeclareToken {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
 }
 
 #[cfg(all(
@@ -3847,7 +3841,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().append_own_mapping(id, out)
+            keys.space()?.append_own_mapping(id, out)
         })
     }
 
@@ -5066,10 +5060,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the message addresses, asked only for a payload class of a session that holds a filter,
     /// and never while the metrics are held, since resolving an alias takes the mapping table.
     #[cfg(feature = "transport-stats")]
-    pub(crate) fn stats_keys_of(
+    pub(crate) fn stats_keys_of<K: AsRef<str>>(
         &self,
         class: crate::stats::NetworkStatsClass,
-        keyexpr: impl FnOnce() -> Option<alloc::string::String>,
+        keyexpr: impl FnOnce() -> Option<K>,
     ) -> crate::stats::NetworkStatsClass {
         if class.payload.is_none()
             || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
@@ -5080,7 +5074,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return class;
         };
         let keys = R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.key_filters().matching(&keyexpr)
+            metrics.key_filters().matching(keyexpr.as_ref())
         });
         class.with_keys(keys)
     }
@@ -14189,9 +14183,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// A plain `Put` (no timestamp, encoding, source info or attachment), with the QoS the
-    /// publisher set, encoded from the caller's own text and bytes, on the key
-    /// `(mapping_id, suffix)`: `(0, Some(key))` is the literal key and any other id is a key
-    /// this session declared. The wire of
+    /// publisher set, encoded from the caller's own text and bytes, on `key`: named on the wire
+    /// as the caller's table names it, its whole text what the counters and filters read. The wire of
     /// [`crate::push_build::build_push_literal_with_meta`] with none of what that builder
     /// makes to be encoded once and dropped (an owned keyexpr, an owned payload, the
     /// extension chain, and the `Box` the network message travels in), which was the larger
@@ -14215,8 +14208,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_plain_put_at(
         &self,
         stage: DispatchStage,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14233,19 +14225,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = qos;
             crate::sample::QosLevel::DEFAULT
         };
+        let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
         #[cfg(feature = "transport-stats")]
-        let class = {
-            let resolve = |id| self.resolve_outbound_mapping(id);
-            let class = crate::network_message::plain_put_stats_class(
-                mapping_id,
-                suffix,
-                value.len(),
-                resolve,
-            );
-            self.stats_keys_of(class, || {
-                crate::network_message::stats_keyexpr_of_key(mapping_id, suffix, &resolve)
-            })
-        };
+        let class = self.stats_keys_of(
+            crate::network_message::named_put_stats_class(key.text(), value.len()),
+            || Some(key.text()),
+        );
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         // The Put's own size, worked out from its parts: a Push has no size constant (its
@@ -14283,8 +14268,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14293,8 +14277,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<(), SendWireError>> {
         self.send_plain_put_at(
             DispatchStage::Fresh,
-            mapping_id,
-            suffix,
+            key,
             value,
             qos,
             reliable,
@@ -14312,8 +14295,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn try_send_plain_put_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14322,8 +14304,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Probed, SendWireError>> {
         let probed = self.send_plain_put_at(
             DispatchStage::Probe,
-            mapping_id,
-            suffix,
+            key,
             value,
             qos,
             reliable,
@@ -14335,8 +14316,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
                 DispatchStage::Fresh,
-                mapping_id,
-                suffix,
+                key,
                 value,
                 qos,
                 reliable,
@@ -14367,8 +14347,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_publication_at(
         &self,
         stage: DispatchStage,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14378,9 +14357,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
-            let _ = (
-                stage, mapping_id, suffix, kind, value, meta, reliable, express, priority,
-            );
+            let _ = (stage, key, kind, value, meta, reliable, express, priority);
             None
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -14388,6 +14365,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if self.rewrites_originated_keys() {
                 return None;
             }
+            let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
             #[cfg(feature = "pubsub-qos")]
             let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
             #[cfg(not(feature = "pubsub-qos"))]
@@ -14433,8 +14411,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn send_publication_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14444,8 +14421,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<(), SendWireError>> {
         self.send_publication_at(
             DispatchStage::Fresh,
-            mapping_id,
-            suffix,
+            key,
             kind,
             value,
             meta,
@@ -14466,8 +14442,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn try_send_publication_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14477,8 +14452,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Probed, SendWireError>> {
         let probed = self.send_publication_at(
             DispatchStage::Probe,
-            mapping_id,
-            suffix,
+            key,
             kind,
             value,
             meta,
@@ -14490,8 +14464,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
                 DispatchStage::Fresh,
-                mapping_id,
-                suffix,
+                key,
                 kind,
                 value,
                 meta,
@@ -14533,13 +14506,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-stats")]
             let class = self.stats_keys_of(
-                crate::network_message::plain_put_stats_class(
-                    0,
-                    Some(keyexpr_suffix),
-                    value.len(),
-                    |_| None,
-                ),
-                || Some(alloc::string::String::from(keyexpr_suffix)),
+                crate::network_message::named_put_stats_class(keyexpr_suffix, value.len()),
+                || Some(keyexpr_suffix),
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();
@@ -14945,9 +14913,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // With no allocator the declaration is written from the caller's own text
         // through the borrowed writer of `lent_control`, straight into the lent slot:
         // the owned `DeclareOwned` below is a heap object whose only job is to be
@@ -14955,7 +14923,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // does not exist in this profile.
         #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Subscriber {
                 id: u64::from(subscriber_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14971,7 +14939,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_subscriber_recorded(
                 subscriber_id,
                 keyexpr_mapping_id,
@@ -14997,8 +14965,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // seam-routed `Session::declare_subscriber`; this wrapper keeps the
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller).
-            let declare =
-                self.prepare_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_subscriber(subscriber_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_subscriber_recorded(
@@ -15043,15 +15010,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: no allocator, so the borrowed writer, with the
         // local `QueryableInfo` the owned form stamps (omitted when it is the default).
         #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Queryable {
                 id: u64::from(queryable_id),
                 mapping_id: keyexpr_mapping_id,
@@ -15067,7 +15034,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_queryable_recorded(
                 queryable_id,
                 keyexpr_mapping_id,
@@ -15096,12 +15063,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller). Mirror of the declare-subscriber
             // split landed in R311ou.
-            let declare = self.prepare_declare_queryable(
-                queryable_id,
-                keyexpr_mapping_id,
-                keyexpr_suffix,
-                complete,
-            )?;
+            let declare = self.prepare_declare_queryable(queryable_id, key, complete)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`), carrying `complete` so a complete queryable survives the replay,
             // and send, as one step.
@@ -15153,15 +15115,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: with no allocator the declaration is written from the
         // caller's own text through the borrowed writer of `lent_control`, straight into the
         // lent slot, and there is no reconnect cache to copy the keyexpr into.
         #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Token {
                 id: u64::from(token_id),
                 mapping_id: keyexpr_mapping_id,
@@ -15172,7 +15134,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A lend-only session: see `send_declare_subscriber`.
         #[cfg(all(feature = "declare-token", feature = "alloc", feature = "tx-lend-only"))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
                 self.dispatch_declare_lent(&LentDeclaration::Token {
                     id: u64::from(token_id),
@@ -15188,8 +15150,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             not(feature = "tx-lend-only")
         ))]
         {
-            let declare =
-                self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_token(token_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
@@ -15220,20 +15181,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        // R300 — same gate shape as `send_declare_subscriber`. The full path
-        // to `DeclareOwned` mirrors `dispatch_declare` — the module-level
-        // `use` is `liveliness-token`-gated but this build half is reachable
-        // under bare `declare-token` (the `send_declare_token` wrapper path).
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        // R300 — same gate shape as `send_declare_subscriber`, on the key's whole text, which
+        // the caller holds with the form that names it. The full path to `DeclareOwned` mirrors
+        // `dispatch_declare` — the module-level `use` is `liveliness-token`-gated but this
+        // build half is reachable under bare `declare-token` (the `send_declare_token` wrapper
+        // path).
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_token(
             u64::from(token_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15255,16 +15214,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_subscriber(
             u64::from(subscriber_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15380,15 +15336,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let mut declare =
-            build_declare_queryable(u64::from(queryable_id), keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
+        let mut declare = build_declare_queryable(
+            u64::from(queryable_id),
+            key.wire().id(),
+            key.wire().suffix(),
+        )?;
         // Stamp the local QueryableInfo completeness (the BestMatching producer
         // input). DEFAULT / incomplete omits the ext, so a plain queryable stays
         // byte-identical to before.
@@ -15602,20 +15558,128 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().resolve_own_mapping(mapping_id)
+            keys.space()?.resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
     }
 
-    /// Read the key expressions this link's session declared from the session's own table,
-    /// through `space`, and keep none on the link: what it declares from here on is recorded by
-    /// the session, which tells every link it has the same declarations under the same ids. A
-    /// session of several links installs it before the link carries anything; what the link had
-    /// kept until then is let go of.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    pub fn install_session_keyexprs(&self, space: crate::wireexpr_resolve::SharedOwnMappingSpace) {
+    /// `key`, which the caller names by the declaration this link's session calls `mapping_id`
+    /// (`0` for none), as this link sends it: named by that declaration while the link knows it
+    /// (its own record of the session's declarations, or the dictionary of shared key ids) and
+    /// it begins the key, and whole otherwise. The declaration's literal is read under the
+    /// link's lock into a buffer on the stack, so naming a key makes no string. `None` for an
+    /// empty key.
+    #[cfg(feature = "alloc")]
+    pub fn named_by<'k>(
+        &self,
+        key: &'k str,
+        mapping_id: crate::wire_id::ExprId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        let declared = crate::wire_key::MappedId::new(mapping_id).and_then(|id| {
+            let mut literal = crate::wireexpr_resolve::KeyexprBuf::new();
+            match self.append_own_mapping(mapping_id, &mut literal) {
+                Some(Ok(())) => crate::named_key::NamedKey::under(
+                    key,
+                    crate::named_key::Prefix::of(id, literal.as_str()),
+                ),
+                _ => self.named_by_shared_key(key, id),
+            }
+        });
+        declared.or_else(|| crate::named_key::NamedKey::literal(key))
+    }
+
+    /// `key` named by the shared key id `id` while the dictionary holds it and its entry begins
+    /// the key (`shared-key-ids`).
+    #[cfg(all(feature = "alloc", feature = "shared-key-ids"))]
+    fn named_by_shared_key<'k>(
+        &self,
+        key: &'k str,
+        id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            let entry = keys.ids()?.key_of(id.get())?;
+            crate::named_key::NamedKey::under(key, crate::named_key::Prefix::of(id, entry))
+        })
+    }
+
+    /// A build without the shared key ids has no dictionary to name a key by.
+    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    #[inline(always)]
+    fn named_by_shared_key<'k>(
+        &self,
+        _key: &'k str,
+        _id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        None
+    }
+
+    /// Run `f` on the key `(mapping_id, suffix)` names as this link resolves it: its whole text,
+    /// read from the declarations the link knows (its own record of them, or the dictionary of
+    /// shared key ids) and the rest after them, named on the wire by that declaration. For a caller
+    /// that holds a key as the wire names it and not its text: a session that keeps its
+    /// declarations names its keys from its own table. Refused, `f` not run, as
+    /// [`Self::reconstruct_outbound_keyexpr`] refuses: the id `0` with no text, or an id the link
+    /// does not know.
+    #[cfg(feature = "alloc")]
+    pub fn with_outbound_key<X>(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        f: impl FnOnce(crate::named_key::NamedKey<'_>) -> Result<X, SendDeclareError>,
+    ) -> Result<X, SendDeclareError> {
+        let text = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
+        let key = match crate::wire_key::MappedId::new(mapping_id) {
+            None => crate::named_key::NamedKey::literal(&text),
+            Some(id) => {
+                // The declaration's literal is the text before the suffix the caller named.
+                let declared = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::named_key::NamedKey::under(&text, crate::named_key::Prefix::of(id, declared))
+            }
+        };
+        f(key.ok_or(SendDeclareError::MissingKeyexpr)?)
+    }
+
+    /// `key` as this link names it, by the link's key-wire form (`shared-key-ids`): the declared
+    /// form keeps it as the session names it, the literal form names it whole, and the shared form
+    /// by the dictionary's id whose entry begins it and the rest after the entry.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn named_on_link<'k>(
+        &self,
+        key: crate::named_key::NamedKey<'k>,
+    ) -> crate::named_key::NamedKey<'k> {
+        let text = key.text();
+        match self.key_wire_on_link(text) {
+            crate::shared_key_ids::KeyWire::Declared => key,
+            crate::shared_key_ids::KeyWire::Literal => {
+                crate::named_key::NamedKey::literal(text).unwrap_or(key)
+            }
+            crate::shared_key_ids::KeyWire::Shared { id, suffix } => {
+                let entry = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::wire_key::MappedId::new(id)
+                    .and_then(|id| {
+                        crate::named_key::NamedKey::under(
+                            text,
+                            crate::named_key::Prefix::of(id, entry),
+                        )
+                    })
+                    .unwrap_or(key)
+            }
+        }
+    }
+
+    /// Keep none of the key expressions this link's session declared, and read none: the
+    /// session records them, tells every link it has the same declarations under the same ids,
+    /// names each key it sends ([`crate::named_key::NamedKey`]) and reads a peer's `M=0` key
+    /// from its own tables. A session of several links does this before the link carries
+    /// anything; what the link had kept until then is let go of.
+    #[cfg(feature = "alloc")]
+    pub fn keep_no_keyexprs(&self) {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            *keys = crate::declared_keyexprs::LinkKeyexprs::Session(space)
+            *keys = crate::declared_keyexprs::LinkKeyexprs::Session
         });
     }
 
@@ -15869,52 +15933,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// What [`Self::reconstruct_outbound_keyexpr`] decides for a declaration's key, with
-    /// no allocator and so no string to build: the outbound pico-safety gate (R300) on
-    /// a literal key, and the refusals for a key that names nothing. A session with no
-    /// allocator declares no keyexpr of its own (`declare-keyexpr` needs the heap), so
-    /// its table of outbound mappings is always empty and every alias is unknown, the
-    /// answer the owned form gives for an empty table.
-    #[cfg(all(
-        not(feature = "alloc"),
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_declared_keyexpr(
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        match (mapping_id, suffix) {
-            (0, None) => Err(SendDeclareError::MissingKeyexpr),
-            (0, Some(literal)) => Ok(check_outbound_keyexpr_pico_safe(literal)?),
-            (id, _) => Err(SendDeclareError::UnknownMappingId(id)),
-        }
-    }
-
-    /// The outbound pico-safety gate (R300) of a declaration a lend-only session writes from its
-    /// parts: the key the peer will read, resolved through this session's outbound mappings, as
-    /// `prepare_declare_subscriber` gates it before it builds the owned one.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "tx-lend-only",
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_held_keyexpr(
-        &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        let reconstructed = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
-        Ok(check_outbound_keyexpr_pico_safe(&reconstructed)?)
-    }
-
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
     /// the outbound link, retracting a previously declared
     /// subscription (id) on the peer. The peer drops the
@@ -15967,11 +15985,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A lend-only session writes the retraction from its parts.
             #[cfg(feature = "tx-lend-only")]
             {
-                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
-                let body = Self::named_key_body(key, &mut buf);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
                     id: subscriber_id,
-                    key: body,
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -15988,8 +16005,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
-    /// The `ext_keyexpr` body a retraction written from its parts names `key` by: the bytes of
-    /// the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// The `ext_keyexpr` body a retraction written from its parts names `key` by, made on the
+    /// stack: the bytes of the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// A suffix past the session's `MAX_KEYEXPR_BYTES`, a key the session holds no text for, is
+    /// not named, and the retraction goes by the id alone, which the peer retracts by as well.
     #[cfg(all(
         feature = "tx-lend-only",
         feature = "declare-undeclare",
@@ -15999,13 +16018,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body<'b>(
+    fn named_key_body(
+        &self,
         key: Option<(crate::wire_id::ExprId, &str)>,
-        buf: &'b mut [u8; NAMED_KEY_BODY_BYTES],
-    ) -> Option<&'b [u8]> {
+    ) -> Option<crate::lent_control::NamedKeyexpr> {
         let (mapping_id, suffix) = key?;
-        let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(mapping_id, suffix, buf)?;
-        buf.get(..len)
+        crate::lent_control::NamedKeyexpr::new(
+            mapping_id,
+            suffix,
+            self.params.limits.max_keyexpr_bytes_held(),
+        )
+        .ok()
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -16050,11 +16073,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_queryable_recorded(queryable_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
-                let body = Self::named_key_body(key, &mut buf);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
                     id: queryable_id,
-                    key: body,
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16118,11 +16140,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_token_recorded(token_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
-                let body = Self::named_key_body(key, &mut buf);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
                     id: token_id,
-                    key: body,
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]

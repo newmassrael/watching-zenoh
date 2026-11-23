@@ -828,6 +828,10 @@ pub mod wire_id;
 /// `0` and no text. Unconditional: the builders of every message that names a key take it.
 pub mod wire_key;
 
+/// A key a session sends as one value: its whole text and the wire form that names it, made
+/// together so they agree. Unconditional, as [`wire_key`] is.
+pub mod named_key;
+
 /// The identity of a unicast datagram link: the one remote end it carries a
 /// session with, fixed once known, and the `InitSyn` header test that binds an
 /// accepting link. Every stack's datagram driver admits what it takes through

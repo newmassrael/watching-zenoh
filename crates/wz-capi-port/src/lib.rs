@@ -13,8 +13,8 @@
 //!
 //! A type belongs here when an ABI and an engine both have to name it and nothing in it is a
 //! particular engine's. The ids an ABI's handles carry ([`SubId`], [`MatchId`], [`FilterId`],
-//! [`TokenId`]), the callback factories an ABI hands an engine ([`SubscriberSink`],
-//! [`MatchingSink`], [`LivelinessSink`]), the
+//! [`TokenId`]), the callbacks and callback factories an ABI hands an engine
+//! ([`SubscriberSink`], [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
 //! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. Why an engine refused
@@ -51,10 +51,25 @@
 //! in every build.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 
@@ -62,12 +77,17 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
+// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;
 mod engine;
+pub mod entity_place;
 pub mod group;
 pub mod held_key;
+// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -92,8 +112,11 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
+pub use entity_place::{EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
-pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
+pub use peers::{
+    each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
+};
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 pub use refusal::Refusal;
 
@@ -114,9 +137,90 @@ pub type MatchId = u64;
 /// holds for its whole life.
 pub type FilterId = u64;
 
-/// Mints one subscriber callback per face.
-pub type SubscriberSink =
-    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+/// A subscriber's callback, as an ABI hands it to an engine. It is called through a shared borrow
+/// ([`Self::call`]), from any thread and at any depth, a call from inside itself included:
+/// zenoh-pico calls its subscriptions' callbacks with no lock of its session held, so a put a
+/// callback makes on a key its own subscription matches calls it again from inside itself
+/// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`), and
+/// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
+/// the engine is done with it, after its last call has returned: its drop is the program's.
+pub enum SubscriberSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawSampleCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedSampleFn>),
+}
+
+/// A Rust program's subscriber callback, as [`SubscriberSink::Shared`] shares it: upstream zenoh's
+/// `Callback<Sample>` shape.
+pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
+/// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
+#[derive(Clone, Copy)]
+pub struct RawSampleCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: a raw callback is made only by `SubscriberSink::raw`, whose caller promises that its
+// function may be called with its context from any thread, at once from several and from inside
+// itself, and its drop once on any thread; the shared one is `Send + Sync` itself.
+unsafe impl Send for SubscriberSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for SubscriberSink {}
+
+impl SubscriberSink {
+    /// A C program's closure: `call` with `context` for each sample, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// `call` may be called with `context` from any thread, at once from several and from inside
+    /// itself, until `drop` is called; `drop`, when given, may be called with `context` once, on
+    /// any thread, after the last call has returned.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawSampleCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl Fn(&dyn SampleView) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `sample` to the callback.
+    pub fn call(&self, sample: &dyn SampleView) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+}
+
+impl Drop for SubscriberSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawSampleCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call, since a
+            // call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries: the
 /// entity id the token is declared under, of the width [`SubId`] has for the same reason.
@@ -170,10 +274,81 @@ impl Drop for Ticker {
     }
 }
 
-/// Mints one liveliness-subscriber callback per face: each token a peer declares on the key is a
-/// `Put`, each it retracts a `Delete`.
-pub type LivelinessSink =
-    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+/// A liveliness subscriber's callback, as an ABI hands it to an engine: each token a peer declares
+/// on the key is a `Put`, each it retracts a `Delete`. Called through a shared borrow, from any
+/// thread and at any depth, and let go of once, after its last call, as [`SubscriberSink`] is.
+pub enum LivelinessSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawLivelinessCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedLivelinessFn>),
+}
+
+/// A Rust program's liveliness callback, as [`LivelinessSink::Shared`] shares it.
+pub type SharedLivelinessFn = dyn for<'a> Fn(LivelinessSample<'a>) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`LivelinessSink::Raw`]), as
+/// [`RawSampleCallback`] holds a subscriber's.
+#[derive(Clone, Copy)]
+pub struct RawLivelinessCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `LivelinessSink::raw`, whose
+// caller promises what the marker traits ask of it.
+unsafe impl Send for LivelinessSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for LivelinessSink {}
+
+impl LivelinessSink {
+    /// A C program's closure: `call` with `context` for each change, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// As [`SubscriberSink::raw`]'s.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawLivelinessCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl for<'a> Fn(LivelinessSample<'a>) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `sample` to the callback.
+    pub fn call(&self, sample: LivelinessSample<'_>) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+}
+
+impl Drop for LivelinessSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawLivelinessCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// Delivers ONE aggregated matching verdict to C.
 ///
@@ -239,11 +414,6 @@ pub enum FanoutError {
     /// zenoh-pico's put fails. Nothing was sent on that face. Under zenoh's profile a congestion
     /// drop is the publish's success, and this is never answered.
     HeldConduit,
-    /// The session's own subscribers it reaches could not all be handed it: one whose callback
-    /// runs on the putting thread is handed it once that callback returns, from the session's
-    /// delivery lane, and the lane had no room for it. No subscriber of the session was handed
-    /// it; what the links were given went.
-    LocalNoRoom,
 }
 
 impl From<StatementNotHonoured> for FanoutError {
@@ -368,6 +538,18 @@ impl core::fmt::Display for LinksNotHonoured {
 
 impl core::error::Error for LinksNotHonoured {}
 
+/// What a `zp_batch_*` call asks of every batch window of a session
+/// ([`SessionEngine::batch_all`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchStep {
+    /// Open a window (zenoh-pico `zp_batch_start`).
+    Start,
+    /// Write what the open windows hold and keep them open (zenoh-pico `zp_batch_flush`).
+    Flush,
+    /// Close the windows, writing what they hold (zenoh-pico `zp_batch_stop`).
+    Stop,
+}
+
 /// What a put through a write filter did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilteredPut {
@@ -413,7 +595,23 @@ pub struct WireKey {
     pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix, `None` when it covers the whole key.
     pub suffix: Option<String>,
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Keeps,
+    /// One hold on the declaration of the key of the entity this key announces, when that is not
+    /// the declaration the wire names: the entity's retraction names it, so it is held for as long
+    /// as the entry is ([`Self::holding_also`]).
+    also: Option<KeyHold>,
+}
+
+/// What a key keeps alive for as long as a declaration made on it stays recorded.
+#[derive(Clone, Default)]
+enum Keeps {
+    /// Nothing.
+    #[default]
+    Nothing,
+    /// An object of the ABI's that retracts the declaration when the last holder lets it go.
+    Anchor { _held: Arc<dyn Send + Sync> },
+    /// One hold on the declaration, counted by the engine itself.
+    Hold { _held: KeyHold },
 }
 
 impl core::fmt::Debug for WireKey {
@@ -421,8 +619,60 @@ impl core::fmt::Debug for WireKey {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
-            .field("keeps", &self.keeps.is_some())
+            .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
+            .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
             .finish()
+    }
+}
+
+/// One hold on a keyexpr declaration of a session, taken from and given back to the engine's own
+/// count of the declaration's holders ([`SessionEngine::retain_keyexpr`],
+/// [`SessionEngine::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
+/// keeps nothing of its own on the heap, and once the session is gone a copy and a drop do
+/// nothing.
+pub struct KeyHold {
+    engine: alloc::sync::Weak<dyn SessionEngine>,
+    mapping_id: wz_session_core::wire_id::ExprId,
+}
+
+impl KeyHold {
+    /// The hold on `mapping_id` that the caller took through `engine`
+    /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
+    pub fn taken(
+        engine: alloc::sync::Weak<dyn SessionEngine>,
+        mapping_id: wz_session_core::wire_id::ExprId,
+    ) -> Self {
+        Self { engine, mapping_id }
+    }
+
+    /// The declaration held.
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
+        self.mapping_id
+    }
+
+    /// Whether the hold is on `engine`'s session, by address.
+    pub fn is_on(&self, engine: *const ()) -> bool {
+        core::ptr::addr_eq(self.engine.as_ptr(), engine)
+    }
+}
+
+impl Clone for KeyHold {
+    fn clone(&self) -> Self {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.retain_keyexpr(self.mapping_id);
+        }
+        Self {
+            engine: self.engine.clone(),
+            mapping_id: self.mapping_id,
+        }
+    }
+}
+
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.release_keyexpr(self.mapping_id);
+        }
     }
 }
 
@@ -437,13 +687,29 @@ impl WireKey {
         Self {
             mapping_id,
             suffix,
-            keeps: None,
+            keeps: Keeps::Nothing,
+            also: None,
         }
     }
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
     pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Some(anchor);
+        self.keeps = Keeps::Anchor { _held: anchor };
+        self
+    }
+
+    /// This key, holding the declaration `hold` holds for as long as a declaration made on it
+    /// stays recorded, in the engine's own count and with nothing of its own on the heap.
+    pub fn holding(mut self, hold: KeyHold) -> Self {
+        self.keeps = Keeps::Hold { _held: hold };
+        self
+    }
+
+    /// This key, holding besides what it names the declaration `hold` holds, of the key of the
+    /// entity it announces, which the entity's retraction names: one more hold in the engine's own
+    /// count, with nothing of its own on the heap.
+    pub fn holding_also(mut self, hold: KeyHold) -> Self {
+        self.also = Some(hold);
         self
     }
 

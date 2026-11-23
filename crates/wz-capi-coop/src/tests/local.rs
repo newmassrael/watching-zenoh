@@ -9,13 +9,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, WireKey};
-use wz_session_core::declare_form::InterestForm;
+use wz_capi_port::{
+    FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, SubscriberSink, WireKey,
+};
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 
-use super::{config, open, open_with, until, CatchAll, Engine, Router};
+use super::{open, until, CatchAll, Engine, Router};
 
 /// What each subscriber of [`subscribe_putting`] was handed: its index and the payload.
 type Handed = Arc<Mutex<Vec<(usize, Vec<u8>)>>>;
@@ -28,18 +30,12 @@ fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<Atomic
     let count = Arc::new(AtomicUsize::new(0));
     let into = count.clone();
     let id = engine
-        .declare_subscriber_on_wire(
-            key,
-            WireKey::literal(),
-            origin,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |_: &dyn SampleView| {
-                    into.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(key, WireKey::literal(), origin, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                into.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("a session with ids left declares");
     (id, count)
 }
@@ -174,9 +170,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
                 FilterPlane::Subscribers,
                 "demo/l/x",
                 &WireKey::literal(),
-                Some(InterestForm {
+                Some(InterestAsk {
                     mapping_id: 0,
-                    suffix: Some("demo/l/x".to_owned()),
+                    suffix: Some("demo/l/x"),
                     aggregate: false,
                 }),
                 count_local,
@@ -230,106 +226,135 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     assert!(engine.write_filter_active(counting_filter));
 }
 
-/// A put reaches each of the session's own subscribers once, inside the call. A put one of their
-/// callbacks makes from inside itself reaches each of them once too: the others inside that
-/// callback, as zenoh-pico's recursion does, and the subscriber whose callback made it once that
-/// callback has returned, where pico would call it again from inside itself.
+/// A put a subscriber's callback makes from inside itself on its own subscriber's key reaches it
+/// again at once, from inside itself, as zenoh-pico's recursion does
+/// (`session/subscription.c`, `_z_trigger_subscriptions_impl`): each nested put is handed out to
+/// depth 3 before the one around it returns, and every other subscriber is handed each put once,
+/// the innermost first. The CONTROL is each put's answer: it reached both subscribers.
 #[test]
-fn a_put_made_inside_a_callback_reaches_each_subscriber_once() {
+fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let session = Arc::downgrade(&engine);
+    let (into, said) = (handed.clone(), answers.clone());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/l/deep",
+            WireKey::literal(),
+            Locality::SessionLocal,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                let depth = sample.payload().first().copied().unwrap_or(0);
+                into.lock().unwrap().push((0, sample.payload().to_vec()));
+                if depth < 3 {
+                    if let Some(engine) = session.upgrade() {
+                        let sent = put_own(&engine, "demo/l/deep", &[depth + 1]);
+                        said.lock().unwrap().push(sent);
+                    }
+                }
+            }),
+        )
+        .expect("a session with ids left declares");
+    let into = handed.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/l/*",
+            WireKey::literal(),
+            Locality::SessionLocal,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push((1, sample.payload().to_vec()));
+            }),
+        )
+        .expect("a session with ids left declares");
+
+    assert_eq!(put_own(&engine, "demo/l/deep", &[0]), Ok(2));
+    assert_eq!(
+        *handed.lock().unwrap(),
+        [
+            (0, vec![0]),
+            (0, vec![1]),
+            (0, vec![2]),
+            (0, vec![3]),
+            (1, vec![3]),
+            (1, vec![2]),
+            (1, vec![1]),
+            (1, vec![0]),
+        ],
+        "each nested put is handed out before the one around it goes on"
+    );
+    assert_eq!(*answers.lock().unwrap(), [Ok(2), Ok(2), Ok(2)]);
+}
+
+/// A put a callback makes from inside itself that does not reach that callback's subscriber is
+/// handed to the others inside the call, as zenoh-pico's is.
+#[test]
+fn a_put_made_inside_a_callback_reaches_the_other_subscribers_inside_it() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
     let inner = Arc::new(Mutex::new(None));
-    subscribe_putting(&engine, &handed, &inner, 0);
+    subscribe_putting(&engine, &handed, &inner, "demo/l/side");
 
     put_own(&engine, "demo/l/fan", b"outer").expect("the publish is accepted");
-    let outer = b"outer".to_vec();
-    let nested = b"inner".to_vec();
     assert_eq!(
         *inner.lock().unwrap(),
-        Some(Ok(3)),
-        "the inner put reached all three"
+        Some(Ok(2)),
+        "the inner put reached the two others"
     );
+    let outer = b"outer".to_vec();
+    let nested = b"inner".to_vec();
     assert_eq!(
         *handed.lock().unwrap(),
         [
             (0, outer.clone()),
             (1, nested.clone()),
-            (2, nested.clone()),
+            (2, nested),
             (1, outer.clone()),
-            (2, outer),
-            (0, nested)
+            (2, outer)
         ],
-        "each subscriber once for each put; the one whose callback put, after it returned"
+        "the others are handed the inner put inside the first callback"
     );
 }
 
-/// A put made inside a subscriber's callback that reaches that subscriber, and that the delivery
-/// lane cannot hold for it until its callback returns, is refused with nothing handed to any
-/// subscriber of the session: no subscriber has it and the others not.
-#[test]
-fn a_put_the_lane_cannot_hold_for_a_running_callback_reaches_no_subscriber() {
-    let router = Router::start(CatchAll::None);
-    let mut config = config(&router);
-    if config.limits.select_delivery_lane_bytes(8192).is_err() {
-        // A build that keeps the lane to its own value has no lane this short.
-        return;
-    }
-    let engine = open_with(config);
-    let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
-    let inner = Arc::new(Mutex::new(None));
-    subscribe_putting(&engine, &handed, &inner, 10_000);
-
-    put_own(&engine, "demo/l/fan", b"outer").expect("the publish is accepted");
-    assert_eq!(
-        *inner.lock().unwrap(),
-        Some(Err(FanoutError::LocalNoRoom)),
-        "a sample longer than the whole lane cannot wait in it"
-    );
-    let outer = b"outer".to_vec();
-    assert_eq!(
-        *handed.lock().unwrap(),
-        [(0, outer.clone()), (1, outer.clone()), (2, outer)],
-        "the refused put reached no subscriber"
-    );
-}
-
-/// Three subscribers of the session's own on `demo/l/fan`, each recording what it is handed in
-/// `handed`; the first, handed `outer`, puts on the same key from inside its callback, `inner`
-/// itself or, when `inner_len` is not zero, that many bytes, and records the put's answer.
-fn subscribe_putting(engine: &Arc<Engine>, handed: &Handed, inner: &InnerPut, inner_len: usize) {
+/// Three subscribers of the session's own, each recording what it is handed in `handed`: the
+/// first on `demo/l/fan`, the other two on `demo/l/*`. The first, handed `outer`, puts `inner`
+/// on `inner_key` from inside its callback and records the put's answer.
+fn subscribe_putting(
+    engine: &Arc<Engine>,
+    handed: &Handed,
+    inner: &InnerPut,
+    inner_key: &'static str,
+) {
     let session = Arc::downgrade(engine);
     for subscriber in 0..3usize {
         let handed = handed.clone();
         let inner = inner.clone();
         let session = session.clone();
+        let key = if subscriber == 0 {
+            "demo/l/fan"
+        } else {
+            "demo/l/*"
+        };
         engine
             .declare_subscriber_on_wire(
-                "demo/l/fan",
+                key,
                 WireKey::literal(),
                 Locality::SessionLocal,
                 None,
-                Arc::new(move || {
-                    let handed = handed.clone();
-                    let inner = inner.clone();
-                    let session = session.clone();
-                    Box::new(move |sample: &dyn SampleView| {
-                        handed
-                            .lock()
-                            .unwrap()
-                            .push((subscriber, sample.payload().to_vec()));
-                        if subscriber == 0 && sample.payload() == b"outer" {
-                            if let Some(engine) = session.upgrade() {
-                                let payload = if inner_len == 0 {
-                                    b"inner".to_vec()
-                                } else {
-                                    vec![7u8; inner_len]
-                                };
-                                let sent = put_own(&engine, "demo/l/fan", &payload);
-                                *inner.lock().unwrap() = Some(sent);
-                            }
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    handed
+                        .lock()
+                        .unwrap()
+                        .push((subscriber, sample.payload().to_vec()));
+                    if subscriber == 0 && sample.payload() == b"outer" {
+                        if let Some(engine) = session.upgrade() {
+                            let sent = put_own(&engine, inner_key, b"inner");
+                            *inner.lock().unwrap() = Some(sent);
                         }
-                    })
+                    }
                 }),
             )
             .expect("a session with ids left declares");
@@ -340,4 +365,135 @@ fn subscribe_putting(engine: &Arc<Engine>, handed: &Handed, inner: &InnerPut, in
 fn put_own(engine: &Engine, key: &str, payload: &[u8]) -> Result<usize, FanoutError> {
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     engine.publish_on_wire_all(key, &WireKey::literal(), payload, &opts)
+}
+
+/// Counts its own drop: what the callback of a subscriber holds, to tell when it was let go of.
+struct Dropped(Arc<AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// An undeclaration made on another thread while a put's call of the subscriber's callback runs
+/// returns only once that call has returned and the callback was let go of (P11), as zenoh-pico's
+/// undeclare waits for the entity's lock. The CONTROL is the undeclaration while the callback is
+/// held inside its call: not returned, and the callback standing.
+#[test]
+fn an_undeclare_on_another_thread_waits_for_the_running_call() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (entered, inside) = channel::<()>();
+    let (release, released) = channel::<()>();
+    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let guard = Dropped(dropped.clone());
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/wait/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                let _ = entered.lock().unwrap().send(());
+                let _ = released.lock().unwrap().recv();
+            }),
+        )
+        .expect("declared");
+    let putting = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || put_own(&engine, "demo/wait/a", b"v"))
+    };
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the put calls the callback");
+    let returned = Arc::new(AtomicBool::new(false));
+    let undeclaring = {
+        let (engine, returned, dropped) = (
+            Arc::clone(&engine),
+            Arc::clone(&returned),
+            Arc::clone(&dropped),
+        );
+        std::thread::spawn(move || {
+            engine.undeclare_subscriber(id);
+            returned.store(true, Ordering::SeqCst);
+            dropped.load(Ordering::SeqCst)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !returned.load(Ordering::SeqCst),
+        "CONTROL: the undeclaration waits while the call runs"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "CONTROL: the callback stands"
+    );
+    release
+        .send(())
+        .expect("the callback waits for its release");
+    let dropped_when_returned = undeclaring.join().expect("the undeclaration returns");
+    assert_eq!(
+        dropped_when_returned, 1,
+        "the callback was let go of before the undeclaration returned"
+    );
+    assert_eq!(
+        putting.join().expect("the put returns"),
+        Ok(1),
+        "the put reached the subscriber once"
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "let go of once");
+}
+
+/// A callback that undeclares its own subscriber from inside a put's call of it does not wait for
+/// itself: the undeclaration returns inside the call, and the row is let go of once the call has
+/// returned, before the put does. A put after it reaches nothing; the CONTROL is the first put,
+/// which reached the subscriber.
+#[test]
+fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let own: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let guard = Dropped(dropped.clone());
+    let session = Arc::downgrade(&engine);
+    let id = engine
+        .declare_subscriber_on_wire("demo/self/**", WireKey::literal(), Locality::Any, None, {
+            let (calls, own) = (Arc::clone(&calls), Arc::clone(&own));
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                calls.fetch_add(1, Ordering::SeqCst);
+                let id = own.lock().unwrap().take();
+                if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                    engine.undeclare_subscriber(id);
+                }
+            })
+        })
+        .expect("declared");
+    *own.lock().unwrap() = Some(id);
+    assert_eq!(
+        put_own(&engine, "demo/self/a", b"v"),
+        Ok(1),
+        "CONTROL: the put reached the subscriber"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "let go of once its own call returned, before the put did"
+    );
+    assert_eq!(
+        put_own(&engine, "demo/self/b", b"v"),
+        Ok(0),
+        "nothing is left to reach"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

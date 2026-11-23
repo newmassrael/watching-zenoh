@@ -9,9 +9,8 @@
 //! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
 //! from the limits and the config the open was handed:
 //!
-//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), each
-//!   row the engine's whole record of a subscriber (`crate::engine::SubscriberRow`), with
-//!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`) are
+//!   rows of the session's one table set (below), with `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
 //!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
@@ -45,7 +44,7 @@
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
 //!   the rows lent when the session opens, first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
-//!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
+//!   it hands its subscribers' callbacks after its lock (`crate::round`), lent next;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`, one for each
 //!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
@@ -65,8 +64,10 @@
 //!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
 //!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
 //!   counted, as zenoh-pico drops a declaration its heap cannot hold;
-//! - with [`ArenaPlan::holding`], the place the ABI keeps its own handle of the session in, last,
-//!   so the handle is reserved with the session and takes no memory of its own.
+//! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
+//!   and the places it keeps its objects of the session's entities in, one for each row the
+//!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
+//!   reserved with the session, sized by the session's own limits, and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -115,13 +116,14 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
-use wz_session_core::pubsub::SubscriberTable;
-use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
+use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{EntryBytes, SubscriberRow};
+use crate::engine::{CoopTables, EntryBytes, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
 use crate::open_source::EndpointList;
+use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -161,41 +163,125 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The delivery lane's flag and its area.
-const LANE_ROWS: usize = 2;
+/// The delivery lane's flag and its area, and the round's records, the callbacks they owe and
+/// its keys.
+const LANE_ROWS: usize = 5;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
-/// The application's tables: subscribers, queryables (`queryable`), liveliness tokens and
-/// subscribers (`liveliness`), and the declaration watchers.
+/// The application's tables apart from the session's one table set: queryables (`queryable`),
+/// liveliness tokens and subscribers (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize =
-    1 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 1;
+    cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 1;
 /// The pending gets, and the ends of their legs (`query`).
 const GET_ROWS: usize = 1 + cfg!(feature = "query") as usize;
+/// The faces' sets and the index of the held ones.
+const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
 const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
+/// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
+/// session whose faces share their pools, so counted where a build shares them at all.
+const OWED_ROWS: usize = (cfg!(all(
+    feature = "liveliness",
+    any(feature = "listen", feature = "group")
+)) && SHARES_ROWS) as usize;
 /// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): queryables
-/// (`queryable`), tokens and liveliness subscribers (`liveliness`), key expressions, write
+/// (`queryable`), liveliness subscribers (`liveliness`), the session's one table set, write
 /// filters, matching listeners, interests and the key arena.
 const ENTITY_ROWS: usize =
-    cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 5;
+    cfg!(feature = "queryable") as usize + cfg!(feature = "liveliness") as usize + 5;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
 /// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
 const HANDLE_ROWS: usize = 2;
+/// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
+/// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
+/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), as many as the ABI
+/// asks places of, at most these.
+const ENTITY_PLACE_ROWS: usize =
+    2 * (3 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize);
 
-/// The most rows a plan holds: every row of the build, the cells' and the ABI's handle's among
-/// them, the sum of the groups' counts.
+/// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
+/// entities' places among them, the sum of the groups' counts.
 pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LINK_ROWS
     + LANE_ROWS
     + REASSEMBLY_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
+    + FACE_ROWS
     + PEER_ROWS
+    + OWED_ROWS
     + ENTITY_ROWS
     + CELL_ROWS
-    + HANDLE_ROWS;
+    + HANDLE_ROWS
+    + ENTITY_PLACE_ROWS;
+
+pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
+
+/// The two rows of `kind`'s places, the flags and the places, and the limit that counts them, as
+/// the plan names them.
+const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        EntityKind::Publisher => (
+            "publisher place flags",
+            "publisher places",
+            "MAX_PUBLISHERS",
+        ),
+        EntityKind::Subscriber => (
+            "subscriber place flags",
+            "subscriber places",
+            "MAX_SUBSCRIPTIONS",
+        ),
+        EntityKind::Queryable => (
+            "queryable place flags",
+            "queryable places",
+            "MAX_QUERYABLES",
+        ),
+        EntityKind::Token => ("token place flags", "token places", "MAX_LOCAL_TOKENS"),
+        EntityKind::LivelinessSubscriber => (
+            "liveliness subscriber place flags",
+            "liveliness subscriber places",
+            "MAX_LIVELINESS_SUBSCRIPTIONS",
+        ),
+        EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
+    }
+}
+
+/// What an ABI keeps of its own in a session's arena, laid out after every table of the session
+/// ([`ArenaPlan::holding`]): a place for its handle of the session, and for each kind of entity it
+/// names, a place of that layout for each row the session keeps of the kind. What it holds there is
+/// reserved with the session and takes no memory of its own, and an open whose arena cannot hold it
+/// opens nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldPlaces {
+    handle: Option<Layout>,
+    entities: [Option<Layout>; ENTITY_KINDS],
+}
+
+impl HeldPlaces {
+    /// No place at all.
+    pub const NONE: Self = Self {
+        handle: None,
+        entities: [None; ENTITY_KINDS],
+    };
+
+    /// A place of `layout` for the ABI's handle of the session, and none for its entities.
+    pub const fn handle(layout: Layout) -> Self {
+        Self {
+            handle: Some(layout),
+            entities: [None; ENTITY_KINDS],
+        }
+    }
+
+    /// These places, with a place of `layout` for each row the session keeps of `kind`.
+    pub fn with_entity(mut self, kind: EntityKind, layout: Layout) -> Self {
+        if let Some(place) = self.entities.get_mut(kind as usize) {
+            *place = Some(layout);
+        }
+        self
+    }
+}
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
@@ -301,7 +387,7 @@ impl GetTables {
 }
 
 /// One face's table of pending gets, as the arena lends it.
-type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -320,7 +406,49 @@ pub struct FacePeers {
     pub pools: PeerPoolRows,
 }
 
+impl FacePeers {
+    /// The sets of face tables the session's arena lends: one for each face counted, and one of
+    /// no rows for the dial face of a session that dials nothing, which holds the first place of
+    /// the faces as every session's dial face does (`engine::registry::Registry::new`).
+    pub const fn sets(&self) -> usize {
+        let sets = if self.dial {
+            self.tables
+        } else {
+            self.tables.saturating_add(1)
+        };
+        if sets == 0 {
+            1
+        } else {
+            sets
+        }
+    }
+
+    /// The rows of the table of what the faces that went still owe the liveliness subscribers
+    /// (the registry's tokens owed): one for each row of the session's token pool, as a face owes
+    /// apart only while its tokens hold a row of the pool at least, so the faces owing at once
+    /// are never more. None for a session of one face, whose one face never goes.
+    pub const fn owed_tokens(&self) -> usize {
+        if self.pools.shared {
+            self.pools.remote_decls
+        } else {
+            0
+        }
+    }
+}
+
 impl EntityRows {
+    /// The rows the engine keeps of `kind`, each of which an ABI's place of the kind is for.
+    pub const fn of_kind(&self, kind: EntityKind) -> usize {
+        match kind {
+            EntityKind::Publisher => self.publishers,
+            EntityKind::Subscriber => self.subscribers,
+            EntityKind::Queryable => self.queryables,
+            EntityKind::Token => self.tokens,
+            EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
+            EntityKind::Querier => self.queriers,
+        }
+    }
+
     /// The rows of the write filters' one table: a publisher's and a querier's each.
     pub const fn filters(&self) -> Option<usize> {
         self.publishers.checked_add(self.queriers)
@@ -364,8 +492,10 @@ pub struct ArenaPlan {
     tx_slots: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
-    /// The bytes of the session's delivery lane (`crate::lane`).
+    /// The bytes of the session's round of deliveries (`crate::round`).
     lane_bytes: usize,
+    /// The rows of the round's tables.
+    round: RoundRowCounts,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
     /// How many such buffers, in the one table the session's links share.
@@ -379,6 +509,9 @@ pub struct ArenaPlan {
     /// The bytes of the place the ABI keeps its handle of the session in, none for no place
     /// ([`Self::holding`]).
     handle_bytes: usize,
+    /// The bytes of each place the ABI keeps an entity of a kind in, by [`EntityKind`], none for
+    /// no place ([`Self::holding`]).
+    entity_bytes: [usize; ENTITY_KINDS],
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
     /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
@@ -457,6 +590,20 @@ impl ArenaPlan {
                 "DELIVERY_LANE_BYTES",
                 Quota::at_most(limits.delivery_lane_bytes()),
             )?,
+            round: RoundRowCounts {
+                records: lent::<{ caps::DELIVERY_LANE_EVENTS }>(
+                    "DELIVERY_LANE_EVENTS",
+                    limits.delivery_lane_events(),
+                )?,
+                callbacks: lent::<{ caps::DELIVERY_LANE_CALLBACKS }>(
+                    "DELIVERY_LANE_CALLBACKS",
+                    limits.delivery_lane_callbacks(),
+                )?,
+                longest_key: lent::<{ caps::MAX_KEYEXPR_BYTES }>(
+                    "MAX_KEYEXPR_BYTES",
+                    limits.max_keyexpr_bytes(),
+                )?,
+            },
             reassembly_bytes,
             reassembly_chains: LENT_CHAINS,
             entities: EntityRows::default(),
@@ -468,6 +615,7 @@ impl ArenaPlan {
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
             handle_bytes: 0,
+            entity_bytes: [0; ENTITY_KINDS],
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
             cell_bytes: LinkCells::default(),
         };
@@ -517,6 +665,25 @@ impl ArenaPlan {
             LentByteCells::FLAG_BYTES,
         )?;
         plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes)?;
+        // The round's tables, lent after its area (`crate::round::RoundRows::lent`).
+        plan.put(
+            "delivery records",
+            "DELIVERY_LANE_EVENTS",
+            plan.round.records,
+            RECORD_BYTES,
+        )?;
+        plan.put(
+            "delivery callbacks",
+            "DELIVERY_LANE_CALLBACKS",
+            plan.round.callbacks,
+            CALLBACK_BYTES,
+        )?;
+        plan.put(
+            "delivery keys",
+            "MAX_KEYEXPR_BYTES",
+            1,
+            plan.round.key_bytes(),
+        )?;
         // The session's reassembly buffers, which its links share, lent next
         // (`SessionArena::lend_reassembly`).
         plan.put(
@@ -530,12 +697,6 @@ impl ArenaPlan {
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             plan.reassembly_bytes,
-        )?;
-        plan.put(
-            "subscribers",
-            "MAX_SUBSCRIPTIONS",
-            lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
-            SubscriberTable::<SubscriberRow, Lent>::ROW_BYTES,
         )?;
         #[cfg(feature = "queryable")]
         plan.put(
@@ -613,7 +774,7 @@ impl ArenaPlan {
             "ended legs",
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
-            core::mem::size_of::<u64>(),
+            core::mem::size_of::<crate::engine::Ended>(),
         )?;
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
@@ -623,6 +784,21 @@ impl ArenaPlan {
             pools: pool_rows(limits, faces)?,
             dial: dials(config),
         };
+        // The sets of face tables themselves, one for each face, in one table
+        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
+        plan.put(
+            "face tables",
+            "MAX_FACES + 1",
+            plan.peers.sets(),
+            FACE_SET_BYTES,
+        )?;
+        // Which face holds which set, a row for each set.
+        plan.put(
+            "held faces",
+            "MAX_FACES + 1",
+            plan.peers.sets(),
+            HELD_SET_BYTES,
+        )?;
         plan.put(
             "peer tables",
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
@@ -644,6 +820,19 @@ impl ArenaPlan {
             ] {
                 plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?)?;
             }
+        }
+        // The tokens the faces that went still owe, lent with the pools
+        // (`engine::registry::Registry::new`).
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        if plan.peers.owed_tokens() > 0 {
+            plan.put(
+                "owed tokens",
+                "SESSION_MAX_REMOTE_DECLS",
+                plan.peers.owed_tokens(),
+                core::mem::size_of::<
+                    wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
+                >(),
+            )?;
         }
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
@@ -667,25 +856,18 @@ impl ArenaPlan {
             EntryBytes::QUERYABLE,
         )?;
         #[cfg(feature = "liveliness")]
-        {
-            self.put(
-                "token declarations",
-                "MAX_LOCAL_TOKENS",
-                rows.tokens,
-                EntryBytes::TOKEN,
-            )?;
-            self.put(
-                "liveliness subscriber declarations",
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
-                rows.liveliness_subscribers,
-                EntryBytes::LIVELINESS_SUBSCRIBER,
-            )?;
-        }
         self.put(
-            "key expressions",
+            "liveliness subscriber declarations",
+            "MAX_LIVELINESS_SUBSCRIPTIONS",
+            rows.liveliness_subscribers,
+            EntryBytes::LIVELINESS_SUBSCRIBER,
+        )?;
+        // The session's one table set, holding the kinds moved onto it so far.
+        self.put(
+            "session tables",
             "MAX_DECLARED_KEYEXPRS",
-            rows.keyexprs,
-            EntryBytes::KEYEXPR,
+            1,
+            CoopTables::arena_bytes(&self.tables()).ok_or(ArenaRefused::TooLarge)?,
         )?;
         self.put(
             "write filters",
@@ -717,6 +899,11 @@ impl ArenaPlan {
         Ok(())
     }
 
+    /// How many rows each table of the session's round of deliveries is lent.
+    pub fn round(&self) -> RoundRowCounts {
+        self.round
+    }
+
     /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
     /// that a link may find every slot held.
     #[cfg(feature = "listen")]
@@ -727,6 +914,17 @@ impl ArenaPlan {
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities
+    }
+
+    /// The rows of the session's one table set: those of the kinds moved onto it, none of the
+    /// others.
+    pub fn tables(&self) -> TableRows {
+        TableRows {
+            keyexprs: self.entities.keyexprs,
+            subscribers: self.entities.subscribers,
+            tokens: self.entities.tokens,
+            ..TableRows::default()
+        }
     }
 
     /// The bytes of blocks of the key arena every keyed row of the session keeps its key in
@@ -780,21 +978,44 @@ impl ArenaPlan {
         Ok(())
     }
 
-    /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
-    /// after every other row: the handle then takes no memory of its own, and an open whose arena
-    /// cannot hold it reserves nothing, as for any other row. A handle of no bytes takes no place.
-    /// Refused as past the address space when the handle asks for more alignment than a span of
-    /// the arena starts on ([`ARENA_ALIGN`]), or the arena with it is.
-    pub fn holding(mut self, handle: Layout) -> Result<Self, ArenaRefused> {
-        if handle.align() > ARENA_ALIGN {
-            return Err(ArenaRefused::TooLarge);
+    /// The plan with the places `held` names, lent after every other row: the ABI's handle of the
+    /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
+    /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
+    /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
+    /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
+    /// already is not laid out again. Refused as past the address space when a place asks for more
+    /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
+    /// places is.
+    pub fn holding(mut self, held: &HeldPlaces) -> Result<Self, ArenaRefused> {
+        if let Some(handle) = held.handle {
+            if handle.align() > ARENA_ALIGN {
+                return Err(ArenaRefused::TooLarge);
+            }
+            if handle.size() != 0 && self.handle_bytes == 0 {
+                self.handle_bytes = handle.size();
+                self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
+                self.put("session handle", "", 1, handle.size())?;
+            }
         }
-        if handle.size() == 0 || self.handle_bytes != 0 {
-            return Ok(self);
+        let laid = self.entity_bytes;
+        for ((kind, place), laid) in EntityKind::ALL.into_iter().zip(held.entities).zip(laid) {
+            let Some(place) = place else {
+                continue;
+            };
+            if place.align() > ARENA_ALIGN {
+                return Err(ArenaRefused::TooLarge);
+            }
+            let count = self.entities.of_kind(kind);
+            if place.size() == 0 || count == 0 || laid != 0 {
+                continue;
+            }
+            let (flags, places, basis) = place_rows(kind);
+            self.put(flags, basis, count, LentByteCells::FLAG_BYTES)?;
+            self.put(places, basis, count, place.size())?;
+            if let Some(bytes) = self.entity_bytes.get_mut(kind as usize) {
+                *bytes = place.size();
+            }
         }
-        self.handle_bytes = handle.size();
-        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
-        self.put("session handle", "", 1, handle.size())?;
         self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(self)
     }
@@ -836,6 +1057,11 @@ impl ArenaPlan {
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
     pub fn handle_bytes(&self) -> usize {
         self.handle_bytes
+    }
+
+    /// The bytes of each place the plan holds for an entity of `kind`, `0` for none.
+    pub fn entity_bytes(&self, kind: EntityKind) -> usize {
+        self.entity_bytes.get(kind as usize).copied().unwrap_or(0)
     }
 
     /// The rows, in the order they are lent.
@@ -1128,13 +1354,34 @@ pub(crate) fn dials_of(endpoints: usize, listens: usize, groups: usize) -> bool 
     !(endpoints == 0 && (listens > 0 || groups > 0))
 }
 
+/// The most faces a session's plan counts ([`faces_of`]), and so the most sets of face tables
+/// its arena lends: the dial role's, each face the build admits besides it (`MAX_FACES`), and in
+/// a build that joins groups one for each group the session's task cells hold (`MAX_TASKS`). A
+/// session that dials nothing counts no dial face but is lent a set of no rows for it
+/// ([`FacePeers::sets`]), so the bound is the same.
+pub(crate) const MAX_FACE_SETS: usize = 1 + caps::MAX_FACES + GROUP_FACES;
+
+/// The groups a session's plan counts at most: as many as its task cells hold in a build that
+/// joins groups, none in one that does not.
+const GROUP_FACES: usize = if cfg!(feature = "group") {
+    caps::MAX_TASKS
+} else {
+    0
+};
+
 /// The faces a session `config` opens may hold at once: the dial role's when it dials
 /// (`dials`), as many besides as `max_faces` admits, a link still in its handshake among them,
-/// and one for each group it joins. `None` past the address space.
+/// and one for each group it joins. A group past the task cells has no task to join it on, and
+/// the open refuses it at its join (`OpenError::NoTask`), as a build without `group` refuses any
+/// by name, so neither is counted. `None` past the address space.
 fn faces_of(config: &CoopConfig<impl EndpointList>) -> Option<usize> {
     usize::from(dials(config))
         .checked_add(config.max_faces)?
-        .checked_add(config.groups.len())
+        .checked_add(if cfg!(feature = "group") {
+            config.groups.len().min(caps::MAX_TASKS)
+        } else {
+            0
+        })
 }
 
 /// The links a session `config` opens may hold at once, whose buffers its open reserves: the dial
@@ -1214,6 +1461,59 @@ impl HandlePlace {
     /// How many bytes it holds: at least the size of the layout the plan was given.
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+}
+
+/// The places a session's arena lent for the ABI's entities ([`HeldPlaces`]), a table of each kind
+/// it holds places of. A place is lent to the ABI by its address and given back by it, each under
+/// the session's lock, which every table of the arena is reached under.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EntityPlaces {
+    cells: [Option<LentByteCells>; ENTITY_KINDS],
+}
+
+impl EntityPlaces {
+    /// No place of any kind.
+    pub(crate) const NONE: Self = Self {
+        cells: [None; ENTITY_KINDS],
+    };
+
+    /// The table of `kind`'s places, if the arena holds one.
+    fn of(&self, kind: EntityKind) -> Option<LentByteCells> {
+        self.cells.get(kind as usize).copied().flatten()
+    }
+
+    /// A free place for an entity of `kind`, or `None` when every one is lent or the arena holds
+    /// none of the kind. The place is the ABI's until it gives it back ([`Self::give_back`]).
+    pub(crate) fn claim(&self, kind: EntityKind) -> Option<EntityPlace> {
+        let buffer = self.of(kind)?.claim()?;
+        let (base, _) = buffer.raw();
+        // The claim is held by the place from here and ended by `give_back`, not by the buffer's
+        // drop.
+        core::mem::forget(buffer);
+        // SAFETY: the cell at `base` was lent for `kind` just now, and this is its one token.
+        Some(unsafe { EntityPlace::lent(NonNull::new(base)?, kind) })
+    }
+
+    /// Give back `place`, or hand it back when it is no place these tables lent: one of another
+    /// session, which only that session takes back.
+    pub(crate) fn give_back(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        // SAFETY: the place is consumed, so the claim it held ends here, once; what the ABI kept
+        // at its address it let go of before it gave the place up.
+        let taken = self
+            .of(place.kind())
+            .is_some_and(|cells| unsafe { cells.release_at(place.as_ptr()) });
+        if taken {
+            Ok(())
+        } else {
+            Err(place)
+        }
+    }
+
+    /// How many places of `kind` are lent, and how many the arena holds.
+    pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.of(kind)
+            .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))
     }
 }
 
@@ -1400,6 +1700,30 @@ impl SessionArena {
         }))
     }
 
+    /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
+    /// of each kind it holds places of. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_entity_places(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<EntityPlaces, ArenaRefused> {
+        let mut places = EntityPlaces::NONE;
+        for ((kind, bytes), cells) in EntityKind::ALL
+            .into_iter()
+            .zip(plan.entity_bytes)
+            .zip(places.cells.iter_mut())
+        {
+            if bytes == 0 {
+                continue;
+            }
+            *cells = Some(
+                self.arena
+                    .lend_byte_cells(bytes, plan.entities.of_kind(kind))
+                    .map_err(ArenaRefused::Lend)?,
+            );
+        }
+        Ok(places)
+    }
+
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
     /// taking nothing, past `N` or past what is left, which an arena reserved by the plan that
     /// counts the table never is.
@@ -1444,6 +1768,7 @@ mod tests {
             tx_slots: 0,
             link_bytes: 0,
             lane_bytes: 0,
+            round: RoundRowCounts::default(),
             reassembly_bytes: 0,
             reassembly_chains: 0,
             entities: EntityRows::default(),
@@ -1452,6 +1777,7 @@ mod tests {
             held_queries: 0,
             key_bytes: 0,
             handle_bytes: 0,
+            entity_bytes: [0; ENTITY_KINDS],
             endpoint_rows: (0, 0),
             cell_bytes: LinkCells::default(),
         }

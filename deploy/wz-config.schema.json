@@ -527,10 +527,10 @@
               ],
               "x-wz-kind": "bound",
               "x-wz-driven": "remote",
-              "x-wz-storage": "quota",
+              "x-wz-storage": "both",
               "x-wz-scope": "entity",
-              "x-wz-binding-heap": "live",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
             "MAX_QUERYABLES": {

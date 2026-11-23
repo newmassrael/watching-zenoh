@@ -51,6 +51,7 @@ use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
+use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
     any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
 };
@@ -64,6 +65,7 @@ use crate::row_callback::RowCallback;
 use crate::sink::RowAccess;
 use crate::slot_map::{Handle, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
+use crate::wire_key::MappedId;
 
 /// The markers that keep one table's handles from being taken by another.
 pub mod kind {
@@ -905,7 +907,7 @@ struct Declaring<'a, P: Storage> {
 impl<P: Storage> Declaring<'_, P> {
     /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let key = KeyMaker::key(self.keys, text).map_err(unkept)?;
+        let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
         let prefix = form.prefix.filter(|&prefix| {
             self.keyexprs.get(prefix).is_some_and(|row| {
                 row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
@@ -1068,7 +1070,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.keyexprs.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
         let handle = self
             .keyexprs
@@ -1089,6 +1091,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// its retraction to go on the wire.
     pub fn undeclare_keyexpr(&mut self, handle: KeyexprHandle) -> Option<ExprId> {
         release_keyexpr(&mut self.keyexprs, handle)
+    }
+
+    /// Take one more hold of the declaration `handle` names, for a holder of it that is copied,
+    /// with nothing on the wire: `false`, changing nothing, when it names no row now or the row
+    /// holds as many as its count holds.
+    pub fn retain_keyexpr(&mut self, handle: KeyexprHandle) -> bool {
+        let Some(row) = self.keyexprs.get_mut(handle) else {
+            return false;
+        };
+        match row.holds.checked_add(1) {
+            Some(holds) => {
+                row.holds = holds;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Retract the declaration `handle` names whatever holds it: its id, for its retraction to go
@@ -1159,6 +1177,36 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 suffix,
             },
             None => literal,
+        }
+    }
+
+    /// The key `key` names as the session sends it: its whole text, named on the wire by the
+    /// declaration its row holds while that declaration stands, and whole otherwise
+    /// ([`Self::wire_of`]). `None` for an empty key, which no row keeps.
+    pub fn named<'k>(&self, key: &'k EntityKey<P::Key>) -> Option<NamedKey<'k>> {
+        let whole = text(&key.key);
+        let declared = key
+            .prefix
+            .and_then(|prefix| self.keyexprs.get(prefix))
+            .and_then(|row| Some(Prefix::of(MappedId::new(row.id)?, text(&row.key))));
+        match declared {
+            Some(prefix) => NamedKey::under(whole, prefix).or_else(|| NamedKey::literal(whole)),
+            None => NamedKey::literal(whole),
+        }
+    }
+
+    /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
+    /// the session sends it: named by that declaration while it stands and begins the key, and
+    /// whole otherwise. `None` for an empty key.
+    pub fn named_by<'k>(&self, key: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
+        let declared = MappedId::new(id).and_then(|mapped| {
+            let handle = self.keyexpr_by_id(id)?;
+            let row = self.keyexprs.get(handle)?;
+            Some(Prefix::of(mapped, text(&row.key)))
+        });
+        match declared {
+            Some(prefix) => NamedKey::under(key, prefix).or_else(|| NamedKey::literal(key)),
+            None => NamedKey::literal(key),
         }
     }
 
@@ -1337,7 +1385,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.interests.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
         self.next_entity = id.checked_add(1);
         let handle = self
@@ -1581,7 +1629,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let gate = match accept {
             crate::reply_acceptance::ReplyAcceptance::Any => None,
             crate::reply_acceptance::ReplyAcceptance::Matching(key) => {
-                match KeyMaker::key(&self.keys, key) {
+                match KeyMaker::shared(&self.keys, key) {
                     Ok(key) => Some(key),
                     Err(why) => {
                         return Err(Refused {
@@ -2029,6 +2077,13 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage> SubscriberRows
 impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P> {
     type Sink = F::Subscriber;
     type RowId = SubscriberHandle;
+
+    // The table set holds the key expressions the session declared: a peer's `M=0` key is read
+    // from them where they lie.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+        Some(P::own_space(&self.keyexprs))
+    }
 
     fn epoch(&self) -> u64 {
         self.subscriber_epoch

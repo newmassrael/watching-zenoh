@@ -143,11 +143,11 @@ impl SessionHandle {
     /// `options` of a publication on `keyexpr`, with the QoS `qos/publication` gives that key
     /// written over them: what `z_put`, `z_delete` and `z_declare_publisher` publish with, as
     /// upstream's session overwrites the QoS of each of the three.
-    pub(crate) fn publication_options(
+    pub(crate) fn publication_options<'a>(
         &self,
         keyexpr: &str,
-        options: wz_runtime_tokio::session::PublishOptions,
-    ) -> wz_runtime_tokio::session::PublishOptions {
+        options: wz_runtime_tokio::session::PublishOptions<'a>,
+    ) -> wz_runtime_tokio::session::PublishOptions<'a> {
         self.session_defaults()
             .publication_qos
             .apply(keyexpr, options)

@@ -1040,11 +1040,6 @@ pub fn multicast_tx_group_announcement<R>(
     }
 }
 
-/// The most bytes the `ext_keyexpr` body of a retraction takes: its inner header, a ten-byte id
-/// and a key of the build's longest.
-#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
-const RETRACTION_KEY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
-
 /// [`crate::declare_build::build_group_retraction`] written from its parts, its key's
 /// `ext_keyexpr` body on the stack, and handed to `f` as a message lent for the call; refused
 /// with `LengthOutOfRange` for a key past the build's longest, and `FeatureDisabled` for a kind
@@ -1059,30 +1054,29 @@ pub fn multicast_tx_group_retraction<R>(
     use crate::declare_form::GroupDeclaration;
     use crate::send_wire_error::SendWireError;
     let refused = SendWireError::Codec(sce_forge_runtime::codec::CodecError::LengthOutOfRange);
-    let mut buf = [0u8; RETRACTION_KEY_BYTES];
-    let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(
+    // A group holds no limits snapshot of its own: its key is bounded by the build's longest.
+    let named = crate::lent_control::NamedKeyexpr::new(
         key.mapping_id,
         key.suffix.unwrap_or(""),
-        &mut buf,
+        crate::limits::MaxKeyexprBytesHeld::default(),
     )
-    .ok_or(refused)?;
-    let named = buf.get(..len).ok_or(refused)?;
+    .map_err(|_| refused)?;
     match what {
         #[cfg(feature = "declare-subscriber")]
         GroupDeclaration::Subscriber => multicast_tx_declaration(
-            &crate::lent_control::undeclare_subscriber_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_subscriber_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
         #[cfg(feature = "declare-queryable")]
         GroupDeclaration::Queryable { .. } => multicast_tx_declaration(
-            &crate::lent_control::undeclare_queryable_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_queryable_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
         #[cfg(feature = "liveliness-token")]
         GroupDeclaration::Token => multicast_tx_declaration(
-            &crate::lent_control::undeclare_token_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_token_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
@@ -1829,7 +1823,7 @@ where
                     if span.drop_marker {
                         return PushOutcome::Congested;
                     }
-                    emitted += 1;
+                    emitted = emitted.saturating_add(1);
                     deadline.next_fragment();
                 }
                 return PushOutcome::Pushed;

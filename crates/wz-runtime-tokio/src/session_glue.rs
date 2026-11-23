@@ -2914,7 +2914,10 @@ mod tests {
     fn send_declare_subscriber_rejects_with_feature_disabled_when_declare_subscriber_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_subscriber(1, 0, Some("home/temp")),
+            actions.send_declare_subscriber(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key")
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-subscriber OFF: send_declare_subscriber must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -2933,7 +2936,11 @@ mod tests {
     fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_queryable(1, 0, Some("home/temp"), false),
+            actions.send_declare_queryable(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key"),
+                false
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-queryable OFF: send_declare_queryable must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -2952,7 +2959,10 @@ mod tests {
     fn send_declare_token_rejects_with_feature_disabled_when_declare_token_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_token(1, 0, Some("home/temp")),
+            actions.send_declare_token(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key")
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-token OFF: send_declare_token must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -3506,7 +3516,7 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id = 0 + suffix = None → no keyexpr at all.
         let err = actions
-            .send_declare_subscriber(1, 0, None)
+            .with_outbound_key(0, None, |key| actions.send_declare_subscriber(1, key))
             .expect_err("MissingKeyexpr");
         assert_eq!(err, SendDeclareError::MissingKeyexpr);
         assert_eq!(driver.frame_count(), 0);
@@ -3518,7 +3528,9 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id != 0 but no prior send_declare_keyexpr.
         let err = actions
-            .send_declare_subscriber(1, 99, Some("/tail"))
+            .with_outbound_key(99, Some("/tail"), |key| {
+                actions.send_declare_subscriber(1, key)
+            })
             .expect_err("UnknownMappingId(99)");
         assert_eq!(err, SendDeclareError::UnknownMappingId(99));
         assert_eq!(driver.frame_count(), 0);
@@ -3541,7 +3553,9 @@ mod tests {
         assert_eq!(frames_before, 1);
 
         let err = actions
-            .send_declare_subscriber(1, /*mapping_id=*/ 7, Some("/c/*"))
+            .with_outbound_key(7, Some("/c/*"), |key| {
+                actions.send_declare_subscriber(1, key)
+            })
             .expect_err("reconstructed `**/c/*` must trigger bug #3 reject");
         match err {
             SendDeclareError::Keyexpr(
@@ -3568,16 +3582,49 @@ mod tests {
             .expect("safe prefix");
         // Pure alias mode: mapping_id=7 + suffix=None → "home"
         actions
-            .send_declare_subscriber(1, 7, None)
+            .with_outbound_key(7, None, |key| actions.send_declare_subscriber(1, key))
             .expect("alias to safe prefix");
         // Composite mode: mapping_id=7 + suffix=`/sensor` → "home/sensor"
         actions
-            .send_declare_subscriber(2, 7, Some("/sensor"))
+            .with_outbound_key(7, Some("/sensor"), |key| {
+                actions.send_declare_subscriber(2, key)
+            })
             .expect("composite to safe full keyexpr");
         // Literal mode: mapping_id=0 + suffix=Some("home/temp")
         actions
-            .send_declare_subscriber(3, 0, Some("home/temp"))
+            .send_declare_subscriber(
+                3,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key"),
+            )
             .expect("literal-mode safe keyexpr");
+    }
+
+    /// The link names a key by the declaration it holds while the declaration begins the key: the
+    /// declaration's id and the rest of the key, or the id alone for the whole of it. A key the
+    /// declaration does not begin, an id the link never declared and the id 0 are named whole; an
+    /// empty key is no key.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn a_link_names_a_key_by_the_declaration_it_holds() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions.send_declare_keyexpr(7, "home").expect("declared");
+        let named = actions.named_by("home/temp", 7).expect("a key");
+        assert_eq!(named.text(), "home/temp");
+        assert_eq!(
+            (named.wire().id(), named.wire().suffix()),
+            (7, Some("/temp"))
+        );
+        let whole = actions.named_by("home", 7).expect("a key");
+        assert_eq!((whole.wire().id(), whole.wire().suffix()), (7, None));
+        for (key, id) in [("away/temp", 7), ("home/temp", 99), ("home/temp", 0)] {
+            let named = actions.named_by(key, id).expect("a key");
+            assert_eq!(
+                (named.text(), named.wire().id(), named.wire().suffix()),
+                (key, 0, Some(key)),
+                "{key} by {id}"
+            );
+        }
+        assert_eq!(actions.named_by("", 7), None);
     }
 
     #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
@@ -3589,7 +3636,11 @@ mod tests {
             // R311y544 — was `**/foo/*`, which a real pico canonizes
             // to itself. The gate-inheritance claim needs a string that
             // actually aborts.
-            .send_declare_queryable(1, 0, Some("**/c/*"), false)
+            .send_declare_queryable(
+                1,
+                wz_session_core::named_key::NamedKey::literal("**/c/*").expect("a key"),
+                false,
+            )
             .expect_err("queryable inherits the same gate");
         assert!(matches!(
             err,
@@ -3606,7 +3657,10 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
             // R311y544 — was `**/abc/*/def`; see the queryable test.
-            .send_declare_token(1, 0, Some("**/a/b/*"))
+            .send_declare_token(
+                1,
+                wz_session_core::named_key::NamedKey::literal("**/a/b/*").expect("a key"),
+            )
             .expect_err("token inherits the same gate");
         assert!(matches!(
             err,
@@ -5363,8 +5417,7 @@ mod batch_tx_tests {
 
         actions
             .send_plain_put_qos(
-                0,
-                Some("home/ex"),
+                wz_session_core::named_key::NamedKey::literal("home/ex").expect("a key"),
                 b"EXEXEXEX",
                 None,
                 true,
@@ -6944,13 +6997,23 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         actions
-            .send_declare_queryable(11, 0, Some("home/qry"), false)
+            .send_declare_queryable(
+                11,
+                wz_session_core::named_key::NamedKey::literal("home/qry").expect("a key"),
+                false,
+            )
             .expect("declare queryable");
         actions
-            .send_declare_token(12, 0, Some("home/tok"))
+            .send_declare_token(
+                12,
+                wz_session_core::named_key::NamedKey::literal("home/tok").expect("a key"),
+            )
             .expect("declare token");
         actions
             .send_interest_liveliness_subscriber(13, /*history=*/ false, 0, Some("home/liv"))
@@ -7012,10 +7075,18 @@ mod reconnect_tx_tests {
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_queryable(11, 0, Some("home/qry"), true)
+            .send_declare_queryable(
+                11,
+                wz_session_core::named_key::NamedKey::literal("home/qry").expect("a key"),
+                true,
+            )
             .expect("complete queryable");
         actions
-            .send_declare_queryable(12, 0, Some("home/inc"), false)
+            .send_declare_queryable(
+                12,
+                wz_session_core::named_key::NamedKey::literal("home/inc").expect("a key"),
+                false,
+            )
             .expect("incomplete queryable");
 
         let info_of = |frame: &[u8]| {
@@ -7083,7 +7154,9 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 7, Some("/tail"))
+            .with_outbound_key(7, Some("/tail"), |key| {
+                actions.send_declare_subscriber(10, key)
+            })
             .expect("aliased subscriber declare");
         actions
             .send_interest_liveliness_subscriber(13, true, 0, Some("home/liv"))
@@ -7141,11 +7214,17 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 7, Some("/tail"))
+            .with_outbound_key(7, Some("/tail"), |key| {
+                actions.send_declare_subscriber(10, key)
+            })
             .expect("aliased subscriber declare");
         for id in 0..plain_subscribers {
             actions
-                .send_declare_subscriber(11 + id, 0, Some(&format!("home/s{id}")))
+                .send_declare_subscriber(
+                    11 + id,
+                    wz_session_core::named_key::NamedKey::literal(&format!("home/s{id}"))
+                        .expect("a key"),
+                )
                 .expect("plain subscriber declare");
         }
         (0..driver.frame_count())
@@ -7229,7 +7308,10 @@ mod reconnect_tx_tests {
     fn a_session_with_no_interest_sent_is_synced() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         assert!(actions.declarations_synced());
     }
@@ -7423,7 +7505,10 @@ mod reconnect_tx_tests {
     fn a_replay_still_owed_is_not_synced_and_its_interests_are_waited_for_when_sent() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         actions
             .send_interest_liveliness_get(14, 0, Some("home/get"))
@@ -7453,7 +7538,10 @@ mod reconnect_tx_tests {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let start = actions.declaration_generation();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         let made = actions.declaration_generation();
         assert_ne!(made, start);
@@ -7502,7 +7590,9 @@ mod reconnect_tx_tests {
         let (reference, reference_driver) = crate::test_fixtures::recording_actions();
         paced_fixture_declarations(&reference, &reference_driver, 1);
         reference
-            .send_declare_subscriber(12, 7, Some("/new"))
+            .with_outbound_key(7, Some("/new"), |key| {
+                reference.send_declare_subscriber(12, key)
+            })
             .expect("the same declaration, made with no replay running");
         let expected: Vec<Vec<u8>> = (0..4).map(|i| reference_driver.frame_bytes(i)).collect();
 
@@ -7513,7 +7603,9 @@ mod reconnect_tx_tests {
         assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
         let before = driver.frame_count();
         actions
-            .send_declare_subscriber(12, 7, Some("/new"))
+            .with_outbound_key(7, Some("/new"), |key| {
+                actions.send_declare_subscriber(12, key)
+            })
             .expect("a live declaration during the replay succeeds from the caller's side");
         assert_eq!(
             driver.frame_count(),
@@ -7870,7 +7962,10 @@ mod reconnect_tx_tests {
         drop(old);
 
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare after swap");
         assert_eq!(
             first.frame_count(),

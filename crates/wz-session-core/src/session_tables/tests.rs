@@ -336,6 +336,22 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
 }
 
+/// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
+/// that names no row takes none.
+#[test]
+fn a_retained_key_expression_is_retracted_by_its_last_holder() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert!(tables.retain_keyexpr(declared.handle));
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "a retracted one takes none"
+    );
+    assert!(tables.keyexprs().is_empty());
+}
+
 #[test]
 fn a_key_expression_id_skips_one_still_declared() {
     let mut tables = Tables::new();
@@ -899,6 +915,34 @@ fn a_key_the_key_arena_has_no_room_for_is_refused_as_a_full_table() {
     );
 }
 
+/// Rows of one text take one block of the key arena between them, whoever made the first: a
+/// subscriber on a key the session declared shares the declaration's block. The CONTROL is a
+/// subscriber on another text, which takes a block of its own.
+#[test]
+fn rows_of_one_text_share_its_block() {
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let space = keys(256);
+    let mut tables = SessionTables::<Calls, Lent>::lent(&mut arena, space, &rows).unwrap();
+    tables.declare_keyexpr("a/shared").unwrap();
+    let one = space.counts().used;
+    tables
+        .declare_subscriber("a/shared", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert_eq!(
+        space.counts().used,
+        one,
+        "the subscriber shares the declaration's block"
+    );
+    tables
+        .declare_subscriber("a/other", Locality::Any, KeyForm::default(), 2)
+        .unwrap();
+    assert!(
+        space.counts().used > one,
+        "CONTROL: another text takes a block of its own"
+    );
+}
+
 #[test]
 fn lent_tables_past_a_build_bound_are_refused() {
     let rows = TableRows {
@@ -947,6 +991,45 @@ fn a_retracted_declaration_goes_whatever_holds_it() {
     assert_eq!(tables.retract_keyexpr(declared.handle), None);
     // The token's retraction finds no declaration left to let go of.
     assert_eq!(tables.undeclare_token(token.handle).unwrap().keyexpr, None);
+}
+
+#[test]
+fn a_key_is_named_as_the_session_sends_it_by_the_declaration_that_stands() {
+    use crate::named_key::NamedKey;
+    use crate::wire_key::{KeyText, MappedId, WireKey};
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    let id = MappedId::new(declared.id).unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        names_key: false,
+    };
+    let token = tables.declare_token("demo/x", form).unwrap();
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    let named = tables.named(key).unwrap();
+    assert_eq!(named.text(), "demo/x");
+    assert_eq!(named.wire(), WireKey::mapped(id, KeyText::new("x")));
+    // A key the program names by a declaration's id is named by it while the key starts with
+    // the declared literal, and whole otherwise.
+    assert_eq!(
+        tables.named_by("demo/y", declared.id).unwrap().wire(),
+        WireKey::mapped(id, KeyText::new("y"))
+    );
+    assert_eq!(
+        tables.named_by("away/y", declared.id),
+        NamedKey::literal("away/y")
+    );
+    assert_eq!(tables.named_by("demo/y", 0), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("demo/y", 99), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("", declared.id), None);
+    // A retracted declaration names no key any more, the token's included.
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(tables.named(key), NamedKey::literal("demo/x"));
+    assert_eq!(
+        tables.named_by("demo/y", declared.id),
+        NamedKey::literal("demo/y")
+    );
 }
 
 #[test]
@@ -1054,6 +1137,104 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert!(
         !tables.has_local_matching("a/b"),
         "the subscriber of peers only is no local match"
+    );
+}
+
+/// The table set is the session's own id space: a peer's `M=0` key that names a key expression
+/// the session declared is read from the set's own table and reaches the subscriber on that key,
+/// with no space installed on the peer's side, and one that names an id the session never declared
+/// reaches nothing; a space a host installs there is read before the tables. The CONTROL is the
+/// peer's side alone, which holds no own space.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[test]
+fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
+    use crate::network_message::NetworkMessage;
+    use crate::pubsub::SubscriberPeer;
+    use crate::reliability::Reliability;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    let push_naming_ours = |id: ExprId| {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap()
+    };
+    let mut tables = SessionTables::<Sinks>::new();
+    let declared = tables.declare_keyexpr("ours/temp").unwrap();
+    let subscriber = tables
+        .declare_subscriber(
+            "ours/temp",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut peer = SubscriberPeer::<crate::bounded::Heap>::default();
+    assert!(
+        !peer.mapping_spaces().has_own(),
+        "CONTROL: the peer's side holds no own space"
+    );
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "read from the set's own table"
+    );
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id + 1))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "an id never declared reaches nothing"
+    );
+    // A space a host installs on the peer's side is read before the tables: the same id names
+    // the key the host holds for it.
+    let elsewhere = tables
+        .declare_subscriber(
+            "installed/key",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut installed = hashbrown::HashMap::new();
+    installed.insert(declared.id, std::string::String::from("installed/key"));
+    let installed: crate::wireexpr_resolve::SharedOwnMappingSpace =
+        alloc::sync::Arc::new(installed);
+    peer.set_own_mapping_space(installed);
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        (
+            heard(&tables, elsewhere.handle),
+            heard(&tables, subscriber.handle)
+        ),
+        (1, 1),
+        "the installed space is read first"
     );
 }
 

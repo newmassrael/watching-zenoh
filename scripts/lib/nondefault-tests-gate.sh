@@ -1477,6 +1477,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
     # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
     "wz-session-core|hook|shared-key-ids,codec-response,pubsub-put|shared_key_ids::"
+    # The unicast receive's per-path counts (`rx-in-place`, which the cooperative runtime forwards):
+    # a receive built in place starts with none, and each path is counted under its own name. The
+    # filter is the module path. The module is built with `storage-profile` and `session-unicast`.
+    "wz-session-core|hook|storage-profile,session-unicast,rx-in-place|unicast_rx::"
     # The limits a creator states to the tables it opens (`limits::enforcement::`): the bounds
     # read by the key-id dictionary and the link's noted requests (`shared-key-ids`) and by the
     # program's links (`app-link`) are tests no other row builds.

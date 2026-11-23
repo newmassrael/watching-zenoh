@@ -111,10 +111,10 @@ pub const DELIVERY_LANE_CALLBACKS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
-    storage: Storage::Quota,
+    storage: Storage::Both,
     scope: &[Scope::Entity],
-    binding_heap: Some(Binding::Live),
-    binding_fixed: None,
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
 

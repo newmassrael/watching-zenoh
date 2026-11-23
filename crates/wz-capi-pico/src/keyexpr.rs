@@ -15,8 +15,9 @@ use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::{HeldKey, KeyAsk, KeyNotHeld, WireKey};
+use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, WireKey};
 use wz_session_core::declare_form::RetractionKey;
+use wz_session_core::keyexpr_canon::KeyexprCanonError;
 use wz_session_core::WhatAmI;
 
 use crate::abi::{
@@ -109,37 +110,22 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
     }
 }
 
-/// pico `_z_keyexpr_wire_declaration_t` behind its refcount: ONE keyexpr
-/// declaration on ONE session, retracted when the last key holding it lets go.
-///
-/// Shared by every key that names it — the owned keyexpr `z_declare_keyexpr`
-/// returns, its clones, the keys `z_keyexpr_concat` / `z_keyexpr_join` build on
-/// it, and an entity declared on it — exactly as pico shares the
-/// `_z_keyexpr_wire_declaration_rc_t`. Its `Drop` is pico's
-/// `_z_keyexpr_wire_declaration_clear`, which undeclares
-/// (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// pico `_z_keyexpr_wire_declaration_t`: ONE keyexpr declaration on ONE session, held by every
+/// key that names it — the owned keyexpr `z_declare_keyexpr` returns, its clones, the keys
+/// `z_keyexpr_concat` / `z_keyexpr_join` build on it, and an entity declared on it — and retracted
+/// when the last lets go, as pico's refcount does (`vendor/zenoh-pico/src/session/keyexpr.c` @
 /// `void _z_keyexpr_wire_declaration_clear(`).
 ///
-/// The session is held WEAKLY, as pico holds `_z_session_weak_t`: a key that
-/// outlives its session must not keep the session alive, and retracting on a
-/// session that is gone is moot.
+/// Each holder keeps one hold of the engine's own count of the declaration's holders
+/// ([`KeyHold`]): a copy takes one more and a drop lets its own go, so the count has one owner and
+/// a holder keeps nothing on the heap. The session is held WEAKLY, as pico holds
+/// `_z_session_weak_t`: a key that outlives its session does not keep it alive, and a hold on a
+/// session that is gone lets go of nothing.
+#[derive(Clone)]
 pub(crate) struct WireDeclaration {
-    session: Weak<Engine>,
-    id: wz_session_core::wire_id::ExprId,
+    hold: KeyHold,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
-}
-
-impl Drop for WireDeclaration {
-    /// Let go of this declaration's hold on the key. The key itself goes only
-    /// when no other declaration of the same key holds it: pico's resource table
-    /// counts its holders, and a second declaration of a key it already has is
-    /// the same id with one more (the engine's `acquire_keyexpr`).
-    fn drop(&mut self) {
-        if let Some(session) = self.session.upgrade() {
-            session.release_keyexpr(self.id);
-        }
-    }
 }
 
 /// A key's text as an object of this ABI keeps it: a block of its session's key arena when the
@@ -265,7 +251,7 @@ fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
 /// `StringState`).
 pub(crate) struct DeclaredKeyexpr {
     literal: KeyText,
-    declaration: Option<Arc<WireDeclaration>>,
+    declaration: Option<WireDeclaration>,
 }
 
 impl DeclaredKeyexpr {
@@ -285,8 +271,8 @@ impl DeclaredKeyexpr {
     /// Another holder of the declaration that covers a prefix of the key, if any, without the
     /// key's text: what keeps the declaration on the session for something that names the key by
     /// it.
-    pub(crate) fn declaration_hold(&self) -> Option<Arc<WireDeclaration>> {
-        self.declaration.clone()
+    pub(crate) fn declaration_hold(&self) -> Option<KeyHold> {
+        self.declaration.as_ref().map(|d| d.hold.clone())
     }
 
     /// Another holder of the literal key's text, without the declaration.
@@ -335,13 +321,13 @@ impl DeclaredKeyexpr {
         }
     }
 
-    fn declared_on(&self, shared: &Engine) -> Option<&Arc<WireDeclaration>> {
+    fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
         self.declaration
             .as_ref()
             // By ADDRESS: both are fat pointers to one engine, and their vtable halves are
             // not guaranteed to be one copy, so comparing them whole could say a session is
             // not itself.
-            .filter(|d| core::ptr::addr_eq(d.session.as_ptr(), shared as *const Engine))
+            .filter(|d| d.hold.is_on((shared as *const Engine).cast::<()>()))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
@@ -359,35 +345,13 @@ impl DeclaredKeyexpr {
             .declared_on(shared)
             .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
         {
-            Some((d, rest)) => {
-                let anchor: Arc<dyn Send + Sync> = d.clone();
-                WireKey::aliased(d.id, (!rest.is_empty()).then(|| rest.to_owned())).keeping(anchor)
-            }
+            Some((d, rest)) => WireKey::aliased(
+                d.hold.mapping_id(),
+                (!rest.is_empty()).then(|| rest.to_owned()),
+            )
+            .holding(d.hold.clone()),
             None => WireKey::literal(),
         }
-    }
-
-    /// The declaration's id when it covers the WHOLE key on `shared`, which is when
-    /// [`Self::wire`] would answer an alias with no remainder: a put on it names the
-    /// key by this id alone. `None` for a literal key, a prefix declaration (the
-    /// remainder rides the wire) or another session's declaration.
-    ///
-    /// The id is stable for as long as the key is held: the key owns its
-    /// declaration, and the declaration is retracted only when the last key
-    /// holding it lets go, so a publisher asks once at declare rather than per put.
-    pub(crate) fn whole_key_mapping(
-        &self,
-        shared: &Engine,
-    ) -> Option<wz_session_core::wire_id::ExprId> {
-        // A session whose links name keys their own way (`crate::key_ids`) is sent a put the
-        // general way, which each link names as its form says: no id goes to every link at once.
-        #[cfg(feature = "shared-key-ids")]
-        if shared.names_keys_by_link() {
-            return None;
-        }
-        self.declared_on(shared)
-            .filter(|d| d.prefix_len == self.literal().len())
-            .map(|d| d.id)
     }
 
     /// What an entity held on this key names when it retracts itself, or `None`
@@ -493,13 +457,19 @@ impl DeclaredKeyexpr {
         })?;
         Ok(Self {
             literal: text,
-            declaration: Some(Arc::new(WireDeclaration {
-                session: Arc::downgrade(shared),
-                id,
+            declaration: Some(WireDeclaration {
+                hold: KeyHold::taken(engine_hold_of(shared), id),
                 prefix_len,
-            })),
+            }),
         })
     }
+}
+
+/// The session `shared` as a key's hold names it: weakly, through the engine's door for keys.
+fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine> {
+    // The engine's own type named, so the downgrade is of it and the coercion to the door's
+    // object follows it, on an engine of a concrete type and on the door's object alike.
+    Arc::<Engine>::downgrade(shared)
 }
 
 /// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
@@ -525,9 +495,10 @@ fn non_wild_prefix(literal: &str) -> &str {
 /// would produce. The one judgement behind [`z_keyexpr_is_canon`], the two
 /// checked view constructors and the checked owned constructor.
 fn is_pico_canon(text: &str) -> bool {
-    matches!(
-        wz_session_core::keyexpr_canon::canonize_keyexpr(text),
-        Ok(canon) if canon.as_str() == text
+    // Judged without writing the canonical form, so a view of a key allocates nothing.
+    wz_session_core::keyexpr_canon::is_canon(
+        text,
+        wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     )
 }
 
@@ -756,9 +727,14 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         let Some(literal) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
+        // The key's place is taken before it is declared, so a full pool refuses the key and
+        // nothing is declared.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Keyexpr) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         match DeclaredKeyexpr::declare(&engine_of(state), literal, declared_of(keyexpr)) {
             Ok(key) => {
-                store_owned_keyexpr(declared, key);
+                owned_keyexpr_at(declared, slot.fill(key));
                 Z_OK
             }
             Err(rc) => rc,
@@ -793,7 +769,10 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         if handle.is_null() {
             return Z_ERR_INVALID;
         }
-        let key = Box::from_raw(handle as *mut DeclaredKeyexpr);
+        // Its place goes back as `key` drops, wherever it lies.
+        let Some(key) = crate::object_slot::Placed::from_raw(handle as *mut DeclaredKeyexpr) else {
+            return Z_ERR_INVALID;
+        };
         let Some(state) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
@@ -880,7 +859,9 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
         }
         let handle = (*obj)._this._handle;
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut DeclaredKeyexpr));
+            // A declared key's place is a pool's, another's the heap's: `release` gives it back to
+            // whichever it lies in.
+            crate::object_slot::release(handle as *mut DeclaredKeyexpr);
         }
         (*obj)._this = z_owned_keyexpr_t::null_value();
         Z_OK
@@ -893,7 +874,7 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
 // cdylib did not (`wz-integration-tests/tests/pico_abi_symbol_census.rs`).
 //
 // None of them re-derives keyexpr semantics. Canonization routes through
-// `wz_session_core::keyexpr_canon::canonize_keyexpr` and the set relations
+// `wz_session_core::keyexpr_canon`'s one walk and the set relations
 // through `wz_session_core::keyexpr_match`, which are the SSOTs the wire path
 // and the R300 outbound gate already use — a second reading of the grammar
 // here would be a copy that drifts from the one the wire obeys, and the
@@ -919,13 +900,21 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
-    let boxed = Box::new(key);
-    let start = boxed.literal().as_ptr();
-    let len = boxed.literal().len();
+    owned_keyexpr_at(dst, Box::into_raw(Box::new(key)));
+}
+
+/// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot
+/// for a key the program declared (`z_declare_keyexpr`), the heap's for the rest.
+///
+/// # Safety
+/// `dst` is valid and writable; `key` is a live key a [`crate::object_slot::Slot`] was filled
+/// with or a `Box` made, which `dst` then owns.
+unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexpr) {
+    let literal = (*key).literal();
     *dst = z_owned_keyexpr_t {
-        _start: start,
-        _len: len,
-        _handle: Box::into_raw(boxed) as *mut c_void,
+        _start: literal.as_ptr(),
+        _len: literal.len(),
+        _handle: key as *mut c_void,
         _mapping: 0,
         _pad: [0usize; 2],
     };
@@ -1019,13 +1008,27 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
             return Z_ERR_NULL;
         };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                *len = canon.as_str().len();
-                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon.as_str()));
+        // The form is written where the key's text is made from, as long as the bound: a text of
+        // any length is read, and only a form past the bound is refused.
+        let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
+        match wz_session_core::keyexpr_canon::canonize_into(
+            text,
+            &mut form,
+            wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
+        ) {
+            Ok(written) => {
+                // The form of UTF-8 is UTF-8 (`canonize_into`).
+                let Some(canon) = form
+                    .get(..written)
+                    .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                else {
+                    return Z_ERR_INVALID;
+                };
+                *len = written;
+                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon));
                 Z_OK
             }
+            Err(KeyexprCanonError::ExceedsCapacity) => Z_EINVAL,
             Err(_) => Z_ERR_INVALID,
         }
     })
@@ -1053,7 +1056,7 @@ unsafe fn owned_keyexpr_input<'a>(
     if name.is_null() {
         return None;
     }
-    let bytes = core::slice::from_raw_parts(name as *const u8, len);
+    let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
     core::str::from_utf8(bytes).ok()
 }
 
@@ -1062,7 +1065,7 @@ unsafe fn owned_keyexpr_input<'a>(
 ///
 /// R2959 — the clone SHARES the source's declaration. This used to make every
 /// clone a literal, on the argument that a clone carrying the id would publish
-/// on a declaration it held no reference to. The declaration is refcounted now
+/// on a declaration it held no reference to. The declaration is held now
 /// (`WireDeclaration`), so the clone holds exactly such a reference, and a
 /// literal clone is no longer the safe direction but a divergence: upstream's
 /// copy clones the refcount (`vendor/zenoh-pico/src/session/keyexpr.c` @
@@ -1149,12 +1152,12 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         let tail: &str = if right.is_null() || len == 0 {
             ""
         } else {
-            match core::str::from_utf8(core::slice::from_raw_parts(right as *const u8, len)) {
+            match core::str::from_utf8(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
                 Ok(t) => t,
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        store_joined(key, left, &[head, tail])
+        store_joined(key, left, &[head.as_bytes(), tail.as_bytes()])
     })
 }
 
@@ -1172,11 +1175,11 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
 }
 
 /// The body `z_keyexpr_concat` and `z_keyexpr_join` share, out of line so neither export holds a
-/// copy of it: `parts` written one after the other into a buffer of the longest key a row of the
-/// session's tables holds, canonized, and stored in `key` keeping `left`'s declaration
-/// ([`extended_from`]). A text longer than the buffer is refused with `Z_EINVAL` before it is
-/// canonized, as one longer after canonizing is: the buffer is the bound every key of this build
-/// is held to, and the join takes no allocation of its own.
+/// copy of it: the text `parts` make, read in order where each lies, canonized into a buffer of
+/// the bound and stored in `key` keeping `left`'s declaration ([`extended_from`]). The bound every
+/// key of this build is held to is held to the form and not to the text, as pico keeps only the
+/// form: a long text whose form is short is a key, and a form past the bound is refused with
+/// `Z_EINVAL`. The join takes no allocation and no copy of its text.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
@@ -1184,28 +1187,27 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
 unsafe fn store_joined(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
-    parts: &[&str],
+    parts: &[&[u8]],
 ) -> ZResult {
-    let mut buf = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
-    let mut used = 0usize;
-    for part in parts {
-        let Some(room) = buf.get_mut(used..used + part.len()) else {
-            return Z_EINVAL;
-        };
-        room.copy_from_slice(part.as_bytes());
-        used += part.len();
-    }
-    // SAFETY: `buf[..used]` is whole `str` values written one after the other, which is UTF-8.
-    let joined = core::str::from_utf8_unchecked(&buf[..used]);
-    match wz_session_core::keyexpr_canon::canonize_keyexpr(joined) {
-        // Canonizing only shortens a key, so one still past the bound is past it.
-        Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-        Ok(canon) => {
-            store_owned_keyexpr(key, extended_from(left, canon.as_str()));
-            Z_OK
-        }
-        Err(_) => Z_ERR_INVALID,
-    }
+    let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
+    let written = match wz_session_core::keyexpr_canon::canonize_parts_into(
+        parts,
+        &mut form,
+        wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
+    ) {
+        Ok(written) => written,
+        Err(KeyexprCanonError::ExceedsCapacity) => return Z_EINVAL,
+        Err(_) => return Z_ERR_INVALID,
+    };
+    // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
+    let Some(canon) = form
+        .get(..written)
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+    else {
+        return Z_ERR_INVALID;
+    };
+    store_owned_keyexpr(key, extended_from(left, canon));
+    Z_OK
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1227,7 +1229,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        store_joined(key, left, &[l, "/", r])
+        store_joined(key, left, &[l.as_bytes(), b"/".as_slice(), r.as_bytes()])
     })
 }
 
@@ -1335,7 +1337,7 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start as *const u8, len))
+        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start.cast::<u8>(), len))
         else {
             return Z_ERR_INVALID;
         };
@@ -1381,9 +1383,9 @@ fn pico_canon_status(err: &wz_session_core::keyexpr_canon::KeyexprCanonError) ->
         E::DollarAfterDollarOrStar => -6,
         E::ContainsSharpOrQmark => -7,
         E::ContainsUnboundDollar => -8,
-        // A wz-side no-alloc-only variant with no pico mirror; on the AP
-        // backing this crate runs on it is never produced, and a generic
-        // failure is the honest answer rather than a status pico defines.
+        // A form past a buffer it is written into, which pico, bounding no key, has no status
+        // for: a generic failure is the honest answer rather than one it defines. The in-place
+        // canonizer, which bounds nothing, never answers it.
         E::ExceedsCapacity => Z_ERR_GENERIC,
     }
 }
@@ -1394,25 +1396,22 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         if start.is_null() || len.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start as *const u8, *len))
-        else {
+        let text = core::slice::from_raw_parts_mut(start.cast::<u8>(), *len);
+        if core::str::from_utf8(text).is_err() {
             return Z_ERR_INVALID;
-        };
-        let canon = match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
-            Ok(c) => c,
-            Err(err) => return pico_canon_status(&err),
-        };
-        let bytes = canon.as_str().as_bytes();
-        debug_assert!(
-            bytes.len() <= *len,
-            "canonization grew a keyexpr, which the in-place contract forbids"
-        );
-        if bytes.len() > *len {
-            return Z_ERR_GENERIC;
         }
-        core::ptr::copy(bytes.as_ptr(), start as *mut u8, bytes.len());
-        *len = bytes.len();
-        Z_OK
+        // Over the caller's own bytes, as pico canonizes them, of any length: the form never
+        // grows, so it takes no buffer and no bound.
+        match wz_session_core::keyexpr_canon::canonize_in_place(
+            text,
+            wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
+        ) {
+            Ok(written) => {
+                *len = written;
+                Z_OK
+            }
+            Err(err) => pico_canon_status(&err),
+        }
     })
 }
 
@@ -1819,33 +1818,23 @@ mod bound_tests {
         }
     }
 
-    /// A concatenation is written into a buffer of the bound before it is canonized: a text past
-    /// the bound is refused even where canonizing would have shortened it under the bound,
-    /// leaving the destination null, and one under it is canonized and kept.
+    /// A concatenation is held to the bound once it is canonized, not before: a text past the bound
+    /// whose form is under it is a key, the lone `$*` chunk canonized, and a form past the bound is
+    /// refused with the destination left null. Turned red by a bound judged on the text.
     #[test]
-    fn a_concatenation_past_the_bound_is_refused_before_it_is_canonized() {
+    fn a_concatenation_is_held_to_the_bound_once_it_is_canonized() {
         unsafe {
             let (rc, mut left) = owned(&key_of(MAX_KEYEXPR_BYTES - 10));
             assert_eq!(rc, Z_OK);
-            let past = "/$*$*$*$*$*$*";
+            let long = "/$*$*$*$*$*$*";
+            assert!(MAX_KEYEXPR_BYTES - 10 + long.len() > MAX_KEYEXPR_BYTES);
             let mut concat = z_owned_keyexpr_t::null_value();
             assert_eq!(
                 z_keyexpr_concat(
                     &mut concat,
                     z_keyexpr_loan(&left),
-                    past.as_ptr() as *const c_char,
-                    past.len(),
-                ),
-                Z_EINVAL
-            );
-            assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
-            let under = "/$*";
-            assert_eq!(
-                z_keyexpr_concat(
-                    &mut concat,
-                    z_keyexpr_loan(&left),
-                    under.as_ptr() as *const c_char,
-                    under.len(),
+                    long.as_ptr() as *const c_char,
+                    long.len(),
                 ),
                 Z_OK
             );
@@ -1853,7 +1842,99 @@ mod bound_tests {
             assert_eq!(made.len(), MAX_KEYEXPR_BYTES - 10 + 2);
             assert!(made.ends_with("/*"), "the lone `$*` chunk is canonized");
             z_keyexpr_drop(z_keyexpr_move(&mut concat));
+
+            // A suffix longer than two keys of the bound is read where it lies, whatever its
+            // length: only its form is held to the bound.
+            let (rc, mut short) = owned("a");
+            assert_eq!(rc, Z_OK);
+            let longer = "/**".repeat(3 * MAX_KEYEXPR_BYTES);
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&short),
+                    longer.as_ptr() as *const c_char,
+                    longer.len(),
+                ),
+                Z_OK
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&concat)), Some("a/**"));
+            z_keyexpr_drop(z_keyexpr_move(&mut concat));
+            z_keyexpr_drop(z_keyexpr_move(&mut short));
+
+            let (rc, mut full) = owned(&key_of(MAX_KEYEXPR_BYTES - 1));
+            assert_eq!(rc, Z_OK);
+            let past = "/b";
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&full),
+                    past.as_ptr() as *const c_char,
+                    past.len(),
+                ),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
+            z_keyexpr_drop(z_keyexpr_move(&mut full));
             z_keyexpr_drop(z_keyexpr_move(&mut left));
+        }
+    }
+
+    /// The canonizing doors read a text of any length and hold only its form to the bound, as
+    /// pico keeps only the form: a text past the bound whose form is under it is a key, its
+    /// form's length written back, and is canonized over itself; a form past the bound is refused
+    /// by the owned constructor with `Z_EINVAL`, the destination null and no length written back,
+    /// and canonized in place, which bounds nothing. Turned red by a bound judged on the text.
+    #[test]
+    fn the_canonizing_doors_hold_the_form_to_the_bound_and_not_the_text() {
+        let stem = key_of(MAX_KEYEXPR_BYTES - 10);
+        let long = format!("{stem}/**/**/**/**");
+        assert!(long.len() > MAX_KEYEXPR_BYTES);
+        let form = format!("{stem}/**");
+        let past = key_of(MAX_KEYEXPR_BYTES + 1);
+        unsafe {
+            let mut len = long.len();
+            let mut key = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(
+                    &mut key,
+                    long.as_ptr() as *const c_char,
+                    &mut len
+                ),
+                Z_OK
+            );
+            assert_eq!(len, form.len(), "the form's length is written back");
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&key)), Some(form.as_str()));
+            z_keyexpr_drop(z_keyexpr_move(&mut key));
+            let mut text = long.clone().into_bytes();
+            let mut len = text.len();
+            assert_eq!(
+                z_keyexpr_canonize(text.as_mut_ptr() as *mut c_char, &mut len),
+                Z_OK
+            );
+            assert_eq!(&text[..len], form.as_bytes());
+
+            let mut len = past.len();
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(
+                    &mut key,
+                    past.as_ptr() as *const c_char,
+                    &mut len
+                ),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&key), "nothing is left behind");
+            assert_eq!(len, past.len(), "no length is written back");
+            let mut text = past.clone().into_bytes();
+            let mut len = text.len();
+            assert_eq!(
+                z_keyexpr_canonize(text.as_mut_ptr() as *mut c_char, &mut len),
+                Z_OK
+            );
+            assert_eq!(
+                &text[..len],
+                past.as_bytes(),
+                "a canon text is its own form"
+            );
         }
     }
 
@@ -2057,6 +2138,57 @@ mod arena_key_tests {
         drop((shared, second));
         assert!(room_for(&engine, 10), "and given back with their holders");
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// A declaration stays as long as any key holds it, each holder one hold of the engine's own
+    /// count: a share and a wire key outlive the key they were made from, and the last holder let
+    /// go retracts it. Turned red by a copy that takes no hold of its own, which lets the
+    /// declaration go with the first holder.
+    #[test]
+    fn a_declaration_lasts_as_long_as_its_last_holder() {
+        let (session, engine) = listening();
+        let declared = |engine: &Arc<Engine>| {
+            engine
+                .keyexpr_declarations()
+                .iter()
+                .any(|(_, key)| key == "demo/hold/a")
+        };
+        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/a", None).expect("declared");
+        assert!(declared(&engine));
+        let shared = key.share();
+        let wire = key.wire(Arc::as_ref(&engine));
+        assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
+        drop(key);
+        assert!(declared(&engine), "the share holds it");
+        drop(shared);
+        assert!(declared(&engine), "the wire key holds it");
+        drop(wire);
+        assert!(!declared(&engine), "the last holder retracts it");
+        close(session);
+    }
+
+    /// A key that announces an entity holds the declaration of the entity's own key besides the
+    /// one it names, as the entity's retraction names it: the declaration outlives the key it was
+    /// made from until the announcing key lets go. Turned red by a key that keeps only what it
+    /// names.
+    #[test]
+    fn a_key_holds_the_declaration_its_entity_retracts_by() {
+        let (session, engine) = listening();
+        let declared = |engine: &Arc<Engine>| {
+            engine
+                .keyexpr_declarations()
+                .iter()
+                .any(|(_, key)| key == "demo/hold/entity")
+        };
+        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/entity", None).expect("declared");
+        let wire =
+            WireKey::literal().holding_also(key.declaration_hold().expect("the key is declared"));
+        assert!(wire.is_literal(), "the wire names no declaration");
+        drop(key);
+        assert!(declared(&engine), "the announcing key holds it");
+        drop(wire);
+        assert!(!declared(&engine), "and lets it go");
         close(session);
     }
 
