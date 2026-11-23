@@ -1813,13 +1813,47 @@ mod tests {
         );
     }
 
-    /// The callbacks of a table set whose queryables a context asks: boxed closures for the
-    /// subscribers, a row of no value for each queryable.
+    /// The row of a queryable these tests declare: a callback the tables call only while they are
+    /// held, which only a context asks.
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-    enum QueryRows {}
+    #[derive(Debug)]
+    struct AskedRow;
 
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-    impl RowCallbacks for QueryRows {
+    impl crate::row_callback::RowCallback for AskedRow {
+        type Call = core::convert::Infallible;
+        const READS_ROW_IN_PLACE: bool = false;
+        fn begin(&self) -> Option<core::convert::Infallible> {
+            None
+        }
+        unsafe fn end(call: core::convert::Infallible) -> bool {
+            match call {}
+        }
+        fn retire(&self) -> bool {
+            true
+        }
+    }
+
+    /// The callbacks of a table set whose queryables a context asks: boxed closures for the
+    /// subscribers, an [`AskedRow`] for each queryable.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    enum AskedRows {}
+
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    impl RowCallbacks for AskedRows {
+        type Subscriber = BoxedSink;
+        type Queryable = AskedRow;
+        type LivelinessSubscriber = NoSink;
+        type Matching = NoSink;
+        type Reply = NoSink;
+    }
+
+    /// The callbacks of a table set whose queryables hold no callback.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    enum UnitRows {}
+
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    impl RowCallbacks for UnitRows {
         type Subscriber = BoxedSink;
         type Queryable = ();
         type LivelinessSubscriber = NoSink;
@@ -1845,11 +1879,11 @@ mod tests {
     }
 
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-    impl crate::query::QueryDelivery<(), crate::session_tables::QueryableHandle> for QueryLog {
+    impl crate::query::QueryDelivery<AskedRow, crate::session_tables::QueryableHandle> for QueryLog {
         fn ask(
             &mut self,
             id: crate::session_tables::QueryableHandle,
-            _row: crate::sink::RowAccess<'_, ()>,
+            _row: crate::sink::RowAccess<'_, AskedRow>,
             _query: &crate::query_sink::ProvenQuery<'_>,
             _responder: &mut crate::query::QueryResponder<'_>,
         ) {
@@ -1867,10 +1901,38 @@ mod tests {
         type SubscriberId = crate::session_tables::SubscriberHandle;
         type QueryableId = crate::session_tables::QueryableHandle;
         type Delivery = QueryLog;
-        type Tables<P: Storage> = SessionTables<QueryRows, P>;
+        type Tables<P: Storage> = SessionTables<AskedRows, P>;
+        type Queryable = AskedRow;
+        type Declared = NoSink;
+        type Undeclared = NoSink;
+    }
+
+    /// Queryables of no callback kept in the session's one table set, with the same context: the
+    /// sink set names them with no delivery of its own for them.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    struct UnitSinks;
+
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    impl ObserverSinks for UnitSinks {
+        type Subscriber = BoxedSink;
+        type SubscriberId = crate::session_tables::SubscriberHandle;
+        type QueryableId = crate::session_tables::QueryableHandle;
+        type Delivery = QueryLog;
+        type Tables<P: Storage> = SessionTables<UnitRows, P>;
         type Queryable = ();
         type Declared = NoSink;
         type Undeclared = NoSink;
+    }
+
+    /// A frame of one peer query on `q/a`.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    fn query_frame() -> DriverLoopOutcome {
+        let request = crate::request_build::build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("q/a").expect("a literal key"),
+        )
+        .expect("the request builds");
+        frame(vec![NetworkMessage::Request(Box::new(request))])
     }
 
     /// The slot fan asks a table set's queryable a peer's query reaches through the context it is
@@ -1885,23 +1947,47 @@ mod tests {
         let mut requesters = Req::new();
         let asked = observer
             .tables
-            .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), ())
+            .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), AskedRow)
             .expect("a table of the build's bound has room");
         observer
             .tables
-            .declare_queryable("q/other", Locality::Any, false, KeyForm::default(), ())
+            .declare_queryable(
+                "q/other",
+                Locality::Any,
+                false,
+                KeyForm::default(),
+                AskedRow,
+            )
             .expect("a table of the build's bound has room");
-        let request = crate::request_build::build_request_query(
-            1,
-            crate::wire_key::WireKey::literal("q/a").expect("a literal key"),
-        )
-        .expect("the request builds");
-        let outcome = frame(vec![NetworkMessage::Request(Box::new(request))]);
         let mut log = QueryLog::default();
-        crate::driver_loop::deliver_frame(&outcome, |event| {
+        crate::driver_loop::deliver_frame(&query_frame(), |event| {
             observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
         });
         assert_eq!(log.0, vec![asked.handle]);
+        assert!(
+            !peers.finals.is_empty(),
+            "the routed query is owed its Final"
+        );
+    }
+
+    /// A row that holds no queryable is asked nothing, whatever context the sink set names: the
+    /// query still reaches it and is owed its Final, and the context records no row.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[test]
+    fn a_row_of_no_queryable_is_asked_nothing_whatever_the_context() {
+        use crate::session_tables::KeyForm;
+        let mut observer = SlotObserverOf::<UnitSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        observer
+            .tables
+            .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), ())
+            .expect("a table of the build's bound has room");
+        let mut log = QueryLog::default();
+        crate::driver_loop::deliver_frame(&query_frame(), |event| {
+            observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
+        });
+        assert!(log.0.is_empty(), "no row of no queryable is recorded");
         assert!(
             !peers.finals.is_empty(),
             "the routed query is owed its Final"

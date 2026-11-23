@@ -2414,6 +2414,22 @@ impl<Row: ResponderSink, Id> QueryDelivery<Row, Id> for () {
     }
 }
 
+/// A row that holds no queryable's callback (`()`, the row of a table set whose build keeps
+/// none) answers nothing, whatever context asks it: a sink set names such rows with any delivery
+/// context, and the context need not know whether its build keeps queryables. `()` is no
+/// [`ResponderSink`], so this and the unit context's own never name the same pair.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+impl<X, Id> QueryDelivery<(), Id> for X {
+    fn ask(
+        &mut self,
+        _id: Id,
+        _row: crate::sink::RowAccess<'_, ()>,
+        _query: &crate::query_sink::ProvenQuery<'_>,
+        _responder: &mut QueryResponder<'_>,
+    ) {
+    }
+}
+
 /// One staged element of the interest-response chain a peer's QUERYABLE
 /// `Interest` is owed (see [`QueryableRegistry::respond_to_queryable_interest`]).
 /// Owned, unlike the id-only liveliness items, because an AGGREGATE reply names
@@ -6673,11 +6689,11 @@ mod tests {
     /// A context that records the id of each queryable it is asked through and calls no row.
     struct AskedIds(Vec<QueryableId>);
 
-    impl<C> QueryDelivery<C, QueryableId> for AskedIds {
+    impl QueryDelivery<crate::query_sink::BoxedQuerySink, QueryableId> for AskedIds {
         fn ask(
             &mut self,
             id: QueryableId,
-            _row: crate::sink::RowAccess<'_, C>,
+            _row: crate::sink::RowAccess<'_, crate::query_sink::BoxedQuerySink>,
             _query: &crate::query_sink::ProvenQuery<'_>,
             _responder: &mut QueryResponder<'_>,
         ) {
