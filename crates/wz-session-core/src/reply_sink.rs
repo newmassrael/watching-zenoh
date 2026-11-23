@@ -544,8 +544,8 @@ impl ReplySink for BoxedReplySink {
 /// to the LAST reply here and to the FIRST under pico.
 #[cfg(feature = "alloc")]
 fn reply_ts_at_least(
-    new: Option<&crate::sample::TimestampHint>,
-    cached: Option<&crate::sample::TimestampHint>,
+    new: Option<crate::reply_stage::TimestampParts<'_>>,
+    cached: Option<crate::reply_stage::TimestampParts<'_>>,
 ) -> bool {
     match (new, cached) {
         // Option ordering: None < Some(_). An unstamped reply never displaces a
@@ -553,7 +553,7 @@ fn reply_ts_at_least(
         (None, None) => true,
         (None, Some(_)) => false,
         (Some(_), None) => true,
-        (Some(n), Some(c)) => (n.time, n.zid.as_slice()) >= (c.time, c.zid.as_slice()),
+        (Some(n), Some(c)) => (n.time, n.zid) >= (c.time, c.zid),
     }
 }
 
@@ -652,7 +652,7 @@ impl<S: ReplySink> ConsolidatingSink<S> {
     fn displaces_cached(&self, reply: &dyn ReplyView) -> bool {
         match self.cache.get(reply.keyexpr()) {
             None => true,
-            Some(cached) => reply_ts_at_least(reply.timestamp(), cached.timestamp()),
+            Some(cached) => reply_ts_at_least(reply.timestamp_parts(), cached.timestamp_parts()),
         }
     }
 
@@ -1320,6 +1320,66 @@ mod consolidating_sink_tests {
             rec.delivered,
             alloc::vec![("a/b".to_string(), b"second".to_vec())],
             "zenoh's >= keeps the last arrival on a tie; pico would keep `first`"
+        );
+    }
+
+    /// A view that states its stamp as parts alone, as a reply read where it lies does, is
+    /// consolidated by that stamp and kept with it.
+    #[test]
+    fn a_view_that_states_its_stamp_as_parts_is_ordered_and_kept_by_it() {
+        struct PartsOnly {
+            payload: &'static [u8],
+            time: u64,
+        }
+        impl ReplyView for PartsOnly {
+            fn rid(&self) -> crate::wire_id::RequestId {
+                1
+            }
+            fn keyexpr(&self) -> &str {
+                "a/b"
+            }
+            fn kind(&self) -> ReplyKind {
+                ReplyKind::Put
+            }
+            fn payload(&self) -> &[u8] {
+                self.payload
+            }
+            fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+                None
+            }
+            fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+                Some(crate::reply_stage::TimestampParts {
+                    time: self.time,
+                    zid: &[7],
+                })
+            }
+        }
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&PartsOnly {
+                payload: b"new",
+                time: 20,
+            });
+            sink.on_reply(&PartsOnly {
+                payload: b"old",
+                time: 10,
+            });
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![("a/b".to_string(), b"new".to_vec())],
+            "the ts=10 arrival is stale by its parts"
+        );
+        let kept = InboundReply::from_view(&PartsOnly {
+            payload: b"x",
+            time: 5,
+        });
+        assert_eq!(
+            kept.timestamp_parts(),
+            Some(crate::reply_stage::TimestampParts { time: 5, zid: &[7] }),
+            "a retained reply keeps the stamp its view stated"
         );
     }
 

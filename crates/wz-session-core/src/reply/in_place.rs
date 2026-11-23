@@ -491,7 +491,10 @@ mod tests {
                 .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
-            timestamp: view.timestamp().cloned(),
+            timestamp: view.timestamp_parts().map(|stamp| TimestampHint {
+                time: stamp.time,
+                zid: stamp.zid.to_vec(),
+            }),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
             #[cfg(feature = "pubsub-ts-stack")]

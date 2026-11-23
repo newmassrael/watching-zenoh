@@ -446,6 +446,9 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { .. } => None,
         }
     }
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+        ReplyView::timestamp(self).map(crate::reply_stage::TimestampParts::of)
+    }
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
         match &self.body {
             InboundReplyBody::Put { payload, .. } => Some(payload),
@@ -504,12 +507,12 @@ impl InboundReply {
                     .put_encoding()
                     .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 source_info: view.source_info().cloned(),
-                timestamp: view.timestamp().cloned(),
+                timestamp: retained_timestamp(view),
             },
             ReplyKind::Del => InboundReplyBody::Del {
                 attachment: retained_attachment(view),
                 source_info: view.source_info().cloned(),
-                timestamp: view.timestamp().cloned(),
+                timestamp: retained_timestamp(view),
             },
             ReplyKind::Err => InboundReplyBody::Err {
                 encoding: view
@@ -527,6 +530,16 @@ impl InboundReply {
             stamp: ReplyStamp::of(view),
         }
     }
+}
+
+/// The timestamp a retained reply keeps, read from the parts every view answers with.
+#[cfg(feature = "alloc")]
+fn retained_timestamp(view: &dyn ReplyView) -> Option<crate::sample::TimestampHint> {
+    view.timestamp_parts()
+        .map(|stamp| crate::sample::TimestampHint {
+            time: stamp.time,
+            zid: stamp.zid.to_vec(),
+        })
 }
 
 /// The attachment a retained reply keeps: a second reference to the storage the
