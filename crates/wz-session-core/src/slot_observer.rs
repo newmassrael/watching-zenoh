@@ -272,20 +272,21 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile>
 
 /// How many rows each application table of an observer of the lent policy is lent
 /// ([`SlotObserverOf::lent`]): the values of their limits the session's open resolved.
+///
+/// `S` is what the table the subscriptions are kept in is lent by ([`LentSubscribers::Rows`]):
+/// a count for a subscriber table, every table's rows for the session's one table set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ObserverRows {
-    /// The subscriptions (`MAX_SUBSCRIPTIONS`).
-    pub subscribers: usize,
+pub struct ObserverRows<S = usize> {
+    /// The rows of the table the subscriptions are kept in: the subscriptions
+    /// (`MAX_SUBSCRIPTIONS`) of a subscriber table, or each table's of the session's one table set
+    /// ([`TableRows`]).
+    pub subscribers: S,
     /// The queryables (`MAX_QUERYABLES`).
     pub queryables: usize,
     /// The tokens the session holds (`MAX_LOCAL_TOKENS`).
     pub local_tokens: usize,
     /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`).
     pub liveliness_subscribers: usize,
-    /// The rows of the session's one table set, read by an observer whose subscriptions are kept
-    /// in that set ([`SessionTables`]) and by no other: a subscriber table is lent
-    /// [`Self::subscribers`] rows, a table set is lent these and nothing else.
-    pub tables: TableRows,
 }
 
 /// The sink types a node registers on its [`SlotObserverOf`]: one type for each kind of
@@ -377,10 +378,13 @@ pub trait ObserverSubscribers: LocalSubscribers + Sized {
 /// An [`ObserverSubscribers`] whose rows a session's arena lends at its open
 /// ([`SlotObserverOf::lent`]).
 pub trait LentSubscribers: ObserverSubscribers {
-    /// A table of no subscription, its rows lent from `arena` as `rows` states for it, its keys
-    /// kept in `keys`, the session's key arena. Refused, the rows lent so far going back with the
-    /// arena, when the arena has not the room or `rows` is past the build's bound.
-    fn lend(arena: &mut Arena, keys: KeySpace, rows: &ObserverRows) -> Result<Self, LendRefused>;
+    /// What the table is lent by: how many rows, or how many of each kind.
+    type Rows;
+
+    /// A table of no subscription, its rows lent from `arena` as `rows` states, its keys kept in
+    /// `keys`, the session's key arena. Refused, the rows lent so far going back with the arena,
+    /// when the arena has not the room or `rows` is past the build's bound.
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: Self::Rows) -> Result<Self, LendRefused>;
 }
 
 impl<C: SampleSink, P: Storage> ObserverSubscribers for SubscriberTable<C, P> {
@@ -396,8 +400,10 @@ impl<C: SampleSink, P: Storage> ObserverSubscribers for SubscriberTable<C, P> {
 }
 
 impl<C: SampleSink> LentSubscribers for SubscriberTable<C, Lent> {
-    fn lend(arena: &mut Arena, keys: KeySpace, rows: &ObserverRows) -> Result<Self, LendRefused> {
-        Self::lent(arena, keys, rows.subscribers)
+    type Rows = usize;
+
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
+        Self::lent(arena, keys, rows)
     }
 }
 
@@ -421,8 +427,10 @@ impl<F: RowCallbacks> LentSubscribers for SessionTables<F, Lent>
 where
     F::Subscriber: SampleSink,
 {
-    fn lend(arena: &mut Arena, keys: KeySpace, rows: &ObserverRows) -> Result<Self, LendRefused> {
-        Self::lent(arena, keys, &rows.tables)
+    type Rows = TableRows;
+
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: TableRows) -> Result<Self, LendRefused> {
+        Self::lent(arena, keys, &rows)
     }
 }
 
@@ -704,7 +712,7 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     pub fn lent(
         arena: &mut Arena,
         keys: KeySpace,
-        rows: ObserverRows,
+        rows: ObserverRows<<K::Subscribers<Lent> as LentSubscribers>::Rows>,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused>
     where
@@ -717,7 +725,7 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
         ))]
         let watchers = Self::decl_watcher_rows(limits)?;
         let mut observer = Self {
-            subscribers: LentSubscribers::lend(arena, keys, &rows)?,
+            subscribers: LentSubscribers::lend(arena, keys, rows.subscribers)?,
             #[cfg(feature = "switchboard")]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "query-queryable")]
@@ -1751,9 +1759,7 @@ mod lent_tests {
     /// An observer of table-set subscriptions lent `subscribers` rows of that set.
     fn table_set_lent(subscribers: usize) -> SlotObserverOf<TableSinks, Lent> {
         let rows = ObserverRows {
-            // A subscriber table's count, which a table set does not read.
-            subscribers: 4,
-            tables: TableRows {
+            subscribers: TableRows {
                 subscribers,
                 ..TableRows::default()
             },
@@ -1768,9 +1774,9 @@ mod lent_tests {
         .expect("the arena has the rows")
     }
 
-    /// A table set holding the observer's subscriptions is lent the rows `ObserverRows::tables`
-    /// states and no other: one row lent, the second subscription is refused as a full table, and
-    /// a set lent none refuses the first, whatever the subscriber table's count says.
+    /// A table set holding the observer's subscriptions is lent the rows its `TableRows` state:
+    /// one row lent, the second subscription is refused as a full table, and a set lent none
+    /// refuses the first.
     #[test]
     fn a_lent_table_set_keeps_the_subscriptions_its_rows_hold() {
         use crate::session_tables::KeyForm;
