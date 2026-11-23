@@ -1358,7 +1358,7 @@ impl PlainPublisher {
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
-            .zip(key.whole_key_mapping(&*session.engine));
+            .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1419,7 +1419,7 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
-        let wire = self.key.wire(&*self.shared);
+        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
         publish_code(
             self.shared
@@ -2744,7 +2744,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // A peer or router-hat session retracts the subscription naming ITS key
@@ -2756,7 +2756,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
         // hold; the engine dropped the sink, so the closure's drop has run.
         let Some(id) =
-            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
+            engine.declare_subscriber_on_wire(&ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             })
@@ -2835,7 +2835,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // Named before the key is dropped: the entry keeps it alive through
@@ -2845,10 +2845,16 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         drop(key);
         // No handle will undeclare this one, so the session's close waits for it.
         state.keep_background(cclosure.release_latch());
-        match engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        }) {
+        match engine.declare_subscriber_on_wire(
+            &ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            },
+        ) {
             Some(_) => Z_OK,
             // As the owned form above refuses it.
             None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,

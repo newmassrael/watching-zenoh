@@ -99,7 +99,7 @@ pub unsafe extern "C" fn wz_ext_snapshot_poll(session: *const z_loaned_session_t
             return Z_ERR_NULL;
         };
         ZResult::from(snapshot::poll(|| {
-            handle.drive.engine_ref().message_reading()
+            wz_capi_port::SessionEngine::message_reading(handle.drive.engine_ref())
         }))
     })
 }

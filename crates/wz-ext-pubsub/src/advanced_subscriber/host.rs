@@ -606,7 +606,7 @@ fn declare_subscription(
 ) -> Result<Held<Subscription>, HostError> {
     let id = engine
         .declare_subscriber_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             wire_of(form),
             origin,
             form.retraction().cloned(),
@@ -632,7 +632,7 @@ fn declare_liveliness_subscription(
     sink: LivelinessSink,
 ) -> Result<Held<Subscription>, HostError> {
     let id = engine
-        .declare_liveliness_subscriber_on_wire(keyexpr.to_owned(), wire_of(form), history, sink)
+        .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
         .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
     Ok(Held {
         entity: Subscription {
@@ -671,7 +671,7 @@ fn declare_detection_token(
         },
     });
     let token = engine
-        .declare_liveliness_token_on_wire(ke, wire_of(&form), retraction)
+        .declare_liveliness_token_on_wire(&ke, wire_of(&form), retraction)
         .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
     Ok(Some(Held {
         entity: Token {

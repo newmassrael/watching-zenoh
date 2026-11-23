@@ -81,7 +81,7 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
     let declares_before = router.seen(|s| s.declares);
     assert_eq!(
         engine.declare_subscriber_on_link_set(
-            "demo/links/**".to_owned(),
+            "demo/links/**",
             WireKey::literal(),
             Locality::Any,
             one_link(),
@@ -91,7 +91,7 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
         Err(LinksNotHonoured)
     );
     let taken = engine.declare_subscriber_on_link_set(
-        "demo/links/**".to_owned(),
+        "demo/links/**",
         WireKey::literal(),
         Locality::Any,
         LinkRestriction::Any,
@@ -171,7 +171,7 @@ fn a_limited_liveliness_token_is_refused_by_name() {
 
     assert_eq!(
         engine.declare_liveliness_token_on_link_set(
-            "demo/links/token".to_owned(),
+            "demo/links/token",
             WireKey::literal(),
             one_link(),
             None,
@@ -179,7 +179,7 @@ fn a_limited_liveliness_token_is_refused_by_name() {
         Err(LinksNotHonoured)
     );
     let taken = engine.declare_liveliness_token_on_link_set(
-        "demo/links/token".to_owned(),
+        "demo/links/token",
         WireKey::literal(),
         LinkRestriction::Any,
         None,

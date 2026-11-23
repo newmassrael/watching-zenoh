@@ -29,7 +29,7 @@ fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<Atomic
     let into = count.clone();
     let id = engine
         .declare_subscriber_on_wire(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             origin,
             None,
@@ -120,7 +120,7 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
     let same = loop {
         let listener = engine.declare_matching_listener(
             FilterPlane::Subscribers,
-            "demo/l/other".to_owned(),
+            "demo/l/other",
             Arc::new(|_: bool| {}),
             false,
         );
@@ -156,7 +156,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
         let into = log.clone();
         let id = engine.declare_matching_listener(
             FilterPlane::Subscribers,
-            "demo/l/x".to_owned(),
+            "demo/l/x",
             Arc::new(move |matching| into.lock().unwrap().push(matching)),
             count_local,
         );
@@ -168,7 +168,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
         engine
             .declare_write_filter(
                 FilterPlane::Subscribers,
-                "demo/l/x".to_owned(),
+                "demo/l/x",
                 &WireKey::literal(),
                 Some(InterestForm {
                     mapping_id: 0,
@@ -301,7 +301,7 @@ fn subscribe_putting(engine: &Arc<Engine>, handed: &Handed, inner: &InnerPut, in
         let session = session.clone();
         engine
             .declare_subscriber_on_wire(
-                "demo/l/fan".to_owned(),
+                "demo/l/fan",
                 WireKey::literal(),
                 Locality::SessionLocal,
                 None,

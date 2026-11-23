@@ -40,6 +40,7 @@ use super::*;
 use crate::drive::{FaceDrive, NodeRole};
 use crate::faces::no_shm_clients;
 use crate::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
+use wz_capi_port::PeerLists;
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -224,7 +225,7 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
     let counted = Arc::clone(&asked);
     let id = engine
         .declare_queryable_on_wire(
-            "wz/port/q/**".to_owned(),
+            "wz/port/q/**",
             WireKey::literal(),
             false,
             Locality::Any,
@@ -323,14 +324,11 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         )
     };
 
-    let token = engine.declare_liveliness_token_on_wire(
-        "wz/port/spent/t/last".to_owned(),
-        WireKey::literal(),
-        None,
-    );
+    let token =
+        engine.declare_liveliness_token_on_wire("wz/port/spent/t/last", WireKey::literal(), None);
     assert_eq!(token, Some(u32::MAX), "the last entity id is handed out");
     let refused = engine.declare_queryable_on_wire(
-        "wz/port/spent/q".to_owned(),
+        "wz/port/spent/q",
         WireKey::literal(),
         false,
         Locality::Any,
@@ -345,7 +343,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
     );
     assert_eq!(
         engine.declare_liveliness_token_on_wire(
-            "wz/port/spent/t/refused".to_owned(),
+            "wz/port/spent/t/refused",
             WireKey::literal(),
             None,
         ),
@@ -416,7 +414,7 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
         let sink = Arc::clone(&seen);
         let id = engine
             .declare_liveliness_subscriber_on_wire(
-                "wz/port/live/**".to_owned(),
+                "wz/port/live/**",
                 WireKey::literal(),
                 history,
                 Arc::new(move || {
@@ -438,11 +436,7 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
     let (on_router, router_sub) = watch(&engine, false);
 
     let token = engine
-        .declare_liveliness_token_on_wire(
-            "wz/port/live/router".to_owned(),
-            WireKey::literal(),
-            None,
-        )
+        .declare_liveliness_token_on_wire("wz/port/live/router", WireKey::literal(), None)
         .expect("a node has tokens");
     let put = (LivelinessSampleKind::Put, "wz/port/live/router".to_owned());
     assert!(
@@ -471,7 +465,7 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
     // A subscription made with its history is told of the token that is already alive, and one
     // that was undeclared is told of nothing more.
     let alive = engine
-        .declare_liveliness_token_on_wire("wz/port/live/again".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("wz/port/live/again", WireKey::literal(), None)
         .expect("a node has tokens");
     let (with_history, history_sub) = watch(&other, true);
     let again = (LivelinessSampleKind::Put, "wz/port/live/again".to_owned());
@@ -540,10 +534,10 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
     };
 
     let from_peer = other
-        .declare_liveliness_token_on_wire("wz/port/lg/peer".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("wz/port/lg/peer", WireKey::literal(), None)
         .expect("a client has tokens");
     let _own = engine
-        .declare_liveliness_token_on_wire("wz/port/lg/router".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("wz/port/lg/router", WireKey::literal(), None)
         .expect("a node has tokens");
     let both = vec!["wz/port/lg/peer".to_owned(), "wz/port/lg/router".to_owned()];
     assert!(
@@ -574,7 +568,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
     let sink = Arc::clone(&told);
     let listener = engine.declare_matching_listener(
         FilterPlane::Subscribers,
-        "wz/port/match/a".to_owned(),
+        "wz/port/match/a",
         Arc::new(move |matching| sink.lock().unwrap().push(matching)),
         false,
     );
@@ -589,7 +583,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
 
     let subscriber = other
         .declare_subscriber_on_wire(
-            "wz/port/match/**".to_owned(),
+            "wz/port/match/**",
             WireKey::literal(),
             Locality::Any,
             None,
@@ -637,7 +631,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
     let count = told.lock().unwrap().len();
     let again = other
         .declare_subscriber_on_wire(
-            "wz/port/match/**".to_owned(),
+            "wz/port/match/**",
             WireKey::literal(),
             Locality::Any,
             None,
@@ -865,7 +859,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         Arc::new(|| Box::new(|_: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>);
     assert_eq!(
         engine.declare_subscriber_on_link_set(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             Locality::Any,
             one,
@@ -877,7 +871,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     );
     let taken = engine
         .declare_subscriber_on_link_set(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             Locality::Any,
             LinkRestriction::Any,
@@ -889,17 +883,12 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     engine.undeclare_subscriber(taken);
 
     assert_eq!(
-        engine.declare_liveliness_token_on_link_set(key.to_owned(), WireKey::literal(), one, None),
+        engine.declare_liveliness_token_on_link_set(key, WireKey::literal(), one, None),
         Err(LinksNotHonoured),
         "a limited token"
     );
     let token = engine
-        .declare_liveliness_token_on_link_set(
-            key.to_owned(),
-            WireKey::literal(),
-            LinkRestriction::Any,
-            None,
-        )
+        .declare_liveliness_token_on_link_set(key, WireKey::literal(), LinkRestriction::Any, None)
         .expect("no set is never refused")
         .expect("a node has an id for a token");
     engine.undeclare_liveliness_token(token);
@@ -958,7 +947,7 @@ mod shared_memory {
         let got: Got = Arc::default();
         let sink = Arc::clone(&got);
         let id = engine.declare_subscriber_on_wire(
-            KEY.to_owned(),
+            KEY,
             WireKey::literal(),
             Locality::Any,
             None,
@@ -1059,7 +1048,7 @@ mod shared_memory {
         let sink = Arc::clone(&got);
         let id = engine
             .declare_queryable_on_wire(
-                ASKED.to_owned(),
+                ASKED,
                 WireKey::literal(),
                 // Not complete, so that a query of best matching is routed to every one.
                 false,
@@ -1228,7 +1217,7 @@ mod shared_memory {
         let _queryable = shared
             .as_engine()
             .declare_queryable_on_wire(
-                ASKED.to_owned(),
+                ASKED,
                 WireKey::literal(),
                 false,
                 Locality::Any,
@@ -1325,7 +1314,7 @@ mod shared_memory {
         let replied = chunk();
         let _queryable = engine
             .declare_queryable_on_wire(
-                ASKED.to_owned(),
+                ASKED,
                 WireKey::literal(),
                 false,
                 Locality::Any,
