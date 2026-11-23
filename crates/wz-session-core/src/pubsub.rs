@@ -1317,7 +1317,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // loopback path ([`local_publish`](Self::local_publish)) stays
             // unguarded — it does not depend on the wire codec gate.
             #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.dispatch_push(peer, push, reliability, true),
+            NetworkMessage::Push(push) => peer.dispatch_push(self, push, reliability, true),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => peer.absorb_declare(&decl.body),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
@@ -1619,8 +1619,135 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         peer.sub_interest_reply(self, item)
     }
 
+    /// Apply the locality filter + keyexpr pattern match against every
+    /// registered subscriber and fire the callbacks that pass. Returns
+    /// the count of callbacks that fired so loopback callers can
+    /// verify delivery (the wire-path caller discards the count).
+    ///
+    /// R227 — the single source of truth for subscriber filtering.
+    /// Both `dispatch_push` (wire path) and
+    /// [`local_publish`](Self::local_publish) (self-publish loopback)
+    /// converge here so the locality + pattern-match invariants are
+    /// enforced exactly once. Mirrors zenoh-pico's
+    /// `_z_trigger_subscriptions_impl`
+    /// (`vendor/zenoh-pico/src/session/subscription.c`), which is the
+    /// single trigger both wire-arrived
+    /// (`_z_handle_network_message → _z_trigger_local_subscriptions`)
+    /// and loopback
+    /// (`_z_session_deliver_push_locally → _z_handle_network_message`)
+    /// paths converge on.
+    ///
+    /// `is_remote` selects the locality predicate:
+    /// `true`  → [`Locality::allows_remote`](crate::locality::Locality)
+    /// `false` → [`Locality::allows_local`](crate::locality::Locality).
+    /// Subscribers pinned to
+    /// [`Locality::Any`](crate::locality::Locality) (the
+    /// [`register`](Self::register) default) pass either predicate
+    /// and so fire on both origins.
+    /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
+    /// against every subscription and deliver the borrowed
+    /// [`SampleView`] to each matching sink, applying the locality
+    /// filter. Borrow-driven (no owned `Sample` materialization), so it
+    /// is the MCU no-heap delivery path; the AP wire path
+    /// (`dispatch_push`) funnels its owned
+    /// `Sample` through the same matcher via the `Sample: SampleView`
+    /// coercion (one matching SSOT). Returns the count of sinks fired.
+    pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
+        self.fire_to_subscribers(view, is_remote, None)
+    }
+
+    /// [`Self::dispatch_borrowed`] for a message from a peer whose declared class is `class`: what a
+    /// closed image that declares its peers must call, since without a class a message from a peer is
+    /// allowed nothing.
+    pub fn dispatch_borrowed_from(
+        &mut self,
+        view: &dyn SampleView,
+        class: Option<ClassId>,
+    ) -> usize {
+        self.fire_to_subscribers(view, true, class)
+    }
+
+    fn fire_to_subscribers(
+        &mut self,
+        view: &dyn SampleView,
+        is_remote: bool,
+        class: Option<ClassId>,
+    ) -> usize {
+        if is_remote {
+            return self.deliver_from_peer(
+                view.keyexpr(),
+                class,
+                PeerDelivery::default(),
+                |sink| sink.deliver(view),
+            );
+        }
+        // The application's own message: no key gate, matched as it is.
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            view.keyexpr(),
+            false,
+            false,
+            |sink| sink.deliver(view),
+        )
+    }
+
+    /// Deliver a message on a numbered key of the closed key set to the subscribers its
+    /// selection names, or `None` when this gate holds no table to select from (a gate set open
+    /// after it numbered the key). A build without the `key-set-closed` feature has no number to
+    /// read and always answers `None`, and the call is not compiled.
+    #[inline]
+    fn deliver_by_selection(
+        &mut self,
+        key: KeyId,
+        text: &str,
+        deliver: impl FnMut(&mut C),
+    ) -> Option<usize> {
+        #[cfg(feature = "key-set-closed")]
+        {
+            let catalogue = self.key_gate.catalogue()?;
+            Some(fire_by_selection(
+                &mut self.subscribers,
+                catalogue,
+                key,
+                text,
+                deliver,
+            ))
+        }
+        #[cfg(not(feature = "key-set-closed"))]
+        {
+            let _ = (key, text, deliver);
+            None
+        }
+    }
+
+    /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
+    /// ([`crate::sink::PlainSample`]): the same matcher and memory, and each matching sink
+    /// is handed the sample through [`SampleSink::deliver_plain`], which a sink that can
+    /// keep a range of the frame instead of a copy of the sample answers more cheaply than
+    /// [`SampleSink::deliver`].
+    #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+    fn fire_plain_to_subscribers(
+        &mut self,
+        sample: &crate::sink::PlainSample<'_>,
+        class: Option<ClassId>,
+    ) -> usize {
+        self.deliver_from_peer(
+            sample.keyexpr(),
+            class,
+            PeerDelivery {
+                repeats_previous: sample.repeats_previous_key(),
+                ..PeerDelivery::default()
+            },
+            |sink| sink.deliver_plain(sample),
+        )
+    }
+}
+
+impl<Q: Storage> SubscriberPeer<Q> {
     /// Project a wire-decoded `Push` into a [`Sample`] and route it
-    /// through [`fire_to_subscribers`](Self::fire_to_subscribers).
+    /// to the subscriptions of `subs` ([`LocalSubscribers::deliver_from_peer`]).
     /// `is_remote` discriminates wire-arrived dispatch
     /// ([`Locality::allows_remote`](crate::locality::Locality)) from
     /// self-publish loopback
@@ -1637,9 +1764,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// `is_remote = false` semantic).
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     #[cfg(feature = "alloc")]
-    fn dispatch_push<Q: Storage>(
+    fn dispatch_push<L: LocalSubscribers>(
         &mut self,
-        peer: &mut SubscriberPeer<Q>,
+        subs: &mut L,
         push: &PushOwned,
         reliability: Reliability,
         is_remote: bool,
@@ -1657,7 +1784,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         // WE declared and is answered out of the installed own space, never out
         // of the peer's (both sides number from 1, so the wrong space would very
         // likely FIND an entry and fire the wrong subscriber).
-        let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, peer.mapping_spaces())
+        let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, self.mapping_spaces())
         {
             Some(r) => r,
             None => {
@@ -1671,7 +1798,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 // Returning here without that would leave the sender holding
                 // every such buffer, confirmed, until the transport ends.
                 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-                peer.settle_unrouted_shm(push);
+                self.settle_unrouted_shm(push);
                 return;
             }
         };
@@ -1763,7 +1890,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                     // descriptor this branch resolves.
                     #[cfg(feature = "transport-shm")]
                     let put_payload = if crate::put_payload::is_sliced(put) {
-                        match peer.unswap_shm_payload(push, put) {
+                        match self.unswap_shm_payload(push, put) {
                             Some(bytes) => bytes,
                             None => return,
                         }
@@ -1908,7 +2035,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         // 4-byte own_zid does not falsely match an 8-byte peer zid
         // that happens to share the first 4 bytes.
         if is_remote {
-            if let (Some(own), Some(info)) = (peer.own_zid(), sample.source_info.as_ref()) {
+            if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
                 let prefix = info.zid_prefix();
                 if !prefix.is_empty() && prefix == own {
                     return;
@@ -1916,132 +2043,16 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             }
         }
 
-        self.fire_to_subscribers(&sample, is_remote, peer.class);
-    }
-
-    /// Apply the locality filter + keyexpr pattern match against every
-    /// registered subscriber and fire the callbacks that pass. Returns
-    /// the count of callbacks that fired so loopback callers can
-    /// verify delivery (the wire-path caller discards the count).
-    ///
-    /// R227 — the single source of truth for subscriber filtering.
-    /// Both `dispatch_push` (wire path) and
-    /// [`local_publish`](Self::local_publish) (self-publish loopback)
-    /// converge here so the locality + pattern-match invariants are
-    /// enforced exactly once. Mirrors zenoh-pico's
-    /// `_z_trigger_subscriptions_impl`
-    /// (`vendor/zenoh-pico/src/session/subscription.c`), which is the
-    /// single trigger both wire-arrived
-    /// (`_z_handle_network_message → _z_trigger_local_subscriptions`)
-    /// and loopback
-    /// (`_z_session_deliver_push_locally → _z_handle_network_message`)
-    /// paths converge on.
-    ///
-    /// `is_remote` selects the locality predicate:
-    /// `true`  → [`Locality::allows_remote`](crate::locality::Locality)
-    /// `false` → [`Locality::allows_local`](crate::locality::Locality).
-    /// Subscribers pinned to
-    /// [`Locality::Any`](crate::locality::Locality) (the
-    /// [`register`](Self::register) default) pass either predicate
-    /// and so fire on both origins.
-    /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
-    /// against every subscription and deliver the borrowed
-    /// [`SampleView`] to each matching sink, applying the locality
-    /// filter. Borrow-driven (no owned `Sample` materialization), so it
-    /// is the MCU no-heap delivery path; the AP wire path
-    /// (`dispatch_push`) funnels its owned
-    /// `Sample` through the same matcher via the `Sample: SampleView`
-    /// coercion (one matching SSOT). Returns the count of sinks fired.
-    pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        self.fire_to_subscribers(view, is_remote, None)
-    }
-
-    /// [`Self::dispatch_borrowed`] for a message from a peer whose declared class is `class`: what a
-    /// closed image that declares its peers must call, since without a class a message from a peer is
-    /// allowed nothing.
-    pub fn dispatch_borrowed_from(
-        &mut self,
-        view: &dyn SampleView,
-        class: Option<ClassId>,
-    ) -> usize {
-        self.fire_to_subscribers(view, true, class)
-    }
-
-    fn fire_to_subscribers(
-        &mut self,
-        view: &dyn SampleView,
-        is_remote: bool,
-        class: Option<ClassId>,
-    ) -> usize {
         if is_remote {
-            return self.deliver_from_peer(
-                view.keyexpr(),
-                class,
+            subs.deliver_from_peer(
+                sample.keyexpr(),
+                self.class,
                 PeerDelivery::default(),
-                |sink| sink.deliver(view),
+                |sink| sink.deliver(&sample),
             );
+        } else {
+            subs.fire_matching(sample.keyexpr(), true, false, |sink| sink.deliver(&sample));
         }
-        // The application's own message: no key gate, matched as it is.
-        fire_into_memoized(
-            &mut self.subscribers,
-            &mut self.memo,
-            self.epoch,
-            view.keyexpr(),
-            false,
-            false,
-            |sink| sink.deliver(view),
-        )
-    }
-
-    /// Deliver a message on a numbered key of the closed key set to the subscribers its
-    /// selection names, or `None` when this gate holds no table to select from (a gate set open
-    /// after it numbered the key). A build without the `key-set-closed` feature has no number to
-    /// read and always answers `None`, and the call is not compiled.
-    #[inline]
-    fn deliver_by_selection(
-        &mut self,
-        key: KeyId,
-        text: &str,
-        deliver: impl FnMut(&mut C),
-    ) -> Option<usize> {
-        #[cfg(feature = "key-set-closed")]
-        {
-            let catalogue = self.key_gate.catalogue()?;
-            Some(fire_by_selection(
-                &mut self.subscribers,
-                catalogue,
-                key,
-                text,
-                deliver,
-            ))
-        }
-        #[cfg(not(feature = "key-set-closed"))]
-        {
-            let _ = (key, text, deliver);
-            None
-        }
-    }
-
-    /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
-    /// ([`crate::sink::PlainSample`]): the same matcher and memory, and each matching sink
-    /// is handed the sample through [`SampleSink::deliver_plain`], which a sink that can
-    /// keep a range of the frame instead of a copy of the sample answers more cheaply than
-    /// [`SampleSink::deliver`].
-    #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-    fn fire_plain_to_subscribers(
-        &mut self,
-        sample: &crate::sink::PlainSample<'_>,
-        class: Option<ClassId>,
-    ) -> usize {
-        self.deliver_from_peer(
-            sample.keyexpr(),
-            class,
-            PeerDelivery {
-                repeats_previous: sample.repeats_previous_key(),
-                ..PeerDelivery::default()
-            },
-            |sink| sink.deliver_plain(sample),
-        )
     }
 }
 
@@ -2905,7 +2916,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// is a counted drop; `Some` is the assembled payload.
     ///
     /// R3041 -- one entry for the two places that owe the same thing and must not
-    /// drift apart: the delivery path in `SubscriberTable::dispatch_push`, and
+    /// drift apart: the delivery path in `dispatch_push`, and
     /// [`settle_unrouted_shm`](Self::settle_unrouted_shm) for a Put whose keyexpr
     /// routing then refuses.
     #[cfg(all(feature = "alloc", feature = "transport-shm", feature = "pubsub-put"))]

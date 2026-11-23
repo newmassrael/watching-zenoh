@@ -366,7 +366,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(peer, &owned, reliability, true);
+            peer.dispatch_push(self, &owned, reliability, true);
         }
     }
 }
