@@ -2185,8 +2185,8 @@ struct ArenaLends {
     keys: KeySpace,
     #[cfg(feature = "query")]
     ended: BoundedVec<Ended, { usize::MAX }, Lent>,
-    handle: Option<HandlePlace>,
-    places: EntityPlaces,
+    /// The ABI's handle's place and the places of its objects of the session's entities.
+    abi: (Option<HandlePlace>, EntityPlaces),
 }
 
 /// Lend from `arena` every table `plan` lays out but the application's, each key of the key arena
@@ -2218,8 +2218,7 @@ fn lend_arena(
         ended: arena.lend(plan.gets().legs().ok_or(ArenaRefused::TooLarge)?)?,
         // The ABI's handle's place, then the places of the ABI's objects of the session's
         // entities: the plan's last rows.
-        handle: arena.lend_handle(plan)?,
-        places: arena.lend_entity_places(plan)?,
+        abi: arena.lend_abi_places(plan)?,
     })
 }
 
@@ -3781,8 +3780,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             keys,
             #[cfg(feature = "query")]
             ended,
-            handle: handle_place,
-            places,
+            abi: (handle_place, places),
         } = lend_arena(&mut arena, &plan, config.limits.max_keyexpr_bytes_held())
             .map_err(OpenError::Arena)?;
         links.lend_buffers(link_tables);
@@ -3997,6 +3995,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
+    }
+
+    /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
+    /// most.
+    #[cfg(test)]
+    pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.core.lock().0.places.counts(kind)
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
@@ -6388,7 +6393,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    #[inline(never)]
     fn put_plain_filtered(
         &self,
         filter: FilterId,
@@ -6397,17 +6401,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        // One take of the session for the whole put, its filter's answer and its sends:
-        // zenoh-pico's put reads its filter's state and takes only its transmit lock
-        // (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
-        if Self::holds_back_in(core, filter) {
-            return FilteredPut::Suppressed;
-        }
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, params)
+        self.put_through_filter(filter, keyexpr, payload, Some((mapping_id, *params)))
     }
 
     fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
@@ -6434,8 +6428,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
         }
-        // A write that brings nothing of its own: the filter's answer and the plain form its row
-        // keeps, read under one take of the session.
+        // A write that brings nothing of its own goes in the plain form its filter's row keeps.
+        self.put_through_filter(filter, keyexpr, payload, None)
+    }
+
+    /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
+    /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
+    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
+    /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    #[inline(never)]
+    fn put_through_filter(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(ExprId, PlainPutParams)>,
+    ) -> FilteredPut {
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
@@ -6443,20 +6451,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if Self::holds_back_in(core, filter) {
             return FilteredPut::Suppressed;
         }
-        let Some((params, mapping_id)) = core
-            .filters
-            .iter()
-            .find(|entry| entry.id == filter)
-            .and_then(|entry| entry.plain.get())
-        else {
-            return FilteredPut::NotPlain;
+        let (mapping_id, params) = match given {
+            Some(given) => given,
+            None => {
+                let Some((params, mapping_id)) = core
+                    .filters
+                    .iter()
+                    .find(|entry| entry.id == filter)
+                    .and_then(|entry| entry.plain.get())
+                else {
+                    return FilteredPut::NotPlain;
+                };
+                // A link that names keys its own way is sent the general way, which names the key
+                // as its form says: no declared id goes to every link at once.
+                #[cfg(feature = "shared-key-ids")]
+                if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+                    return FilteredPut::NotPlain;
+                }
+                (mapping_id, params)
+            }
         };
-        // A link that names keys its own way is sent the general way, which names the key as
-        // its form says: no declared id goes to every link at once.
-        #[cfg(feature = "shared-key-ids")]
-        if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
-            return FilteredPut::NotPlain;
-        }
         Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
@@ -7184,10 +7198,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     /// which the ABI's object of the entity holds off.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
-    }
-
-    fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
-        self.core.lock().0.places.counts(kind)
     }
 }
 
