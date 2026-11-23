@@ -85,6 +85,13 @@ pub trait StreamSocket: Sized {
     /// is `tcp/`, a secure channel over one `tls/`.
     const PROTO: LinkProto = LinkProto::Tcp;
 
+    /// The link a stack holds over this stream: [`StreamDriver`] over it, for every stream there
+    /// is one of. [`NoStream`] names itself, a link there is none of, so the case a stack keeps
+    /// for a protocol it does not carry holds nothing and no code serves it.
+    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
+    where
+        Self: 'static;
+
     /// The address and port this end of the connection is bound to.
     fn local(&self) -> SocketAddr;
 
@@ -298,6 +305,27 @@ impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
     }
 }
 
+/// What a stack makes of a connected stream and holds as one of its links
+/// ([`StreamSocket::Link`]).
+pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
+    /// The link over the connected `socket`, receiving into `rx` and building its frames in `tx`.
+    fn over(socket: S, rx: B, tx: X) -> Self;
+
+    /// The same link, waited on by its owner ([`StreamDriver::waited_by_owner`]).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn waited_by_owner(self) -> Self;
+}
+
+/// The link a stack holds over the connected `socket` ([`StreamSocket::Link`]).
+pub fn link_over<S, B, X>(socket: S, rx: B, tx: X) -> S::Link<B, X>
+where
+    S: StreamSocket + 'static,
+    B: AsMut<[u8]> + 'static,
+    X: TxStore + 'static,
+{
+    <S::Link<B, X> as StreamLink<S, B, X>>::over(socket, rx, tx)
+}
+
 /// The dial of a stream protocol a stack does not carry: an image with no secure channel names
 /// it for `tls/`, and every dial is [`LinkOpenError::Unsupported`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -309,6 +337,11 @@ pub enum NoStream {}
 
 impl StreamSocket for NoStream {
     type Error = core::convert::Infallible;
+
+    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>
+        = NoStream
+    where
+        Self: 'static;
 
     fn local(&self) -> SocketAddr {
         match *self {}
@@ -331,6 +364,158 @@ impl StreamSocket for NoStream {
     }
 
     fn shutdown(&self) {
+        match *self {}
+    }
+}
+
+// A link over a stream there is none of is no value either: every call is a match of nothing.
+impl<B, X> StreamLink<NoStream, B, X> for NoStream {
+    fn over(socket: NoStream, _rx: B, _tx: X) -> Self {
+        socket
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn waited_by_owner(self) -> Self {
+        self
+    }
+}
+
+impl BoxedLinkDriver for NoStream {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        match *self {}
+    }
+
+    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        match *self {}
+    }
+
+    fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        match *self {}
+    }
+
+    fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+        match *self {}
+    }
+
+    fn tx_slot_send(
+        &self,
+        _slot: TxSlot,
+        _start: usize,
+        _len: usize,
+        _reliability: Reliability,
+        _priority: Priority,
+    ) -> LinkSendOutcome {
+        match *self {}
+    }
+
+    fn tx_slot_abort(&self, _slot: TxSlot) {
+        match *self {}
+    }
+
+    fn open_blocking(&self) {
+        match *self {}
+    }
+
+    fn close_blocking(&self) {
+        match *self {}
+    }
+
+    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+        match *self {}
+    }
+
+    fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        match *self {}
+    }
+
+    fn batch_length_prefixed(&self) -> bool {
+        match *self {}
+    }
+
+    fn link_mtu(&self) -> usize {
+        match *self {}
+    }
+
+    fn link_rx_capacity(&self) -> usize {
+        match *self {}
+    }
+}
+
+impl SessionDatagramLink for NoStream {
+    fn service(&self) {
+        match *self {}
+    }
+
+    fn service_within(&self, _max_wait_ms: u64) {
+        match *self {}
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        match *self {}
+    }
+
+    #[cfg(feature = "alloc")]
+    fn try_recv(&self) -> Option<RxFrame> {
+        match *self {}
+    }
+
+    fn recv_with(&self, _f: &mut dyn FnMut(&[u8])) -> bool {
+        match *self {}
+    }
+
+    fn lost(&self) -> Option<LostCause> {
+        match *self {}
+    }
+
+    fn holds_input(&self) -> bool {
+        match *self {}
+    }
+
+    fn owes_write(&self) -> bool {
+        match *self {}
+    }
+
+    fn takes_input(&self) -> bool {
+        match *self {}
+    }
+
+    fn keeps_input(&self) -> bool {
+        match *self {}
+    }
+
+    fn keep(&self) {
+        match *self {}
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        match *self {}
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        match *self {}
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        match *self {}
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        match *self {}
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn land_rx(&self, _lease: RxLease) {
         match *self {}
     }
 }
@@ -1222,6 +1407,22 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
 /// A buffer lent to the owner's read is not let go of under it: the stream is shut, which ends a
 /// read waiting on it at once, and the read is waited out before the buffer goes.
+impl<S, B, X> StreamLink<S, B, X> for StreamDriver<S, B, X>
+where
+    S: StreamSocket + 'static,
+    B: AsMut<[u8]> + 'static,
+    X: TxStore + 'static,
+{
+    fn over(socket: S, rx: B, tx: X) -> Self {
+        StreamDriver::over(socket, rx, tx)
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn waited_by_owner(self) -> Self {
+        StreamDriver::waited_by_owner(self)
+    }
+}
+
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),
@@ -1282,6 +1483,11 @@ mod tests {
 
     impl StreamSocket for Pipe {
         type Error = Broken;
+
+        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+            = crate::stream_link::StreamDriver<Self, B, X>
+        where
+            Self: 'static;
 
         fn local(&self) -> SocketAddr {
             self.ends_at

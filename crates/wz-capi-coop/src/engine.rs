@@ -2032,8 +2032,8 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     >()
 }
 
-/// What a session's runtime reserves when the session opens (`CoopRuntime::opening`), from the
-/// build's limits and the faces its config admits.
+/// What a session's runtime reserves when the session opens (`Self::runtime`), from the build's
+/// limits and the faces its config admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeTables {
     /// Reserved at once: a task cell for each link the session may hold at once (the dial role's,
@@ -2061,6 +2061,28 @@ impl RuntimeTables {
                 timers: caps::MAX_TIMERS,
             },
             groups,
+        }
+    }
+
+    /// The runtime these tables are reserved for. A build that joins groups reserves the links'
+    /// cells and holds a bare cell for each group, given the bytes the group's task needs when the
+    /// open spawns it, and sealed once the open is over (`open_links`). A build that joins none
+    /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
+    /// that names a group is refused by name there, so the groups' cells are none.
+    pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
+        #[cfg(feature = "group")]
+        {
+            CoopRuntime::opening(clock, self.rows, self.groups)
+        }
+        #[cfg(not(feature = "group"))]
+        {
+            CoopRuntime::reserved(
+                clock,
+                RuntimeRows {
+                    tasks: self.rows.tasks.saturating_add(self.groups),
+                    ..self.rows
+                },
+            )
         }
     }
 }
@@ -3700,8 +3722,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
-        let tables = RuntimeTables::of::<C>(&config);
-        let runtime = CoopRuntime::opening(clock.clone(), tables.rows, tables.groups);
+        let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
         // from its open. A face accepted or attached later grows the buffer once.
@@ -3860,6 +3881,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         // What the open spawned has its cells: from here a spawn finds a free cell or is refused.
+        #[cfg(feature = "group")]
         core.runtime.seal();
         Ok(())
     }
