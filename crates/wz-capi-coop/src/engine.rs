@@ -48,7 +48,7 @@ use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlace, EntityPlaces,
     EntityRows, HandlePlace, HeldPlaces, LinkCells, SessionArena,
 };
-use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
+use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
@@ -220,11 +220,15 @@ use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 #[cfg(feature = "liveliness")]
 mod liveliness;
 #[cfg(feature = "liveliness")]
+pub(crate) use liveliness::{LivelinessCall, LivelinessRow};
+#[cfg(feature = "liveliness")]
 use {
-    liveliness::{retract_token, LiveSubEntry},
+    liveliness::retract_token,
     registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
+    wz_session_core::declare::liveliness_subscriber::LivelinessDelivery,
+    wz_session_core::session_tables::LivelinessSubscriberHandle,
 };
 
 #[cfg(feature = "query")]
@@ -1137,6 +1141,9 @@ impl RowCallbacks for CoopRows {
     type Queryable = QueryableRow;
     #[cfg(not(feature = "queryable"))]
     type Queryable = ();
+    #[cfg(feature = "liveliness")]
+    type LivelinessSubscriber = LivelinessRow;
+    #[cfg(not(feature = "liveliness"))]
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
@@ -1157,42 +1164,6 @@ fn tables(registry: &RefCell<Registry>) -> core::cell::Ref<'_, CoopTables> {
 fn tables_mut(registry: &RefCell<Registry>) -> core::cell::RefMut<'_, CoopTables> {
     core::cell::RefMut::map(registry.borrow_mut(), |registry| &mut registry.app.tables)
 }
-
-/// A liveliness subscriber's callback, as the ABI handed it: called through a shared borrow with no
-/// lock, from any thread and at any depth, retired when its subscriber is undeclared or its session
-/// closed, and let go of with the last copy.
-#[cfg(feature = "liveliness")]
-pub(crate) struct LiveLiveliness {
-    live: AtomicBool,
-    call: LivelinessSink,
-}
-
-#[cfg(feature = "liveliness")]
-impl LiveLiveliness {
-    pub(crate) fn new(call: LivelinessSink) -> Self {
-        Self {
-            live: AtomicBool::new(true),
-            call,
-        }
-    }
-
-    /// Hand `sample` to the callback, unless it was retired.
-    pub(crate) fn call(&self, sample: LivelinessSample<'_>) {
-        if self.live.load(Ordering::Acquire) {
-            self.call.call(sample);
-        }
-    }
-
-    /// Hand nothing more: its subscriber is gone.
-    fn retire(&self) {
-        self.live.store(false, Ordering::Release);
-    }
-}
-
-/// A liveliness subscriber's callback, shared by the table of callbacks, the sink its
-/// registration holds and the deliveries that copied it out.
-#[cfg(feature = "liveliness")]
-pub(crate) type LivelinessCallback = Arc<LiveLiveliness>;
 
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
@@ -1251,9 +1222,6 @@ type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
 pub(crate) struct EntryBytes;
 
 impl EntryBytes {
-    /// A liveliness subscriber's row.
-    #[cfg(feature = "liveliness")]
-    pub(crate) const LIVELINESS_SUBSCRIBER: usize = core::mem::size_of::<LiveSubEntry>();
     /// A write filter's row.
     pub(crate) const FILTER: usize = core::mem::size_of::<FilterEntry>();
     /// A matching listener's row.
@@ -1372,9 +1340,6 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     pending_gets: Vec<PendingGet>,
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
-    /// The session's liveliness subscribers (`liveliness`); its tokens are rows of its tables.
-    #[cfg(feature = "liveliness")]
-    live_subs: Rows<LiveSubEntry, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
@@ -1680,6 +1645,28 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         unsafe {
             self.round
                 .offer_sample(SubscriberCall::new(call, id), sample)
+        };
+    }
+}
+
+#[cfg(feature = "liveliness")]
+impl LivelinessDelivery<LivelinessRow, LivelinessSubscriberHandle> for RoundDelivery {
+    fn deliver(
+        &mut self,
+        id: LivelinessSubscriberHandle,
+        row: RowAccess<'_, LivelinessRow>,
+        sample: LivelinessSample<'_>,
+    ) {
+        // As a subscriber's sample: the row is read where it lies, and one past the most calls
+        // its latch counts is handed nothing.
+        let Some(call) = RowCallback::begin(row.row()) else {
+            return;
+        };
+        // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
+        // holds, as the round's writer must.
+        unsafe {
+            self.round
+                .offer_liveliness(LivelinessCall::new(call, id), &sample)
         };
     }
 }
@@ -3162,12 +3149,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         // not told again: neither upstream tells a group that comes up of
                         // the entities a session already holds.
                         #[cfg(feature = "liveliness")]
-                        for entry in self.live_subs.iter() {
+                        for (_, row) in tables(&self.registry).liveliness_subscribers().iter() {
                             face.ask_liveliness(
-                                entry.id,
-                                &entry.keyexpr,
-                                &entry.wire,
-                                entry.history,
+                                row.id(),
+                                row.key().as_str(),
+                                row.callback().wire(),
+                                row.history(),
                             );
                         }
                         self.groups[at] = face;
@@ -3700,10 +3687,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let matches = arena
             .lend(entities.matching_listeners)
             .map_err(OpenError::Arena)?;
-        #[cfg(feature = "liveliness")]
-        let live_subs = arena
-            .lend(entities.liveliness_subscribers)
-            .map_err(OpenError::Arena)?;
         let keys = arena
             .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
             .map_err(OpenError::Arena)?;
@@ -3724,7 +3707,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             ObserverRows {
                 tables: plan.tables(),
                 local_tokens: entities.tokens,
-                liveliness_subscribers: entities.liveliness_subscribers,
             },
             plan.gets(),
             plan.peers(),
@@ -3813,8 +3795,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
             gets: Arc::new(GetPlane::new(ended)),
-            #[cfg(feature = "liveliness")]
-            live_subs,
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
@@ -4966,14 +4946,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// `drop` never runs under the lock.
     fn let_go_of_released(&self) {
         while let Some(releasing) = self.samples.take_released() {
-            let row = {
-                let guard = self.core.lock();
-                let mut tables = tables_mut(&guard.0.registry);
-                tables
-                    .release_subscriber(releasing.handle())
-                    .map(|row| row.into_callback())
-            };
-            drop(row);
+            match releasing.handle() {
+                LetGo::Subscriber(handle) => {
+                    let row = {
+                        let guard = self.core.lock();
+                        let mut tables = tables_mut(&guard.0.registry);
+                        tables
+                            .release_subscriber(handle)
+                            .map(|row| row.into_callback())
+                    };
+                    drop(row);
+                }
+                #[cfg(feature = "liveliness")]
+                LetGo::LivelinessSubscriber(handle) => {
+                    let row = {
+                        let guard = self.core.lock();
+                        let mut tables = tables_mut(&guard.0.registry);
+                        tables
+                            .release_liveliness_subscriber(handle)
+                            .map(|row| row.into_callback())
+                    };
+                    drop(row);
+                }
+            }
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
         }
@@ -4987,6 +4982,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_release(&self, handle: SubscriberHandle) {
         self.wait_until_let_go(
             |tables| tables.subscribers().holds_slot(handle),
+            || self.samples.released_settled(),
+        );
+    }
+
+    /// [`Self::wait_for_release`] for liveliness subscriber `handle`, whose calls the round of
+    /// deliveries ends as a subscriber's.
+    #[cfg(feature = "liveliness")]
+    fn wait_for_liveliness_release(&self, handle: LivelinessSubscriberHandle) {
+        self.wait_until_let_go(
+            |tables| tables.liveliness_subscribers().holds_slot(handle),
             || self.samples.released_settled(),
         );
     }
@@ -5080,21 +5085,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         #[cfg(feature = "liveliness")]
         loop {
-            let callback = {
-                let mut guard = self.core.lock();
-                let core = &mut guard.0;
-                let Some(entry) = core.live_subs.pop() else {
+            let undeclared = {
+                let guard = self.core.lock();
+                let mut tables = tables_mut(&guard.0.registry);
+                let Some((handle, _)) = tables.liveliness_subscribers().iter().next() else {
                     break;
                 };
-                core.registry
-                    .borrow_mut()
-                    .app
-                    .liveliness_subscribers
-                    .unregister(u64::from(entry.id));
-                entry.callback.retire();
-                entry.callback
+                tables
+                    .undeclare_liveliness_subscriber(handle)
+                    .map(|undeclared| (handle, undeclared.row.map(|row| row.into_callback())))
             };
-            drop(callback);
+            match undeclared {
+                Some((_, Some(row))) => drop(row),
+                Some((handle, None)) => self.wait_for_liveliness_release(handle),
+                None => {}
+            }
         }
     }
 
@@ -5193,22 +5198,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.0.write_answers(generation);
     }
 
-    /// Hand liveliness subscriber `id` the tokens the session already knows, which its declaration
-    /// with history is owed, on this thread with no lock held while each is handed: under the
-    /// session's lock the next token's key is copied into a buffer on this stack
-    /// ([`Registry::next_history_token`]), the lock is let go, the callback is called, and the next
-    /// is looked for from where the last stood. A session closed meanwhile hands no more.
+    /// Hand the liveliness subscriber `handle` names the tokens the session already knows, which
+    /// its declaration with history is owed, on this thread with no lock held while each is handed:
+    /// a call is begun on its row, under the session's lock the next token's key is copied into a
+    /// buffer on this stack ([`Registry::next_history_token`]), the lock is let go, the callback is
+    /// called, and the next is looked for from where the last stood. A session closed meanwhile, or
+    /// the subscriber undeclared, hands no more; the call is ended as the history is.
     #[cfg(feature = "liveliness")]
-    fn hand_history(&self, id: SubId, callback: &LivelinessCallback) {
+    fn hand_history(&self, handle: LivelinessSubscriberHandle) {
         // A callback that steps the session from inside its history hands out nothing itself, as
         // one inside a delivery does.
         let _delivering = self.deliveries.enter();
+        let begun = self.live().and_then(|core| {
+            let tables = tables(&core.0.registry);
+            let id = tables.liveliness_subscribers().get(handle)?.id();
+            let call = tables.begin_liveliness_subscriber(handle)?;
+            Some((id, LivelinessCall::new(call, handle)))
+        });
+        let Some((id, call)) = begun else {
+            return;
+        };
         let mut cursor = HistoryCursor::default();
         let mut key = [0u8; caps::MAX_KEYEXPR_BYTES];
         loop {
             let next = {
                 let Some(core) = self.live() else {
-                    return;
+                    break;
                 };
                 let registry = core.0.registry.borrow();
                 let found = registry.next_history_token(u64::from(id), cursor).and_then(
@@ -5221,7 +5236,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 found
             };
             let Some((at, token_id, len)) = next else {
-                return;
+                break;
             };
             cursor = at;
             // The key was a `&str` the registry held, copied whole.
@@ -5229,14 +5244,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .get(..len)
                 .and_then(|bytes| core::str::from_utf8(bytes).ok())
             else {
-                return;
+                break;
             };
-            callback.call(LivelinessSample {
+            call.hand(LivelinessSample {
                 kind: LivelinessSampleKind::Put,
                 keyexpr,
                 token_id,
             });
         }
+        // A row whose last call this was, its subscriber undeclared from inside its history, is
+        // let go of by the delivery the declaration ends with.
+        self.samples.end_liveliness_call(call);
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
@@ -5954,37 +5972,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
-        // A liveliness subscriber's id is one of these too (the port's one id space): its
-        // registration goes and its Interest ends.
+        // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
+        // and its Interest ends.
         #[cfg(feature = "liveliness")]
         let live = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let at = core.live_subs.iter().position(|s| s.id == id)?;
-            let links = core.retract(Kind::LiveSub, at);
-            let mut entry = core.live_subs.remove(at);
+            let handle = tables(&core.registry)
+                .liveliness_subscribers()
+                .iter()
+                .find(|(_, row)| row.id() == id)
+                .map(|(handle, _)| handle)?;
+            let place = core.liveliness_place(handle);
+            let links = core.retract_at(place);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
             for group in &core.groups {
                 group.end_liveliness_ask(id);
             }
-            core.registry
-                .borrow_mut()
-                .app
-                .liveliness_subscribers
-                .unregister(u64::from(id));
+            let undeclared = tables_mut(&core.registry).undeclare_liveliness_subscriber(handle)?;
+            // The row went before the links are told: a send never finds the tables borrowed.
             for actions in links {
                 actions.send_interest_final(u64::from(id));
             }
-            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
-            entry.keyexpr.let_go();
-            Some(entry)
+            Some((handle, undeclared.row.map(|row| row.into_callback())))
         });
+        // The row, and its callback with it, is let go of here with no lock held; one a call of
+        // which runs is let go of by the call that ends last.
         #[cfg(feature = "liveliness")]
-        if let Some(entry) = live {
-            // A delivery that copied the callback out of the sink before hands it nothing more;
-            // the row, and its callback with it, is let go of here with no lock held.
-            entry.callback.retire();
-            drop(entry);
+        if let Some(undeclared) = live {
+            match undeclared {
+                (_, Some(row)) => drop(row),
+                (handle, None) => self.wait_for_liveliness_release(handle),
+            }
             return;
         }
         // The row is taken out of the tables under the lock and let go of after it: its key may hold
@@ -7090,33 +7109,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare.
         let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
-        // A full table refuses the subscriber before it takes an id, registers or asks anything;
-        // the sink goes with the refusal.
-        if core.live_subs.free_slots() == 0 {
-            return Err(Declined::TableFull);
-        }
-        // So does a key the session cannot hold.
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
+        // The subscriber is one row of the session's tables, numbered by the id they hand out
+        // next, which its Interest carries: a full table, a key the session cannot hold or no id
+        // left refuses it before anything is asked, and the sink goes with the refusal. Its
+        // Interest names its key as the ABI did, so the row holds no key expression declaration.
+        let id = tables(&core.registry)
+            .next_entity_id()
+            .ok_or(Declined::NoEntityId)?;
+        let form = wz_session_core::session_tables::KeyForm {
+            prefix: None,
+            names_key: false,
         };
-        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
-        // The table of callbacks holds it before the sink does, so a sink the registration refuses
-        // is not its last holder when it is dropped under the session's lock.
-        let callback: LivelinessCallback = Arc::new(LiveLiveliness::new(sink));
-        let registered = core.registry.borrow_mut().register_liveliness_subscriber(
-            u64::from(id),
+        let declared = tables_mut(&core.registry).declare_liveliness_subscriber(
             keyexpr,
             history,
-            liveliness::sample_sink(&callback, &self.samples),
+            form,
+            LivelinessRow::new(wire, sink),
         );
-        // Refused by the observer, the declaration is refused, as a subscriber's is; the callback
-        // the sink shared is let go of with no lock held.
-        if let Err(refused) = registered {
-            let refused = Declined::from(refused);
-            drop(guard);
-            drop(callback);
-            return Err(refused);
-        }
+        let declared = match declared {
+            Ok(declared) => declared,
+            Err(refused) => {
+                // The program's callback goes with the refusal, let go of with no lock held.
+                drop(guard);
+                let why = Declined::from(refused.why);
+                drop(refused.callback);
+                return Err(why);
+            }
+        };
+        debug_assert_eq!(
+            declared.id, id,
+            "the tables number a row as they said they would"
+        );
         // With `history`, the subscriber is handed the tokens the session already knows before
         // the peers are asked for the rest, as zenoh-pico's is
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`):
@@ -7124,27 +7147,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
             drop(guard);
-            self.hand_history(id, &callback);
+            self.hand_history(declared.handle);
             guard = match self.live() {
                 Some(guard) => guard,
                 None => return Err(Declined::Closed),
             };
         }
         let core = &mut guard.0;
-        let entry = LiveSubEntry {
-            id,
-            keyexpr: key,
-            wire,
-            history,
-            callback,
-        };
-        core.announce(Kind::LiveSub, |actions| entry.ask(actions));
+        // A subscriber its own history's callback undeclared asks nothing: its row is gone, and so
+        // is its place in the replay's order.
+        let stands = tables(&core.registry)
+            .liveliness_subscribers()
+            .get(declared.handle)
+            .is_some();
+        if !stands {
+            drop(guard);
+            self.deliver();
+            return Ok(id);
+        }
+        // Each link is asked from the row, as it stands now.
+        core.announce_liveliness(declared.handle);
         // And each group the session joined is asked, as its declarations say.
         #[cfg(feature = "group")]
-        for group in &core.groups {
-            group.ask_liveliness(id, &entry.keyexpr, &entry.wire, entry.history);
+        {
+            let tables = tables(&core.registry);
+            if let Some(row) = tables.liveliness_subscribers().get(declared.handle) {
+                for group in &core.groups {
+                    group.ask_liveliness(
+                        id,
+                        row.key().as_str(),
+                        row.callback().wire(),
+                        row.history(),
+                    );
+                }
+            }
         }
-        keep(&mut core.live_subs, entry);
         drop(guard);
         self.deliver();
         Ok(id)

@@ -458,7 +458,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 local_tokens: &mut app.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
-                liveliness_subscribers: &mut app.liveliness_subscribers,
+                liveliness_subscribers: &mut app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
                 declarations_final: &mut self.declarations_final,
             },
@@ -499,7 +499,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 local_tokens: &app.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
-                liveliness_subscribers: &app.liveliness_subscribers,
+                liveliness_subscribers: &app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
                 declarations_final: &self.declarations_final,
             },
@@ -709,7 +709,8 @@ impl ApplicationLayerObserver {
     /// A no-op when `liveliness-subscriber` is compiled out — there is no
     /// registry to flush and no subscriber to tell.
     pub fn flush_liveliness_on_link_loss(&mut self) -> usize {
-        self.app.flush_liveliness_on_link_loss(&mut self.peers)
+        self.app
+            .flush_liveliness_on_link_loss(&mut (), &mut self.peers)
     }
 
     /// R311y799 — the DECLARATION plane's twin of
@@ -1728,6 +1729,7 @@ mod tests {
             let s = sub_fired.clone();
             observer
                 .app
+                .tables
                 .liveliness_subscribers
                 .register(
                     &observer.peers.tokens,
@@ -2533,6 +2535,7 @@ mod history_replay_is_peer_scoped {
         let f = fired.clone();
         observer
             .app
+            .tables
             .liveliness_subscribers
             .register(
                 &observer.peers.tokens,
@@ -2563,7 +2566,7 @@ mod history_replay_is_peer_scoped {
     fn a_peer_token_is_replayed_to_the_same_history_subscriber() {
         let mut observer = ApplicationLayerObserver::new();
         // Same shape as the local token above, but arriving over the wire.
-        observer.app.liveliness_subscribers.dispatch_declare(
+        observer.app.tables.liveliness_subscribers.dispatch_declare(
             &mut observer.peers.tokens,
             &crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
                 decl_token_nonlocal(41, 0, Some("live/theirs")),
@@ -2575,6 +2578,7 @@ mod history_replay_is_peer_scoped {
         let f = fired.clone();
         observer
             .app
+            .tables
             .liveliness_subscribers
             .register(
                 &observer.peers.tokens,

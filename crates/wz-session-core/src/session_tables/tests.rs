@@ -1634,3 +1634,59 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
         assert!(!tables.queryables.has_local_queryable("elsewhere", false));
     }
 }
+
+/// The table set's liveliness subscribers are told a peer's tokens by the registry's rule: a live
+/// token reaches every subscriber on a key it intersects, a historical one only those that asked
+/// for history; a subscriber is found by its Interest's id, and the responder's end of its history
+/// marks it.
+#[test]
+fn a_token_reaches_the_table_sets_liveliness_subscribers_by_the_registrys_rule() {
+    use crate::declare::liveliness_subscriber::LocalLivelinessSubscribers;
+    let mut tables = Tables::new();
+    tables
+        .declare_liveliness_subscriber("l/a", false, KeyForm::default(), 1)
+        .unwrap();
+    let history = tables
+        .declare_liveliness_subscriber("l/a", true, KeyForm::default(), 2)
+        .unwrap();
+    tables
+        .declare_liveliness_subscriber("other", true, KeyForm::default(), 3)
+        .unwrap();
+    let tell = |tables: &mut Tables, historical: bool| {
+        let mut told = Vec::new();
+        let fired = tables.liveliness_subscribers.fire_matching(
+            "l/a",
+            historical,
+            |_, row: RowAccess<'_, u32>| told.push(*row.row()),
+        );
+        assert_eq!(fired, told.len());
+        told
+    };
+    assert_eq!(tell(&mut tables, false), [1, 2]);
+    assert_eq!(tell(&mut tables, true), [2]);
+    let id = u64::from(
+        tables
+            .liveliness_subscribers()
+            .get(history.handle)
+            .unwrap()
+            .id(),
+    );
+    assert_eq!(tables.liveliness_subscribers.pattern_of(id), Some("l/a"));
+    assert_eq!(
+        tables
+            .liveliness_subscribers
+            .row_of(id)
+            .map(|(handle, _)| handle),
+        Some(history.handle)
+    );
+    let complete = |tables: &Tables| {
+        tables
+            .liveliness_subscribers()
+            .get(history.handle)
+            .unwrap()
+            .history_complete()
+    };
+    assert!(!complete(&tables));
+    tables.liveliness_subscribers.mark_history_complete(id);
+    assert!(complete(&tables));
+}

@@ -24,7 +24,7 @@ use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use super::entity_tables::lowered;
 use crate::engine::{SubscriberCall, SubscriberRow};
-use crate::round::{ReadRoom, Round, RoundCounts, RoundGate};
+use crate::round::{LetGo, ReadRoom, Round, RoundCounts, RoundGate};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
@@ -308,7 +308,7 @@ fn a_round_let_go_of_ends_the_calls_its_records_owe() {
     unsafe { round.let_go() };
     assert_eq!(
         round.take_released().map(|row| row.handle()),
-        Some(first.handle),
+        Some(LetGo::Subscriber(first.handle)),
         "the undeclared row's last call ended with the round's tables"
     );
     assert_eq!(round.take_released().map(|row| row.handle()), None);
@@ -371,7 +371,7 @@ fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
     assert_eq!(tags, [2], "CONTROL: the declared row alone is handed it");
     assert_eq!(
         round.take_released().map(|row| row.handle()),
-        Some(gone.handle)
+        Some(LetGo::Subscriber(gone.handle))
     );
     assert_eq!(round.take_released().map(|row| row.handle()), None);
 }
@@ -574,19 +574,44 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
 #[cfg(feature = "liveliness")]
 type Heard = Arc<Mutex<Vec<(u8, String, u64)>>>;
 
-/// A liveliness subscriber's callback that notes each change it is handed with `tag`.
+/// A liveliness subscriber's row, boxed so it lies where it is while a call of it runs, and the
+/// handle its table would name it by.
 #[cfg(feature = "liveliness")]
-fn hearing(tag: u8, heard: &Heard) -> crate::engine::LivelinessCallback {
+struct Hearing {
+    row: Box<crate::engine::LivelinessRow>,
+    handle: wz_session_core::session_tables::LivelinessSubscriberHandle,
+}
+
+#[cfg(feature = "liveliness")]
+impl Hearing {
+    /// A call of its callback, begun as the session's dispatch begins one.
+    fn call(&self) -> crate::engine::LivelinessCall {
+        crate::engine::LivelinessCall::new(
+            self.row.begin().expect("a live row begins a call"),
+            self.handle,
+        )
+    }
+}
+
+/// A liveliness subscriber's row that notes each change it is handed with `tag`.
+#[cfg(feature = "liveliness")]
+fn hearing(tag: u8, heard: &Heard) -> Hearing {
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
     let heard = heard.clone();
-    Arc::new(crate::engine::LiveLiveliness::new(
-        wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
-            heard
-                .lock()
-                .unwrap()
-                .push((tag, sample.keyexpr.to_owned(), sample.token_id));
-        }),
-    ))
+    let bits = NonZeroU32::new(u32::from(tag) + 1).expect("not zero");
+    Hearing {
+        row: Box::new(crate::engine::LivelinessRow::new(
+            WireKey::literal(),
+            wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                heard
+                    .lock()
+                    .unwrap()
+                    .push((tag, sample.keyexpr.to_owned(), sample.token_id));
+            }),
+        )),
+        handle: wz_session_core::session_tables::LivelinessSubscriberHandle::from_bits(bits)
+            .expect("an index"),
+    }
 }
 
 /// A token is one record however many liveliness subscribers it reaches, its key read where it
@@ -609,9 +634,9 @@ fn the_tokens_of_a_round_are_handed_in_order() {
     };
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.offer_liveliness(&first, &put(lying, 1)) };
-    unsafe { round.offer_liveliness(&second, &put(lying, 1)) };
-    unsafe { round.offer_liveliness(&first, &put("demo/t/2", 2)) };
+    unsafe { round.offer_liveliness(first.call(), &put(lying, 1)) };
+    unsafe { round.offer_liveliness(second.call(), &put(lying, 1)) };
+    unsafe { round.offer_liveliness(first.call(), &put("demo/t/2", 2)) };
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());

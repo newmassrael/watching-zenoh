@@ -107,6 +107,7 @@ use crate::keyexpr_match::keyexpr_intersects;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+use crate::sink::RowAccess;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
@@ -130,6 +131,87 @@ pub use crate::declare::liveliness_sample::BoxedLivelinessSampleSink;
 pub use crate::declare::liveliness_sample::{
     LivelinessSample, LivelinessSampleKind, LivelinessSampleSink,
 };
+
+/// The session's own liveliness subscribers, as a peer's tokens reach them: the rows a token on a
+/// key is told of, the pattern a history replay is filtered by, the one row a replay is owed to,
+/// and the mark a responder's `Declare(DeclFinal)` sets. Implemented by
+/// [`LivelinessSubscriberTable`] and by the session's one table set, so the token fan of one peer
+/// ([`PeerTokens`]) serves either.
+pub trait LocalLivelinessSubscribers {
+    /// What a matched row is told through, with the context the fan is handed
+    /// ([`LivelinessDelivery`]): the row's own record of its subscriber.
+    type Sink;
+    /// The id the table gives a subscriber's row, which a delivery names it by.
+    type RowId: Copy;
+
+    /// Hand `deliver` each row whose pattern intersects `keyexpr` — of a historical token (an
+    /// answer to a CURRENT interest), only the rows that asked for history — in the table's
+    /// order: how many.
+    fn fire_matching<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
+        &mut self,
+        keyexpr: &str,
+        historical: bool,
+        deliver: D,
+    ) -> usize
+    where
+        Self: Sized;
+
+    /// The pattern of the subscriber whose Interest is `interest_id`.
+    fn pattern_of(&self, interest_id: u64) -> Option<&str>;
+
+    /// The subscriber whose Interest is `interest_id`, to tell one sample.
+    fn row_of(&mut self, interest_id: u64) -> Option<(Self::RowId, RowAccess<'_, Self::Sink>)>;
+
+    /// The responder ended the history of the subscriber whose Interest is `interest_id`.
+    fn mark_history_complete(&mut self, interest_id: u64);
+}
+
+/// What a matched liveliness subscriber's row is told through: the context the fan is handed with
+/// the sample, so a row holds its own facts and no reference to the state its samples go to, as
+/// [`crate::sink::SampleDelivery`] is for a subscriber's row.
+///
+/// `()` is the context of a row that is its own sink (`Row: LivelinessSampleSink`), which the table
+/// holds alone; a row of no subscriber's callback (`()`) is told nothing by any context.
+pub trait LivelinessDelivery<Row, Id> {
+    /// Tell `row`, the row `id`, one sample.
+    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: LivelinessSample<'_>);
+}
+
+impl<Row: LivelinessSampleSink, Id> LivelinessDelivery<Row, Id> for () {
+    fn deliver(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: LivelinessSample<'_>) {
+        if let Some(row) = row.held() {
+            row.on_sample(sample);
+        }
+    }
+}
+
+/// `()` is no [`LivelinessSampleSink`], so this and the unit context's own never name the same
+/// pair.
+impl<X, Id> LivelinessDelivery<(), Id> for X {
+    fn deliver(&mut self, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
+}
+
+/// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many.
+fn tell<L: LocalLivelinessSubscribers, X: LivelinessDelivery<L::Sink, L::RowId>>(
+    subs: &mut L,
+    cx: &mut X,
+    kind: LivelinessSampleKind,
+    keyexpr: &str,
+    token_id: u64,
+    historical: bool,
+) -> usize {
+    subs.fire_matching(keyexpr, historical, |id, row| {
+        cx.deliver(
+            id,
+            row,
+            LivelinessSample {
+                kind,
+                keyexpr,
+                token_id,
+            },
+        )
+    })
+}
 
 /// Per-subscriber slot. Private to this module; consumers interact
 /// through [`LivelinessSubscriberRegistry::register`] /
@@ -911,7 +993,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// keyexpr), so it is the MCU no-heap fan-out; the `alloc` wire path
     /// ([`dispatch_declare`](Self::dispatch_declare)) resolves the keyexpr
     /// through the peer table + `peer_token_table` and funnels through
-    /// here. Returns the count of slots fired.
+    /// the same fan. Returns the count of slots fired.
     pub fn dispatch_sample_borrowed(
         &mut self,
         kind: LivelinessSampleKind,
@@ -921,7 +1003,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // The BORROWED fan is the live plane by construction: it carries no
         // envelope, so there is no `interest_id` that could make it a CURRENT
         // answer. `false` is the derived value here, not a default.
-        self.fan_to_matching_slots(kind, keyexpr, token_id, false)
+        tell(self, &mut (), kind, keyexpr, token_id, false)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -956,36 +1038,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_declare_historical(peer, body, peer_keyexpr_table, false);
+        peer.dispatch_declare_historical(self, &mut (), body, peer_keyexpr_table, false);
     }
 
-    /// [`Self::dispatch_declare`], told whether the declaration is a
-    /// HISTORICAL one — i.e. an answer to a CURRENT interest, which on the
-    /// wire is a `Declare` carrying an outer `interest_id`.
-    ///
-    /// A historical token is delivered ONLY to slots that asked for history.
-    /// zenoh spells the rule `(!historical || sub.history)` at
-    /// `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`, and
-    /// derives the flag at its `DeclareToken` arm from the envelope, with the
-    /// reason in its own comment: `zenoh/src/api/session.rs` @ `// interest_id is set if the Token is an Interest::Current.`
-    ///
-    /// WHY IT MATTERS, and why the flag cannot be dropped: `history = false`
-    /// means "tell me about tokens that come alive FROM NOW ON". A second
-    /// subscriber declaring with `history = true` pulls the peer's whole
-    /// CURRENT set onto the same session, and without this gate every one of
-    /// those pre-existing tokens is announced to the `history = false`
-    /// subscriber as if it had just appeared — the exact event that subscriber
-    /// declined. The tokens still enter `peer_token_table` either way (the gate
-    /// is on DELIVERY, not on the table), which is upstream's split too: its
-    /// `Entry::Vacant` insert runs before the callback fan.
-    ///
-    /// zenoh-pico has NO counterpart and cannot have one: its subscription
-    /// record stores no `history` bit at all —
-    /// `vendor/zenoh-pico/include/zenoh-pico/net/subscribe.h` @ `_z_subscriber_t`
-    /// — the flag being consumed at register time and discarded, so pico fans a
-    /// historical token to every matching subscription. wz follows zenoh here
-    /// rather than pico: the two disagree, and this gate is the side that keeps
-    /// `history = false` truthful.
+    /// [`PeerTokens::dispatch_declare_historical`] with the slots' own sinks.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_historical<'a, Q: Storage>(
         &mut self,
@@ -994,48 +1050,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
     ) {
-        let peer_keyexpr_table = peer_keyexpr_table.into();
-        match body {
-            DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
-                // S9a — resolved into a bounded buffer: the fixed backing takes
-                // the declaration without the heap.
-                let mut composed = KeyexprBuf::new();
-                let resolved = match resolve_wireexpr_into(
-                    &decl.keyexpr.body,
-                    peer_keyexpr_table,
-                    &mut composed,
-                ) {
-                    Ok(Some(s)) => s,
-                    Ok(None) => return,
-                    Err(_) => {
-                        peer.oversize = peer.oversize.saturating_add(1);
-                        return;
-                    }
-                };
-                self.apply_token_declared(peer, decl.id, resolved, historical);
-            }
-            DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
-                self.apply_token_undeclared(
-                    peer,
-                    undecl.id,
-                    crate::held_list::HeldList::entries(&undecl.extensions),
-                    peer_keyexpr_table,
-                    historical,
-                );
-            }
-            // Other DeclareOwnedVariant arms are not the liveliness layer's
-            // concern.
-            _ => {}
-        }
+        peer.dispatch_declare_historical(self, &mut (), body, peer_keyexpr_table, historical);
     }
 
-    /// [`Self::dispatch_declare_historical`] for a `Declare` the in-place receive
-    /// path lends ([`IterationEvent::InPlace`]): the same two arms over the
-    /// declaration as it is decoded where its frame lies. Only the reading differs
-    /// (the keyexpr by [`resolve_wireexpr_view`], the retraction's extension chain by
-    /// [`crate::declare_ext_keyexpr::resolve_ext_keyexpr_in`], each the rule the
-    /// owned form's resolver shares); what is done with the result is
-    /// `apply_token_declared` / `apply_token_undeclared` for both.
+    /// [`PeerTokens::dispatch_declare_view_historical`] with the slots' own sinks.
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
@@ -1048,185 +1066,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
     ) {
-        let peer_keyexpr_table = peer_keyexpr_table.into();
-        match body {
-            DeclareVariant::CodecZenohDeclToken(decl) => {
-                let mut composed = KeyexprBuf::new();
-                let resolved = match resolve_wireexpr_view(
-                    &decl.keyexpr.body,
-                    peer_keyexpr_table,
-                    &mut composed,
-                ) {
-                    Ok(Some(s)) => s,
-                    Ok(None) => return,
-                    Err(_) => {
-                        peer.oversize = peer.oversize.saturating_add(1);
-                        return;
-                    }
-                };
-                self.apply_token_declared(peer, decl.id, resolved, historical);
-            }
-            DeclareVariant::CodecZenohUndeclToken(undecl) => {
-                self.apply_token_undeclared(
-                    peer,
-                    undecl.id,
-                    crate::held_list::HeldList::entries(&undecl.extensions),
-                    peer_keyexpr_table,
-                    historical,
-                );
-            }
-            // Other arms are not the liveliness layer's concern.
-            _ => {}
-        }
-    }
-
-    /// What a declared peer token does once its keyexpr is resolved, whichever
-    /// form carried the declaration: bind it and fan a `Put` to the matching slots.
-    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_token_declared<Q: Storage>(
-        &mut self,
-        peer: &mut PeerTokens<Q>,
-        id: u64,
-        resolved: &str,
-        historical: bool,
-    ) {
-        // R311y769 — the FIRST declaration of an id wins, and a repeat
-        // is silent. zenoh wraps this whole arm in
-        // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
-        // (`zenoh/src/api/session.rs`
-        // @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`),
-        // so an OCCUPIED id neither
-        // re-inserts nor calls the subscriber back.
-        //
-        // Both halves matter and they are one decision, not two. Firing
-        // again would tell an application that counts presence that the
-        // same token appeared twice; re-inserting would rebind the id to
-        // the newer keyexpr, and the eventual `UndeclToken` — which
-        // carries only the id — would then name a keyexpr the token was
-        // never declared on. Skipping the arm entirely is what keeps the
-        // retraction truthful.
-        //
-        // A token declared by its keyexpr (id `0`) is not one id repeated but a token for each
-        // keyexpr: it is held under an id of its own, found again by the keyexpr.
-        #[cfg(feature = "alloc")]
-        let id = if id == 0 {
-            if peer.sourced_id(resolved).is_some() {
-                return;
-            }
-            peer.next_sourced_id()
-        } else {
-            id
-        };
-        if peer.table.find(id).is_some() {
-            return;
-        }
-        // S9a — a token the table has no room for, or none under the quota
-        // its creator stated (or whose keyexpr is longer than a row's text),
-        // is REFUSED and counted, and is not announced to the subscribers:
-        // what they are told is what the table holds, so a later
-        // `UndeclToken` can name it.
-        // Of the peer's own policy: the row it is kept in is that peer's table's.
-        let text = match key_text_within::<Q>(&peer.keys, resolved, peer.key_quota) {
-            Ok(text) => text,
-            Err(KeyUnkept::TooLong) => {
-                peer.oversize = peer.oversize.saturating_add(1);
-                return;
-            }
-            // No room where the rows keep their keys: dropped and counted as a token the table
-            // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
-            // cannot hold.
-            Err(KeyUnkept::NoRoom) => {
-                peer.table.count_refused();
-                return;
-            }
-        };
-        let quota = peer.quota;
-        if peer
-            .table
-            .bind_within(id, text, |count| quota.admits(count))
-            .is_err()
-        {
-            return;
-        }
-        self.fan_to_matching_slots(LivelinessSampleKind::Put, resolved, id, historical);
-    }
-
-    /// What an undeclared peer token does, whichever form carried the
-    /// undeclaration (`exts` is its extension chain, `peer_keyexpr_table` the
-    /// spaces it resolves against): fan a `Delete` to the matching slots, under the
-    /// keyexpr the table held for the id or, for an id it never held, the one the
-    /// retraction carries.
-    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView, Q: Storage>(
-        &mut self,
-        peer: &mut PeerTokens<Q>,
-        id: u64,
-        exts: Option<&'k [E]>,
-        peer_keyexpr_table: MappingSpaces<'k>,
-        historical: bool,
-    ) {
-        // The row's own text, taken out of the table, or the keyexpr
-        // the retraction carries. `KeyText` is a `String` on the
-        // growable backing and a bounded buffer on the fixed one, so
-        // both arms are read as a `&str` below and neither allocates
-        // there.
-        let mut composed = KeyexprBuf::new();
-        // A retraction by keyexpr (id `0`) names a token held under the id its declaration was
-        // given: the one the keyexpr was found under.
-        #[cfg(feature = "alloc")]
-        let id = if id == 0 {
-            let mut named = KeyexprBuf::new();
-            match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
-                exts,
-                peer_keyexpr_table,
-                &mut named,
-            ) {
-                Ok(Some(text)) => peer.sourced_id(text).unwrap_or(id),
-                _ => id,
-            }
-        } else {
-            id
-        };
-        let removed = peer.table.unbind(id);
-        let resolved: &str = match removed.as_ref() {
-            Some(s) => s.as_ref(),
-            // R311y769 — the id is unknown, so FALL BACK to the keyexpr
-            // the retraction carries itself. zenoh reaches its
-            // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
-            // branch here (`api/session.rs:2679-2708`) and delivers the
-            // Delete all the same.
-            //
-            // This is what a SOURCED retraction always looks like: zenoh
-            // identifies a sourced token by its KEYEXPR, not an id (the
-            // id is 0 — see
-            // [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr)),
-            // so the table can never hold it and dropping on a table miss
-            // discarded every one of them.
-            //
-            // [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
-            // rather than the literal-only `read_ext_keyexpr`, because
-            // the ext may name an alias; and the PEER half of the pair
-            // because upstream pins this resolution to the remote space
-            // (`wireexpr_to_keyexpr(.., false)`) regardless of what the
-            // ext's own mapping bit says. An ext that is absent or names
-            // an alias the peer never declared resolves to `None`, and
-            // then nothing fires — a Delete for a keyexpr nobody named
-            // would be worse than the drop this replaces.
-            //
-            // S9a — [`resolve_ext_keyexpr_in`](crate::declare_ext_keyexpr::resolve_ext_keyexpr_in):
-            // the same rule composed in a bounded buffer, because this arm
-            // is what a PEER reaches with an id the table never held, and a
-            // peer must not be able to make the registry build a `String`.
-            None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
-                exts,
-                peer_keyexpr_table,
-                &mut composed,
-            ) {
-                Ok(Some(s)) => s,
-                Ok(None) | Err(_) => return,
-            },
-        };
-        self.fan_to_matching_slots(LivelinessSampleKind::Delete, resolved, id, historical);
+        peer.dispatch_declare_view_historical(self, &mut (), body, peer_keyexpr_table, historical);
     }
 
     /// R311y521 — flush EVERY remote token, firing a `Delete` to each matching
@@ -1286,195 +1126,32 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
             .0
     }
 
-    /// [`Self::flush_peer_tokens_on_link_loss`] for a caller whose subscribers take a bounded
-    /// number of samples at a time: before each token `room` says whether its `Delete` can be
-    /// taken now, and the tokens left when it says no stay in `peer` for a later call, in the
-    /// same order. How many were flushed, and whether none is left.
+    /// [`PeerTokens::flush_on_link_loss_while`] with the slots' own sinks.
     pub fn flush_peer_tokens_on_link_loss_while<Q: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         room: &mut dyn FnMut() -> bool,
     ) -> (usize, bool) {
-        #[cfg(feature = "storage-profile")]
-        {
-            let mut flushed = 0usize;
-            while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
-                if !room() {
-                    return (flushed, false);
-                }
-                let Some(keyexpr) = peer.table.unbind(id) else {
-                    break;
-                };
-                // A link loss is a LIVE event — the peer's tokens are going
-                // away NOW — so it reaches every matching slot regardless of
-                // its history flag, exactly as the live `UndeclToken` fan does.
-                self.fan_to_matching_slots(
-                    LivelinessSampleKind::Delete,
-                    keyexpr.as_ref(),
-                    id,
-                    false,
-                );
-                flushed += 1;
-            }
-            (flushed, true)
-        }
-        #[cfg(not(feature = "storage-profile"))]
-        {
-            let _ = (peer, room);
-            (0, true)
-        }
+        peer.flush_on_link_loss_while(self, &mut (), room)
     }
 
-    /// R311y790 — replay the peer tokens this session ALREADY knows to the one
-    /// subscriber `interest_id` names, as `Put` samples. Returns how many were
-    /// replayed. Called by [`register`](Self::register) for a `history = true`
-    /// slot; both upstreams do exactly this at declare time — zenoh collects
-    /// `state.remote_tokens` intersecting the new subscriber's keyexpr and
-    /// calls its callback with an empty-payload `Put`
-    /// (`zenoh/src/api/session.rs`
-    /// @ `let known_tokens = if history {`), and zenoh-pico's
-    /// `_z_liveliness_subscription_trigger_history` walks `zn->_remote_tokens`
-    /// and does the same (`vendor/zenoh-pico/src/net/liveliness.c:133-166`).
-    ///
-    /// The peer's CURRENT reply is NOT a substitute for this, which is why it
-    /// is not merely a latency optimisation: a zenoh router suppresses
-    /// re-declaring a token it has already declared to that face
-    /// (`net/routing/hat/router/token.rs:127`), so a SECOND history subscriber
-    /// on one wz session received an EMPTY history where both upstreams give
-    /// it the full set — silently, since the responder still terminates the
-    /// replay with its `Declare(DeclFinal)` and `history_complete` flips true.
-    ///
-    /// ONLY the named slot fires; this is deliberately not
-    /// `fan_to_matching_slots` (a code span, not a link: that helper is
-    /// private and a doc link to it is a broken one). The replay is
-    /// owed to the subscriber that just declared — every other matching slot
-    /// was already told about these tokens when they arrived live, and firing
-    /// them again would report the same token appearing twice to an
-    /// application that counts presence.
-    ///
-    /// The replay cannot double-fire against the peer's own CURRENT reply
-    /// either: an inbound `DeclToken` for an id already in `peer_token_table`
-    /// is dropped by the R311y769 first-declaration-wins guard in
-    /// `dispatch_declare` (a code span, not a link: that method is gated on
-    /// `all(codec-declare, alloc)` and the link breaks in builds without it).
-    ///
-    /// Replay order is by token id. That is a TEST-determinism choice and not
-    /// a wire property — the same call the sibling
-    /// [`flush_peer_tokens_on_link_loss`](Self::flush_peer_tokens_on_link_loss)
-    /// records, and neither upstream's map order is defined.
-    ///
-    /// The BODY is `alloc`-gated, not the function (signature stability, the
-    /// same shape as the sibling flush): `peer_token_table` is the wire-side
-    /// resolution state and does not exist on the no-alloc control plane, so
-    /// `0` is the honest answer there — nothing is known to replay.
+    /// [`PeerTokens::replay_known_tokens`] with the slots' own sinks.
     pub fn replay_known_tokens<Q: Storage>(
         &mut self,
         peer: &PeerTokens<Q>,
         interest_id: u64,
     ) -> usize {
-        // S9a — replayed in ascending token id, one at a time, with nothing collected: each round
-        // finds the lowest matching id above the last one fired.
-        let mut replayed = 0usize;
-        let mut after: Option<u64> = None;
-        while let Some((token_id, keyexpr)) = self.next_known_token(peer, interest_id, after) {
-            let Some(slot) = self.slots.iter_mut().find(|s| s.interest_id == interest_id) else {
-                break;
-            };
-            slot.sink.on_sample(LivelinessSample {
-                kind: LivelinessSampleKind::Put,
-                keyexpr,
-                token_id,
-            });
-            replayed += 1;
-            after = Some(token_id);
-        }
-        replayed
+        peer.replay_known_tokens(self, &mut (), interest_id)
     }
 
-    /// The token of `peer` subscriber `interest_id` is owed next by its history: the one of the
-    /// lowest id above `after` (any, for `None`) whose keyexpr intersects the subscriber's
-    /// pattern. `None` once there is none, for an id no slot holds, and on a backing with no peer
-    /// token table. The scan is over at most `caps::MAX_REMOTE_DECLS` rows.
+    /// [`PeerTokens::next_known_token`] for subscriber `interest_id` of these slots.
     pub fn next_known_token<'p, Q: Storage>(
         &self,
         peer: &'p PeerTokens<Q>,
         interest_id: u64,
         after: Option<u64>,
     ) -> Option<(u64, &'p str)> {
-        #[cfg(feature = "storage-profile")]
-        {
-            let peer_token_table = &peer.table;
-            if !peer_token_table.is_bound() {
-                return None;
-            }
-            let slot = self.slots.iter().find(|s| s.interest_id == interest_id)?;
-            // R2662 (open-debt item 763) — INTERSECTION. A TOKEN's keyexpr may itself be a
-            // pattern: `local_token.rs` @ `pub fn register` constrains only the id, the byte
-            // length and the table capacity, and upstream's `declare_token` takes a
-            // `TryIntoKeyExpr` with no wildcard refusal either. Reading the token keyexpr as a
-            // LITERAL key would mean a subscriber on `demo/a` never saw a token declared on
-            // `demo/*`. On the fixed backing an over-deep TOKEN keyexpr is skipped rather than
-            // intersected truncated: the matcher applies the chunk bound itself, the same refusal
-            // `fan_to_matching_slots` gets from it.
-            let mut next: Option<(u64, &'p str)> = None;
-            for (token_id, keyexpr) in peer_token_table.entries() {
-                if after.is_some_and(|last| token_id <= last)
-                    || next.is_some_and(|(lowest, _)| token_id >= lowest)
-                {
-                    continue;
-                }
-                if keyexpr_intersects(&slot.pattern, keyexpr.as_ref()) {
-                    next = Some((token_id, keyexpr.as_ref()));
-                }
-            }
-            next
-        }
-        #[cfg(not(feature = "storage-profile"))]
-        {
-            let _ = (peer, interest_id, after);
-            None
-        }
-    }
-
-    /// Internal fan-out helper (the no-heap match SSOT). Walks every slot
-    /// and invokes its sink when the slot's pattern matches the resolved
-    /// keyexpr, matching the slot's pattern ([`Storage::Key`]) against it as
-    /// text (no heap). On the fixed backing a pattern or a keyexpr deeper
-    /// than [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS)
-    /// chunks fires nothing rather than being matched truncated; the matcher
-    /// applies that bound itself. Returns the count of slots fired.
-    fn fan_to_matching_slots(
-        &mut self,
-        kind: LivelinessSampleKind,
-        resolved: &str,
-        token_id: u64,
-        historical: bool,
-    ) -> usize {
-        let mut fired: usize = 0;
-        for slot in self.slots.iter_mut() {
-            // R2359 — a HISTORICAL delivery (an answer to a CURRENT interest)
-            // reaches only the slots that asked for history. zenoh's own
-            // predicate is `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`,
-            // evaluated per subscriber in exactly this position: after the
-            // origin test and before the keyexpr match, on the SAME slot list
-            // the live fan walks.
-            if historical && !slot.history {
-                continue;
-            }
-            // R2662 (open-debt item 763) — INTERSECTION, the same repair as
-            // `replay_known_tokens` above and for the same reason: `resolved`
-            // is a TOKEN keyexpr and nothing forbids it carrying a wildcard.
-            if keyexpr_intersects(&slot.pattern, resolved) {
-                // R311gb-3d — deliver through the LivelinessSampleSink seam.
-                slot.sink.on_sample(LivelinessSample {
-                    kind,
-                    keyexpr: resolved,
-                    token_id,
-                });
-                fired = fired.saturating_add(1);
-            }
-        }
-        fired
+        peer.next_known_token(self, interest_id, after)
     }
 
     /// Drain a `&[NetworkMessage]` through [`Self::dispatch_declare`]
@@ -1502,7 +1179,576 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, &|_| false);
     }
 
-    /// [`Self::dispatch_messages`], skipping any `Declare` whose outer
+    /// [`PeerTokens::dispatch_messages_unclaimed`] with the slots' own sinks.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_messages_unclaimed<'a, Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
+        peer.dispatch_messages_unclaimed(self, &mut (), messages, peer_keyexpr_table, claimed);
+    }
+
+    /// [`IterationEvent`] adapter; mirror of the other
+    /// application-layer registries. Routes `FramePayload` events
+    /// through [`Self::dispatch_messages`]; other variants are
+    /// no-ops here (the liveliness signal path lives entirely in the
+    /// `Declare` / `Interest` MIDs).
+    #[cfg(feature = "storage-profile")]
+    pub fn dispatch_iteration_event<'a, Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+        event: IterationEvent<'_, '_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.dispatch_iteration_event_unclaimed(peer, event, peer_keyexpr_table, &|_| false);
+    }
+
+    /// [`PeerTokens::dispatch_iteration_event_unclaimed`] with the slots' own sinks.
+    #[cfg(feature = "storage-profile")]
+    pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+        event: IterationEvent<'_, '_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
+        peer.dispatch_iteration_event_unclaimed(self, &mut (), event, peer_keyexpr_table, claimed);
+    }
+}
+
+/// The slots are found by their Interest's id, which is the row's id here.
+impl<C: LivelinessSampleSink, P: Storage> LocalLivelinessSubscribers
+    for LivelinessSubscriberTable<C, P>
+{
+    type Sink = C;
+    type RowId = u64;
+
+    fn fire_matching<D: FnMut(u64, RowAccess<'_, C>)>(
+        &mut self,
+        keyexpr: &str,
+        historical: bool,
+        mut deliver: D,
+    ) -> usize {
+        let mut fired: usize = 0;
+        for slot in self.slots.iter_mut() {
+            // R2359 — a HISTORICAL delivery (an answer to a CURRENT interest)
+            // reaches only the slots that asked for history. zenoh's own
+            // predicate is `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`,
+            // evaluated per subscriber in exactly this position: after the
+            // origin test and before the keyexpr match, on the SAME slot list
+            // the live fan walks.
+            if historical && !slot.history {
+                continue;
+            }
+            // R2662 (open-debt item 763) — INTERSECTION: `keyexpr` is a TOKEN
+            // keyexpr and nothing forbids it carrying a wildcard. On the fixed
+            // backing a pattern or a keyexpr deeper than
+            // `MAX_KEYEXPR_CHUNKS` chunks fires nothing rather than being
+            // matched truncated; the matcher applies that bound itself.
+            if keyexpr_intersects(&slot.pattern, keyexpr) {
+                deliver(slot.interest_id, RowAccess::Held(&mut slot.sink));
+                fired = fired.saturating_add(1);
+            }
+        }
+        fired
+    }
+
+    fn pattern_of(&self, interest_id: u64) -> Option<&str> {
+        self.keyexpr(interest_id)
+    }
+
+    fn row_of(&mut self, interest_id: u64) -> Option<(u64, RowAccess<'_, C>)> {
+        self.slots
+            .iter_mut()
+            .find(|slot| slot.interest_id == interest_id)
+            .map(|slot| (interest_id, RowAccess::Held(&mut slot.sink)))
+    }
+
+    fn mark_history_complete(&mut self, interest_id: u64) {
+        LivelinessSubscriberTable::mark_history_complete(self, interest_id);
+    }
+}
+
+/// The token fan of ONE peer: what that peer's `Decl*Token` records, its link's loss and a
+/// history subscriber's replay do to the session's liveliness subscribers `subs`, each matched
+/// row told through `cx` ([`LivelinessDelivery`]). The subscribers are the application's, one
+/// table for every session; the tokens are this peer's.
+impl<P: Storage> PeerTokens<P> {
+    /// [`LivelinessSubscriberTable::dispatch_declare`], told whether the declaration is a
+    /// HISTORICAL one — i.e. an answer to a CURRENT interest, which on the
+    /// wire is a `Declare` carrying an outer `interest_id`.
+    ///
+    /// A historical token is delivered ONLY to slots that asked for history.
+    /// zenoh spells the rule `(!historical || sub.history)` at
+    /// `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`, and
+    /// derives the flag at its `DeclareToken` arm from the envelope, with the
+    /// reason in its own comment: `zenoh/src/api/session.rs` @ `// interest_id is set if the Token is an Interest::Current.`
+    ///
+    /// WHY IT MATTERS, and why the flag cannot be dropped: `history = false`
+    /// means "tell me about tokens that come alive FROM NOW ON". A second
+    /// subscriber declaring with `history = true` pulls the peer's whole
+    /// CURRENT set onto the same session, and without this gate every one of
+    /// those pre-existing tokens is announced to the `history = false`
+    /// subscriber as if it had just appeared — the exact event that subscriber
+    /// declined. The tokens still enter `peer_token_table` either way (the gate
+    /// is on DELIVERY, not on the table), which is upstream's split too: its
+    /// `Entry::Vacant` insert runs before the callback fan.
+    ///
+    /// zenoh-pico has NO counterpart and cannot have one: its subscription
+    /// record stores no `history` bit at all —
+    /// `vendor/zenoh-pico/include/zenoh-pico/net/subscribe.h` @ `_z_subscriber_t`
+    /// — the flag being consumed at register time and discarded, so pico fans a
+    /// historical token to every matching subscription. wz follows zenoh here
+    /// rather than pico: the two disagree, and this gate is the side that keeps
+    /// `history = false` truthful.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_historical<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        historical: bool,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
+                // S9a — resolved into a bounded buffer: the fixed backing takes
+                // the declaration without the heap.
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_into(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                self.apply_token_declared(subs, cx, decl.id, resolved, historical);
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
+                self.apply_token_undeclared(
+                    subs,
+                    cx,
+                    undecl.id,
+                    crate::held_list::HeldList::entries(&undecl.extensions),
+                    peer_keyexpr_table,
+                    historical,
+                );
+            }
+            // Other DeclareOwnedVariant arms are not the liveliness layer's
+            // concern.
+            _ => {}
+        }
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_declare_historical`] for a `Declare` the in-place receive
+    /// path lends ([`IterationEvent::InPlace`]): the same two arms over the
+    /// declaration as it is decoded where its frame lies. Only the reading differs
+    /// (the keyexpr by [`resolve_wireexpr_view`], the retraction's extension chain by
+    /// [`crate::declare_ext_keyexpr::resolve_ext_keyexpr_in`], each the rule the
+    /// owned form's resolver shares); what is done with the result is
+    /// `apply_token_declared` / `apply_token_undeclared` for both.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "rx-lent-control"
+    ))]
+    pub fn dispatch_declare_view_historical<
+        'a,
+        'f,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        body: &DeclareVariant<'f>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        historical: bool,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                self.apply_token_declared(subs, cx, decl.id, resolved, historical);
+            }
+            DeclareVariant::CodecZenohUndeclToken(undecl) => {
+                self.apply_token_undeclared(
+                    subs,
+                    cx,
+                    undecl.id,
+                    crate::held_list::HeldList::entries(&undecl.extensions),
+                    peer_keyexpr_table,
+                    historical,
+                );
+            }
+            // Other arms are not the liveliness layer's concern.
+            _ => {}
+        }
+    }
+
+    /// What a declared peer token does once its keyexpr is resolved, whichever
+    /// form carried the declaration: bind it and fan a `Put` to the matching slots.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn apply_token_declared<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        id: u64,
+        resolved: &str,
+        historical: bool,
+    ) {
+        // R311y769 — the FIRST declaration of an id wins, and a repeat
+        // is silent. zenoh wraps this whole arm in
+        // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
+        // (`zenoh/src/api/session.rs`
+        // @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`),
+        // so an OCCUPIED id neither
+        // re-inserts nor calls the subscriber back.
+        //
+        // Both halves matter and they are one decision, not two. Firing
+        // again would tell an application that counts presence that the
+        // same token appeared twice; re-inserting would rebind the id to
+        // the newer keyexpr, and the eventual `UndeclToken` — which
+        // carries only the id — would then name a keyexpr the token was
+        // never declared on. Skipping the arm entirely is what keeps the
+        // retraction truthful.
+        //
+        // A token declared by its keyexpr (id `0`) is not one id repeated but a token for each
+        // keyexpr: it is held under an id of its own, found again by the keyexpr.
+        #[cfg(feature = "alloc")]
+        let id = if id == 0 {
+            if self.sourced_id(resolved).is_some() {
+                return;
+            }
+            self.next_sourced_id()
+        } else {
+            id
+        };
+        if self.table.find(id).is_some() {
+            return;
+        }
+        // S9a — a token the table has no room for, or none under the quota
+        // its creator stated (or whose keyexpr is longer than a row's text),
+        // is REFUSED and counted, and is not announced to the subscribers:
+        // what they are told is what the table holds, so a later
+        // `UndeclToken` can name it.
+        // Of the peer's own policy: the row it is kept in is that peer's table's.
+        let text = match key_text_within::<P>(&self.keys, resolved, self.key_quota) {
+            Ok(text) => text,
+            Err(KeyUnkept::TooLong) => {
+                self.oversize = self.oversize.saturating_add(1);
+                return;
+            }
+            // No room where the rows keep their keys: dropped and counted as a token the table
+            // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
+            // cannot hold.
+            Err(KeyUnkept::NoRoom) => {
+                self.table.count_refused();
+                return;
+            }
+        };
+        let quota = self.quota;
+        if self
+            .table
+            .bind_within(id, text, |count| quota.admits(count))
+            .is_err()
+        {
+            return;
+        }
+        tell(
+            subs,
+            cx,
+            LivelinessSampleKind::Put,
+            resolved,
+            id,
+            historical,
+        );
+    }
+
+    /// What an undeclared peer token does, whichever form carried the
+    /// undeclaration (`exts` is its extension chain, `peer_keyexpr_table` the
+    /// spaces it resolves against): fan a `Delete` to the matching slots, under the
+    /// keyexpr the table held for the id or, for an id it never held, the one the
+    /// retraction carries.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn apply_token_undeclared<
+        'k,
+        E: crate::ext_view::ExtEntryView,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        id: u64,
+        exts: Option<&'k [E]>,
+        peer_keyexpr_table: MappingSpaces<'k>,
+        historical: bool,
+    ) {
+        // The row's own text, taken out of the table, or the keyexpr
+        // the retraction carries. `KeyText` is a `String` on the
+        // growable backing and a bounded buffer on the fixed one, so
+        // both arms are read as a `&str` below and neither allocates
+        // there.
+        let mut composed = KeyexprBuf::new();
+        // A retraction by keyexpr (id `0`) names a token held under the id its declaration was
+        // given: the one the keyexpr was found under.
+        #[cfg(feature = "alloc")]
+        let id = if id == 0 {
+            let mut named = KeyexprBuf::new();
+            match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
+                exts,
+                peer_keyexpr_table,
+                &mut named,
+            ) {
+                Ok(Some(text)) => self.sourced_id(text).unwrap_or(id),
+                _ => id,
+            }
+        } else {
+            id
+        };
+        let removed = self.table.unbind(id);
+        let resolved: &str = match removed.as_ref() {
+            Some(s) => s.as_ref(),
+            // R311y769 — the id is unknown, so FALL BACK to the keyexpr
+            // the retraction carries itself. zenoh reaches its
+            // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
+            // branch here (`api/session.rs:2679-2708`) and delivers the
+            // Delete all the same.
+            //
+            // This is what a SOURCED retraction always looks like: zenoh
+            // identifies a sourced token by its KEYEXPR, not an id (the
+            // id is 0 — see
+            // [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr)),
+            // so the table can never hold it and dropping on a table miss
+            // discarded every one of them.
+            //
+            // [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
+            // rather than the literal-only `read_ext_keyexpr`, because
+            // the ext may name an alias; and the PEER half of the pair
+            // because upstream pins this resolution to the remote space
+            // (`wireexpr_to_keyexpr(.., false)`) regardless of what the
+            // ext's own mapping bit says. An ext that is absent or names
+            // an alias the peer never declared resolves to `None`, and
+            // then nothing fires — a Delete for a keyexpr nobody named
+            // would be worse than the drop this replaces.
+            //
+            // S9a — [`resolve_ext_keyexpr_in`](crate::declare_ext_keyexpr::resolve_ext_keyexpr_in):
+            // the same rule composed in a bounded buffer, because this arm
+            // is what a PEER reaches with an id the table never held, and a
+            // peer must not be able to make the registry build a `String`.
+            None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
+                exts,
+                peer_keyexpr_table,
+                &mut composed,
+            ) {
+                Ok(Some(s)) => s,
+                Ok(None) | Err(_) => return,
+            },
+        };
+        tell(
+            subs,
+            cx,
+            LivelinessSampleKind::Delete,
+            resolved,
+            id,
+            historical,
+        );
+    }
+
+    /// [`LivelinessSubscriberTable::flush_peer_tokens_on_link_loss`] for a caller whose subscribers take a bounded
+    /// number of samples at a time: before each token `room` says whether its `Delete` can be
+    /// taken now, and the tokens left when it says no stay here for a later call, in the
+    /// same order. How many were flushed, and whether none is left.
+    pub fn flush_on_link_loss_while<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool) {
+        #[cfg(feature = "storage-profile")]
+        {
+            let mut flushed = 0usize;
+            while let Some(id) = self.table.entries().map(|(id, _)| id).min() {
+                if !room() {
+                    return (flushed, false);
+                }
+                let Some(keyexpr) = self.table.unbind(id) else {
+                    break;
+                };
+                // A link loss is a LIVE event — the peer's tokens are going
+                // away NOW — so it reaches every matching slot regardless of
+                // its history flag, exactly as the live `UndeclToken` fan does.
+                tell(
+                    subs,
+                    cx,
+                    LivelinessSampleKind::Delete,
+                    keyexpr.as_ref(),
+                    id,
+                    false,
+                );
+                flushed += 1;
+            }
+            (flushed, true)
+        }
+        #[cfg(not(feature = "storage-profile"))]
+        {
+            let _ = (subs, cx, room);
+            (0, true)
+        }
+    }
+
+    /// R311y790 — replay the peer tokens this session ALREADY knows to the one
+    /// subscriber `interest_id` names, as `Put` samples. Returns how many were
+    /// replayed. Called by [`register`](LivelinessSubscriberTable::register) for a `history = true`
+    /// slot; both upstreams do exactly this at declare time — zenoh collects
+    /// `state.remote_tokens` intersecting the new subscriber's keyexpr and
+    /// calls its callback with an empty-payload `Put`
+    /// (`zenoh/src/api/session.rs`
+    /// @ `let known_tokens = if history {`), and zenoh-pico's
+    /// `_z_liveliness_subscription_trigger_history` walks `zn->_remote_tokens`
+    /// and does the same (`vendor/zenoh-pico/src/net/liveliness.c:133-166`).
+    ///
+    /// The peer's CURRENT reply is NOT a substitute for this, which is why it
+    /// is not merely a latency optimisation: a zenoh router suppresses
+    /// re-declaring a token it has already declared to that face
+    /// (`net/routing/hat/router/token.rs:127`), so a SECOND history subscriber
+    /// on one wz session received an EMPTY history where both upstreams give
+    /// it the full set — silently, since the responder still terminates the
+    /// replay with its `Declare(DeclFinal)` and `history_complete` flips true.
+    ///
+    /// ONLY the named slot fires; this is deliberately not
+    /// `tell` (a code span, not a link: that helper is
+    /// private and a doc link to it is a broken one). The replay is
+    /// owed to the subscriber that just declared — every other matching slot
+    /// was already told about these tokens when they arrived live, and firing
+    /// them again would report the same token appearing twice to an
+    /// application that counts presence.
+    ///
+    /// The replay cannot double-fire against the peer's own CURRENT reply
+    /// either: an inbound `DeclToken` for an id already in `peer_token_table`
+    /// is dropped by the R311y769 first-declaration-wins guard in
+    /// `dispatch_declare` (a code span, not a link: that method is gated on
+    /// `all(codec-declare, alloc)` and the link breaks in builds without it).
+    ///
+    /// Replay order is by token id. That is a TEST-determinism choice and not
+    /// a wire property — the same call the sibling
+    /// [`flush_peer_tokens_on_link_loss`](LivelinessSubscriberTable::flush_peer_tokens_on_link_loss)
+    /// records, and neither upstream's map order is defined.
+    ///
+    /// The BODY is `alloc`-gated, not the function (signature stability, the
+    /// same shape as the sibling flush): `peer_token_table` is the wire-side
+    /// resolution state and does not exist on the no-alloc control plane, so
+    /// `0` is the honest answer there — nothing is known to replay.
+    pub fn replay_known_tokens<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
+        &self,
+        subs: &mut L,
+        cx: &mut X,
+        interest_id: u64,
+    ) -> usize {
+        // S9a — replayed in ascending token id, one at a time, with nothing collected: each round
+        // finds the lowest matching id above the last one fired.
+        let mut replayed = 0usize;
+        let mut after: Option<u64> = None;
+        while let Some((token_id, keyexpr)) = self.next_known_token(&*subs, interest_id, after) {
+            let Some((id, row)) = subs.row_of(interest_id) else {
+                break;
+            };
+            cx.deliver(
+                id,
+                row,
+                LivelinessSample {
+                    kind: LivelinessSampleKind::Put,
+                    keyexpr,
+                    token_id,
+                },
+            );
+            replayed += 1;
+            after = Some(token_id);
+        }
+        replayed
+    }
+
+    /// The token of this peer subscriber `interest_id` of `subs` is owed next by its history: the one of the
+    /// lowest id above `after` (any, for `None`) whose keyexpr intersects the subscriber's
+    /// pattern. `None` once there is none, for an id no slot holds, and on a backing with no peer
+    /// token table. The scan is over at most `caps::MAX_REMOTE_DECLS` rows.
+    pub fn next_known_token<L: LocalLivelinessSubscribers>(
+        &self,
+        subs: &L,
+        interest_id: u64,
+        after: Option<u64>,
+    ) -> Option<(u64, &str)> {
+        #[cfg(feature = "storage-profile")]
+        {
+            let peer_token_table = &self.table;
+            if !peer_token_table.is_bound() {
+                return None;
+            }
+            let pattern = subs.pattern_of(interest_id)?;
+            // R2662 (open-debt item 763) — INTERSECTION. A TOKEN's keyexpr may itself be a
+            // pattern: `local_token.rs` @ `pub fn register` constrains only the id, the byte
+            // length and the table capacity, and upstream's `declare_token` takes a
+            // `TryIntoKeyExpr` with no wildcard refusal either. Reading the token keyexpr as a
+            // LITERAL key would mean a subscriber on `demo/a` never saw a token declared on
+            // `demo/*`. On the fixed backing an over-deep TOKEN keyexpr is skipped rather than
+            // intersected truncated: the matcher applies the chunk bound itself, the same refusal
+            // `tell` gets from it.
+            let mut next: Option<(u64, &str)> = None;
+            for (token_id, keyexpr) in peer_token_table.entries() {
+                if after.is_some_and(|last| token_id <= last)
+                    || next.is_some_and(|(lowest, _)| token_id >= lowest)
+                {
+                    continue;
+                }
+                if keyexpr_intersects(pattern, keyexpr.as_ref()) {
+                    next = Some((token_id, keyexpr.as_ref()));
+                }
+            }
+            next
+        }
+        #[cfg(not(feature = "storage-profile"))]
+        {
+            let _ = (subs, interest_id, after);
+            None
+        }
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_messages`], skipping any `Declare` whose outer
     /// `interest_id` a caller CLAIMS.
     ///
     /// A liveliness GET's replies are interest_id-tagged and match this
@@ -1522,9 +1768,14 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// The two entry points share ONE body: `dispatch_messages` is this with a
     /// closure that claims nothing.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a, Q: Storage>(
+    pub fn dispatch_messages_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
-        peer: &mut PeerTokens<Q>,
+        subs: &mut L,
+        cx: &mut X,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
@@ -1532,7 +1783,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // As the table and `claimed` below: consumed only by the `Declare` arm.
         #[cfg(not(feature = "codec-declare"))]
-        let _ = &peer;
+        let _ = (&subs, &cx);
         // R311q — `peer_keyexpr_table` is only consumed inside the
         // cfg-gated `NetworkMessage::Declare` arm below; the
         // explicit `let _ = ...` on the codec-declare-OFF build
@@ -1589,7 +1840,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                     // pending GET owns, so what survives to here and carries an
                     // id is a SUBSCRIBER's own CURRENT replay.
                     self.dispatch_declare_historical(
-                        peer,
+                        subs,
+                        cx,
                         &decl.body,
                         peer_keyexpr_table,
                         decl.interest_id.is_some(),
@@ -1605,7 +1857,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                     // flag meaningful only for history-enabled subscribers.
                     if let Some(interest_id) = decl.interest_id {
                         if matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_)) {
-                            self.mark_history_complete(interest_id);
+                            subs.mark_history_complete(interest_id);
                         }
                     }
                 }
@@ -1618,30 +1870,20 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         }
     }
 
-    /// [`IterationEvent`] adapter; mirror of the other
-    /// application-layer registries. Routes `FramePayload` events
-    /// through [`Self::dispatch_messages`]; other variants are
-    /// no-ops here (the liveliness signal path lives entirely in the
-    /// `Declare` / `Interest` MIDs).
-    #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a, Q: Storage>(
-        &mut self,
-        peer: &mut PeerTokens<Q>,
-        event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-    ) {
-        self.dispatch_iteration_event_unclaimed(peer, event, peer_keyexpr_table, &|_| false);
-    }
-
-    /// [`Self::dispatch_iteration_event`] with the claim filter of
-    /// [`Self::dispatch_messages_unclaimed`].
+    /// [`LivelinessSubscriberTable::dispatch_iteration_event`] with the claim filter of
+    /// [`LivelinessSubscriberTable::dispatch_messages_unclaimed`].
     // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage>(
+    pub fn dispatch_iteration_event_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
-        peer: &mut PeerTokens<Q>,
+        subs: &mut L,
+        cx: &mut X,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
@@ -1653,12 +1895,18 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
             feature = "alloc",
             all(feature = "rx-lent-control", feature = "codec-declare")
         )))]
-        let _ = (&peer, &peer_keyexpr_table, claimed);
+        let _ = (&subs, &cx, &peer_keyexpr_table, claimed);
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 if let Some(messages) = crate::driver_loop::owned_records(messages) {
-                    self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
+                    self.dispatch_messages_unclaimed(
+                        subs,
+                        cx,
+                        messages,
+                        peer_keyexpr_table,
+                        claimed,
+                    );
                 }
             }
             // A Declare the in-place receive path lends where its frame lies,
@@ -1672,14 +1920,15 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                         return;
                     }
                     self.dispatch_declare_view_historical(
-                        peer,
+                        subs,
+                        cx,
                         &decl.body,
                         peer_keyexpr_table,
                         decl.interest_id.is_some(),
                     );
                     if let Some(interest_id) = decl.interest_id {
                         if matches!(decl.body, DeclareVariant::CodecZenohDeclFinal(_)) {
-                            self.mark_history_complete(interest_id);
+                            subs.mark_history_complete(interest_id);
                         }
                     }
                 }
@@ -1938,7 +2187,7 @@ mod tests {
     }
 
     /// R2662 (open-debt item 763) — THE REPLAY PATH'S OWN WITNESS. The two
-    /// tests around this one both reach `fan_to_matching_slots` via
+    /// tests around this one both reach `tell` via
     /// `dispatch_declare`; `replay_known_tokens` is a SECOND fan with its own
     /// matcher call, and a test that never enters it would leave half the
     /// migration unwitnessed while looking complete.
@@ -2007,7 +2256,7 @@ mod tests {
     /// hands it an empty history while the first subscriber has the full set.
     ///
     /// THE DISCRIMINATOR is the untouched first subscriber. Replaying through
-    /// the shared `fan_to_matching_slots` would satisfy every count below
+    /// the shared `tell` would satisfy every count below
     /// except that one — subscriber A would be told a second time about
     /// tokens it was told about live.
     #[cfg(feature = "keyexpr-wildcard-double")]

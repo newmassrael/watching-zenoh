@@ -164,6 +164,7 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         l.select_max_queriers(Quota::at_most(4))?;
         l.select_max_matching_listeners(Quota::at_most(5))?;
         l.select_max_queryables(Quota::at_most(7))?;
+        l.select_max_liveliness_subscriptions(Quota::at_most(3))?;
         l.select_max_declared_keyexprs(Quota::at_most(6))
     });
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
@@ -211,6 +212,21 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         count("queryable declarations"),
         None,
         "a queryable is one row, the session core's"
+    );
+    assert_eq!(
+        plan.tables().liveliness_subscribers,
+        if cfg!(feature = "liveliness") { 3 } else { 0 },
+        "a liveliness subscriber is a row of the session's one table set, in a build that has them"
+    );
+    assert_eq!(
+        count("liveliness subscribers"),
+        None,
+        "the observer keeps no table of liveliness subscribers beside the session's"
+    );
+    assert_eq!(
+        count("liveliness subscriber declarations"),
+        None,
+        "a liveliness subscriber is one row, the session core's"
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);

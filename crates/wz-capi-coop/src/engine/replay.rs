@@ -37,9 +37,9 @@ use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 #[cfg(feature = "queryable")]
 use wz_session_core::session_tables::QueryableHandle;
-#[cfg(feature = "liveliness")]
-use wz_session_core::session_tables::TokenHandle;
 use wz_session_core::session_tables::{KeyexprHandle, SubscriberHandle};
+#[cfg(feature = "liveliness")]
+use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -204,7 +204,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             #[cfg(feature = "liveliness")]
             Kind::Token => super::tables(&self.registry).tokens().len(),
             #[cfg(feature = "liveliness")]
-            Kind::LiveSub => self.live_subs.len(),
+            Kind::LiveSub => super::tables(&self.registry).liveliness_subscribers().len(),
         }
     }
 
@@ -278,7 +278,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     told
                 }
                 #[cfg(feature = "liveliness")]
-                Kind::LiveSub => self.live_subs[left].ask(actions),
+                Kind::LiveSub => {
+                    let tables = super::tables(&self.registry);
+                    let row = tables.liveliness_subscribers().iter().nth(left);
+                    let asked = row.map_or(true, |(_, row)| {
+                        row.callback()
+                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                    });
+                    asked
+                }
             };
         }
         // A place past the sequence is a defect of the cursor and has nothing to send.
@@ -485,6 +493,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         .is_some_and(|key| super::liveliness::declare_token(actions, row.id(), key))
                 });
                 taken
+            },
+            |_| {},
+        );
+    }
+
+    /// The place in the replay's order of the liveliness subscriber `handle` names, the one past
+    /// the last for a handle that names none: its rank in the table's slot order, which the replay
+    /// asks them in.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn liveliness_place(&self, handle: LivelinessSubscriberHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let subscribers = tables.liveliness_subscribers();
+        let rank = subscribers
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(subscribers.len());
+        self.start_of(Kind::LiveSub) + rank
+    }
+
+    /// Ask each face that is up for what the liveliness subscriber `handle` names asks, as
+    /// [`Self::announce`] tells a declaration: the row is the subscriber itself, so the tables
+    /// stored it before any link is asked, and each link is asked from the row.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn announce_liveliness(&mut self, handle: LivelinessSubscriberHandle) {
+        let place = self.liveliness_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                let tables = super::tables(registry);
+                let asked = tables
+                    .liveliness_subscribers()
+                    .get(handle)
+                    .is_some_and(|row| {
+                        row.callback()
+                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                    });
+                asked
             },
             |_| {},
         );
