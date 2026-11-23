@@ -195,7 +195,9 @@ impl Lender {
         unsafe { core::ptr::addr_of_mut!((*at).lender).write(core::mem::ManuallyDrop::new(self)) };
     }
 
-    /// Give the place back to the session that lent it, whatever it held let go of first.
+    /// Give the place back to the session that lent it, whatever it held let go of first. One
+    /// body for every kind of entity, out of the line of each release.
+    #[inline(never)]
     fn give_back(self) {
         let Self { place, engine } = self;
         // The engine that lent the place lends places, so it takes it back.
