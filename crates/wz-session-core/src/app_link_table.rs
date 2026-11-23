@@ -185,8 +185,9 @@ pub enum InboundRefusal {
 /// The most bytes one datagram a link carries holds: the widest batch the wire can state.
 pub const DATAGRAM_MAX: usize = u16::MAX as usize;
 
-/// The longest locator a datagram is queued with.
-pub const SOURCE_MAX: usize = u8::MAX as usize - 1;
+/// The longest locator a datagram is queued with: one less than a byte holds, as the record's
+/// length byte keeps 0 for no locator.
+pub const SOURCE_MAX: usize = 254;
 
 /// The head of each queued datagram: its length (two bytes, little-endian) and the length of
 /// the locator after it, one more than the locator's bytes, 0 for none.
@@ -213,7 +214,7 @@ pub struct QueuedDatagram<'a> {
 impl<'a> QueuedDatagram<'a> {
     /// How many bytes the datagram holds.
     pub fn len(&self) -> usize {
-        self.parts.0.len() + self.parts.1.len()
+        self.parts.0.len().saturating_add(self.parts.1.len())
     }
 
     /// Whether the datagram holds no byte.
@@ -229,11 +230,7 @@ impl<'a> QueuedDatagram<'a> {
     /// Copy the datagram into `buf`, cut to it: how many bytes were copied.
     pub fn copy_to(&self, buf: &mut [u8]) -> usize {
         let (first, second) = self.parts;
-        let n = self.len().min(buf.len());
-        let from_first = n.min(first.len());
-        buf[..from_first].copy_from_slice(&first[..from_first]);
-        buf[from_first..n].copy_from_slice(&second[..n - from_first]);
-        n
+        copy_runs(buf, first, second)
     }
 
     /// The datagram and its locator copied onto the heap.
@@ -457,20 +454,19 @@ impl RxRing {
     }
 
     fn free(&self) -> usize {
-        self.capacity() - self.len
+        self.capacity().saturating_sub(self.len)
     }
 
     /// Room for `more` bytes, for the one link whose storage could not be taken whole when it was
     /// made: a link with no bound.
     fn grow_for(&mut self, more: usize) {
-        let need = self.len + more;
+        let need = self.len.saturating_add(more);
         if need <= self.capacity() {
             return;
         }
-        let mut next = alloc::vec![0; need.next_power_of_two()];
+        let mut next = alloc::vec![0; need.checked_next_power_of_two().unwrap_or(need)];
         let (first, second) = self.front(self.len);
-        next[..first.len()].copy_from_slice(first);
-        next[first.len()..self.len].copy_from_slice(second);
+        copy_runs(&mut next, first, second);
         self.buf = next;
         self.head = 0;
     }
@@ -478,46 +474,69 @@ impl RxRing {
     /// Append `bytes`, which the caller has found room for.
     fn push(&mut self, bytes: &[u8]) {
         debug_assert!(bytes.len() <= self.free(), "the caller found room");
-        if bytes.is_empty() {
-            return;
-        }
         let capacity = self.capacity();
-        let tail = (self.head + self.len) % capacity;
-        let first = bytes.len().min(capacity - tail);
-        self.buf[tail..tail + first].copy_from_slice(&bytes[..first]);
-        self.buf[..bytes.len() - first].copy_from_slice(&bytes[first..]);
-        self.len += bytes.len();
+        // `head` is within the storage and `len` at most its length, so their sum cannot wrap.
+        let Some(tail) = self.head.wrapping_add(self.len).checked_rem(capacity) else {
+            return;
+        };
+        // The split point is at most `bytes.len()`, so the split is within it.
+        let (to_end, to_front) = bytes.split_at(bytes.len().min(capacity.saturating_sub(tail)));
+        copy_at(&mut self.buf, tail, to_end);
+        copy_at(&mut self.buf, 0, to_front);
+        self.len = self.len.saturating_add(bytes.len());
     }
 
     /// The oldest `n` bytes held (all of them when fewer are), in at most two runs.
     fn front(&self, n: usize) -> (&[u8], &[u8]) {
         let n = n.min(self.len);
-        let first = n.min(self.capacity() - self.head);
-        (
-            &self.buf[self.head..self.head + first],
-            &self.buf[..n - first],
-        )
+        let first = n.min(self.capacity().saturating_sub(self.head));
+        let to_end = self
+            .buf
+            .get(self.head..self.head.saturating_add(first))
+            .unwrap_or_default();
+        let from_front = self.buf.get(..n.saturating_sub(first)).unwrap_or_default();
+        (to_end, from_front)
     }
 
     /// Let go of the oldest `n` bytes.
     fn consume(&mut self, n: usize) {
         let n = n.min(self.len);
-        self.len -= n;
-        self.head = if self.len == 0 {
-            0
-        } else {
-            (self.head + n) % self.capacity()
+        self.len = self.len.saturating_sub(n);
+        self.head = match self.len {
+            0 => 0,
+            // `head` is within the storage and `n` at most its length: the sum cannot wrap.
+            _ => self
+                .head
+                .wrapping_add(n)
+                .checked_rem(self.capacity())
+                .unwrap_or(0),
         };
     }
 
     /// Move the oldest bytes into `out`, as many as it holds: how many were moved.
     fn take_into(&mut self, out: &mut [u8]) -> usize {
         let (first, second) = self.front(out.len());
-        let n = first.len() + second.len();
-        out[..first.len()].copy_from_slice(first);
-        out[first.len()..n].copy_from_slice(second);
+        let n = copy_runs(out, first, second);
         self.consume(n);
         n
+    }
+}
+
+/// Copy `first` and then `second` into the front of `out`, as far as it reaches: how many bytes
+/// were copied.
+fn copy_runs(out: &mut [u8], first: &[u8], second: &[u8]) -> usize {
+    let mut copied = 0usize;
+    for (to, from) in out.iter_mut().zip(first.iter().chain(second)) {
+        *to = *from;
+        copied = copied.saturating_add(1);
+    }
+    copied
+}
+
+/// Copy `bytes` into `buf` from `at`, where the caller found room for them.
+fn copy_at(buf: &mut [u8], at: usize, bytes: &[u8]) {
+    if let Some(to) = buf.get_mut(at..at.saturating_add(bytes.len())) {
+        to.copy_from_slice(bytes);
     }
 }
 
@@ -528,7 +547,10 @@ impl RxRing {
 fn rx_capacity(kind: AppLinkKind, queue: Quota) -> usize {
     match (kind.is_listener(), queue.most()) {
         (true, _) | (false, None) => 0,
-        (false, Some(most)) if kind.is_datagram() => most.max(1) + RECORD_HEAD + SOURCE_MAX,
+        (false, Some(most)) if kind.is_datagram() => most
+            .max(1)
+            .saturating_add(RECORD_HEAD)
+            .saturating_add(SOURCE_MAX),
         (false, Some(most)) => most.max(1),
     }
 }
@@ -674,7 +696,7 @@ impl Link {
     /// of its bound is one the program is told of. A link with no bound refuses nothing.
     fn note_read(&mut self) {
         let read_down = match self.queue.most() {
-            Some(most) => self.queued() <= most.max(1) / 2,
+            Some(most) => self.queued() <= most.max(1).checked_div(2).unwrap_or(0),
             None => true,
         };
         if self.refused_full && read_down {
@@ -799,29 +821,6 @@ impl AppLinkTable {
         }
     }
 
-    /// The row of a link of `kind` held to `queue`: a free row that holds what it takes, the
-    /// smallest, else a new one. A listener and a group never take a provisioned row.
-    fn row_for(&mut self, kind: AppLinkKind, queue: Quota) -> usize {
-        let own = kind.is_listener() || kind == AppLinkKind::Group;
-        let free = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row.handle == 0 && !(own && row.provisioned) && row.link.fits(kind, queue)
-            })
-            .min_by_key(|(_, row)| row.link.rx.capacity())
-            .map(|(at, _)| at);
-        free.unwrap_or_else(|| {
-            self.rows.push(Row {
-                handle: 0,
-                provisioned: false,
-                link: Link::with_storage(rx_capacity(kind, queue), remainder_capacity(queue)),
-            });
-            self.rows.len() - 1
-        })
-    }
-
     fn at(&self, handle: LinkHandle) -> Option<usize> {
         if handle == 0 {
             return None;
@@ -831,12 +830,12 @@ impl AppLinkTable {
 
     fn link(&self, handle: LinkHandle) -> Option<&Link> {
         let at = self.at(handle)?;
-        Some(&self.rows[at].link)
+        self.rows.get(at).map(|row| &row.link)
     }
 
     fn link_mut(&mut self, handle: LinkHandle) -> Option<&mut Link> {
         let at = self.at(handle)?;
-        Some(&mut self.rows[at].link)
+        self.rows.get_mut(at).map(|row| &mut row.link)
     }
 
     /// The next thing due for the host to do, taken from the table: a close, then a drained, then
@@ -901,7 +900,8 @@ impl AppLinkTable {
 
     fn take_handle(&mut self) -> LinkHandle {
         let handle = self.next;
-        self.next += 1;
+        // A count of the links ever named, which no table lives long enough to wrap.
+        self.next = self.next.wrapping_add(1);
         handle
     }
 
@@ -910,12 +910,35 @@ impl AppLinkTable {
     /// Its row's storage holds the bound, and a call of the program's that hands in more than the
     /// bound at once is refused ([`InboundRefusal::TooLarge`]); a quota of 0 holds one byte at a
     /// time. The links accepted on a listener keep the listener's bound.
+    ///
+    /// The row is a free one that holds what the link takes, the smallest, else a new one. A
+    /// listener and a group never take a provisioned row.
     pub fn reserve(&mut self, kind: AppLinkKind, queue: Quota) -> LinkHandle {
-        let at = self.row_for(kind, queue);
         let handle = self.take_handle();
-        let row = &mut self.rows[at];
-        row.handle = handle;
-        row.link.reset(kind, queue);
+        let own = kind.is_listener() || kind == AppLinkKind::Group;
+        let free = self
+            .rows
+            .iter_mut()
+            .filter(|row| {
+                row.handle == 0 && !(own && row.provisioned) && row.link.fits(kind, queue)
+            })
+            .min_by_key(|row| row.link.rx.capacity());
+        match free {
+            Some(row) => {
+                row.handle = handle;
+                row.link.reset(kind, queue);
+            }
+            None => {
+                let mut link =
+                    Link::with_storage(rx_capacity(kind, queue), remainder_capacity(queue));
+                link.reset(kind, queue);
+                self.rows.push(Row {
+                    handle,
+                    provisioned: false,
+                    link,
+                });
+            }
+        }
         handle
     }
 
@@ -974,7 +997,8 @@ impl AppLinkTable {
                 effects
             }
             ProgramEvent::Writable => {
-                link.writables += 1;
+                // Compared for equality only, so a count that wrapped still tells two apart.
+                link.writables = link.writables.wrapping_add(1);
                 link.drive(AppLinkEvent::LinkWritable)
             }
         })
@@ -1003,9 +1027,9 @@ impl AppLinkTable {
         let queue = link.queue;
         let handle = self.reserve(accepted_kind, queue);
         let order = self.accepted_order;
-        self.accepted_order += 1;
-        let at = self.at(handle).ok_or(InboundRefusal::NoSuchLink)?;
-        let stream = &mut self.rows[at].link;
+        // A count of the links ever accepted, which no table lives long enough to wrap.
+        self.accepted_order = self.accepted_order.wrapping_add(1);
+        let stream = self.link_mut(handle).ok_or(InboundRefusal::NoSuchLink)?;
         stream.remote.push_str(remote);
         stream.remote_named = true;
         stream.accepted_by = listener;
@@ -1054,7 +1078,9 @@ impl AppLinkTable {
             return Err(InboundRefusal::TooLarge);
         }
         let stored = if datagram {
-            RECORD_HEAD + source.map_or(0, str::len) + bytes.len()
+            RECORD_HEAD
+                .saturating_add(source.map_or(0, str::len))
+                .saturating_add(bytes.len())
         } else {
             bytes.len()
         };
@@ -1064,7 +1090,7 @@ impl AppLinkTable {
         // Past the bound nothing is taken, and the program learns when to hand it in again. An
         // empty queue takes whatever passed the checks above: the storage holds the bound.
         if !link.rx.is_empty()
-            && (!link.admits(link.queued() + bytes.len()) || stored > link.rx.free())
+            && (!link.admits(link.queued().saturating_add(bytes.len())) || stored > link.rx.free())
         {
             link.refused_full = true;
             return Err(InboundRefusal::Full);
@@ -1072,17 +1098,18 @@ impl AppLinkTable {
         if datagram {
             let name = source.map_or(&[][..], str::as_bytes);
             // Both fit their bytes: the lengths were checked against DATAGRAM_MAX and SOURCE_MAX.
-            let [low, high] = (bytes.len() as u16).to_le_bytes();
-            let named = if source.is_some() {
-                name.len() as u8 + 1
-            } else {
-                0
+            let [low, high] = u16::try_from(bytes.len()).unwrap_or(u16::MAX).to_le_bytes();
+            let named = match source {
+                Some(_) => u8::try_from(name.len())
+                    .unwrap_or(u8::MAX)
+                    .saturating_add(1),
+                None => 0,
             };
             link.rx.push(&[low, high, named]);
             link.rx.push(name);
         }
         link.rx.push(bytes);
-        link.queued += bytes.len();
+        link.queued = link.queued.saturating_add(bytes.len());
         let reader = link.reader.take();
         Ok(link.wake(reader))
     }
@@ -1098,7 +1125,7 @@ impl AppLinkTable {
             return StreamRead::End;
         };
         let copied = link.rx.take_into(buf);
-        link.queued -= copied;
+        link.queued = link.queued.saturating_sub(copied);
         if copied > 0 {
             link.note_read();
             return StreamRead::Bytes(copied);
@@ -1152,14 +1179,16 @@ impl AppLinkTable {
         }
         let mut head = [0u8; RECORD_HEAD];
         link.rx.take_into(&mut head);
-        let len = usize::from(u16::from_le_bytes([head[0], head[1]]));
+        let [low, high, named_byte] = head;
+        let len = usize::from(u16::from_le_bytes([low, high]));
         let mut name = [0u8; SOURCE_MAX];
-        let named = usize::from(head[2]).saturating_sub(1);
-        let named = link.rx.take_into(&mut name[..named]);
+        let named = name
+            .get_mut(..usize::from(named_byte).saturating_sub(1))
+            .map_or(0, |slot| link.rx.take_into(slot));
         // The locator was a `str` when it was queued.
-        let source = match head[2] {
+        let source = match named_byte {
             0 => None,
-            _ => core::str::from_utf8(&name[..named]).ok(),
+            _ => core::str::from_utf8(name.get(..named).unwrap_or_default()).ok(),
         };
         let (first, second) = link.rx.front(len);
         let taken = take(QueuedDatagram {
@@ -1167,7 +1196,7 @@ impl AppLinkTable {
             source,
         });
         link.rx.consume(len);
-        link.queued -= len;
+        link.queued = link.queued.saturating_sub(len);
         link.note_read();
         DatagramRead::Datagram(taken)
     }
@@ -1310,7 +1339,7 @@ impl AppLinkTable {
         if link.is_gone() {
             return Err(InboundRefusal::Closed);
         }
-        if !link.admits(link.remainder.len() + bytes.len()) {
+        if !link.admits(link.remainder.len().saturating_add(bytes.len())) {
             return Err(InboundRefusal::Full);
         }
         link.remainder.extend_from_slice(bytes);
@@ -1377,9 +1406,9 @@ impl AppLinkTable {
 
     /// Free the row of `handle` once its link is gone and nothing due names it.
     fn free_if_done(&mut self, handle: LinkHandle) {
-        if let Some(at) = self.at(handle) {
-            if self.rows[at].link.is_done() {
-                self.rows[at].handle = 0;
+        if let Some(row) = self.at(handle).and_then(|at| self.rows.get_mut(at)) {
+            if row.link.is_done() {
+                row.handle = 0;
             }
         }
     }
