@@ -248,7 +248,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-046 | `wz-session-core` | `stats` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
 | TD-047 | `wz-session-core` | `stream_supervisor` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
 | TD-048 | `wz-session-core` | `policy_document` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
-| TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
+| TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
 | TD-051 | `wz-session-core` | `ext_chain` | `expect_used`, `panic`, `arithmetic_side_effects` | 16 | open |
 | TD-052 | `wz-session-core` | `sample` | `indexing_slicing`, `arithmetic_side_effects` | 16 | open |
@@ -387,6 +387,10 @@ still answers a `Result` its type does not rule out. The fix is that the buffer 
 `multicast_tx` and `session_actions`, and the slot buffers of the cooperative crates, so it is
 made after the branches restructuring those land; the same `expect` in `encoded_push` leaves
 with it.
+
+TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn` that fills an
+array of `N` waits when the build is compiled: on Rust 1.81 a `const fn` takes no `&mut`, so an
+element of an array whose length is a generic is written by index; the loop bound is `N`.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,

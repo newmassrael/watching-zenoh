@@ -175,10 +175,11 @@ fn grown_ms(delay_ms: u64, factor: f64) -> u64 {
 const fn grown_ms_by_bits(delay_ms: u64, bits: u64) -> u64 {
     const FRACTION_BITS: u32 = 52;
     const SIGNIFICANT_BITS: u32 = 53;
+    const FRACTION_MASK: u64 = (1u64 << FRACTION_BITS) - 1;
 
     let negative = bits >> 63 != 0;
     let biased = ((bits >> FRACTION_BITS) & 0x7ff) as i32;
-    let fraction = bits & ((1u64 << FRACTION_BITS) - 1);
+    let fraction = bits & FRACTION_MASK;
     if biased == 0x7ff {
         // NaN, or an infinity: `delay * inf` is inf (saturates) unless the delay is 0 (NaN) or the
         // infinity is negative (-inf), and both of those cast to 0.
@@ -195,31 +196,32 @@ const fn grown_ms_by_bits(delay_ms: u64, bits: u64) -> u64 {
     }
     // factor = mantissa * 2^exponent, with 2^52 <= mantissa < 2^53.
     let mantissa = (fraction | (1u64 << FRACTION_BITS)) as u128;
-    let exponent = biased - 1075;
+    // The biased exponent is 1 to 2046 here, so the bias comes off exactly.
+    let exponent = biased.saturating_sub(1075);
 
     // The delay as an `f64` holds it: rounded to 53 significant bits when it needs more.
     let delay = {
-        let length = 64 - delay_ms.leading_zeros();
+        let length = u64::BITS.saturating_sub(delay_ms.leading_zeros());
         if length <= SIGNIFICANT_BITS {
             delay_ms as u128
         } else {
-            (round_to_significant(delay_ms as u128, length - SIGNIFICANT_BITS) as u128)
-                << (length - SIGNIFICANT_BITS)
+            let dropped = length.saturating_sub(SIGNIFICANT_BITS);
+            (round_to_significant(delay_ms as u128, dropped) as u128) << dropped
         }
     };
 
     // The product, exact: under 2^64 * 2^53.
-    let product = delay * mantissa;
-    let length = 128 - product.leading_zeros();
+    let product = delay.saturating_mul(mantissa);
+    let length = u128::BITS.saturating_sub(product.leading_zeros());
     let (kept, dropped) = if length <= SIGNIFICANT_BITS {
         (product as u64, 0)
     } else {
-        let dropped = length - SIGNIFICANT_BITS;
+        let dropped = length.saturating_sub(SIGNIFICANT_BITS);
         (round_to_significant(product, dropped), dropped)
     };
 
     // value = kept * 2^(dropped + exponent), and `as u64` truncates it and saturates.
-    let shift = dropped as i32 + exponent;
+    let shift = (dropped as i32).saturating_add(exponent);
     if shift >= 0 {
         if shift >= 64 {
             return u64::MAX;
@@ -233,7 +235,7 @@ const fn grown_ms_by_bits(delay_ms: u64, bits: u64) -> u64 {
     } else if shift <= -64 {
         0
     } else {
-        kept >> -shift
+        kept >> shift.unsigned_abs()
     }
 }
 
@@ -241,10 +243,11 @@ const fn grown_ms_by_bits(delay_ms: u64, bits: u64) -> u64 {
 /// keeps of a number that has `dropped` more.
 const fn round_to_significant(value: u128, dropped: u32) -> u64 {
     let mut kept = value >> dropped;
-    let remainder = value & ((1u128 << dropped) - 1);
-    let half = 1u128 << (dropped - 1);
+    // `dropped` is one or more: the callers drop the bits past the 53 an `f64` keeps.
+    let remainder = value & (1u128 << dropped).saturating_sub(1);
+    let half = 1u128 << dropped.saturating_sub(1);
     if remainder > half || (remainder == half && kept & 1 == 1) {
-        kept += 1;
+        kept = kept.saturating_add(1);
     }
     // At most 2^53.
     kept as u64
@@ -336,7 +339,7 @@ pub const fn fixed_waits<const N: usize>(
     while at < N {
         waits[at] = delay;
         let next = clamp_to_ceiling(grown_ms_by_bits(delay, factor_bits), period_max_ms);
-        if at + 1 < N {
+        if at.saturating_add(1) < N {
             assert!(
                 next != delay,
                 "the schedule settles in fewer waits than stated"
@@ -348,7 +351,7 @@ pub const fn fixed_waits<const N: usize>(
             );
         }
         delay = next;
-        at += 1;
+        at = at.saturating_add(1);
     }
     waits
 }
@@ -410,8 +413,8 @@ impl<P: FixedRetryPolicy> FixedRetryPeriod<P> {
     /// The wait to apply now, then move on to the next one: [`RetryPeriod::next_ms`].
     pub fn next_ms(&mut self) -> u64 {
         let now = self.peek_ms();
-        if usize::from(self.step) + 1 < P::WAITS.len() {
-            self.step += 1;
+        if usize::from(self.step).saturating_add(1) < P::WAITS.len() {
+            self.step = self.step.saturating_add(1);
         }
         now
     }
