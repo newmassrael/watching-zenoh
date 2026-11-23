@@ -910,13 +910,14 @@ pub unsafe extern "C" fn z_open(
         };
         // What the config and the options ask for is read in a frame of its own, which has
         // returned before the engine opens the session (`open_request`).
-        let request = match open_request(&cfg, options) {
+        // The config's place is given back once the open has read it, before anything is dialled
+        // or bound, so a handshake that takes long holds no place of the program's configs: the
+        // tokio engine's as the request is made, the cooperative engine's once its open has
+        // written the config's texts into its rows.
+        let request = match open_request(cfg, options) {
             Ok(request) => request,
             Err(code) => return code,
         };
-        // The config's place is given back once the open has read it, before the session is
-        // opened, so a handshake that takes long holds no place of the program's configs.
-        drop(cfg);
         #[cfg(feature = "engine-tokio")]
         return open_on_tokio(zs, request);
         #[cfg(not(feature = "engine-tokio"))]
@@ -963,9 +964,10 @@ unsafe fn taken_config(
 /// As [`z_open`]'s: `options` is null or valid.
 #[inline(never)]
 unsafe fn open_request(
-    cfg: &ConfigState,
+    placed: crate::object_slot::Placed<ConfigState>,
     options: *const z_open_options_t,
 ) -> Result<OpenRequest, ZResult> {
+    let cfg: &ConfigState = &placed;
     // pico reads the options only when they are given and otherwise takes
     // `z_open_options_default`, whose read task starts.
     #[cfg(feature = "multi-thread")]
@@ -1029,14 +1031,17 @@ unsafe fn open_request(
         key_ids,
     );
     #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-    let scouted = match (connect, listen) {
+    let scouted: Vec<String> = match (connect, listen) {
         (None, None) => crate::scout::locators_by_scout(cfg, &policy, &limits)?,
         _ => Vec::new(),
     };
     #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
-    if connect.is_none() && listen.is_none() {
-        return Err(crate::result::Z_ERR_SCOUT_NO_RESULTS);
-    }
+    let scouted: Vec<String> = {
+        if connect.is_none() && listen.is_none() {
+            return Err(crate::result::Z_ERR_SCOUT_NO_RESULTS);
+        }
+        Vec::new()
+    };
     // The time base the config names, which the session holds from here on.
     #[cfg(feature = "time-base")]
     let time_base = cfg.time_base.clone();
@@ -1049,36 +1054,34 @@ unsafe fn open_request(
     if listen.is_some() || dial_whatami != WhatAmI::Client {
         return Err(crate::result::Z_ERR_INVALID);
     }
-    // The texts the engine is handed, each made once as its own from the config's text where it
-    // lies, or from the scout's answer: the cooperative engine's as pico's link of the scheme
-    // reads it (`crate::endpoint::engine_endpoint`), and a group's listen locator, with what is
-    // dialled beside the group, as written, the group being the session's one transport.
+    // The unicast endpoints the cooperative engine is handed, judged where the config holds them,
+    // or the scout's answer, as pico's link of the scheme reads each: the engine's open writes
+    // them into its rows from there (`open_on_coop`). A group's listen locator, and what is
+    // dialled beside the group, are not unicast endpoints: the group is the session's one
+    // transport.
     #[cfg(not(feature = "engine-tokio"))]
-    let engine_text = {
+    {
         #[cfg(feature = "peer")]
         let joins_a_group = listen.is_some_and(is_group_endpoint);
         #[cfg(not(feature = "peer"))]
         let joins_a_group = false;
-        move |text: &str| {
-            if joins_a_group {
-                Ok(String::from(text))
-            } else {
-                crate::endpoint::engine_endpoint(text)
+        if !joins_a_group {
+            let unicast = listen
+                .into_iter()
+                .chain(connect)
+                .chain(scouted.iter().map(String::as_str));
+            for endpoint in unicast {
+                crate::endpoint::checked_endpoint(endpoint)?;
             }
         }
-    };
+    }
+    // The tokio engine holds the texts it dials and listens on as its own.
     #[cfg(feature = "engine-tokio")]
-    let engine_text = |text: &str| -> Result<String, ZResult> { Ok(String::from(text)) };
-    let listen = listen.map(engine_text).transpose()?;
+    let listen = listen.map(String::from);
+    #[cfg(feature = "engine-tokio")]
     let connect: Vec<String> = match connect {
-        Some(connect) => vec![engine_text(connect)?],
-        #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-        None => scouted
-            .iter()
-            .map(|locator| engine_text(locator.as_str()))
-            .collect::<Result<_, _>>()?,
-        #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
-        None => Vec::new(),
+        Some(connect) => vec![String::from(connect)],
+        None => scouted,
     };
     // A config carrying BOTH connect and listen is pico's dual-role listen-and-dial peer:
     // `_z_locators_by_config` refuses the pair only in a build without unicast peers and
@@ -1097,8 +1100,14 @@ unsafe fn open_request(
     Ok(OpenRequest {
         #[cfg(feature = "engine-tokio")]
         slot,
+        #[cfg(feature = "engine-tokio")]
         connect,
+        #[cfg(feature = "engine-tokio")]
         listen,
+        #[cfg(not(feature = "engine-tokio"))]
+        config: placed,
+        #[cfg(not(feature = "engine-tokio"))]
+        scouted,
         dial_whatami,
         zid,
         start_read_task,
@@ -1360,9 +1369,18 @@ struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
     #[cfg(feature = "engine-tokio")]
     slot: crate::object_slot::Slot<PicoSessionHandle>,
-    /// The locators dialled and the one listened on, as the engine takes them.
+    /// The locators dialled and the one listened on, as the tokio engine holds them.
+    #[cfg(feature = "engine-tokio")]
     connect: Vec<String>,
+    #[cfg(feature = "engine-tokio")]
     listen: Option<String>,
+    /// The moved config, whose texts the cooperative engine's open writes into its rows, its
+    /// place given back once they are written, before anything is dialled or bound.
+    #[cfg(not(feature = "engine-tokio"))]
+    config: crate::object_slot::Placed<ConfigState>,
+    /// The locators of the node a scout found, for a config that names none.
+    #[cfg(not(feature = "engine-tokio"))]
+    scouted: Vec<String>,
     dial_whatami: WhatAmI,
     /// The id the config names for the session, as the bytes an INIT carries, `None` for one the
     /// engine mints.
@@ -1765,17 +1783,68 @@ mod faces_besides_dial_tests {
 ///
 /// # Safety
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
+/// What the cooperative engine's open of a pico config reads: the engine's config, which counts
+/// the unicast endpoints and holds none of their texts, and the writer of the texts into the rows
+/// the open lends for them, which holds the moved config and lets it go when it has written them.
+#[cfg(not(feature = "engine-tokio"))]
+struct PicoOpenSource<M, W> {
+    make: M,
+    write: W,
+}
+
+#[cfg(not(feature = "engine-tokio"))]
+impl<M, W> PicoOpenSource<M, W>
+where
+    M: FnOnce() -> wz_capi_coop::CoopConfig<wz_capi_coop::open_source::Counted>,
+    W: FnOnce(
+        &mut wz_capi_coop::open_source::EndpointWriter<'_>,
+    ) -> Result<(), wz_capi_coop::OpenError>,
+{
+    fn new(make: M, write: W) -> Self {
+        Self { make, write }
+    }
+}
+
+#[cfg(not(feature = "engine-tokio"))]
+impl<M, W> wz_capi_coop::open_source::OpenSource for PicoOpenSource<M, W>
+where
+    M: FnOnce() -> wz_capi_coop::CoopConfig<wz_capi_coop::open_source::Counted>,
+    W: FnOnce(
+        &mut wz_capi_coop::open_source::EndpointWriter<'_>,
+    ) -> Result<(), wz_capi_coop::OpenError>,
+{
+    fn into_parts(
+        self,
+    ) -> (
+        wz_capi_coop::CoopConfig<wz_capi_coop::open_source::Counted>,
+        impl FnOnce(
+            &mut wz_capi_coop::open_source::EndpointWriter<'_>,
+        ) -> Result<(), wz_capi_coop::OpenError>,
+    ) {
+        ((self.make)(), self.write)
+    }
+}
+
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
+    // What the config names, read where it lies; the texts themselves are written into the
+    // engine's rows by the open (`write_endpoints` below), the config going with them.
+    let Ok(open) = open_config(&request.config) else {
+        // `open_request` read the same config and took its mode.
+        return crate::result::Z_ERR_CONFIG_INVALID_MODE;
+    };
+    let (stated, listen) = (open.connect, open.listen);
     // A build without `peer` is a client build: `z_open` refused a listener and the peer role
     // before this.
     #[cfg(not(feature = "peer"))]
-    debug_assert!(request.listen.is_none());
+    debug_assert!(listen.is_none());
     // A listen endpoint that names a group is joined as the session's one transport, and a
     // connect locator beside it opens nothing, as the tokio engine's open reads it (pico adds a
     // peer to a unicast transport only). A build without the multicast transport refuses it.
     #[cfg(feature = "peer")]
-    let joins_a_group = request.listen.as_deref().is_some_and(is_group_endpoint);
+    let joins_a_group = listen.is_some_and(is_group_endpoint);
+    #[cfg(not(feature = "peer"))]
+    let joins_a_group = false;
     #[cfg(all(feature = "peer", not(feature = "multicast-transport")))]
     if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -1786,8 +1855,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
     let memory = memory_basis(
-        request.listen.as_deref(),
-        !request.connect.is_empty(),
+        listen,
+        stated.is_some() || !request.scouted.is_empty(),
         &tx_queue,
         &limits,
     );
@@ -1799,42 +1868,43 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
-    let transport_endpoint = request
-        .listen
-        .clone()
-        .or_else(|| request.connect.first().cloned());
-    // pico's config carries ONE listen locator, so the set is that one or none, unless it names
-    // the group the session joins.
+    let transport_endpoint = listen
+        .or(stated)
+        .or_else(|| request.scouted.first().map(String::as_str))
+        .map(String::from);
+    // pico's config carries ONE listen locator, so the session listens on that one or none,
+    // unless it names the group the session joins.
     #[cfg(feature = "multicast-transport")]
-    let (listen, connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen {
-        Some(endpoint) if joins_a_group => (
-            Vec::new(),
-            Vec::new(),
-            vec![wz_capi_port::group::GroupJoin {
-                endpoint,
-                profile: pico_group(sn_resolution, &limits),
-                is_shm: false,
-                // pico declares its entities over whatever transport it holds, a group too, and
-                // with `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as
-                // well, as the tokio engine's open reads it.
-                #[cfg(not(feature = "multicast-declarations"))]
-                declarations: wz_capi_port::group::GroupDeclarations::Entities,
-                #[cfg(feature = "multicast-declarations")]
-                declarations: wz_capi_port::group::GroupDeclarations::Mapped,
-            }],
-        ),
-        listen => (listen.into_iter().collect(), request.connect, Vec::new()),
+    let groups: Vec<_> = match listen {
+        Some(endpoint) if joins_a_group => vec![wz_capi_port::group::GroupJoin {
+            endpoint: String::from(endpoint),
+            profile: pico_group(sn_resolution, &limits),
+            is_shm: false,
+            // pico declares its entities over whatever transport it holds, a group too, and
+            // with `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as
+            // well, as the tokio engine's open reads it.
+            #[cfg(not(feature = "multicast-declarations"))]
+            declarations: wz_capi_port::group::GroupDeclarations::Entities,
+            #[cfg(feature = "multicast-declarations")]
+            declarations: wz_capi_port::group::GroupDeclarations::Mapped,
+        }],
+        _ => Vec::new(),
     };
     #[cfg(not(feature = "multicast-transport"))]
-    let (listen, connect, groups): (
-        Vec<String>,
-        Vec<String>,
-        Vec<wz_capi_port::group::GroupJoin>,
-    ) = (
-        request.listen.into_iter().collect(),
-        request.connect,
-        Vec::new(),
-    );
+    let groups: Vec<wz_capi_port::group::GroupJoin> = Vec::new();
+    // The unicast endpoints: none beside a group, and otherwise the one the config states or
+    // those the scout found to dial, and the one it states to listen on.
+    let unicast_listens = usize::from(listen.is_some() && !joins_a_group);
+    let unicast_dials = if joins_a_group {
+        0
+    } else {
+        usize::from(stated.is_some()) + request.scouted.len()
+    };
+    // The open writes each unicast endpoint's text into the row it lent for it, as pico's link of
+    // the scheme reads it (`crate::endpoint::with_engine_text`, judged at `open_request`), from
+    // the config's text where it lies or the scout's answer, and lets the config go with the
+    // writer, before anything is dialled or bound.
+    let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
@@ -1844,11 +1914,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // listens holds as many peers as its limits admit, pico's `Z_LISTEN_MAX_CONNECTION_NB` at the
     // pico preset, the one it dials among them (`faces_besides_dial`). A limit over the build's is
     // refused as the open's arena refuses one.
-    let max_faces = if listen.is_empty() {
-        faces_besides_dial(None, !connect.is_empty())
+    let max_faces = if unicast_listens == 0 {
+        faces_besides_dial(None, unicast_dials > 0)
     } else {
         match wz_capi_coop::arena::admitted_faces(&limits) {
-            Ok(faces) => faces_besides_dial(Some(faces), !connect.is_empty()),
+            Ok(faces) => faces_besides_dial(Some(faces), unicast_dials > 0),
             Err(refused) => {
                 return coop_open_refusal(&wz_capi_coop::OpenError::Arena(refused));
             }
@@ -1893,7 +1963,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // frame, which the open's handshake runs under, holds the maker and what it reads, and never
     // the config.
     let make_config = || wz_capi_coop::CoopConfig {
-        endpoints: connect,
+        endpoints: wz_capi_coop::open_source::Counted(unicast_dials),
         whatami: dial_whatami,
         zid,
         // The numbers of pico's value build switches, as the open's snapshot holds them: the
@@ -1919,7 +1989,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // The bounds of an accept are the session's limits: the faces it holds besides its dial
         // (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at the pico preset
         // pico's own, ten peers and one handshake at a time.
-        listen,
+        listen: wz_capi_coop::open_source::Counted(unicast_listens),
         accept_pending,
         max_faces,
         // The group the listen endpoint names, when it names one.
@@ -1930,6 +2000,26 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // The session limits the config states, which the engine's tables are held to.
         limits,
     };
+    // The open writes each unicast endpoint's text into the row it lent for it, as pico's link of
+    // the scheme reads it (`crate::endpoint::with_engine_text`, judged at `open_request`), from
+    // the config's text where it lies or the scout's answer, and lets the config go with the
+    // writer, before anything is dialled or bound.
+    let source = PicoOpenSource::new(make_config, move |writer| {
+        if joins_a_group {
+            return Ok(());
+        }
+        let dialled = config
+            .get(Z_CONFIG_CONNECT_KEY)
+            .into_iter()
+            .chain(scouted.iter().map(String::as_str));
+        for endpoint in dialled {
+            crate::endpoint::with_engine_text(endpoint, |text| writer.dial(text))?;
+        }
+        if let Some(endpoint) = config.get(Z_CONFIG_LISTEN_KEY) {
+            crate::endpoint::with_engine_text(endpoint, |text| writer.listen(text))?;
+        }
+        Ok(())
+    });
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
     // way the session holds the key ids the config states (`crate::key_ids`). The read task waits
@@ -1950,7 +2040,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             ),
             clock,
             crate::coop_host::entropy(),
-            make_config,
+            source,
             policy,
             request.key_ids,
             &wz_capi_coop::arena::AllocatorMemory,
@@ -1961,7 +2051,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             links.waited_by_owner(),
             clock,
             crate::coop_host::entropy(),
-            make_config,
+            source,
             policy,
             request.key_ids,
             &wz_capi_coop::arena::AllocatorMemory,
@@ -1974,7 +2064,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         links.waited_by_owner(),
         clock,
         crate::coop_host::entropy(),
-        make_config,
+        source,
         policy,
         request.key_ids,
         &wz_capi_coop::arena::AllocatorMemory,

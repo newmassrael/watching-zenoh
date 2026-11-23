@@ -136,6 +136,7 @@ impl<'a> PicoEndpoint<'a> {
 
     /// The text pico keeps of the endpoint ([`Self::write_text`]), made once at its length: the
     /// one copy of it its holder keeps.
+    #[cfg(feature = "connectivity")]
     pub(crate) fn text(&self, separator: &str) -> alloc::string::String {
         let mut text = alloc::string::String::with_capacity(self.text_len(separator));
         self.write_text(separator, |piece| text.push_str(piece));
@@ -143,26 +144,17 @@ impl<'a> PicoEndpoint<'a> {
     }
 }
 
-/// Reads a unicast endpoint the program wrote, in place, as pico reads it, for a session of the
-/// cooperative engine to dial or listen on: what pico's link reads stays for the engine, which
-/// carries it out or refuses it; the metadata and the config keys past the first one pico's link
-/// does not know are left out, as pico leaves them, so `tcp/127.0.0.1:7447#iface=lo` is dialled as
-/// `tcp/127.0.0.1:7447`, which pico's TCP link binds to no interface either. A scheme whose
-/// config this ABI does not read goes on as written. A malformed config is refused with pico's
-/// `_Z_ERR_CONFIG_INVALID_VALUE`.
-///
-/// The text is read where the config holds it and the one the engine is handed is made once, at
-/// its length, the engine's own copy. A kept text past the build's `MAX_LOCATOR_LEN`, the bound
-/// every locator text of a session is held to, is refused with pico's
-/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its reading of a config answers when it has no memory to
-/// hold a value in (`vendor/zenoh-pico/src/protocol/config.c` @
-/// `ret = _Z_ERR_SYSTEM_OUT_OF_MEMORY;`), and nothing of it is cut short.
+/// Whether a unicast endpoint the program wrote can be handed to a session of the cooperative
+/// engine as pico reads it ([`with_engine_text`]): a malformed config is refused with pico's
+/// `_Z_ERR_CONFIG_INVALID_VALUE`, and a kept text past the build's `MAX_LOCATOR_LEN`, the bound
+/// every locator text of a session is held to, with pico's `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its
+/// reading of a config answers when it has no memory to hold a value in
+/// (`vendor/zenoh-pico/src/protocol/config.c` @ `ret = _Z_ERR_SYSTEM_OUT_OF_MEMORY;`). Judged
+/// over the text where it lies, before anything is opened; nothing is written.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn engine_endpoint(
-    endpoint: &str,
-) -> Result<alloc::string::String, crate::result::ZResult> {
+pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZResult> {
     let Some(keys) = config_keys(scheme_of(endpoint)) else {
-        return Ok(endpoint.into());
+        return Ok(());
     };
     let read = PicoEndpoint::read(endpoint, keys);
     if read.is_malformed() {
@@ -171,7 +163,33 @@ pub(crate) fn engine_endpoint(
     if read.text_len("#") > wz_session_core::caps::MAX_LOCATOR_LEN {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     }
-    Ok(read.text("#"))
+    Ok(())
+}
+
+/// `use_text` handed a unicast endpoint the program wrote as pico reads it, for a session of the
+/// cooperative engine to dial or listen on: what pico's link reads stays for the engine, which
+/// carries it out or refuses it; the metadata and the config keys past the first one pico's link
+/// does not know are left out, as pico leaves them, so `tcp/127.0.0.1:7447#iface=lo` is dialled as
+/// `tcp/127.0.0.1:7447`, which pico's TCP link binds to no interface either. A scheme whose
+/// config this ABI does not read goes on as written.
+///
+/// The text is made in a locator text of the stack, the form of the row the engine writes it
+/// into, so no text of an endpoint is a value of the heap. One [`checked_endpoint`] refused is
+/// handed over as written, for the engine to refuse by name.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
+    let Some(keys) = config_keys(scheme_of(endpoint)) else {
+        return use_text(endpoint);
+    };
+    let read = PicoEndpoint::read(endpoint, keys);
+    let mut kept = wz_session_core::locator_directory::LocatorText::new();
+    let mut fits = !read.is_malformed();
+    read.write_text("#", |piece| fits = fits && kept.push_str(piece).is_ok());
+    if fits {
+        use_text(kept.as_str())
+    } else {
+        use_text(endpoint)
+    }
 }
 
 #[cfg(all(test, not(feature = "engine-tokio")))]
@@ -183,7 +201,8 @@ mod tests {
 
     /// The endpoint the engine is handed for `written`.
     fn dialled(written: &str) -> Result<String, ZResult> {
-        engine_endpoint(written)
+        checked_endpoint(written)?;
+        Ok(with_engine_text(written, String::from))
     }
 
     /// A TCP endpoint keeps what pico's TCP link reads and loses what it does not: an interface
@@ -240,8 +259,10 @@ mod tests {
         let read = PicoEndpoint::read("udp/127.0.0.1:9000#tout=5;iface=lo", keys);
         let kept = "udp/127.0.0.1:9000#iface=lo;tout=5";
         assert_eq!(read.text_len("#"), kept.len());
-        let text = read.text("#");
-        assert_eq!(text, kept);
+        assert_eq!(
+            with_engine_text("udp/127.0.0.1:9000#tout=5;iface=lo", String::from),
+            kept
+        );
 
         let host = "h".repeat(MAX_LOCATOR_LEN - "tcp/:9000".len());
         let at_bound = format!("tcp/{host}:9000");
