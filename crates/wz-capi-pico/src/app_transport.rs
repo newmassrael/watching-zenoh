@@ -256,6 +256,8 @@ fn refusal_code(refusal: InboundRefusal) -> ZResult {
         InboundRefusal::Full => crate::result::WZ_EXT_ERR_LINK_FULL,
         // A group's datagram must name the member it came from.
         InboundRefusal::NoSource => Z_ERR_NULL,
+        // No storage of the link could hold it: handed in again it is refused again.
+        InboundRefusal::TooLarge => Z_EINVAL,
     }
 }
 
@@ -347,8 +349,10 @@ pub unsafe extern "C" fn wz_ext_config_transport(
 /// came from, NUL-terminated, or NULL. The bytes are copied before this returns.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport, or NULL data with a length; Z_EINVAL for a source that
-/// is not UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never
-/// gave, or a link the session let go whose close on the program has returned);
+/// is not UTF-8, or for more than the link could ever hold at once (more bytes than its bound, a
+/// datagram past 65,535 bytes, a locator past 254);
+/// WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never gave, or a
+/// link the session let go whose close on the program has returned);
 /// WZ_EXT_ERR_LINK_NOT_OPEN before the link is up; WZ_EXT_ERR_LINK_CLOSED once it is closing or
 /// closed and still held; WZ_EXT_ERR_LINK_KIND for a listener.
 ///
@@ -594,6 +598,7 @@ mod tests {
             crate::result::WZ_EXT_ERR_LINK_FULL
         );
         assert_eq!(refusal_code(InboundRefusal::NoSource), Z_ERR_NULL);
+        assert_eq!(refusal_code(InboundRefusal::TooLarge), Z_EINVAL);
         assert_eq!(
             refusal_code(InboundRefusal::NoSuchLink),
             crate::result::WZ_EXT_ERR_LINK_UNKNOWN

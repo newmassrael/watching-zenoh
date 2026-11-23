@@ -8604,6 +8604,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// shape as the lowlatency / compression merges above. Monotonically
     /// non-increasing, so a second Init cannot raise a level a first one
     /// lowered.
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
         R::with_mutex_mut(&self.negotiated_patch, |s| {
             // The first Init starts from wz's OWN announcement (R121f1 puts
@@ -8681,7 +8683,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRef`).
+    /// message lies (`crate::inbound::ExtChainRead`).
     pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
         &self,
         extensions: impl IntoIterator<Item = E>,
@@ -8885,7 +8887,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRef`).
+    /// message lies (`crate::inbound::ExtChainRead`).
     pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
         &self,
         extensions: impl IntoIterator<Item = E>,
@@ -9003,6 +9005,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the caller reads the chain ONCE — [`crate::extpatch::peer_patch`] is
     /// also what feeds [`Self::negotiate_patch_against_peer`] on the very next
     /// step, and a rejected level must never reach that `min()`.
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn init_ack_patch_acceptable(&self, peer_patch: u8) -> bool {
         crate::extpatch::init_ack_patch_acceptable(self.advertised_patch(), peer_patch)
     }
@@ -10161,6 +10165,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// what makes the slot behave like the stack value -- the next handshake
     /// draws its own at InitAck ([`Self::draw_cookie_nonce`]).
     #[cfg(feature = "codec-open-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
         #[cfg(feature = "session-unicast-accept")]
         {
@@ -10298,6 +10304,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// initiator's caps come off the InitAck and are held, so its seed has
     /// nothing to wait for but admission.
     #[cfg(feature = "codec-open-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
         R::with_mutex_mut(&self.awaiting_open_ack, |s| *s = false);
         // R311ke — pico captures `_initial_sn_rx` from either Open body
@@ -10384,13 +10392,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
     /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
-        self.observe_control(&frame.control_facts());
+        self.observe_control(&frame.control_facts().unchained());
     }
 
     /// What the link records about one received transport message, whichever read it: the
     /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
     /// taken, so it cannot fail.
-    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_, ()>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor
@@ -10983,6 +10991,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// then drives the FSM's `framing.error` arm, which closes with
     /// `CloseReason::Invalid`, upstream's reason for this check.
     #[cfg(feature = "codec-init-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn init_ack_zid_acceptable(&self, init_ack_zid: &[u8]) -> bool {
         // A `match`, not `is_none_or`: that method is stable since 1.82 and
         // this crate builds with 1.81.

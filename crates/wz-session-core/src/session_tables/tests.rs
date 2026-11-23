@@ -4,6 +4,7 @@
 use super::*;
 use crate::bounded::{Static, ARENA_ALIGN};
 use crate::limits::SessionLimits;
+use crate::reply_acceptance::ReplyAcceptance;
 use crate::row_callback::{CClosure, CallLatch};
 use core::ptr::NonNull;
 use std::vec::Vec;
@@ -45,7 +46,7 @@ impl RowCallbacks for Latched {
     type Queryable = CClosure<u32>;
     type LivelinessSubscriber = CClosure<u32>;
     type Matching = CClosure<u32>;
-    type Reply = u32;
+    type Reply = CClosure<u32>;
 }
 
 /// The tables of the static policy, whose rows never move, with latched callbacks.
@@ -81,6 +82,7 @@ fn rows() -> TableRows {
         write_filters: FILTER_ROWS,
         matching_listeners: caps::MAX_MATCHING_LISTENERS,
         pending_gets: caps::MAX_PENDING_QUERIES,
+        held_replies: caps::MAX_PENDING_REPLIES,
     }
 }
 
@@ -265,14 +267,19 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
     let listener = tables
         .declare_matching_listener(filter, latched(3))
         .unwrap();
-    let get = tables.begin_get(1, "g", 10, 4).unwrap();
+    let get = tables
+        .begin_get(ReplyAcceptance::Matching("g"), 1, 10, latched(4))
+        .unwrap();
     let calls = (
         tables.begin_queryable(qbl.handle).unwrap(),
         tables.begin_liveliness_subscriber(live.handle).unwrap(),
         tables.begin_matching_listener(listener).unwrap(),
-        tables.pin_get(get.handle).unwrap(),
+        tables.begin_reply(get.handle).unwrap(),
     );
-    assert_eq!((calls.0.call, calls.1.call, calls.2.call), (1, 2, 3));
+    assert_eq!(
+        (calls.0.call, calls.1.call, calls.2.call, calls.3.call),
+        (1, 2, 3, 4)
+    );
     assert!(tables
         .undeclare_queryable(qbl.handle)
         .unwrap()
@@ -297,7 +304,12 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
     assert!(tables.release_liveliness_subscriber(live.handle).is_some());
     assert!(ended::<CClosure<u32>>(calls.2));
     assert!(tables.release_matching_listener(listener).is_some());
-    assert_eq!(tables.unpin_get(calls.3).unwrap().into_callback(), 4);
+    assert!(
+        tables.begin_reply(get.handle).is_none(),
+        "an ended get begins no call"
+    );
+    assert!(ended::<CClosure<u32>>(calls.3));
+    assert!(tables.release_get(get.handle).is_some());
 }
 
 #[test]
@@ -635,15 +647,26 @@ fn a_matching_listener_is_told_each_change_once() {
 }
 
 #[test]
-fn a_get_is_found_by_its_face_and_request_and_ended_by_deadline_or_face() {
+fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
     let mut tables = Tables::new();
-    let first = tables.begin_get(1, "k", 100, 7).unwrap();
-    let second = tables.begin_get(2, "k", 50, 8).unwrap();
+    let first = tables
+        .begin_get(ReplyAcceptance::Matching("k"), 2, 100, 7)
+        .unwrap();
+    let second = tables.begin_get(ReplyAcceptance::Any, 1, 50, 8).unwrap();
     assert_ne!(first.request, second.request);
-    let (found, row) = tables.pending_get(1, first.request).unwrap();
+    let (found, row) = tables.pending_get(first.request).unwrap();
     assert_eq!(found, first.handle);
-    assert_eq!((row.face(), row.key(), row.deadline()), (1, "k", 100));
-    assert!(tables.pending_get(2, first.request).is_none());
+    assert_eq!(
+        (row.gate(), row.legs(), row.deadline()),
+        (Some("k"), 2, 100)
+    );
+    assert_eq!(
+        tables
+            .pending_get(second.request)
+            .map(|(_, row)| row.gate()),
+        Some(None),
+        "a get that takes any key keeps none"
+    );
     assert_eq!(tables.next_get_deadline(), Some(50));
     let mut cursor = 0;
     assert_eq!(
@@ -651,26 +674,63 @@ fn a_get_is_found_by_its_face_and_request_and_ended_by_deadline_or_face() {
         Some(second.handle)
     );
     assert_eq!(tables.next_expired_get(60, &mut cursor), None);
-    let mut cursor = 0;
-    assert_eq!(tables.next_get_on_face(1, &mut cursor), Some(first.handle));
-    assert_eq!(tables.next_get_on_face(1, &mut cursor), None);
-    match tables.end_get(first.handle) {
-        Some(Removal::Taken(row)) => assert_eq!(row.into_callback(), 7),
-        _ => panic!("the get was not pinned, so it is handed back at once"),
+    assert!(matches!(
+        tables.end_leg(first.handle),
+        Some(LegEnded::Owed(1))
+    ));
+    assert!(
+        tables.pending_get(first.request).is_some(),
+        "a leg still owes"
+    );
+    match tables.end_leg(first.handle) {
+        Some(LegEnded::Over(Removal::Taken(row))) => assert_eq!(row.into_callback(), 7),
+        _ => panic!("the last leg ends a get no call runs on, and hands it back at once"),
     }
-    assert!(tables.pending_get(1, first.request).is_none());
+    assert!(tables.pending_get(first.request).is_none());
     assert_eq!(tables.next_get_deadline(), Some(50));
+    assert!(
+        tables.end_leg(first.handle).is_none(),
+        "an ended get has no leg"
+    );
+}
+
+/// A get's gate admits a Put or a Del on a key it intersects and every Err; a get that takes any
+/// key admits every reply.
+#[test]
+fn a_gets_gate_admits_its_key_and_every_err() {
+    use crate::reply_sink::{BorrowedReply, ReplyKind};
+    let reply = |keyexpr, kind| BorrowedReply {
+        rid: 0,
+        keyexpr,
+        kind,
+        payload: &[],
+        err_encoding: None,
+        attachment: None,
+        put_encoding: None,
+    };
+    let mut tables = Tables::new();
+    let gated = tables
+        .begin_get(ReplyAcceptance::Matching("a/b"), 1, 0, 1)
+        .unwrap();
+    let any = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
+    let gated = tables.pending_get(gated.request).unwrap().1;
+    assert!(gated.admits(&reply("a/b", ReplyKind::Put)));
+    assert!(gated.admits(&reply("a/b", ReplyKind::Del)));
+    assert!(!gated.admits(&reply("c/d", ReplyKind::Put)));
+    assert!(gated.admits(&reply("c/d", ReplyKind::Err)));
+    let any = tables.pending_get(any.request).unwrap().1;
+    assert!(any.admits(&reply("c/d", ReplyKind::Put)));
 }
 
 #[test]
 fn a_request_id_skips_the_ones_still_pending() {
     let mut tables = Tables::new();
     tables.next_request = u32::MAX;
-    let last = tables.begin_get(1, "k", 0, 1).unwrap();
-    let wrapped = tables.begin_get(1, "k", 0, 2).unwrap();
+    let last = tables.begin_get(ReplyAcceptance::Any, 1, 0, 1).unwrap();
+    let wrapped = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
     assert_eq!((last.request, wrapped.request), (u32::MAX, 0));
     tables.next_request = u32::MAX;
-    let next = tables.begin_get(1, "k", 0, 3).unwrap();
+    let next = tables.begin_get(ReplyAcceptance::Any, 1, 0, 3).unwrap();
     assert_eq!(next.request, 1);
 }
 
@@ -681,9 +741,72 @@ fn a_full_get_table_refuses_and_hands_the_callback_back() {
         pending_gets: 0,
         ..rows()
     });
-    let refused = tables.begin_get(1, "k", 0, 5).unwrap_err();
+    let refused = tables
+        .begin_get(ReplyAcceptance::Matching("k"), 1, 0, 5)
+        .unwrap_err();
     assert_eq!(refused.why, RegisterError::TableFull);
     assert_eq!(refused.callback, 5);
+}
+
+/// A `Latest` get holds its replies in the tables until its caller takes them out, and a get
+/// ended with replies still held lets them go with it.
+#[cfg(feature = "storage-profile")]
+#[test]
+fn a_latest_get_holds_its_replies_until_they_are_taken_and_ends_with_the_rest() {
+    use crate::query_mode::ConsolidationMode;
+    use crate::reply_hold::Consolidated;
+    use crate::reply_sink::{BorrowedReply, ReplyKind, ReplyView};
+    let reply = |keyexpr, payload| BorrowedReply {
+        rid: 0,
+        keyexpr,
+        kind: ReplyKind::Put,
+        payload,
+        err_encoding: None,
+        attachment: None,
+        put_encoding: None,
+    };
+    let mut tables = Tables::new();
+    let first = tables.begin_get(ReplyAcceptance::Any, 1, 0, 1).unwrap();
+    let second = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
+    let latest = ConsolidationMode::Latest;
+    assert_eq!(
+        tables.consolidate_reply(first.handle, latest, &reply("a", b"one")),
+        Consolidated::Held
+    );
+    assert_eq!(
+        tables.consolidate_reply(first.handle, latest, &reply("a", b"two")),
+        Consolidated::Held,
+        "two unstamped replies tie, and the later is held"
+    );
+    assert_eq!(
+        tables.consolidate_reply(second.handle, latest, &reply("b", b"other")),
+        Consolidated::Held
+    );
+    let taken = tables
+        .take_held(first.handle)
+        .expect("the first get holds a reply");
+    assert_eq!((taken.keyexpr(), taken.payload()), ("a", b"two".as_slice()));
+    assert!(tables.take_held(first.handle).is_none());
+    assert!(tables.end_get(second.handle).is_some());
+    assert!(
+        tables.take_held(second.handle).is_none(),
+        "what an ended get held went with it"
+    );
+}
+
+/// A get whose gate is longer than a fixed row keeps is refused before it spends a request id, and
+/// its callback is handed back.
+#[test]
+fn a_get_whose_gate_is_too_long_is_refused_and_spends_no_request_id() {
+    let mut tables = SessionTables::<Calls, Static>::new();
+    let before = tables.next_request;
+    let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+    let refused = tables
+        .begin_get(ReplyAcceptance::Matching(&long), 1, 0, 6)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::KeyexprTooLong);
+    assert_eq!(refused.callback, 6);
+    assert_eq!(tables.next_request, before, "no request id was spent");
 }
 
 /// One block of an arena's memory, aligned as an arena's spans start.
@@ -717,6 +840,7 @@ fn small_rows() -> TableRows {
         write_filters: 1,
         matching_listeners: 1,
         pending_gets: 1,
+        held_replies: 1,
     }
 }
 

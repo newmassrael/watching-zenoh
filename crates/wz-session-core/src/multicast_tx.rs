@@ -308,8 +308,8 @@ pub trait MulticastTxQueue {
     /// sequence number `sn` it already minted, as the unicast lend falls back.
     ///
     /// The default lends nothing, which is every queue that has no pool (the
-    /// MCU loop's, the collecting one behind `multicast_tx_emit`).
-    #[cfg(feature = "transport-tx-lend")]
+    /// MCU loop's, the collecting one behind `multicast_tx_emit`). A push asks
+    /// only under `transport-tx-lend`; a queue may offer its slots in any build.
     fn enqueue_lent(
         &mut self,
         priority: Priority,
@@ -527,6 +527,82 @@ where
     multicast_tx_push_in(item, tx_sn, params, conf, queue, Some(window))
 }
 
+/// A message a group's producer pushes for the call without owning it: the network message's
+/// own QoS, the channel it rides, the most its body encodes to, and the encoder that writes the
+/// body where the frame is built. A message a writer writes from borrowed parts (a query's
+/// `lent_request::RequestWriter`) is pushed as this and is never an owned message, so it costs
+/// no allocation of its own.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[derive(Clone, Copy)]
+pub struct MulticastTxEncoded<'a> {
+    /// The message's own `ext_qos`: its band, its congestion control, whether it is express.
+    pub qos: crate::sample::QosLevel,
+    /// The channel: the reliable ring, or the best-effort one.
+    pub reliable: bool,
+    /// The most the body encodes to.
+    pub size: usize,
+    /// The encoder of the network message the frame carries.
+    pub body: &'a crate::frame_encode::BodyEncoder<'a>,
+}
+
+/// What a push of a message with `qos` on the channel `reliable` onto a group of `params` must
+/// know besides its bytes: the band its own `ext_qos` names clamped as every message's is, the
+/// frame's `ext_qos`, and whether it may be dropped. The one reading of such a message, owned or
+/// lent.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+fn qos_frame_meta(
+    qos: crate::sample::QosLevel,
+    reliable: bool,
+    params: &crate::multicast_params::MulticastParams,
+) -> FrameMeta {
+    let eff = effective_mcast_priority(qos.priority(), params.is_qos);
+    FrameMeta {
+        priority: eff,
+        ext_qos: frame_ext_qos(eff),
+        reliable,
+        droppable: is_droppable(reliable, qos.congestion()),
+        express: qos.is_express(),
+    }
+}
+
+/// The conduit a push of the lent `message` onto a group of `params` mints on, as
+/// [`multicast_tx_conduit`] answers for an owned one.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_encoded_conduit(
+    message: &MulticastTxEncoded<'_>,
+    params: &crate::multicast_params::MulticastParams,
+) -> Priority {
+    qos_frame_meta(message.qos, message.reliable, params).priority
+}
+
+/// [`multicast_tx_push`] (or [`multicast_tx_push_batched`] inside a window) of a message lent for
+/// the call ([`MulticastTxEncoded`]): the same walk, its body written by its encoder where the
+/// frame is built.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_push_encoded<M, Q>(
+    message: &MulticastTxEncoded<'_>,
+    tx_sn: &mut M,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+    window: Option<&mut MulticastBatch>,
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
+    push_frame(
+        qos_frame_meta(message.qos, message.reliable, params),
+        message.size,
+        message.body,
+        tx_sn,
+        params,
+        conf,
+        queue,
+        window,
+    )
+}
+
 /// [`multicast_tx_push`] with or without a batch window ([`multicast_tx_push_batched`]).
 #[cfg(all(
     feature = "alloc",
@@ -733,17 +809,11 @@ fn frame_meta(
         // A query's band comes off its own `ext_qos`, clamped as a Response's is; it rides the
         // reliable ring, as the unicast query does.
         #[cfg(all(feature = "codec-push", feature = "codec-request"))]
-        MulticastTxItem::Request { request } => {
-            let qos = crate::declare_ext_qos::read_request_qos(request);
-            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
-            FrameMeta {
-                priority: eff,
-                ext_qos: frame_ext_qos(eff),
-                reliable: true,
-                droppable: is_droppable(true, qos.congestion()),
-                express: qos.is_express(),
-            }
-        }
+        MulticastTxItem::Request { request } => qos_frame_meta(
+            crate::declare_ext_qos::read_request_qos(request),
+            true,
+            params,
+        ),
         // R2594 — the band comes off the Response's own `ext_qos`, clamped
         // exactly as a Push's is, because upstream's transport reads a
         // Response's band there:
@@ -943,6 +1013,19 @@ impl MulticastTxLanes {
     pub fn of_group(params: &crate::multicast_params::MulticastParams) -> Self {
         let batch = usize::from(params.batch_size);
         Self::new(params.tx_queue.shape(params.is_qos, batch, batch))
+    }
+
+    /// The bytes the lane of `priority` holds at most, when `priority` has a lane of its own:
+    /// every priority on a group that runs QoS, DEFAULT alone otherwise. `None` is a priority
+    /// whose messages take DEFAULT's lane.
+    pub fn own_lane_bytes(&self, priority: Priority) -> Option<usize> {
+        (self.shape.qos || priority == Priority::DEFAULT).then(|| self.shape.lane_bytes(priority))
+    }
+
+    /// The index, by priority wire byte, of the lane a message of `priority` takes: its own on a
+    /// QoS group, the DEFAULT one otherwise.
+    pub fn lane_index(&self, priority: Priority) -> usize {
+        self.lane(priority)
     }
 
     /// The lane a message of `priority` takes: its own on a QoS group, the DEFAULT one otherwise.
@@ -2017,6 +2100,54 @@ mod push_tests {
             Some(LinkRoom::Free),
             "a write makes room and lowers the mark"
         );
+    }
+
+    /// A message lent for the call is framed as the owned one is: the same datagrams, on the
+    /// same conduit, under the same sequence numbers.
+    #[test]
+    fn a_lent_message_is_framed_as_the_owned_one_is() {
+        let params = params(512);
+        let owned = put(true, b"lent");
+        let push = crate::push_build::build_push_literal("k", b"lent").unwrap();
+        let body = crate::frame_encode::push_body(&push);
+        let lent = MulticastTxEncoded {
+            qos: crate::declare_ext_qos::read_push_qos(&push),
+            reliable: true,
+            size: multicast_tx_bytes(&owned),
+            body: &body,
+        };
+        assert_eq!(
+            multicast_tx_encoded_conduit(&lent, &params),
+            multicast_tx_conduit(&owned, &params)
+        );
+        let mask = mask_from_res(params.seq_num_res);
+        let (mut by_owned, mut by_lent) = (Scripted::default(), Scripted::default());
+        let mut sn_owned = MulticastTxConduits::new(mask);
+        let mut sn_lent = MulticastTxConduits::new(mask);
+        assert_eq!(
+            multicast_tx_push(
+                owned,
+                &mut sn_owned,
+                &params,
+                &params.tx_queue,
+                &mut by_owned
+            ),
+            PushOutcome::Pushed
+        );
+        assert_eq!(
+            multicast_tx_push_encoded(
+                &lent,
+                &mut sn_lent,
+                &params,
+                &params.tx_queue,
+                &mut by_lent,
+                None
+            ),
+            PushOutcome::Pushed
+        );
+        assert_eq!(by_lent.enqueued, by_owned.enqueued);
+        assert_eq!(by_lent.sns, by_owned.sns);
+        assert_eq!(by_lent.asks.len(), by_owned.asks.len());
     }
 
     /// A message counts on a lane for what its frame is reserved by when it is pushed, so a

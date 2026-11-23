@@ -72,7 +72,7 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
 | `interests` | `InterestRow`: entity id, kind, key, holders | `MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS` |
 | `write_filters` | `WriteFilterRow`: plane, its Interest, count-local, cached peers' verdict | `MAX_PUBLISHERS + MAX_QUERIERS` |
 | `matching` | `MatchingRow`: plane, its Interest, count-local, last verdict, callback | `MAX_MATCHING_LISTENERS` |
-| `pending_gets` | `PendingGetRow`: request id, face, key, deadline, callback | `MAX_PENDING_QUERIES` |
+| `pending_gets` | `PendingGetRow`: request id, gate key (none for `_anyke`), legs owing a Final, deadline, callback | `MAX_PENDING_QUERIES` |
 
 - **Slot maps.** Each table is a `SlotMap<K, T, N, P>`: a fixed-capacity map whose rows are named
   by a `Handle<K>`, a slot index (`NonZeroU16`, so `Option<Handle<K>>` is four bytes) and the
@@ -133,8 +133,10 @@ fn declare_matching_listener(&mut self, filter: WriteFilterHandle, cb: F::Matchi
     -> Result<MatchingListenerHandle, Refused<F::Matching>>;
 fn undeclare_write_filter(&mut self, h: WriteFilterHandle,
     each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>)) -> Option<Unwatched<WriteFilterRow>>;
-fn begin_get(&mut self, face: FaceId, key: &str, deadline: u64, cb: F::Reply)
+fn begin_get(&mut self, accept: ReplyAcceptance<'_>, legs: u16, deadline: u64, cb: F::Reply)
     -> Result<GetBegun, Refused<F::Reply>>;
+fn end_leg(&mut self, h: PendingGetHandle) -> Option<LegEnded<PendingGet<F, P>>>;
+fn end_get(&mut self, h: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>>;
 
 // Look up and match: total functions over the rows.
 fn wire_of<'a, Key>(&'a self, key: &'a EntityKey<Key>) -> WireForm<'a>;
@@ -142,9 +144,8 @@ fn matches(&self, plane: Plane, key: &str, count_local: bool, peers: &impl PeerD
 fn write_filter_open(&self, h: WriteFilterHandle, peers: &impl PeerDeclarations) -> Option<bool>;
 fn next_matching_change(&mut self, cursor: &mut usize, peers: &impl PeerDeclarations)
     -> Option<(MatchingListenerHandle, bool)>;
-fn pending_get(&self, face: FaceId, request: RequestId) -> Option<(PendingGetHandle, &PendingGet<F, P>)>;
+fn pending_get(&self, request: RequestId) -> Option<(PendingGetHandle, &PendingGet<F, P>)>;
 fn next_expired_get(&self, now: u64, cursor: &mut usize) -> Option<PendingGetHandle>;
-fn next_get_on_face(&self, face: FaceId, cursor: &mut usize) -> Option<PendingGetHandle>;
 
 // Deliver: iterators over the rows a key reaches, and the pins a call outside the lock takes.
 fn subscribers_for<'a>(&'a self, key: &'a str, local: bool) -> impl Iterator<Item = (SubscriberHandle, &'a Subscriber<F, P>)>;
@@ -194,8 +195,10 @@ keeps every test green and is measured against the size ledger (P9).
    `InterestHold`, the `MatchingWatchList`s and the `matching` queue go: a change of what the
    peers declare is followed by `next_matching_change`.
 5. **Pending gets.** `Requesters` per face, `PendingGet`, `EndedLegs` and the reply targets go:
-   a reply finds its get by `pending_get(face, request)`, a lost face ends its gets by
-   `next_get_on_face`, a deadline by `next_expired_get`.
+   a get is one row whose request id every leg carries, so a reply finds it by
+   `pending_get(request)`, is admitted by its gate (`PendingGetRow::admits`) and is handed to its
+   callback on the row's latch (`begin_reply`); a leg's Final, or the loss of the face it was asked
+   on, is `end_leg`, and a deadline found by `next_expired_get` is `end_get`.
 6. **The delivery lane.** With every callback in a row, a delivery pins the rows it reaches and
    calls them from the received bytes (P4); `SharedLane`, `targets`, `Resolved`, `TryCell` and
    `LiveCallback` go. Backpressure becomes the transport's flow control alone: the session takes

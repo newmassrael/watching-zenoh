@@ -55,7 +55,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
     kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
-    SendStep, StreamRead,
+    SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
 
@@ -812,15 +812,16 @@ impl StreamListen for AppStreamListener {
     }
 
     fn accept(&self) -> Result<Option<AppStreamSocket>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         match next {
-            AcceptRead::Accepted(handle, remote) => Ok(Some(AppStreamSocket {
+            AcceptRead::Accepted((handle, peer)) => Ok(Some(AppStreamSocket {
                 held: Held::accepted(&self.held.transport, handle),
                 local: self.at,
-                peer: socket_of(&remote),
+                peer,
             })),
             AcceptRead::Empty => Ok(None),
             AcceptRead::End => Err(LinkOpenError::Unsupported),
@@ -868,11 +869,11 @@ impl AppDatagramSocket {
     }
 
     /// The datagram link of the source the program accepted on a datagram listener as `handle`,
-    /// naming it `remote`.
-    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
+    /// at `peer`, the address of the locator the program named for it.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, peer: SocketAddr) -> Self {
         Self {
             held: Held::accepted(transport, handle),
-            peer: socket_of(remote),
+            peer,
             reads_sources: false,
         }
     }
@@ -880,21 +881,18 @@ impl AppDatagramSocket {
     /// Take the next datagram into `buf`: its length (cut to `buf`) and source.
     fn take(&self, buf: &mut [u8]) -> Result<Option<Received>, AppLinkError> {
         let handle = self.held.handle;
-        let read = self
-            .held
-            .transport
-            .with(|table| table.read_datagram(handle, None));
-        self.held.tell_drained();
-        match read {
-            DatagramRead::Datagram(datagram) => {
-                let n = datagram.bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&datagram.bytes[..n]);
-                let source = match datagram.source.as_deref() {
+        let read = self.held.transport.with(|table| {
+            table.read_datagram(handle, None, |datagram| {
+                let source = match datagram.source() {
                     Some(named) if self.reads_sources => socket_of(named),
                     _ => self.peer,
                 };
-                Ok(Some((n, source)))
-            }
+                (datagram.copy_to(buf), source)
+            })
+        });
+        self.held.tell_drained();
+        match read {
+            DatagramRead::Datagram(taken) => Ok(Some(taken)),
             DatagramRead::Empty => Ok(None),
             DatagramRead::End => Err(AppLinkError::Closed),
         }
@@ -948,9 +946,12 @@ impl DatagramSocket for AppDatagramSocket {
 /// group is closing the link.
 pub struct AppGroupTransport {
     held: Option<Held>,
-    /// The datagram the last receive lent and the source it came from, which the transport
-    /// keeps until its next receive so that a datagram asked to be kept is lent again whole.
-    lent: Option<(alloc::vec::Vec<u8>, SocketAddr)>,
+    /// The datagram the last receive lent, which the transport keeps until its next receive so
+    /// that a datagram asked to be kept is lent again whole. Its storage is taken when the group
+    /// is joined, room for the widest datagram, and each receive copies into it.
+    lent: alloc::vec::Vec<u8>,
+    /// The source of the datagram in `lent`, `None` while it holds none.
+    lent_from: Option<SocketAddr>,
     /// Whether the next receive lends `lent` again ([`GroupTransport::keep`]).
     kept: bool,
 }
@@ -971,7 +972,8 @@ impl AppGroupTransport {
     ) -> Result<Self, LinkOpenError> {
         Ok(Self {
             held: Some(open_link(transport, AppLinkKind::Group, locator, bound)?),
-            lent: None,
+            lent: alloc::vec::Vec::with_capacity(DATAGRAM_MAX),
+            lent_from: None,
             kept: false,
         })
     }
@@ -995,7 +997,7 @@ impl GroupTransport for AppGroupTransport {
     fn close(&mut self) {
         // Dropping the link closes it on the program, which is the leave.
         self.held = None;
-        self.lent = None;
+        self.lent_from = None;
         self.kept = false;
     }
 
@@ -1063,28 +1065,31 @@ impl GroupTransport for AppGroupTransport {
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         // A datagram kept is lent again before the program's next one is read.
         if core::mem::take(&mut self.kept) {
-            if let Some((bytes, source)) = &self.lent {
-                f(bytes, *source);
+            if let Some(source) = self.lent_from {
+                f(self.lent.as_slice(), source);
                 return true;
             }
         }
         let Some(held) = &self.held else {
             return false;
         };
-        let read = held
-            .transport
-            .with(|table| table.read_datagram(held.handle, None));
-        held.tell_drained();
-        match read {
-            DatagramRead::Datagram(datagram) => {
+        let lent = &mut self.lent;
+        let read = held.transport.with(|table| {
+            table.read_datagram(held.handle, None, |datagram| {
+                lent.resize(datagram.len(), 0);
+                datagram.copy_to(lent);
                 // The table holds a group's datagrams only with their source.
-                let source = datagram.source.as_deref().map_or(
+                datagram.source().map_or(
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                     socket_of,
-                );
-                f(&datagram.bytes, source);
-                // Moved, not copied: the table handed the datagram over whole.
-                self.lent = Some((datagram.bytes, source));
+                )
+            })
+        });
+        held.tell_drained();
+        match read {
+            DatagramRead::Datagram(source) => {
+                self.lent_from = Some(source);
+                f(self.lent.as_slice(), source);
                 true
             }
             DatagramRead::Empty | DatagramRead::End => false,
@@ -1097,7 +1102,7 @@ impl GroupTransport for AppGroupTransport {
     }
 
     fn keep(&mut self) {
-        self.kept = self.lent.is_some();
+        self.kept = self.lent_from.is_some();
     }
 }
 
@@ -1299,8 +1304,10 @@ impl SessionLinks for AppLinks {
     /// which is what the table opens as a group. Any other endpoint is no group the program's
     /// transport carries, and is refused before the program is asked.
     /// Every link opened from now on, and every one a listener opened after this takes, claims its
-    /// buffers from `tables`.
+    /// buffers from `tables`, and its row of the program's transport is taken now, one for each
+    /// link the tables hold.
     fn lend_buffers(&mut self, tables: LinkTables) {
+        self.transport.provision(tables.links());
         self.lent = Some(tables);
     }
 
@@ -1341,13 +1348,14 @@ impl LinkListener<HeapLink> for AppDatagramListener {
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         let socket = match next {
-            AcceptRead::Accepted(handle, remote) => {
-                AppDatagramSocket::accepted(&self.held.transport, handle, &remote)
+            AcceptRead::Accepted((handle, peer)) => {
+                AppDatagramSocket::accepted(&self.held.transport, handle, peer)
             }
             AcceptRead::Empty => return Ok(None),
             AcceptRead::End => return Err(LinkOpenError::Unsupported),
@@ -1961,12 +1969,14 @@ mod tests {
         transport
             .accepted(listening, "udp/198.51.100.3:50000")
             .unwrap();
-        let AcceptRead::Accepted(handle, remote) =
-            transport.with(|table| table.next_accepted(listening, None))
-        else {
+        let AcceptRead::Accepted((handle, peer)) = transport.with(|table| {
+            table.next_accepted(listening, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        }) else {
             panic!("the accepted source waits on the listener");
         };
-        let socket = AppDatagramSocket::accepted(&transport, handle, &remote);
+        let socket = AppDatagramSocket::accepted(&transport, handle, peer);
         // The program names another source, and then none: both are the accepted source's.
         transport
             .received(handle, b"one", Some("udp/203.0.113.7:9"))

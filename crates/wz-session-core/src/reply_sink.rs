@@ -531,40 +531,6 @@ impl ReplySink for BoxedReplySink {
     }
 }
 
-/// R311y321 — is `new` at least as recent as `cached`, by the ordering zenoh
-/// consolidates with?
-///
-/// zenoh compares `Option<uhlc::Timestamp>` with `>=` (api/session.rs, the
-/// Monotonic + Auto/Latest arms). `uhlc::Timestamp` derives `Ord` over its
-/// fields IN ORDER — `time: NTP64` then `id: ID` (uhlc timestamp.rs) — so the
-/// rule is lexicographic `(time, zid)`, and `Option`'s own ordering puts `None`
-/// BELOW every `Some`. Both halves matter: a stamped reply always beats an
-/// unstamped one, and two replies stamped at the same instant by different
-/// sources still have a deterministic winner rather than an arrival-order race.
-///
-/// NAMED DIVERGENCE — pico compares `msg->_commons._timestamp.time <=
-/// pen_rep->_tstamp.time` (`vendor/zenoh-pico/src/session/query.c:145`): the
-/// TIME WORD ONLY, and it drops on a tie, so pico keeps the FIRST arrival among
-/// equal stamps while zenoh keeps the LAST. wz follows zenoh: its order is
-/// total, so the delivered reply does not depend on which peer answered first.
-/// The tie is also where "no timestamps at all" lands (both read as `None`),
-/// which is why the choice is not academic — an unstamped keyexpr consolidates
-/// to the LAST reply here and to the FIRST under pico.
-#[cfg(feature = "alloc")]
-fn reply_ts_at_least(
-    new: Option<&crate::sample::TimestampHint>,
-    cached: Option<&crate::sample::TimestampHint>,
-) -> bool {
-    match (new, cached) {
-        // Option ordering: None < Some(_). An unstamped reply never displaces a
-        // stamped one; two unstamped replies tie, and a tie keeps the newer.
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some(_), None) => true,
-        (Some(n), Some(c)) => (n.time, n.zid.as_slice()) >= (c.time, c.zid.as_slice()),
-    }
-}
-
 /// R311y321 — reception-side reply consolidation as a DECORATOR over any
 /// [`ReplySink`], the apply-half of the `query-consolidation` atom.
 ///
@@ -603,7 +569,7 @@ fn reply_ts_at_least(
 ///   per keyexpr and flush the whole cache on the terminal final. zenoh and pico
 ///   agree on the shape (`api/session.rs:3025-3029` flushes at `nb_final == 0`;
 ///   `query.c:239-246` flushes at finalize); they differ only in the tie-break,
-///   see `reply_ts_at_least`.
+///   see `reply_hold::stamp_at_least`.
 ///
 /// The cache holds owned [`crate::reply::InboundReply`] values for BOTH caching
 /// modes, matching zenoh (`query.replies` is allocated for every mode but None,
@@ -611,13 +577,15 @@ fn reply_ts_at_least(
 /// stores only the keyexpr + stamp under Monotonic — an MCU memory economy, not
 /// a semantic difference, and moot here because this type is AP-only.
 #[cfg(feature = "alloc")]
-pub struct ConsolidatingSink<S: ReplySink> {
+use crate::reply_hold::ReplyHold;
+
+#[cfg(feature = "alloc")]
+pub struct ConsolidatingSink<S: ReplySink, H: ReplyHold = HeapHold> {
     inner: S,
     mode: crate::query_mode::ConsolidationMode,
-    /// Most-recent reply per keyexpr. Empty for `None` (never populated), so a
-    /// non-consolidating pending pays one empty `HashMap` — no allocation until
-    /// the first insert.
-    cache: hashbrown::HashMap<alloc::string::String, crate::reply::InboundReply>,
+    /// What the mode keeps of each key ([`crate::reply_hold`]). Empty for `None`, which holds
+    /// nothing.
+    cache: H,
     /// What the node records on the timestamp stack of a reply as it arrives, for a query that is
     /// instrumented: see [`Self::with_arrival`].
     #[cfg(feature = "pubsub-ts-stack")]
@@ -626,15 +594,30 @@ pub struct ConsolidatingSink<S: ReplySink> {
 
 #[cfg(feature = "alloc")]
 impl<S: ReplySink> ConsolidatingSink<S> {
-    /// Wrap `inner` with `mode`. `ConsolidationMode::None` is a pure
+    /// Wrap `inner` with `mode`, holding on the heap. `ConsolidationMode::None` is a pure
     /// passthrough — the wrapper is installed on EVERY pending so the registry's
     /// `C` stays one type, and a non-consolidating z_get must therefore behave
     /// exactly as it did before this type existed.
     pub fn new(mode: crate::query_mode::ConsolidationMode, inner: S) -> Self {
+        Self::with_hold(mode, inner, HeapHold::default())
+    }
+
+    /// Wrap `inner` in passthrough mode — the constructor every non-z_get
+    /// registration path uses (liveliness, the aligner's own plumbing), so their
+    /// call sites keep their signatures and their behaviour.
+    pub fn passthrough(inner: S) -> Self {
+        Self::new(crate::query_mode::ConsolidationMode::None, inner)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<S: ReplySink, H: ReplyHold> ConsolidatingSink<S, H> {
+    /// Wrap `inner` with `mode`, holding in `hold`.
+    pub fn with_hold(mode: crate::query_mode::ConsolidationMode, inner: S, hold: H) -> Self {
         Self {
             inner,
             mode,
-            cache: hashbrown::HashMap::new(),
+            cache: hold,
             #[cfg(feature = "pubsub-ts-stack")]
             arrival: None,
         }
@@ -648,29 +631,6 @@ impl<S: ReplySink> ConsolidatingSink<S> {
         self
     }
 
-    /// Wrap `inner` in passthrough mode — the constructor every non-z_get
-    /// registration path uses (liveliness, the aligner's own plumbing), so their
-    /// call sites keep their signatures and their behaviour.
-    pub fn passthrough(inner: S) -> Self {
-        Self::new(crate::query_mode::ConsolidationMode::None, inner)
-    }
-
-    /// Would `reply` displace what is cached for its keyexpr? `true` when
-    /// nothing is cached yet, or when the arrival is at least as recent.
-    fn displaces_cached(&self, reply: &dyn ReplyView) -> bool {
-        match self.cache.get(reply.keyexpr()) {
-            None => true,
-            Some(cached) => reply_ts_at_least(reply.timestamp(), cached.timestamp()),
-        }
-    }
-
-    fn cache_reply(&mut self, reply: &dyn ReplyView) {
-        self.cache.insert(
-            alloc::string::String::from(reply.keyexpr()),
-            crate::reply::InboundReply::from_view(reply),
-        );
-    }
-
     /// R311y323 — deliver and clear the `Latest` cache. The ONE place that
     /// decides a flush is due, shared by the normal-final path
     /// ([`ReplySink::on_final`]) and the timeout path
@@ -679,18 +639,15 @@ impl<S: ReplySink> ConsolidatingSink<S> {
     /// as they arrive and the cache (if any) is only a staleness record, never a
     /// delivery backlog.
     fn flush_latest(&mut self) {
-        if self.mode == crate::query_mode::ConsolidationMode::Latest {
-            // Each held reply is given up whole: an inner sink that delivers it after its caller
-            // has let go of what it holds keeps it with no copy.
-            for (_, reply) in self.cache.drain() {
-                self.inner.on_reply_owned(reply);
-            }
-        }
+        let inner = &mut self.inner;
+        crate::reply_hold::flush_latest(self.mode, &mut self.cache, &mut |reply| {
+            inner.on_reply(reply)
+        });
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
+impl<S: ReplySink, H: ReplyHold> ReplySink for ConsolidatingSink<S, H> {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         // A reply that carries a timestamp stack is completed as it ARRIVES, before consolidation
         // can hold it back: the node that receives a reply records its routing and its receive at
@@ -735,70 +692,51 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
 }
 
 #[cfg(feature = "alloc")]
-impl<S: ReplySink> ConsolidatingSink<S> {
-    /// What the sink does with a reply, by the mode it was made with: forwards it, caches it, or
-    /// drops it as stale ([`ReplySink::on_reply`] hands it here, completed on arrival if it
-    /// carries a timestamp stack).
+impl<S: ReplySink, H: ReplyHold> ConsolidatingSink<S, H> {
+    /// What the sink does with a reply, by the mode it was made with: forwards it, holds it, or
+    /// drops it as stale, by the one rule every consolidating get applies
+    /// ([`crate::reply_hold::consolidate`]; [`ReplySink::on_reply`] hands it here, completed on
+    /// arrival if it carries a timestamp stack).
     fn consolidate(&mut self, reply: &dyn ReplyView) {
-        use crate::query_mode::ConsolidationMode;
-        // An Err reply is NEVER consolidated — forwarded immediately, in every
-        // mode, and never cached.
-        //
-        // This is zenoh's shape, and zenoh expresses it STRUCTURALLY rather than
-        // as a rule: its consolidation match lives entirely inside
-        // `send_response`'s `ResponseBody::Reply` arm, while `ResponseBody::Err`
-        // is a DISJOINT arm that calls `callback.call(new_reply)` directly
-        // (api/session.rs, the two arms of the payload match). It could not
-        // consolidate an Err even if it wanted to: `Reply.result`'s `Err` variant
-        // is a bare `ReplyError { payload, encoding }` with NO keyexpr, and the
-        // consolidation arms key the cache on `result.unwrap().key_expr` — which
-        // is unreachable for an Err by construction.
-        //
-        // wz cannot borrow that structure: `InboundReply` gives EVERY arm a
-        // `keyexpr_literal` (the wire dispatcher resolves it before the body
-        // match), so an Err arrives here fully cache-able and the type system
-        // does not stop it. The guard has to be explicit.
-        //
-        // R311y321 review — the first cut of this method had no guard and
-        // reasoned, wrongly, that an Err "ties with an unstamped Put and is
-        // forwarded — matching zenoh, which runs every reply through the same
-        // match". zenoh does not run every reply through the same match, and the
-        // consequences were data loss on the default pico path in BOTH
-        // directions: against a stamped Put the Err failed `displaces_cached` and
-        // was silently swallowed; against an unstamped Put it won the tie and
-        // EVICTED the good reply. The comment was the artifact that hid it — it
-        // argued from the tie rule and never checked the upstream arm split.
-        if reply.kind() == ReplyKind::Err {
-            self.inner.on_reply(reply);
-            return;
+        let inner = &mut self.inner;
+        let _ = crate::reply_hold::consolidate(self.mode, &mut self.cache, reply, &mut |reply| {
+            inner.on_reply(reply)
+        });
+    }
+}
+
+/// The replies one get holds on the heap: its owned replies, one per key. Under `Monotonic` the
+/// whole reply is kept too, as zenoh keeps it (`query.replies`), though only its stamp is read.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+pub struct HeapHold(hashbrown::HashMap<alloc::string::String, crate::reply::InboundReply>);
+
+#[cfg(feature = "alloc")]
+impl ReplyHold for HeapHold {
+    fn displaces(&self, reply: &dyn ReplyView) -> bool {
+        match self.0.get(reply.keyexpr()) {
+            None => true,
+            Some(held) => {
+                crate::reply_hold::stamp_at_least(reply.timestamp_parts(), held.timestamp_parts())
+            }
         }
-        match self.mode {
-            ConsolidationMode::None => self.inner.on_reply(reply),
-            ConsolidationMode::Monotonic => {
-                // zenoh's arm: cache AND forward when this is not stale; drop
-                // outright when it is.
-                if self.displaces_cached(reply) {
-                    self.cache_reply(reply);
-                    self.inner.on_reply(reply);
-                }
-            }
-            ConsolidationMode::Latest => {
-                // Cache only; the flush happens at the end, via `flush_latest` —
-                // reached from `on_final` on the normal path and from
-                // `on_timeout` on the expired one.
-                //
-                // R311y323 review — this said the timeout path was covered "for
-                // free" because the sweep fired `on_final`. That was true when it
-                // was written and is now the reasoning `on_timeout`'s override
-                // exists to REFUTE: the sweep fires `on_timeout`, and taking the
-                // free ride (the trait default's `on_reply` -> `on_final`) would
-                // emit the Timeout error BEFORE the flush. zenoh flushes first.
-                // A comment describing a bug as a convenience is how the y321 Err
-                // bug shipped; see the override.
-                if self.displaces_cached(reply) {
-                    self.cache_reply(reply);
-                }
-            }
+    }
+
+    fn hold(
+        &mut self,
+        reply: &dyn ReplyView,
+        _whole: bool,
+    ) -> Result<(), crate::reply_hold::HoldRefused> {
+        self.0.insert(
+            alloc::string::String::from(reply.keyexpr()),
+            crate::reply::InboundReply::from_view(reply),
+        );
+        Ok(())
+    }
+
+    fn drain(&mut self, each: &mut dyn FnMut(&dyn ReplyView)) {
+        for (_, reply) in self.0.drain() {
+            each(&reply);
         }
     }
 }
@@ -1294,11 +1232,11 @@ mod consolidating_sink_tests {
         }
     }
 
-    /// A `Latest` flush gives each held reply up whole, at the final and at a timeout alike, and
-    /// a timeout reaches the inner sink as its own timeout, after the flush; a reply forwarded as
-    /// it arrives is lent.
+    /// A `Latest` flush hands each held reply on from the hold that keeps it, at the final and at a
+    /// timeout alike, and a timeout reaches the inner sink as its own timeout, after the flush; a
+    /// reply forwarded as it arrives is lent as it came.
     #[test]
-    fn a_flush_gives_its_replies_up_whole_and_a_timeout_reaches_the_inner_sink() {
+    fn a_flush_hands_its_replies_on_and_a_timeout_reaches_the_inner_sink() {
         let mut kept = Keeper::default();
         {
             let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut kept);
@@ -1310,7 +1248,7 @@ mod consolidating_sink_tests {
             kept.events,
             alloc::vec![
                 ("lent", b"boom".to_vec()),
-                ("owned", b"held".to_vec()),
+                ("lent", b"held".to_vec()),
                 ("final", Vec::new())
             ]
         );
@@ -1322,7 +1260,7 @@ mod consolidating_sink_tests {
         }
         assert_eq!(
             timed.events,
-            alloc::vec![("owned", b"held".to_vec()), ("timeout", Vec::new())],
+            alloc::vec![("lent", b"held".to_vec()), ("timeout", Vec::new())],
             "the flush first, then the inner sink's own timeout"
         );
         let mut passed = Keeper::default();
@@ -1400,9 +1338,69 @@ mod consolidating_sink_tests {
         );
     }
 
+    /// A view that states its stamp as parts alone, as a reply read where it lies does, is
+    /// consolidated by that stamp and kept with it.
+    #[test]
+    fn a_view_that_states_its_stamp_as_parts_is_ordered_and_kept_by_it() {
+        struct PartsOnly {
+            payload: &'static [u8],
+            time: u64,
+        }
+        impl ReplyView for PartsOnly {
+            fn rid(&self) -> crate::wire_id::RequestId {
+                1
+            }
+            fn keyexpr(&self) -> &str {
+                "a/b"
+            }
+            fn kind(&self) -> ReplyKind {
+                ReplyKind::Put
+            }
+            fn payload(&self) -> &[u8] {
+                self.payload
+            }
+            fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+                None
+            }
+            fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+                Some(crate::reply_stage::TimestampParts {
+                    time: self.time,
+                    zid: &[7],
+                })
+            }
+        }
+        let mut rec = Recorder::default();
+        {
+            let mut sink = ConsolidatingSink::new(ConsolidationMode::Latest, &mut rec);
+            sink.on_reply(&PartsOnly {
+                payload: b"new",
+                time: 20,
+            });
+            sink.on_reply(&PartsOnly {
+                payload: b"old",
+                time: 10,
+            });
+            sink.on_final(1);
+        }
+        assert_eq!(
+            rec.delivered,
+            alloc::vec![("a/b".to_string(), b"new".to_vec())],
+            "the ts=10 arrival is stale by its parts"
+        );
+        let kept = InboundReply::from_view(&PartsOnly {
+            payload: b"x",
+            time: 5,
+        });
+        assert_eq!(
+            kept.timestamp_parts(),
+            Some(crate::reply_stage::TimestampParts { time: 5, zid: &[7] }),
+            "a retained reply keeps the stamp its view stated"
+        );
+    }
+
     /// A stamped reply always beats an unstamped one, in both directions —
     /// `Option`'s `None < Some` ordering, which zenoh gets for free by comparing
-    /// `Option<Timestamp>` and wz reproduces in `reply_ts_at_least`.
+    /// `Option<Timestamp>` and wz reproduces in `reply_hold::stamp_at_least`.
     #[test]
     fn stamped_beats_unstamped_regardless_of_arrival_order() {
         for (first, second, want) in [

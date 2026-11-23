@@ -1935,6 +1935,11 @@ pub mod query;
 #[cfg(feature = "storage-profile")]
 pub mod reply_stage;
 
+/// What a consolidating get holds back, and the one rule it holds by: the owned replies of one get
+/// on the heap, or the rows of the session's one table of held replies, with no allocation.
+#[cfg(feature = "storage-profile")]
+pub mod reply_hold;
+
 /// Fixed-memory step S9a — every table a PEER writes, or that is owed to one
 /// peer, for ONE session: its keyexpr aliases, the declarations it made to us, its
 /// interests and what is staged back, the replies and `Final`s its queries owe.
