@@ -2672,111 +2672,27 @@ pub unsafe extern "C" fn z_declare_subscriber(
     callback: *mut z_moved_closure_sample_t,
     options: *const crate::session::z_subscriber_options_t,
 ) -> ZResult {
-    guarded(|| {
-        if subscriber.is_null() || callback.is_null() {
-            return Z_ERR_NULL;
-        }
-        // Consume the moved closure FIRST (pico consume-on-all-paths contract):
-        // the `CClosure` now owns the C `drop(context)` responsibility, so an
-        // early error return below drops it and frees the context; on success
-        // it moves into the subscriber callback.
-        let owned = &mut (*callback)._this;
-        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
-        *owned = z_owned_closure_sample_t::null_value();
-
-        let state = match session_handle(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        // A closed session takes no declaration; the closure this call consumed runs its drop.
-        if state.is_closed() {
-            return Z_ERR_SESSION_CLOSED;
-        }
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
-        };
-        // Reject a non-canonical / pico-unsafe keyexpr UP FRONT (e.g. the
-        // `**/c/*` three-family bug), returning `Z_ERR_INVALID` rather than
-        // recording a dead SSOT entry that never matches yet reports `Z_OK`.
-        // This is the same outbound gate wz's own `Session::declare_subscriber`
-        // applies per face — hoisted here so the verdict is uniform whether or
-        // not a peer is connected yet (the registry declares best-effort per
-        // face, so a per-face reject would otherwise be swallowed). `cclosure`
-        // is already owned, so this early return drops it and runs the C
-        // `drop(context)` (consume-on-all-paths).
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
-        }
-        // The subscriber's place is taken before anything is declared, so a full pool refuses
-        // the declaration and declares nothing; the closure runs its drop as on every refusal.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber)
-        else {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
-        };
-
-        // Record the subscription in the session's SSOT and declare it on every
-        // face that is already up. With no peer yet — a listener before its
-        // first connection — this declares nothing on the wire and still
-        // records the entry (pico's declare-before-peer); each face replays the
-        // SSOT as it comes up. Recording the local entry always succeeds
-        // (mirrors pico's `_z_register_subscriber`).
-        // R311y554 — the origin is the caller's `allowed_origin` with
-        // `local-subscriber`, and `Locality::Remote` without it: a FIDELITY
-        // choice with a measured source rather than a soundness workaround.
-        // `Z_FEATURE_LOCAL_SUBSCRIBER` defaults to 0 upstream, which is why
-        // pico's own `z_subscriber_options_t` has no `allowed_origin` field in a
-        // default build; a default pico build never delivers a session's own
-        // put to its own subscriber, so neither does that arm of this ABI.
-        // R2959 — pico's two keys for one subscriber, and they are NOT the same
-        // one. The subscription's own key gets the NON-WILD PREFIX declared,
-        // and that declaration goes on the wire FIRST
-        // (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
-        // the `DeclSubscriber` is then announced on the CALLER's key, a literal
-        // for a view (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few
-        // lines on). Measured on the wire by
-        // `pico_keyexpr_declaration_twice_and_diff.rs`: `DeclKexpr = demo/kd/sub`
-        // then `DeclSubscriber on "demo/kd/sub/**"`.
-        let engine = engine_of(state);
-        let key = match DeclaredKeyexpr::declare_non_wild_prefix(&engine, &ke, declared_of(keyexpr))
-        {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
-            return Z_ERR_INVALID;
-        };
-        // A peer or router-hat session retracts the subscription naming ITS key
-        // (`_z_undeclare_subscriber`), which is the prefix declaration above and
-        // not the caller's key the announce went out on.
-        let retraction = key.retraction_naming(&PicoSession::of(state));
-        let released = cclosure.release_latch();
-        // A session that holds no more subscribers, its table at the limit it opened under or
-        // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
-        // hold; the engine dropped the sink, so the closure's drop has run.
-        let Some(id) =
-            engine.declare_subscriber_on_wire(&ke, wire, subscriber_origin(options), retraction, {
-                let closure = Arc::new(cclosure);
-                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            })
-        else {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
-        };
-        let state = slot.fill(SubscriberState {
-            shared: engine,
-            id,
-            key,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            released,
-        });
-        (*state).bind();
-        *subscriber = z_owned_subscriber_t {
-            handle: state as *mut c_void,
-            _pad: [core::ptr::null_mut(); 3],
-        };
-        Z_OK
-    })
+    // A null out-parameter refuses the call before the closure is taken: it is still the
+    // caller's.
+    if subscriber.is_null() {
+        return Z_ERR_NULL;
+    }
+    guarded(
+        || match declare_subscriber_with(zs, keyexpr, callback, options, true) {
+            Ok(Some((slot, state))) => {
+                let state = slot.fill(state);
+                (*state).bind();
+                *subscriber = z_owned_subscriber_t {
+                    handle: state as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 3],
+                };
+                Z_OK
+            }
+            // The owned form always asks for its place, so a declaration answers one.
+            Ok(None) => Z_ERR_GENERIC,
+            Err(rc) => rc,
+        },
+    )
 }
 
 /// Declare a subscriber with NO owned handle (pico
@@ -2788,11 +2704,10 @@ pub unsafe extern "C" fn z_declare_subscriber(
 /// `z_pong.c` and `z_sub_thr.c` all take this form, which is why one export
 /// unlocks three examples.
 ///
-/// Everything except the handle is [`z_declare_subscriber`]: same SSOT
-/// registration, same declare-before-peer replay, same up-front keyexpr gate,
-/// same consume-on-all-paths closure contract. The registry entry is simply
-/// never removed, and `z_close` clears it with the rest of the session — which
-/// is also where the C `drop(context)` finally runs.
+/// Everything except the handle is [`z_declare_subscriber`]'s, one body for both
+/// (`declare_subscriber_with`). The registry entry is never removed, and
+/// `z_close` clears it with the rest of the session — which is also where the C
+/// `drop(context)` finally runs.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_background_subscriber(
     zs: *const z_loaned_session_t,
@@ -2800,65 +2715,123 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
     callback: *mut z_moved_closure_sample_t,
     options: *const crate::session::z_subscriber_options_t,
 ) -> ZResult {
-    guarded(|| {
-        if callback.is_null() {
-            return Z_ERR_NULL;
-        }
-        let owned = &mut (*callback)._this;
-        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
-        *owned = z_owned_closure_sample_t::null_value();
+    guarded(
+        || match declare_subscriber_with(zs, keyexpr, callback, options, false) {
+            Ok(_) => Z_OK,
+            Err(rc) => rc,
+        },
+    )
+}
 
-        let state = match session_handle(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        // A closed session takes no declaration; the closure this call consumed runs its drop.
-        if state.is_closed() {
-            return Z_ERR_SESSION_CLOSED;
+/// The place and the state of an owned subscriber the shared body declared, before the place is
+/// filled.
+type OwnedSubscriber = (crate::object_slot::Slot<SubscriberState>, SubscriberState);
+
+/// The body both subscriber doors share, out of line so neither export holds a copy of it: the
+/// moved closure taken, the session and the key read and checked, the subscription's own key
+/// declared and the subscription recorded and announced. `owned` asks for the owned door's
+/// handle place, taken after the key's checks and before anything is declared, so a full pool
+/// declares nothing; the owned door is answered the place and the state to fill it with. The
+/// background door's closure latch is kept with the session instead, which its close waits on.
+///
+/// The closure is consumed on every path (pico's consume-on-all-paths contract): from the first
+/// line it is owned here, so any refusal below drops it and runs the C `drop(context)`.
+///
+/// # Safety
+/// As the doors': `zs` and `keyexpr` null or live loans, `callback` null or a valid moved
+/// closure, `options` null or valid.
+#[inline(never)]
+unsafe fn declare_subscriber_with(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *const crate::session::z_subscriber_options_t,
+    owned: bool,
+) -> Result<Option<OwnedSubscriber>, ZResult> {
+    if callback.is_null() {
+        return Err(Z_ERR_NULL);
+    }
+    let moved = &mut (*callback)._this;
+    let cclosure = CClosure::new(moved.context, moved.call, moved.drop);
+    *moved = z_owned_closure_sample_t::null_value();
+
+    let Some(state) = session_handle(zs) else {
+        return Err(Z_ERR_NULL);
+    };
+    // A closed session takes no declaration; the closure this call consumed runs its drop.
+    if state.is_closed() {
+        return Err(Z_ERR_SESSION_CLOSED);
+    }
+    // The caller's key is read where it lies: the session copies it into its own key arena, so
+    // no copy is made for the call.
+    let Some(ke) = keyexpr_str(keyexpr) else {
+        return Err(Z_ERR_INVALID);
+    };
+    // A non-canonical or pico-unsafe keyexpr is refused up front, the outbound gate wz's own
+    // `Session::declare_subscriber` applies per face, so the verdict is the same whether or not
+    // a peer is up yet (the registry declares best-effort per face and would swallow a per-face
+    // refusal).
+    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(ke).is_err() {
+        return Err(Z_ERR_INVALID);
+    }
+    let slot = if owned {
+        match crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber) {
+            Some(slot) => Some(slot),
+            None => return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY),
         }
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
-        };
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
-        }
-        // The returned SubId is deliberately discarded: with no owned handle
-        // there is nothing that could ever undeclare it, so retaining the id
-        // would only invite a caller-less removal path that pico does not have.
-        // R311y554 — same Remote pin, same reason as the owned form above.
-        // R2959 — and the same two keys: the declaration lives in the registry
-        // entry, which is the only holder a handle-less subscriber has.
-        let engine = engine_of(state);
-        let key = match DeclaredKeyexpr::declare_non_wild_prefix(&engine, &ke, declared_of(keyexpr))
-        {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
-            return Z_ERR_INVALID;
-        };
-        // Named before the key is dropped: the entry keeps it alive through
-        // `wire`'s anchor (see `subscriber_wire`), so the id it names stays
-        // declared for as long as the entry can retract.
-        let retraction = key.retraction_naming(&PicoSession::of(state));
-        drop(key);
+    } else {
+        None
+    };
+    // pico's two keys for one subscriber, which are NOT the same one. The subscription's own
+    // key gets its NON-WILD PREFIX declared, and that declaration goes on the wire FIRST
+    // (`vendor/zenoh-pico/src/net/primitives.c` @
+    // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
+    // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
+    // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
+    let engine = engine_of(state);
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, ke, declared_of(keyexpr))?;
+    let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
+        return Err(Z_ERR_INVALID);
+    };
+    // A peer or router-hat session retracts the subscription naming ITS key
+    // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's
+    // key the announce went out on. A background subscriber's entry keeps that declaration
+    // alive through `wire`'s anchor, so the id it names stays declared as long as it can
+    // retract.
+    let retraction = key.retraction_naming(&PicoSession::of(state));
+    let released = cclosure.release_latch();
+    let released = if owned {
+        Some(released)
+    } else {
         // No handle will undeclare this one, so the session's close waits for it.
-        state.keep_background(cclosure.release_latch());
-        match engine.declare_subscriber_on_wire(
-            &ke,
-            wire,
-            subscriber_origin(options),
-            retraction,
-            {
-                let closure = Arc::new(cclosure);
-                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+        state.keep_background(released);
+        None
+    };
+    // A session that holds no more subscribers, its table at the limit it opened under or its
+    // declaration ids spent, refuses the subscriber as pico refuses an entity it cannot hold;
+    // the engine dropped the sink, so the closure's drop has run.
+    let closure = Arc::new(cclosure);
+    let Some(id) = engine.declare_subscriber_on_wire(
+        ke,
+        wire,
+        subscriber_origin(options),
+        retraction,
+        Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
+    ) else {
+        return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    };
+    Ok(match (slot, released) {
+        (Some(slot), Some(released)) => Some((
+            slot,
+            SubscriberState {
+                shared: engine,
+                id,
+                key,
+                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+                released,
             },
-        ) {
-            Some(_) => Z_OK,
-            // As the owned form above refuses it.
-            None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
-        }
+        )),
+        _ => None,
     })
 }
 
@@ -3439,5 +3412,105 @@ mod tests {
         // SAFETY: a sample this crate marshalled and bound.
         let carried = unsafe { z_sample_encoding(none.as_loaned()) };
         assert!(carried.is_null(), "no encoding carried, none handed out");
+    }
+
+    unsafe extern "C" fn never_called(_: *const z_loaned_sample_t, _: *mut c_void) {}
+
+    unsafe extern "C" fn count_drop(context: *mut c_void) {
+        *(context as *mut usize) += 1;
+    }
+
+    /// A moved sample closure whose drop counts into `drops`.
+    fn counted_closure(drops: &mut usize) -> z_moved_closure_sample_t {
+        z_moved_closure_sample_t {
+            _this: z_owned_closure_sample_t {
+                context: (drops as *mut usize).cast::<c_void>(),
+                call: Some(never_called),
+                drop: Some(count_drop),
+            },
+        }
+    }
+
+    /// Both subscriber doors run one body, which takes the moved closure first: a refused
+    /// declaration on no session runs the closure's drop once and leaves the caller's closure
+    /// null, through either door. The owned door with no place to write its subscriber refuses
+    /// before taking the closure, which stays the caller's, and a missing closure is refused by
+    /// both.
+    #[test]
+    fn both_subscriber_doors_take_the_closure_and_refuse_alike() {
+        let mut out = z_owned_subscriber_t::null_value();
+        let mut drops = 0usize;
+        let mut closure = counted_closure(&mut drops);
+        // SAFETY: every pointer is null or points at a live value of its type.
+        let rc = unsafe {
+            z_declare_subscriber(
+                core::ptr::null(),
+                &mut out,
+                core::ptr::null(),
+                &mut closure,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(rc, Z_ERR_NULL, "no session");
+        assert_eq!(drops, 1, "the refused declaration ran the closure's drop");
+        assert!(closure._this.call.is_none() && closure._this.drop.is_none());
+        assert!(out.handle.is_null());
+
+        let mut drops = 0usize;
+        let mut closure = counted_closure(&mut drops);
+        // SAFETY: as above.
+        let rc = unsafe {
+            z_declare_background_subscriber(
+                core::ptr::null(),
+                core::ptr::null(),
+                &mut closure,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(rc, Z_ERR_NULL, "no session");
+        assert_eq!(
+            drops, 1,
+            "the background door took the closure as the owned one does"
+        );
+        assert!(closure._this.call.is_none() && closure._this.drop.is_none());
+
+        let mut drops = 0usize;
+        let mut closure = counted_closure(&mut drops);
+        // SAFETY: as above.
+        let rc = unsafe {
+            z_declare_subscriber(
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                &mut closure,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(rc, Z_ERR_NULL, "no subscriber to write");
+        assert_eq!(drops, 0, "the closure is still the caller's");
+        assert!(closure._this.drop.is_some());
+        // SAFETY: the caller's closure, dropped once.
+        unsafe { z_closure_sample_drop(&mut closure) };
+        assert_eq!(drops, 1);
+
+        // SAFETY: as above.
+        let (owned, background) = unsafe {
+            (
+                z_declare_subscriber(
+                    core::ptr::null(),
+                    &mut out,
+                    core::ptr::null(),
+                    core::ptr::null_mut(),
+                    core::ptr::null(),
+                ),
+                z_declare_background_subscriber(
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    core::ptr::null_mut(),
+                    core::ptr::null(),
+                ),
+            )
+        };
+        assert_eq!((owned, background), (Z_ERR_NULL, Z_ERR_NULL), "no closure");
     }
 }
