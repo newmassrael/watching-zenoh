@@ -120,7 +120,7 @@ mod tests;
 
 pub use engine::{
     ClockMovesWord, CoopConfig, CoopEngine, EndpointRefusal, KeyWireFormRefused, OpenError,
-    OpenKeyIds, Refusal, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES,
+    OpenKeyIds, Refusal,
 };
 #[cfg(feature = "time-base")]
 pub use engine::ClockMoves;

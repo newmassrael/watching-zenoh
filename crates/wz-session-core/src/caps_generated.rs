@@ -70,6 +70,8 @@ pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 1
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
 pub(super) const MAX_PEER_NODES: usize = limit(option_env!("WZ_LIMIT_MAX_PEER_NODES"), 0);
+pub(super) const MAX_FACES: usize = limit(option_env!("WZ_LIMIT_MAX_FACES"), 1000);
+pub(super) const MAX_ACCEPT_PENDING: usize = limit(option_env!("WZ_LIMIT_MAX_ACCEPT_PENDING"), 100);
 pub(super) const QUERIER_MAX_PENDING_QUERIES: usize =
     limit(option_env!("WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"), 0);
 pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =

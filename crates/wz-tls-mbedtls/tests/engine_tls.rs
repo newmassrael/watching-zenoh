@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use rcgen::ExtendedKeyUsagePurpose;
 
 use common::{library, Authority, End};
-use wz_capi_coop::{CoopConfig, CoopEngine, OpenError, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES};
+use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
+use wz_capi_coop::{CoopConfig, CoopEngine, OpenError};
 use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_posix::net::PosixUdpSocket;
@@ -72,8 +73,10 @@ fn base_config() -> CoopConfig {
         redial_ms: None,
         idle_wait_ms: 100,
         listen: Vec::new(),
-        accept_pending: DEFAULT_ACCEPT_PENDING,
-        max_faces: DEFAULT_MAX_FACES,
+        accept_pending: admitted_handshakes(&wz_session_core::limits::SessionLimits::defaults())
+            .expect("the build admits its own value"),
+        max_faces: admitted_faces(&wz_session_core::limits::SessionLimits::defaults())
+            .expect("the build admits its own value"),
         groups: Vec::new(),
         clock_moves: None,
         limits: wz_session_core::limits::SessionLimits::defaults(),

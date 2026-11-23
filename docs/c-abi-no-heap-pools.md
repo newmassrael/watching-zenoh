@@ -207,8 +207,9 @@ The engine's `Core` (faces, listeners, groups, admission), `McuActions` behind `
 admission registry, reconnect state, the handshake's cookie and signing key, the zid, the
 `Arc<CoopEngine>` the ABI holds, the `Box<dyn SessionDrive>`.
 
-- Bound: one dial face; NEW MAX_FACES for a listening session (today `CoopConfig::max_faces`,
-  default 1000) and NEW MAX_ACCEPT_PENDING (today `DEFAULT_ACCEPT_PENDING`, 100);
+- Bound: one dial face; `MAX_FACES` for a listening session (default 1,000, zenoh's
+  `max_sessions`; 10 at the pico preset) and `MAX_ACCEPT_PENDING` (default 100; 1 at the pico
+  preset), which `CoopConfig::max_faces` and `accept_pending` are held to (section 9.6);
   `MAX_STATIC_CONNECT` endpoints, each at most `MAX_LOCATOR_LEN`; `HANDSHAKE_COOKIE_BYTES`.
 - Form: the session object is a slot of the process session pool (`object_pool.rs` already has
   the kind); its arena holds the faces in a `Lent` table; references between the session's parts
@@ -609,13 +610,17 @@ its own either way, and the build still refuses a document that raises a value (
 | `MAX_PENDING_REPLIES` | 8 | 2 | two queries replied to, in pico's queryable API test |
 | `MAX_PENDING_FINALS` | 8 | 2 | two queries held, in the same test |
 | `DELIVERY_LANE_BYTES` | 65,536 | 4,380 | the least lane the build accepts (`holds_a_read`), below |
+| `MAX_FACES` | 1,000 | 10 | zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB`, a constant no switch sets (section 9.6) |
+| `MAX_ACCEPT_PENDING` | 100 | 1 | zenoh-pico's accept task, which handshakes one link at a time |
 
 The limits zenoh-pico has a constant for already default to it (`PICO_UNICAST_BATCH_BYTES` 2,048,
 `PICO_MULTICAST_BATCH_BYTES` 2,048, `PICO_FRAG_MAX_BYTES` 4,096) and have no preset.
 `MAX_KEYEXPR_BYTES` keeps 256: zenoh-pico bounds no key, and a shorter bound would refuse keys a
 router declares and samples it delivers that zenoh-pico takes. The limits of what the peer writes
 (`MAX_INBOUND_SUB_INTERESTS`, `MAX_REMOTE_DECLS`, `MAX_PEER_KEYEXPR_ALIASES`) keep theirs too: the
-peer, not the program, decides how many it sends.
+peer, not the program, decides how many it sends, and zenoh-pico allocates each as it comes with no
+bound, so a lower preset would refuse declarations zenoh-pico accepts. Their memory is to be cut by
+the form of their rows (a pool of rows the faces share), not by a lower bound.
 
 The lane's preset is one record's room: the larger of the batch and the largest rejoined message
 (4,096), a key of 256 bytes, a clock id of 16 and a 4-byte id for each of the 3 subscribers. Both
@@ -856,3 +861,89 @@ reassembly buffers move no cell, each holding one link:
 | st, rtt, 8 bytes | 9,960 | 43,488 | about 34,700 |
 | st, 64 and 1,024 bytes | 8,216 to 9,960 | not measured since section 9.4 | the 8-byte cell's, and a copied payload of about 1,100 in the rtt cell at 1,024 |
 | mt, every workload and size | 8,312 to 10,072 | not measured since section 9.4 | st's, and about 250 for the read task's thread (its stack is the static pool `arm_w_mt.conf` places) |
+
+### 9.6 The faces a session holds, and the pico preset of them
+
+A session of the cooperative engine holds the dial role's face, a face for each group it joins and
+as many faces besides as its config's `max_faces` admits: the links it accepts, a link still in its
+handshake among them (`Core::accept_face` counts it), and those it attaches. Its open lends each of
+those faces one set of a face's tables, and each link the buffers of one link; a listener's arena
+also holds the buffers of `accept_pending` links more (`ArenaPlan::of` in
+`crates/wz-capi-coop/src/arena.rs`).
+
+**What it was.** The open lent a set for every link it might hold, the handshakes included, and the
+pico interface stated zenoh's numbers for a listener with nothing to lower them by: 1,000 faces and
+100 handshakes, so a listening session lent 1,101 sets and the buffers of 1,101 links, and a client
+one of each.
+
+**The two limits.** `MAX_FACES` (default 1,000, zenoh's `transport/unicast/max_sessions`) and
+`MAX_ACCEPT_PENDING` (default 100, zenoh's `transport/unicast/accept_pending`) are limits of the
+session, bound at the open and read from its snapshot, so a document's `wz/limits` states them; the
+arena holds the config's two numbers to the session's values under the build's, and a config or a
+document over either is refused by the limit's name (`ArenaRefused::Limit`), as a stage after the
+build only lowers the memory the build fixes. The pico interface states the session's values for a
+listener (`admitted_faces`, `admitted_handshakes`) and no face besides the dial for a session that
+listens on nothing, as zenoh-pico's client holds its one transport. The sets are lent for the faces
+alone: the dial role's, `max_faces` and the groups. The Rust and zenoh-c nodes run on the tokio
+engine, which keeps zenoh's own `max_sessions` and `accept_pending` and reads neither limit.
+
+**The pico preset.** zenoh-pico refuses an inbound link once its unicast transport holds
+`Z_LISTEN_MAX_CONNECTION_NB` peers, a constant of its configuration template that no build switch
+sets (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`,
+`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+`if (_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB) {`), and its
+accept task runs the whole handshake of one link before it takes the next
+(`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+`ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`). The preset is those: `MAX_FACES` 10
+and `MAX_ACCEPT_PENDING` 1 (section 9.1).
+
+**What one set holds.** A face's set is `FaceTables` (`crates/wz-capi-coop/src/engine/registry.rs`):
+the face's pending gets and `PeerTables` of what its peer writes and is owed. Most of it is rows
+the arena lends at the open, sized by limits a document lowers; the tables keyed by the peer's ids
+are inline in the registry at the build's capacities, each row an id and its key's place in the key
+arena. The preset lowers none of the limits of what the peer writes (section 9.1): the peer decides
+how much it sends and zenoh-pico takes each as it comes, so those rows are to shrink by their form
+(a pool of rows the faces share), not by a lower bound. Estimates, not a measurement; the arena's
+parts are its row `peer tables` and its row `pending gets`:
+
+| part | where | sized by | build's defaults | pico preset |
+|------|-------|----------|-----------------:|------------:|
+| the replies staged for the peer's queries, each with a key and a payload | arena | `MAX_PENDING_REPLIES`, `MAX_REPLY_PAYLOAD_BYTES`, `MAX_KEYEXPR_BYTES` | 8 of 1,024 and 256 bytes, about 10,500 | 2, about 2,600 |
+| the answers staged to the peer's interests, and the `Final`s owed | arena | `MAX_PENDING_DECLARES`, `MAX_PENDING_FINALS` | 32 and 8 rows | 4 and 2 |
+| the peer's interests in the session's subscribers | arena | `MAX_INBOUND_SUB_INTERESTS` | 16 rows | 16 rows |
+| the face's pending gets | arena | `MAX_PENDING_QUERIES`, `MAX_PENDING_LIVELINESS_GETS` | 16 and 8 rows | 2 and 1 |
+| the peer's aliases, its subscribers', queryables' and tokens' declarations, and the repeats of its subscribers and queryables | registry, inline | `MAX_PEER_KEYEXPR_ALIASES`, `MAX_REMOTE_DECLS` (the build's) | 16 of each, about 2,100 on a 32-bit core and 2,200 on a 64-bit host | the same |
+
+A set is about 18,700 bytes on a 64-bit host at the build's defaults and about 4,600 at the pico
+preset, besides its 2,200 of registry rows, and a link's buffers about 4,100 at a batch of 2,048 bytes.
+
+**What a session reserves.** The arena of a client, and of a peer, at the pico preset is checked by
+`the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum`
+(`crates/wz-capi-coop/src/tests/arena.rs`): a client lends one set and the buffers of one link; a
+peer lends the client's rows, with a set and a link's buffers for each of its 10 faces and a link's
+buffers for its one handshake, every other row item for item the client's. So a peer reserves about
+10 × (4,600 + 4,100) + 4,100, about 91,000 bytes, beyond the client's arena, and 10 sets of
+registry rows, about 22,000 bytes, beside it.
+
+| session | sets | links | reserved by the faces (64-bit host, estimate) |
+|---------|-----:|------:|----------------------------------------------:|
+| a listener at the build's defaults, before | 1,101 | 1,101 | about 25,100,000 in the arena and 2,400,000 of registry rows |
+| a listener at the build's defaults, now | 1,001 | 1,101 | about 23,200,000 and 2,200,000 |
+| a listener at the pico preset | 11 | 12 | about 100,000 and 24,000 |
+| a client, either | 1 | 1 | about 8,700 and 2,200 at the preset, 22,800 and 2,200 at the defaults |
+
+**On a host.** Only the pages a session writes are resident, so a listener's resident memory falls by
+what its open wrote of the sets and links it no longer lends: up to the 12,000,000 bytes the
+measured listener held above zenoh-pico's (38.9 MB against 26.9 MB), expected near zenoh-pico's for a
+build of the preset, which is to be measured. The parity harness (`scripts/pico-compare.sh`) builds
+wz's side with `wz_config.py --original-features zenoh-pico`, the capabilities of zenoh-pico's
+defconfig and not its limits (the `WZ_LIMIT_*` environment `--resolve-env` gives), so as committed
+its build keeps the defaults and moves only by the 100 sets of the handshakes, about 1,900,000 bytes
+of reservation, until it states the preset's environment.
+
+**On an MCU.** The speed image is a client that states its own limits (`arm_w.conf`: four
+declarations of each kind, four aliases, two interests), so no cell moves, and neither does a client
+of the pico preset alone, which lent one set before as it does now. One that listens at the preset
+reserves its 10 faces and one handshake, about 87,000 bytes of arena and 21,000 of registry rows on
+a 32-bit core, where before its open could not have been reserved at all, and states fewer where its
+memory is smaller.

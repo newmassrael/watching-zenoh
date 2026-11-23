@@ -948,6 +948,44 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "MAX_FACES": {
+              "description": "The faces a session that listens holds besides the one it dials: the links it accepts, those still in their handshake among them, and those it attaches.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_ACCEPT_PENDING": {
+              "description": "The inbound links a session that listens holds in their handshake at once.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "QUERIER_MAX_PENDING_QUERIES": {
               "description": "The queries one declared querier may have in flight at once; one more is refused until a pending one ends.",
               "oneOf": [

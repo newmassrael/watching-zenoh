@@ -60,10 +60,14 @@
 //! never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
-//! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
-//! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
-//! has a row of gets and no buffers. These are the tables whose limits bind at the open
-//! (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
+//! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
+//! (`Core::accept_face` counts it against `max_faces`): the plan lends a set of a face's tables for
+//! each of those and no more. One that listens holds the buffers of as many links again as
+//! `accept_pending` admits. The config's two numbers are held to the session's `MAX_FACES` and
+//! `MAX_ACCEPT_PENDING` under the build's, which [`admitted_faces`] and [`admitted_handshakes`]
+//! give an ABI to state, and a config over either is refused. A group's face is no link of the
+//! session's: it has a set of tables and no buffers. These are the tables whose limits bind at the
+//! open (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
 //! lends it from the arena and bounds it by limits of its own (`docs/c-abi-no-heap-pools.md`,
 //! section 4.14): reserved before then, it would be memory nothing uses.
 //!
@@ -276,6 +280,14 @@ impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+        hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
+        if !config.listen.is_empty() {
+            hold(
+                "MAX_ACCEPT_PENDING",
+                config.accept_pending,
+                admitted_handshakes(limits)?,
+            )?;
+        }
         let links = links_of(config).ok_or(ArenaRefused::TooLarge)?;
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
@@ -686,15 +698,50 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
     })
 }
 
+/// The faces besides the dial role's that `limits` admit: the session's `MAX_FACES`, under the
+/// build's. What an ABI states as [`CoopConfig::max_faces`] for a session that takes faces besides
+/// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
+/// the build's.
+pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_FACES }>("MAX_FACES", limits.max_faces())
+}
+
+/// The inbound links in their handshake at once that `limits` admit: the session's
+/// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as
+/// [`CoopConfig::accept_pending`], which [`ArenaPlan::of`] holds the config of a session that
+/// listens to. Refused when the session's value is over the build's.
+pub fn admitted_handshakes(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_ACCEPT_PENDING }>("MAX_ACCEPT_PENDING", limits.max_accept_pending())
+}
+
+/// `asked`, what a session's config states of the limit `limit`, held to `admitted`, the session's
+/// value of it under the build's: a config over it is refused, as a stage after the build only
+/// lowers the memory the build fixes.
+fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaRefused> {
+    if asked > admitted {
+        return Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: asked,
+                ceiling: admitted,
+            },
+        });
+    }
+    Ok(())
+}
+
 /// `count` items for each of `each` holders.
 fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
-/// The faces a session `config` opens may hold at once: its links ([`links_of`]) and one for each
-/// group it joins. `None` past the address space.
+/// The faces a session `config` opens may hold at once: the dial role's, as many besides as
+/// `max_faces` admits, a link still in its handshake among them, and one for each group it joins.
+/// `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
-    links_of(config)?.checked_add(config.groups.len())
+    1usize
+        .checked_add(config.max_faces)?
+        .checked_add(config.groups.len())
 }
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as

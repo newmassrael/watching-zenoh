@@ -101,10 +101,11 @@
 # counterpart is a comparison, not a second way to set the limit: a document sets a limit only under
 # `wz/limits`, and an upstream key keeps its own meaning.
 #
-# `[limit.pico_preset]` is for a limit zenoh-pico bounds by no constant of its own, which wz sizes
-# memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
-# session, and `reason` says what of zenoh-pico's own build it holds, its examples and its API tests
-# (decision Q3 of docs/c-abi-engine-and-memory.md). It only lowers the default, and a limit a
+# `[limit.pico_preset]` is for a limit zenoh-pico bounds by no value switch of its own, which wz
+# sizes memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
+# session, and `reason` says what of zenoh-pico's own build it holds: a constant of its own that no
+# switch sets, or else its examples and its API tests (decision Q3 of
+# docs/c-abi-engine-and-memory.md). It only lowers the default, and a limit a
 # zenoh-pico value switch anchors to has none, as its default is pico's own constant. The generated
 # Kconfig makes each preset the limit's default under one switch, which zenoh-pico's defconfig turns
 # on; a build that does not turn it on keeps the defaults.
@@ -3179,6 +3180,68 @@ is refused.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: it sizes the connection machines a fixed-memory wz image holds for the peers it opens by their zid."
+
+[[limit]]
+id = "MAX_FACES"
+kconfig = "WZ_LIMIT_MAX_FACES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 1000
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link past the limit is closed before a byte of its handshake is answered.
+wire = "none"
+help = '''
+The faces a session that listens holds besides the one it dials: the links it
+accepts, those still in their handshake among them, and those it attaches. A
+link that arrives past it is closed unread. The cooperative engine lends each
+face its tables and each link its buffers from the session's memory when it
+opens, so a session may lower this and never raise it. The zenoh-pico
+interface holds no face besides its dial for a session that listens on
+nothing.
+'''
+
+[limit.upstream]
+zenoh = "transport/unicast/max_sessions"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Maximum number of unicast sessions (default: 1000)`", "`io/zenoh-transport/src/unicast/manager.rs` @ `self = self.max_sessions(*config.transport().unicast().max_sessions());`", "`io/zenoh-transport/src/unicast/manager.rs` @ `if guard.len() >= self.config.unicast.max_sessions {`"]
+
+[limit.pico_preset]
+value = 10
+reason = "zenoh-pico refuses an inbound link once its unicast transport holds Z_LISTEN_MAX_CONNECTION_NB peers, a constant of its configuration template that no build switch sets (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`, `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `if (_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB) {`). A client holds its one transport and no other, which the pico interface states for a session that listens on nothing."
+
+[[limit]]
+id = "MAX_ACCEPT_PENDING"
+kconfig = "WZ_LIMIT_MAX_ACCEPT_PENDING"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 100
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link past the limit is closed before a byte of its handshake is answered.
+wire = "none"
+help = '''
+The inbound links a session that listens holds in their handshake at once. A
+link that arrives past it is closed unread. Each is one of MAX_FACES; the
+cooperative engine lends each the buffers of one more link from the session's
+memory when it opens, so that a link past either bound can be taken off its
+port and closed, and a session may lower this and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "transport/unicast/accept_pending"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Number of links that may stay pending during accept phase (default: 100).`", "`io/zenoh-transport/src/unicast/manager.rs` @ `self = self.accept_pending(*config.transport().unicast().accept_pending());`"]
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico accepts one link at a time: its accept task runs the whole handshake of the link it took before it takes the next (`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`)."
 
 [[limit]]
 id = "QUERIER_MAX_PENDING_QUERIES"

@@ -399,6 +399,30 @@ config WZ_LIMIT_MAX_PEER_NODES
 	  by its zid declares none of that, and refuses the open. One more than this
 	  is refused.
 
+config WZ_LIMIT_MAX_FACES
+	int "MAX_FACES"
+	default 10 if WZ_LIMITS_ZENOH_PICO
+	default 1000
+	help
+	  The faces a session that listens holds besides the one it dials: the links it
+	  accepts, those still in their handshake among them, and those it attaches. A
+	  link that arrives past it is closed unread. The cooperative engine lends each
+	  face its tables and each link its buffers from the session's memory when it
+	  opens, so a session may lower this and never raise it. The zenoh-pico
+	  interface holds no face besides its dial for a session that listens on
+	  nothing.
+
+config WZ_LIMIT_MAX_ACCEPT_PENDING
+	int "MAX_ACCEPT_PENDING"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 100
+	help
+	  The inbound links a session that listens holds in their handshake at once. A
+	  link that arrives past it is closed unread. Each is one of MAX_FACES; the
+	  cooperative engine lends each the buffers of one more link from the session's
+	  memory when it opens, so that a link past either bound can be taken off its
+	  port and closed, and a session may lower this and never raise it.
+
 config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	int "QUERIER_MAX_PENDING_QUERIES"
 	default 0
