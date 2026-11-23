@@ -863,16 +863,6 @@ impl DatagramSocket for ZephyrUdpSocket {
             self._close.wait_on()
         }
 
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            target_has_atomic = "ptr"
-        ))]
-        fn readiness(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
-            Some(self._close.readiness())
-        }
     }
 }
 

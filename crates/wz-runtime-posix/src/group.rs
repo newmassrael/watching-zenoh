@@ -95,13 +95,6 @@ pub trait MulticastSocket: DatagramSocket {
         #[cfg(feature = "host-multicast")]
         fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn>;
 
-        /// [`Self::wait_writable`] made by a thread other than the one that owns the socket, on a
-        /// handle of its own, so a wait made after the socket was closed asks one still open.
-        /// `None` when the platform cannot give one.
-        #[cfg(feature = "host-multicast")]
-        fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>>;
     }
 }
 
@@ -298,12 +291,6 @@ impl MulticastSocket for PosixUdpSocket {
             PosixUdpSocket::room_wait(self)
         }
 
-        #[cfg(feature = "host-multicast")]
-        fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
-            PosixUdpSocket::writability(self)
-        }
     }
 }
 

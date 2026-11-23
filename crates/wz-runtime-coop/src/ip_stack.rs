@@ -55,14 +55,14 @@ use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 ))]
 use crate::session_drive::RxLease;
 use crate::session_drive::SessionDatagramLink;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::WaitOn;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{Dialled, LinkListener, OpenedLink, PendingDial, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkReadiness, LinkWritability, WaitOn};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::link_over;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -316,16 +316,6 @@ where
         either!(self, link => link.room_wait())
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        either!(self, link => link.readiness())
-    }
-
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        either!(self, link => link.writability())
-    }
-
     #[cfg(all(
         feature = "alloc",
         not(feature = "session-slot"),
@@ -495,7 +485,7 @@ where
         }
     }
 
-    /// Links whose owner waits for their input ([`SessionDatagramLink::readiness`]): what holds a
+    /// Links whose owner waits for their input ([`SessionDatagramLink::input_wait`]): what holds a
     /// session behind a lock and waits for it outside the lock. Each link whose socket can be
     /// waited on that way does not wait in its loop; one whose socket cannot still does.
     #[must_use]
@@ -846,10 +836,6 @@ impl<U: DatagramSocket + 'static> LinkListener<HeapLink> for IpUdpListener<U> {
     fn input_wait(&self) -> Option<WaitOn> {
         self.port.input_wait()
     }
-
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.port.readiness()
-    }
 }
 
 /// The accepting end of the `tls/` port a stack listens on: what [`IpListener`] is for `tcp/`,
@@ -884,10 +870,6 @@ impl<T: StreamSocket + 'static> LinkListener<HeapLink> for IpTlsListener<T> {
     fn input_wait(&self) -> Option<WaitOn> {
         self.listener.input_wait()
     }
-
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.listener.readiness()
-    }
 }
 
 /// The accepting end of the `tcp/` port a stack listens on: the connections on its streams `S`
@@ -917,10 +899,6 @@ impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
 
     fn input_wait(&self) -> Option<WaitOn> {
         self.listener.input_wait()
-    }
-
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.listener.readiness()
     }
 }
 

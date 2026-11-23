@@ -45,7 +45,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink, WaitOn};
+use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
@@ -1988,14 +1988,5 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     // The gate holds back input only: what the session sends goes out while the round is full.
     fn room_wait(&self) -> Option<WaitOn> {
         self.pump.room_wait()
-    }
-
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.pump.readiness()
-    }
-
-    // The gate holds back input only: what the session sends goes out while the round is full.
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        self.pump.writability()
     }
 }

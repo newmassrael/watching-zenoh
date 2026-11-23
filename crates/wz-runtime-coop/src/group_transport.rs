@@ -145,34 +145,6 @@ pub trait GroupTransport {
         None
     }
 
-    /// [`Self::wait_for_room`] made from outside the loop that owns the transport, by a sender
-    /// with nothing of the session held: the group's half of
-    /// [`SessionDatagramLink::writability`](crate::session_drive::SessionDatagramLink::writability).
-    /// `None` for a stack that gives none; the heap profile's, as that one is.
-    #[cfg(all(
-        feature = "session-unicast",
-        feature = "alloc",
-        not(feature = "session-slot")
-    ))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkWritability>> {
-        None
-    }
-
-    /// A wait for the group's next inbound datagram made from outside the loop that owns the
-    /// transport, by a host with nothing of the session held: the group's half of
-    /// [`SessionDatagramLink::readiness`](crate::session_drive::SessionDatagramLink::readiness).
-    /// A host that steps the group waits on it, and on the group's deadlines, instead of looking
-    /// at the group on a tick. `None` for a stack that gives none; the heap profile's, as that one
-    /// is.
-    #[cfg(all(
-        feature = "session-unicast",
-        feature = "alloc",
-        not(feature = "session-slot")
-    ))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkReadiness>> {
-        None
-    }
-
     /// Lend the next inbound datagram and its source address to `f` WHERE THE
     /// TRANSPORT HOLDS IT, and let it go once `f` returns; `false` when nothing
     /// is queued. The source is the §3.2 peer key: an opaque equality key, so the
@@ -246,16 +218,6 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
     #[cfg(feature = "session-unicast")]
     fn input_wait(&self) -> Option<crate::session_drive::WaitOn> {
         (**self).input_wait()
-    }
-
-    #[cfg(feature = "session-unicast")]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkWritability>> {
-        (**self).writability()
-    }
-
-    #[cfg(feature = "session-unicast")]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkReadiness>> {
-        (**self).readiness()
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {

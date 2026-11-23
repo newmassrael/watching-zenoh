@@ -22,8 +22,6 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 // Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as every
 // implementation of them below is.
 wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
     use wz_runtime_coop::session_drive::WaitOn;
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     use wz_runtime_coop::session_drive::{LinkRead, ReadWaited};
@@ -219,11 +217,6 @@ impl StreamListen for PosixTcpListener {
             crate::net::wait_on(self.fd)
         }
 
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            // A listening descriptor polls readable while a connection is queued on it.
-            crate::net::FdReadiness::of(self.fd)
-        }
     }
 
     fn accept(&self) -> Result<Option<PosixTcpSocket>, LinkOpenError> {
@@ -459,16 +452,6 @@ impl StreamSocket for PosixTcpSocket {
 
         fn room_wait(&self) -> Option<WaitOn> {
             crate::net::wait_on(self.fd)
-        }
-
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            crate::net::FdReadiness::of(self.fd)
-        }
-
-        #[cfg(feature = "alloc")]
-        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-            crate::net::FdReadiness::writable_of(self.fd)
         }
 
         #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -837,19 +820,17 @@ mod tests {
 
     wz_runtime_coop::with_heap_link_seams! {
         /// A link that took only part of a frame is woken by its stream's room alone: its owner's
-        /// wait, made for room as well while the link owes the stream (`AndRoom`), ends once the far
+        /// wait, made for room as well while the link owes the stream (`LinkWait::input_or_room`),
+        /// ends once the far
         /// end reads, with no input and no send, and the one step it wakes writes the rest, every
         /// frame arriving whole and in order. CONTROL: the owner's wait for input alone, while
         /// nothing is owed and the stream has room, sleeps its whole time.
         #[cfg(feature = "alloc")]
         #[test]
         fn a_link_that_owes_the_stream_is_woken_by_room_and_writes_the_rest() {
-            use std::sync::Arc;
             use std::time::{Duration, Instant};
             use wz_runtime_coop::link_storage::HeapTx;
-            use wz_runtime_coop::session_drive::{
-                wait_any, AndRoom, LinkReadiness, SessionDatagramLink,
-            };
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, SessionDatagramLink};
             use wz_runtime_coop::stream_link::StreamDriver;
             use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
             use wz_session_core::reliability::Reliability;
@@ -857,12 +838,12 @@ mod tests {
             let (near, mut far) = pair();
             let link =
                 StreamDriver::with_buffers(near, 4096, HeapTx::new(2, 2048)).waited_by_owner();
-            let ready: Arc<dyn LinkReadiness> =
-                Arc::from(link.readiness().expect("the owner's wait"));
+            let on = link.input_wait().expect("the owner's wait");
+            let waits = crate::net::PosixWaits;
 
             assert!(!link.owes_write(), "CONTROL: nothing is owed");
             let started = Instant::now();
-            wait_any(&[Arc::clone(&ready)], 200);
+            waits.wait(&[LinkWait::input(on)], 200);
             assert!(
                 started.elapsed() >= Duration::from_millis(150),
                 "CONTROL: a wait for input alone is not woken by room"
@@ -887,7 +868,7 @@ mod tests {
             let mut wakes = 0;
             while link.owes_write() {
                 let started = Instant::now();
-                wait_any(&[AndRoom::of(Arc::clone(&ready))], 10_000);
+                waits.wait(&[LinkWait::input_or_room(on)], 10_000);
                 assert!(
                     started.elapsed() < Duration::from_secs(10),
                     "the stream's room ended the wait"
@@ -904,14 +885,15 @@ mod tests {
             }
         }
 
-        /// The wait for room handed to another thread answers as the socket's own wait does: it
-        /// has room while the stream takes bytes, and none once the peer has stopped reading.
-        #[cfg(feature = "alloc")]
+        /// A wait for room on the handle the stream names answers as the socket's own wait does:
+        /// it has room while the stream takes bytes, and none once the peer has stopped reading.
         #[test]
-        fn the_wait_for_room_handed_out_answers_as_the_socket_does() {
+        fn a_wait_for_room_on_the_streams_handle_answers_as_the_socket_does() {
+            use wz_runtime_coop::session_drive::LinkWaits;
             let (near, _far) = pair();
-            let wait = near.writability().expect("a duplicate of the descriptor");
-            assert!(wait.wait_writable(1_000), "an empty stream takes bytes");
+            let on = near.room_wait().expect("the stream's descriptor");
+            let waits = crate::net::PosixWaits;
+            assert!(waits.wait_room(on, 1_000), "an empty stream takes bytes");
             let chunk = [0x5au8; 1024];
             let mut written = 0usize;
             while near.wait_writable(1_000) {
@@ -924,8 +906,8 @@ mod tests {
                 );
             }
             assert!(
-                !wait.wait_writable(1_000),
-                "the wait handed out sees the stream full as the socket does"
+                !waits.wait_room(on, 1_000),
+                "a wait on the handle sees the stream full as the socket does"
             );
         }
 

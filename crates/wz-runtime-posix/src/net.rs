@@ -40,8 +40,6 @@ const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 // The heap profile's readiness seam is compiled where the runtime declares it, whatever this crate's
 // own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
 wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
     use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 }
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
@@ -97,44 +95,6 @@ pub enum PosixNetError {
 }
 
 wz_runtime_coop::with_heap_link_seams! {
-/// A wait on a socket that a thread other than its link's makes, for input ([`LinkReadiness`]) or
-/// for room ([`LinkWritability`]): `poll` on a duplicate of the socket's descriptor, which this
-/// owns and closes. A duplicate and not the number itself, so a wait that outlives the socket
-/// never reaches a descriptor number its close has freed for another file.
-#[cfg(feature = "alloc")]
-pub(crate) struct FdReadiness(c_int);
-
-#[cfg(feature = "alloc")]
-impl FdReadiness {
-    /// A wait on `fd`, or `None` when the descriptor cannot be duplicated.
-    fn duplicate(fd: c_int) -> Option<Self> {
-        // SAFETY: `fd` is the caller's live descriptor; `fcntl` duplicates it or fails.
-        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-        if dup < 0 {
-            return None;
-        }
-        Some(FdReadiness(dup))
-    }
-
-    /// A wait for input on `fd`, or `None` when the descriptor cannot be duplicated.
-    pub(crate) fn of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        Some(alloc::boxed::Box::new(Self::duplicate(fd)?))
-    }
-
-    /// A wait for room on the stream socket `fd`, or `None` when the descriptor cannot be
-    /// duplicated.
-    pub(crate) fn writable_of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        Some(alloc::boxed::Box::new(Self::duplicate(fd)?))
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl LinkWritability for FdReadiness {
-    fn wait_writable(&self, timeout_us: u64) -> bool {
-        poll_writable(self.0, timeout_us)
-    }
-}
-
 /// What a wait on a socket asks `poll` for: input, and room as well when `room`.
 fn wait_events(room: bool) -> libc::c_short {
     if room {
@@ -144,83 +104,6 @@ fn wait_events(room: bool) -> libc::c_short {
     }
 }
 
-#[cfg(feature = "alloc")]
-impl LinkReadiness for FdReadiness {
-    fn wait_readable(&self, timeout_ms: u32) {
-        self.wait_ready(false, timeout_ms);
-    }
-
-    fn handle(&self) -> Option<usize> {
-        usize::try_from(self.0).ok()
-    }
-
-    fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        self.wait_ready_among(false, others, timeout_ms);
-    }
-
-    fn wait_ready(&self, room: bool, timeout_ms: u32) {
-        let mut pfd = libc::pollfd {
-            fd: self.0,
-            events: wait_events(room),
-            revents: 0,
-        };
-        let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
-        // SAFETY: one live `pollfd` over the descriptor this owns; the timeout bounds the wait. A
-        // failed or interrupted wait is a quiet socket: the step that follows reports the error.
-        unsafe { libc::poll(&mut pfd, 1, timeout) };
-    }
-
-    // Out of line: `wait_readable_among` is this wait for input alone, and both are entries of
-    // the readiness vtable, so an inlined copy would be a second body of the same wait.
-    #[inline(never)]
-    fn wait_ready_among(
-        &self,
-        room: bool,
-        others: &[alloc::sync::Arc<dyn LinkReadiness>],
-        timeout_ms: u32,
-    ) {
-        let mut fds = [libc::pollfd {
-            fd: self.0,
-            events: wait_events(room),
-            revents: 0,
-        }; crate::WAIT_SET_SOCKETS];
-        let mut count = 1;
-        for other in others {
-            let fd = other
-                .handle()
-                .and_then(|handle| c_int::try_from(handle).ok());
-            match (fd, fds.get_mut(count)) {
-                (Some(fd), Some(entry)) => {
-                    *entry = libc::pollfd {
-                        fd,
-                        events: wait_events(other.wants_room()),
-                        revents: 0,
-                    };
-                    count += 1;
-                }
-                // A wait this cannot name to the kernel, or one past the set: the bounded look, so
-                // it is not starved behind a wait on the others.
-                _ => return self.wait_ready(room, timeout_ms.min(1)),
-            }
-        }
-        let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
-        // SAFETY: the first `count` entries of `fds` are written and live for the call; every
-        // descriptor is a duplicate its owner holds open for as long as the wait is held, and the
-        // timeout bounds the wait. A failed or interrupted wait is a quiet socket: the step that
-        // follows reads and reports the error.
-        unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) };
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl Drop for FdReadiness {
-    fn drop(&mut self) {
-        // SAFETY: the duplicate is this value's own descriptor, closed exactly once.
-        unsafe { libc::close(self.0) };
-    }
-}
-
-wz_runtime_coop::with_heap_link_seams! {
 /// The waits of this platform's sockets ([`LinkWaits`]): one `poll` over the descriptors the
 /// links name, made by a thread other than the links' own with nothing of a session held. A
 /// descriptor is named by its number and nothing holds it open: one a close freed and a new socket
@@ -282,7 +165,6 @@ impl LinkWaits for PosixWaits {
 /// What a wait on the socket `fd` names it by.
 pub(crate) fn wait_on(fd: c_int) -> Option<WaitOn> {
     usize::try_from(fd).ok().map(WaitOn::Socket)
-}
 }
 }
 
@@ -938,22 +820,12 @@ impl DatagramSocket for PosixUdpSocket {
             wait_on(self.fd)
         }
 
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            FdReadiness::of(self.fd)
-        }
     }
 }
 
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "host-multicast")]
     impl PosixUdpSocket {
-        /// A wait for room on this socket made by a thread other than its owner's, on a duplicate
-        /// of its descriptor; `None` when the descriptor cannot be duplicated.
-        pub(crate) fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-            FdReadiness::writable_of(self.fd)
-        }
-
         /// What a wait for room on this socket names it by.
         pub(crate) fn room_wait(&self) -> Option<WaitOn> {
             wait_on(self.fd)
@@ -1274,59 +1146,6 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        /// A wait over several sockets names each of them to the system, the set's last one too:
-        /// a datagram queued there ends it at once. A wait over more sockets than the set holds is
-        /// the bounded look, which ends within a millisecond. CONTROL: a wait over quiet sockets
-        /// that fill the set sleeps its time. Turned red by a set that keeps only the first socket,
-        /// or one that waits on part of a larger set for the whole time.
-        #[cfg(feature = "alloc")]
-        #[test]
-        fn a_wait_over_several_sockets_names_each_and_one_past_its_set_looks() {
-            use std::sync::Arc;
-            use std::time::{Duration, Instant};
-            use std::vec::Vec;
-            use wz_runtime_coop::session_drive::LinkReadiness;
-
-            let (quiet, sender) = pair();
-            let ready = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
-            let wait_on = |socket: &PosixUdpSocket| -> Arc<dyn LinkReadiness> {
-                Arc::new(FdReadiness::duplicate(socket.fd).expect("a duplicate"))
-            };
-            let first = FdReadiness::duplicate(quiet.fd).expect("a duplicate");
-            let mut others: Vec<Arc<dyn LinkReadiness>> = (1..crate::WAIT_SET_SOCKETS)
-                .map(|_| wait_on(&quiet))
-                .collect();
-
-            let started = Instant::now();
-            first.wait_ready_among(false, &others, 100);
-            assert!(
-                started.elapsed() >= Duration::from_millis(80),
-                "CONTROL: quiet sockets that fill the set sleep the wait's time"
-            );
-
-            others.push(wait_on(&quiet));
-            let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
-            assert!(
-                started.elapsed() < Duration::from_millis(1_000),
-                "a wait past the set is the bounded look, took {:?}",
-                started.elapsed()
-            );
-
-            others.pop();
-            others.pop();
-            others.push(wait_on(&ready));
-            assert_eq!(others.len() + 1, crate::WAIT_SET_SOCKETS, "the set is full");
-            sender.send_to(ready.local(), b"wake").expect("a send");
-            let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
-            assert!(
-                started.elapsed() < Duration::from_millis(2_500),
-                "the datagram on the set's last socket ended the wait, took {:?}",
-                started.elapsed()
-            );
-        }
-
         /// The stack's waits name each socket by its descriptor: a wait over a set whose last
         /// socket has a datagram ends at once, one over quiet sockets sleeps its time, and one
         /// that names a handle of another stack's, or more sockets than the set holds, is the

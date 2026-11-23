@@ -193,12 +193,6 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
             self.lower.socket.room_wait()
         }
 
-        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
-            self.lower.socket.writability()
-        }
     }
 
     /// A stream begun without waiting connects the stream under it, then runs one step of its

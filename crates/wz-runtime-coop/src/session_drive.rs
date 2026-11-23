@@ -178,14 +178,14 @@ pub trait SessionDatagramLink {
 
     /// Whether the link holds input it has already taken from its stack: a whole batch read
     /// together with the one before it, a datagram read while the loop waited. The next step
-    /// reads it, and a wait on the stack would not see it (`readiness`, the heap profile's).
+    /// reads it, and a wait on the stack would not see it (`input_wait`, the heap profile's).
     fn holds_input(&self) -> bool {
         false
     }
 
     /// Whether the link has input waiting in its stack that it cannot read: it receives into a
     /// pool of buffers its session's links share, holds none, and every one is held by another
-    /// link for something of its own. A wait on its readiness would end at once and the step
+    /// link for something of its own. A wait on its input would end at once and the step
     /// that follows would read nothing, so its owner leaves it out of the wait; the step that
     /// gives a buffer back is woken by the holder's own input, and the link is waited on again
     /// once a buffer is free. The provided form answers `false`: a link that receives into a
@@ -197,7 +197,7 @@ pub trait SessionDatagramLink {
 
     /// Whether the link owes its stack bytes of a frame it was already handed, which its next
     /// step writes as far as the stack takes them ([`Self::service`]). While it does, a wait its
-    /// owner makes for the link's input must end on room as well (`AndRoom`, the heap profile's),
+    /// owner makes for the link's input must end on room as well (`LinkWait::input_or_room`),
     /// or the rest waits for the next input; while it owes nothing that wait is for input alone,
     /// so a link with room does not wake it. The provided form owes nothing: a link that writes
     /// each frame whole.
@@ -265,38 +265,17 @@ pub trait SessionDatagramLink {
         None
     }
 
-    /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
-    /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
-    /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
-    /// for a link whose loop waits, which is every link that was not opened otherwise. The heap
-    /// profile's: a slot image's loop is the only thing that drives its links.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        None
-    }
-
-    /// A wait for room on this link's outbound side, made from any thread and with nothing of the
-    /// session held: [`Self::readiness`]'s pair for the other direction. A sender that finds the
-    /// session held by another, which may be waiting for room on this link up to
-    /// `wait_before_close`, asks this instead of waiting for the session, so that a message it may
-    /// drop is not held behind one it may not. `None` for a link that cannot tell. The heap
-    /// profile's, as [`Self::readiness`] is.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        None
-    }
-
     /// Lend the owner the free part of this link's receive buffer for one read it makes with
     /// nothing of the session held, waiting in the read itself ([`RxLease`]), where a wait on the
-    /// link's readiness ([`Self::readiness`]) is followed by the step's read. `None` for a link
+    /// link's input ([`Self::input_wait`]) is followed by the step's read. `None` for a link
     /// that gives no such read, holds input already, has a lease out, or has ended; its owner then
-    /// waits on its readiness. While the lease is out the link's receive reads nothing and leaves
+    /// waits on its input. While the lease is out the link's receive reads nothing and leaves
     /// the buffer alone, and what the read brought is the link's once the lease is landed
     /// ([`Self::land_rx`]).
     ///
     /// Asked only where the link could be asked to receive: what is left of a batch is moved to
     /// the front of the buffer here, as a receive moves it, so nothing a receive lent may be read
-    /// any more ([`Self::lends_until_next_receive`]). The heap profile's, as [`Self::readiness`]
+    /// any more ([`Self::lends_until_next_receive`]). The heap profile's, as [`Self::input_wait`]
     /// is.
     #[cfg(all(
         feature = "alloc",
@@ -320,134 +299,15 @@ pub trait SessionDatagramLink {
     }
 }
 
-/// A wait for room on a link's outbound side, made by a thread that does not drive the link
-/// ([`SessionDatagramLink::writability`]).
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkWritability: Send + Sync {
-    /// Wait up to `timeout_us` microseconds for the link to take more bytes: `true` once it will
-    /// (or once it has failed, which the send that follows reports), `false` when it still would
-    /// not when the time is up. The answer the link's own wait for room gives, asked from outside.
-    fn wait_writable(&self, timeout_us: u64) -> bool;
-}
-
-/// A wait for a link's next input, made by a thread that does not drive the link
-/// ([`SessionDatagramLink::readiness`]).
+/// A wait that a thread which drives no link makes beside the links' (`LinkWaits`): the program's
+/// word that a clock it moves has moved on, which no stack names to its platform. A wait over
+/// links with one of these beside them is a look at the links, and the step that follows reads
+/// every link.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub trait LinkReadiness: Send + Sync {
-    /// Block until the link's stack has input queued, or `timeout_ms` has passed; return at once
-    /// when it already has. A failed wait is a quiet link: the step that follows reads and
-    /// reports the failure.
+    /// Block until what this waits for has come, or `timeout_ms` has passed; return at once
+    /// when it already has.
     fn wait_readable(&self, timeout_ms: u32);
-
-    /// The platform's handle for what this waits on (a descriptor), opaque to everything but the
-    /// stack that made it; `None` when it has none to give. A wait over several links reads these
-    /// to ask the platform for the first of them to be ready ([`Self::wait_readable_among`]).
-    fn handle(&self) -> Option<usize> {
-        None
-    }
-
-    /// Block until this or any of `others` is ready, or `timeout_ms` has passed. A stack that
-    /// can wait on several handles at once overrides it; the answer of one that cannot is a
-    /// bounded look at this alone, a millisecond at most, and the step that follows reads every
-    /// link whether or not it was the one waited on. Only where a pointer is atomic: the shared
-    /// handle is an `Arc`, which ARMv6-M does not have, and a stack there waits on one link.
-    #[cfg(target_has_atomic = "ptr")]
-    fn wait_readable_among(&self, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        let _ = others;
-        self.wait_readable(timeout_ms.min(1));
-    }
-
-    /// Whether this wait ends on the link's room as well as on its input (`AndRoom`): what a
-    /// wait over several links reads of each of the others.
-    fn wants_room(&self) -> bool {
-        false
-    }
-
-    /// [`Self::wait_readable`], ending also when the link has room if `room`. A stack that can
-    /// wait for room overrides it; the provided form waits for input alone, which is right for a
-    /// link that never owes its stack a write ([`SessionDatagramLink::owes_write`]).
-    fn wait_ready(&self, room: bool, timeout_ms: u32) {
-        let _ = room;
-        self.wait_readable(timeout_ms);
-    }
-
-    /// [`Self::wait_readable_among`], ending also when this link has room if `room`, or when any
-    /// of `others` whose wait asks for it ([`Self::wants_room`]) has. The provided form waits as
-    /// [`Self::wait_readable_among`] does.
-    #[cfg(target_has_atomic = "ptr")]
-    fn wait_ready_among(&self, room: bool, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        let _ = room;
-        self.wait_readable_among(others, timeout_ms);
-    }
-}
-
-/// A link's wait for input that ends on its room as well: what the owner of a link that owes its
-/// stack a write waits on ([`SessionDatagramLink::owes_write`]), so the rest is written as soon
-/// as the stack takes it and not when the next input comes. Made only while the link owes, so a
-/// link with room and nothing to write does not wake its owner.
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub struct AndRoom(Arc<dyn LinkReadiness>);
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl AndRoom {
-    /// The wait `ready`, ending on room as well.
-    pub fn of(ready: Arc<dyn LinkReadiness>) -> Arc<dyn LinkReadiness> {
-        Arc::new(Self(ready))
-    }
-}
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl LinkReadiness for AndRoom {
-    fn wait_readable(&self, timeout_ms: u32) {
-        self.0.wait_ready(true, timeout_ms);
-    }
-
-    fn handle(&self) -> Option<usize> {
-        self.0.handle()
-    }
-
-    fn wait_readable_among(&self, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        self.0.wait_ready_among(true, others, timeout_ms);
-    }
-
-    fn wants_room(&self) -> bool {
-        true
-    }
-
-    fn wait_ready(&self, _room: bool, timeout_ms: u32) {
-        self.0.wait_ready(true, timeout_ms);
-    }
-
-    fn wait_ready_among(&self, _room: bool, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        self.0.wait_ready_among(true, others, timeout_ms);
-    }
-}
-
-/// Block until one of `waits` is ready or `timeout_ms` has passed. Nothing to wait on returns at
-/// once, and the wait of one is that wait's own.
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
-    match waits {
-        [] => {}
-        [only] => only.wait_readable(timeout_ms),
-        [first, rest @ ..] => first.wait_readable_among(rest, timeout_ms),
-    }
 }
 
 /// What a wait on a link names: the link's handle in the stack that made it, a value copied into
@@ -785,16 +645,6 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
         (**self).room_wait()
     }
 
-    #[cfg(feature = "alloc")]
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        (**self).readiness()
-    }
-
-    #[cfg(feature = "alloc")]
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        (**self).writability()
-    }
-
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     fn lend_rx(&self) -> Option<RxLease> {
         (**self).lend_rx()
@@ -876,16 +726,6 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells:
     #[cfg(feature = "alloc")]
     fn room_wait(&self) -> Option<WaitOn> {
         (**self).room_wait()
-    }
-
-    #[cfg(feature = "alloc")]
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        (**self).readiness()
-    }
-
-    #[cfg(feature = "alloc")]
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        (**self).writability()
     }
 
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -1198,12 +1038,6 @@ pub trait LinkListener<P> {
     /// ([`LinkWaits::wait`]); `None` when the stack gives none, and then the node looks for one
     /// at a pace of its own.
     fn input_wait(&self) -> Option<WaitOn> {
-        None
-    }
-
-    /// A wait for a connection that a thread other than the one that accepts can make; `None`
-    /// when the stack gives none, and then the node looks for one at a pace of its own.
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         None
     }
 }

@@ -31,7 +31,7 @@ use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWait, LinkWaits, LinkWritability, WaitOn};
+use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
@@ -194,14 +194,6 @@ impl GroupTransport for Watched {
 
     fn input_wait(&self) -> Option<WaitOn> {
         self.inner.input_wait()
-    }
-
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        self.inner.writability()
-    }
-
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        self.inner.readiness()
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {

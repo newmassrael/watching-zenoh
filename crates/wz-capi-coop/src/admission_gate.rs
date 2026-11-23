@@ -18,7 +18,7 @@
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink, WaitOn};
+use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
@@ -144,16 +144,6 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
     // is admitted, so its room is the link's.
     fn room_wait(&self) -> Option<WaitOn> {
         self.pump.room_wait()
-    }
-
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.pump.readiness()
-    }
-
-    // The gate holds back input only: what the session sends goes out whether or not the link
-    // is admitted, so its room is the link's.
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        self.pump.writability()
     }
 }
 

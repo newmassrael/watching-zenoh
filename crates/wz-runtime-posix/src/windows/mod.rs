@@ -42,13 +42,6 @@ use wz_runtime_coop::ClockSource;
 
 use crate::windows_arith;
 
-// Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as
-// every implementation of them in this module is.
-wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
-}
-
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     pub mod links;
@@ -505,71 +498,6 @@ fn wait_ms(timeout_ms: u32) -> i32 {
     i32::try_from(timeout_ms).unwrap_or(i32::MAX)
 }
 
-/// A wait on a socket that a thread other than its link's makes, for input ([`LinkReadiness`])
-/// or for room ([`LinkWritability`]): `WSAPoll` on a duplicate of the socket, which this owns and
-/// closes. A duplicate and not the handle itself, so a wait that outlives the socket never
-/// reaches a handle value its close has freed for another object.
-#[cfg(feature = "alloc")]
-pub(crate) struct SocketReadiness(ws::SOCKET);
-
-#[cfg(feature = "alloc")]
-impl SocketReadiness {
-    /// A wait for input on `socket`, or `None` when the socket cannot be duplicated.
-    pub(crate) fn of(socket: ws::SOCKET) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        Some(alloc::boxed::Box::new(Self::duplicate(socket)?))
-    }
-
-    /// A wait for room on the stream `socket`, or `None` when the socket cannot be duplicated.
-    pub(crate) fn writable_of(
-        socket: ws::SOCKET,
-    ) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        Some(alloc::boxed::Box::new(Self::duplicate(socket)?))
-    }
-
-    /// A wait on `socket`, or `None` when the socket cannot be duplicated.
-    fn duplicate(socket: ws::SOCKET) -> Option<Self> {
-        let mut info = ws::WSAPROTOCOL_INFOW::default();
-        // SAFETY: `info` is a live description the call writes; `socket` is the caller's open
-        // socket, and the process the duplicate is for is this one.
-        let rc = unsafe {
-            ws::WSADuplicateSocketW(
-                socket,
-                windows_sys::Win32::System::Threading::GetCurrentProcessId(),
-                &mut info,
-            )
-        };
-        if rc != 0 {
-            return None;
-        }
-        // SAFETY: `info` is the description the call above wrote, which names the family, the
-        // type and the protocol of the duplicate.
-        let duplicate = unsafe {
-            ws::WSASocketW(
-                ws::FROM_PROTOCOL_INFO,
-                ws::FROM_PROTOCOL_INFO,
-                ws::FROM_PROTOCOL_INFO,
-                &info,
-                0,
-                ws::WSA_FLAG_OVERLAPPED | ws::WSA_FLAG_NO_HANDLE_INHERIT,
-            )
-        };
-        if duplicate == ws::INVALID_SOCKET {
-            return None;
-        }
-        Some(SocketReadiness(duplicate))
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl LinkWritability for SocketReadiness {
-    fn wait_writable(&self, timeout_us: u64) -> bool {
-        poll_writable(
-            self.0,
-            i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
-        )
-    }
-}
-
 /// A `WSAPoll` entry for `socket` that asks for input, and for room as well when `room`.
 fn wait_entry(socket: ws::SOCKET, room: bool) -> ws::WSAPOLLFD {
     ws::WSAPOLLFD {
@@ -580,64 +508,6 @@ fn wait_entry(socket: ws::SOCKET, room: bool) -> ws::WSAPOLLFD {
             ws::POLLRDNORM
         },
         revents: 0,
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl LinkReadiness for SocketReadiness {
-    fn wait_readable(&self, timeout_ms: u32) {
-        poll_readable(self.0, wait_ms(timeout_ms));
-    }
-
-    fn handle(&self) -> Option<usize> {
-        Some(self.0)
-    }
-
-    fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        self.wait_ready_among(false, others, timeout_ms);
-    }
-
-    fn wait_ready(&self, room: bool, timeout_ms: u32) {
-        let mut fd = wait_entry(self.0, room);
-        // SAFETY: one live `WSAPOLLFD` over the socket this owns; the timeout bounds the wait. A
-        // failed wait is a quiet socket: the step that follows reads and reports the error.
-        unsafe { ws::WSAPoll(&mut fd, 1, wait_ms(timeout_ms)) };
-    }
-
-    // Out of line: `wait_readable_among` is this wait for input alone, and both are entries of
-    // the readiness vtable, so an inlined copy would be a second body of the same wait.
-    #[inline(never)]
-    fn wait_ready_among(
-        &self,
-        room: bool,
-        others: &[alloc::sync::Arc<dyn LinkReadiness>],
-        timeout_ms: u32,
-    ) {
-        let mut fds = [wait_entry(self.0, room); crate::WAIT_SET_SOCKETS];
-        let mut count = 1;
-        for other in others {
-            match (other.handle(), fds.get_mut(count)) {
-                (Some(socket), Some(entry)) => {
-                    *entry = wait_entry(socket, other.wants_room());
-                    count += 1;
-                }
-                // A wait this cannot name to the system, or one past the set: the bounded look, so
-                // it is not starved behind a wait on the others.
-                _ => return self.wait_ready(room, timeout_ms.min(1)),
-            }
-        }
-        // SAFETY: the first `count` entries of `fds` are written and live for the call; every
-        // socket is a duplicate its owner holds open for as long as the wait is held, and the
-        // timeout bounds the wait. A failed wait is a quiet socket: the step that follows reads
-        // and reports the error.
-        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) };
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl Drop for SocketReadiness {
-    fn drop(&mut self) {
-        close(self.0);
     }
 }
 

@@ -57,6 +57,8 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxLender, TxStore};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
 #[cfg(all(
     feature = "alloc",
@@ -64,8 +66,6 @@ use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
     target_has_atomic = "ptr"
 ))]
 use crate::session_drive::{LinkRead, OwnerRead, ReadWaited, RxLease};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkReadiness, LinkWritability, WaitOn};
 use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -182,29 +182,11 @@ pub trait StreamSocket: Sized {
         None
     }
 
-    /// A wait for this stream that a thread other than the link's can make
-    /// ([`SessionDatagramLink::readiness`]); `None` when the platform gives none (a secure
-    /// channel holds bytes of its own the socket's wait would not see), and then a link over the
-    /// stream waits in its own loop whatever it was asked.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        None
-    }
-
-    /// [`Self::wait_writable`] made by a thread other than the link's
-    /// ([`SessionDatagramLink::writability`]), on a handle of its own that outlives the stream
-    /// safely; `None` when the platform gives none, and then a sender that finds the session held
-    /// waits for it.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        None
-    }
-
     /// A read of this stream that a thread other than the link's makes, waiting in the read
     /// itself ([`SessionDatagramLink::lend_rx`]), on a handle of its own that outlives the stream
-    /// safely, as [`Self::readiness`]'s does. `None` when the platform gives none (a stream whose
-    /// write must not wait keeps a read that cannot either), and then the owner waits on the
-    /// stream's readiness and the link reads after.
+    /// safely. `None` when the platform gives none (a stream whose write must not wait keeps a read
+    /// that cannot either), and then the owner waits on the stream's input
+    /// ([`Self::input_wait`]) and the link reads after.
     #[cfg(all(
         feature = "alloc",
         not(feature = "session-slot"),
@@ -301,15 +283,6 @@ pub trait StreamListen {
     fn input_wait(&self) -> Option<WaitOn> {
         None
     }
-
-    /// A wait for a connection that a thread other than the one that accepts can make
-    /// ([`StreamSocket::readiness`] is the stream's): ready when a connection is queued.
-    /// `None` when the platform gives none, and then the owner looks for a connection at a pace
-    /// of its own.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        None
-    }
 }
 
 /// A boxed listener is a listener, so a provider that wraps the one a [`StreamDial::listen`] hands
@@ -329,10 +302,6 @@ impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
 
     fn input_wait(&self) -> Option<WaitOn> {
         (**self).input_wait()
-    }
-
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        (**self).readiness()
     }
 }
 
@@ -529,16 +498,6 @@ impl SessionDatagramLink for NoStream {
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn room_wait(&self) -> Option<WaitOn> {
-        match *self {}
-    }
-
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        match *self {}
-    }
-
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         match *self {}
     }
 
@@ -835,7 +794,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     }
 
     /// The same link, waited on by its owner when its stream can be
-    /// ([`SessionDatagramLink::readiness`]): its loop then reads what is queued and does not
+    /// ([`SessionDatagramLink::input_wait`]): its loop then reads what is queued and does not
     /// wait, and its owner waits on the stream with nothing of the session held. A stream that
     /// gives no such wait keeps the link waiting in its loop. One that also gives a read made from
     /// outside ([`StreamSocket::reader`]) lends its owner the buffer to wait in that read
@@ -1403,28 +1362,13 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         }
     }
 
-    // Whoever waits for input, room is the socket's alone, as for `writability` below.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn room_wait(&self) -> Option<WaitOn> {
-        self.socket.room_wait()
-    }
-
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        if self.owner_waits {
-            self.socket.readiness()
-        } else {
-            None
-        }
-    }
-
     // Whoever waits for input, room is the socket's alone: the driver queues nothing of its own
     // ahead of it (`wait_for_room` asks the socket too, unless the last write already said the
     // stream had room), so a wait on the socket from outside answers what the session's own wait
     // would.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        self.socket.writability()
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.socket.room_wait()
     }
 
     #[cfg(all(
@@ -1685,11 +1629,6 @@ mod tests {
             Some(WaitOn::Socket(PIPE_HANDLE))
         }
 
-        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-            Some(alloc::boxed::Box::new(Room(!self.full.get())))
-        }
-
         #[cfg(all(
             feature = "alloc",
             not(feature = "session-slot"),
@@ -1704,36 +1643,6 @@ mod tests {
     /// tests compare.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     const PIPE_HANDLE: usize = 7;
-
-    /// The pipe's room when its wait was handed out, as a wait from outside answers it.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    struct Room(bool);
-
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    impl LinkWritability for Room {
-        fn wait_writable(&self, _timeout_us: u64) -> bool {
-            self.0
-        }
-    }
-
-    /// A link hands out its socket's wait for room whether or not its owner waits for its input
-    /// (none does here): a sender that finds the session held asks it from outside, and it
-    /// answers as the socket does.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    #[test]
-    fn a_link_hands_out_its_sockets_wait_for_room() {
-        let free = link();
-        let wait = free.writability().expect("the socket's wait for room");
-        assert!(wait.wait_writable(1_000), "a stream that takes bytes");
-
-        let full = link();
-        full.socket.full.set(true);
-        let wait = full.writability().expect("the socket's wait for room");
-        assert!(
-            !wait.wait_writable(1_000),
-            "a stream whose peer reads nothing"
-        );
-    }
 
     /// A link names its socket's handle for a wait on its room whether or not its owner waits for
     /// its input (none does here), and names nothing for its input then. Turned red by a link

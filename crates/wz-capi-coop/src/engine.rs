@@ -285,7 +285,7 @@ pub struct CoopConfig<E = Vec<String>> {
     /// The longest a read waits for its link to have something to read before it steps the
     /// session, in milliseconds; a read returns as soon as something is there. The wait is made
     /// with nothing of the session held, on a link whose network stack lets its owner wait
-    /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
+    /// (`SessionDatagramLink::input_wait`); a link whose stack does not waits in its own loop.
     pub idle_wait_ms: u32,
     /// The endpoints to listen on (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`; port 0 has the stack
     /// choose one, read back with `CoopEngine::listening`), which the session takes inbound links
@@ -818,7 +818,7 @@ pub(crate) struct Takes {
     pub(crate) handed: core::sync::atomic::AtomicUsize,
     /// The turns a droppable publish spun on a held session before it tried the session again.
     pub(crate) spins: core::sync::atomic::AtomicUsize,
-    /// The reads whose wait was a wait on the readiness of the session's links and ports, which
+    /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The reads whose wait was made in the read of the one link's buffer ([`IdleWait::Read`]).

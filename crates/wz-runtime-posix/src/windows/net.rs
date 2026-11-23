@@ -23,11 +23,6 @@ use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::group_transport::GroupInterface;
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
-wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
-}
-
 use super::{
     close, in6_addr, in_addr, last_error, name_of, open_socket, poll_readable, set_flag,
     set_option, RawAddr, WindowsNetError,
@@ -380,24 +375,12 @@ impl DatagramSocket for WindowsUdpSocket {
             Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
 
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            super::SocketReadiness::of(self.socket)
-        }
     }
 }
 
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "host-multicast")]
     impl WindowsUdpSocket {
-        /// A wait for room on this socket made by a thread other than its owner's, on a duplicate
-        /// of the socket; `None` when it cannot be duplicated.
-        pub(crate) fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
-            super::SocketReadiness::writable_of(self.socket)
-        }
-
         /// What a wait for room on this socket names it by.
         pub(crate) fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
             Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
@@ -667,52 +650,55 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        /// A wait over several sockets names each of them to the system, the set's last one too:
-        /// a datagram queued there ends it at once. A wait over more sockets than the set holds is
-        /// the bounded look, which ends within a millisecond. CONTROL: a wait over quiet sockets
-        /// that fill the set sleeps its time. Turned red by a set that keeps only the first socket,
-        /// or one that waits on part of a larger set for the whole time.
-        #[cfg(feature = "alloc")]
+        /// The stack's waits name each socket to the system, the set's last one too: a datagram
+        /// queued there ends the wait at once. A wait over more sockets than the set holds, or one
+        /// that names a handle of another stack's, is the bounded look. CONTROL: a wait over quiet
+        /// sockets that fill the set sleeps its time. Turned red by a set that keeps only the first
+        /// socket, or one that waits on part of a larger set for the whole time.
         #[test]
-        fn a_wait_over_several_sockets_names_each_and_one_past_its_set_looks() {
-            use std::sync::Arc;
+        fn the_stacks_waits_name_each_socket_and_look_at_what_they_cannot() {
             use std::time::{Duration, Instant};
             use std::vec::Vec;
-            use wz_runtime_coop::session_drive::LinkReadiness;
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
+            let waits = super::super::WindowsWaits;
             let (quiet, sender) = pair();
             let ready = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
-            let wait_on = |socket: &WindowsUdpSocket| -> Arc<dyn LinkReadiness> {
-                Arc::new(super::super::SocketReadiness::duplicate(socket.socket).expect("a duplicate"))
+            let on = |socket: &WindowsUdpSocket| {
+                LinkWait::input(socket.input_wait().expect("a socket names its handle"))
             };
-            let first = super::super::SocketReadiness::duplicate(quiet.socket).expect("a duplicate");
-            let mut others: Vec<Arc<dyn LinkReadiness>> = (1..crate::WAIT_SET_SOCKETS)
-                .map(|_| wait_on(&quiet))
-                .collect();
+            let mut set: Vec<LinkWait> = (0..crate::WAIT_SET_SOCKETS).map(|_| on(&quiet)).collect();
 
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 100);
+            waits.wait(&set, 100);
             assert!(
                 started.elapsed() >= Duration::from_millis(80),
                 "CONTROL: quiet sockets that fill the set sleep the wait's time"
             );
 
-            others.push(wait_on(&quiet));
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
+            waits.wait(&[on(&quiet), LinkWait::input(WaitOn::AppLink(7))], 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a handle of another stack's is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            set.push(on(&quiet));
+            let started = Instant::now();
+            waits.wait(&set, 5_000);
             assert!(
                 started.elapsed() < Duration::from_millis(1_000),
                 "a wait past the set is the bounded look, took {:?}",
                 started.elapsed()
             );
 
-            others.pop();
-            others.pop();
-            others.push(wait_on(&ready));
-            assert_eq!(others.len() + 1, crate::WAIT_SET_SOCKETS, "the set is full");
+            set.pop();
+            set.pop();
+            set.push(on(&ready));
             sender.send_to(ready.local(), b"wake").expect("a send");
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
+            waits.wait(&set, 5_000);
             assert!(
                 started.elapsed() < Duration::from_millis(2_500),
                 "the datagram on the set's last socket ended the wait, took {:?}",

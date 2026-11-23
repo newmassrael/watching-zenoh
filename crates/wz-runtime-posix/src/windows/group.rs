@@ -86,12 +86,6 @@ impl MulticastSocket for WindowsUdpSocket {
             WindowsUdpSocket::room_wait(self)
         }
 
-        #[cfg(feature = "host-multicast")]
-        fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
-            WindowsUdpSocket::writability(self)
-        }
     }
 }
 

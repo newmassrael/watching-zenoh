@@ -30,11 +30,6 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
-wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
-}
-
 use super::{
     close, keep_from_children, last_error, name_of, open_socket, poll_readable, poll_writable,
     set_flag, set_nonblocking, RawAddr, WindowsNetError,
@@ -248,11 +243,6 @@ impl StreamListen for WindowsTcpListener {
             Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
 
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            // A listening socket polls readable while a connection is queued on it.
-            super::SocketReadiness::of(self.socket)
-        }
     }
 
     fn accept(&self) -> Result<Option<WindowsTcpSocket>, LinkOpenError> {
@@ -504,15 +494,6 @@ impl StreamSocket for WindowsTcpSocket {
             Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
 
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            super::SocketReadiness::of(self.socket)
-        }
-
-        #[cfg(feature = "alloc")]
-        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-            super::SocketReadiness::writable_of(self.socket)
-        }
     }
 }
 
@@ -920,14 +901,15 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        /// The wait for room handed to another thread answers as the socket's own wait does: it
-        /// has room while the stream takes bytes, and none once the peer has stopped reading.
-        #[cfg(feature = "alloc")]
+        /// A wait for room on the handle the stream names answers as the socket's own wait does:
+        /// it has room while the stream takes bytes, and none once the peer has stopped reading.
         #[test]
-        fn the_wait_for_room_handed_out_answers_as_the_socket_does() {
+        fn a_wait_for_room_on_the_streams_handle_answers_as_the_socket_does() {
+            use wz_runtime_coop::session_drive::LinkWaits;
             let (near, _far) = pair();
-            let wait = near.writability().expect("a duplicate of the socket");
-            assert!(wait.wait_writable(1_000), "an empty stream takes bytes");
+            let on = near.room_wait().expect("the stream's handle");
+            let waits = super::super::WindowsWaits;
+            assert!(waits.wait_room(on, 1_000), "an empty stream takes bytes");
             let chunk = [0x5au8; 1024];
             let mut written = 0usize;
             while near.wait_writable(1_000) {
@@ -940,20 +922,20 @@ mod tests {
                 );
             }
             assert!(
-                !wait.wait_writable(1_000),
-                "the wait handed out sees the stream full as the socket does"
+                !waits.wait_room(on, 1_000),
+                "a wait on the handle sees the stream full as the socket does"
             );
         }
 
-        /// The owner of a Windows stream waits on its readiness and is given no read that waits in
+        /// The owner of a Windows stream waits on its input and is given no read that waits in
         /// itself: the socket does not block, for the write that is tried first. CONTROL: the
-        /// readiness it waits on is given.
+        /// input it waits on is named.
         #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
         #[test]
         fn a_windows_stream_gives_its_owner_no_read_that_waits_in_itself() {
             let (near, _far) = pair();
             assert!(near.reader().is_none());
-            assert!(near.readiness().is_some(), "CONTROL: the wait on its readiness");
+            assert!(near.input_wait().is_some(), "CONTROL: the wait on its input");
         }
     }
 }
