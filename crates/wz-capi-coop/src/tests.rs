@@ -2252,7 +2252,12 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod entity_tables;
-#[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "local-queryable"
+))]
 mod face_table;
 #[cfg(feature = "connectivity")]
 mod faces;

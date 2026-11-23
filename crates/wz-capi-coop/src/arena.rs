@@ -1040,7 +1040,11 @@ const GROUP_FACES: usize = if cfg!(feature = "group") {
 fn faces_of(config: &CoopConfig) -> Option<usize> {
     1usize
         .checked_add(config.max_faces)?
-        .checked_add(config.groups.len().min(GROUP_FACES))
+        .checked_add(if cfg!(feature = "group") {
+            config.groups.len().min(caps::MAX_TASKS)
+        } else {
+            0
+        })
 }
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as

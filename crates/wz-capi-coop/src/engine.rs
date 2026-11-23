@@ -1297,7 +1297,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]).
     rooms: Arc<LinkRooms>,
-    /// The face an accepted or attached link takes next, beneath the dial role's.
+    /// The face an accepted or attached link or a joined group takes next, beneath the dial
+    /// role's: a build of faces besides the dial role's alone.
+    #[cfg(any(feature = "listen", feature = "group"))]
     next_face: FaceId,
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
@@ -3067,6 +3069,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Add a face whose link is `link`: a dial under way or a handshake. It is told the session's
     /// declarations at the pace the dial role's face is.
+    #[cfg(feature = "listen")]
     fn push_face(&mut self, id: FaceId, link: Link<C>) {
         let pacing = self.dial().replay.pacing();
         self.faces.push(Face {
@@ -3758,6 +3761,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
             }],
             rooms: Arc::new(LinkRooms::default()),
+            #[cfg(any(feature = "listen", feature = "group"))]
             next_face: 1,
             #[cfg(feature = "connectivity")]
             watchers: Arc::new(FacePlane::default()),

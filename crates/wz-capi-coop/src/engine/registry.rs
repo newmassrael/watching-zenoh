@@ -187,7 +187,9 @@ pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them.
 pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<HeldSet>();
 
-/// A face past the sets the open lent: the session refuses it as one past `max_faces`.
+/// A face past the sets the open lent: the session refuses it as one past `max_faces`. Only a
+/// build of faces besides the dial role's adds one.
+#[cfg(any(feature = "listen", feature = "group", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FacesFull;
 
@@ -319,19 +321,14 @@ pub(super) type App = SlotObserverOf<CoopSinks, Lent>;
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
     pub(super) app: App,
-    /// The limits the session's open resolved, which every face's tables are held to: a face
-    /// accepted after the open takes them as the dial role's face did.
-    limits: SessionLimits,
-    /// The session's key arena, which every face's tables keep the keys of what its peer declares
-    /// in: a face past the sets the open lent is handed it as a lent set's is.
-    keys: KeySpace,
     /// The session's pools of what its peers write by their own choice, which every face's tables
-    /// keep those rows in: a face past the sets the open lent is handed them as a lent set's is.
+    /// keep their rows in from the open on: what a test reads the pools' counts by.
+    #[cfg(test)]
     pools: PeerPools,
     /// Every set of face tables, each where it was built and never moved from, in a table the arena
     /// lent at the open with a row for each face the config admits: the dial role's face's first
     /// and always held by it, then the faces to come. A face past them is refused
-    /// ([`FacesFull`]), so the session's memory is the arena alone. A set no face holds is kept,
+    /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
     sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     /// The sets faces hold, each with its face, in the order of `sets`, which is the order of the
@@ -437,8 +434,7 @@ impl Registry {
             held,
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             owed,
-            limits: *limits,
-            keys,
+            #[cfg(test)]
             pools,
             #[cfg(feature = "local-queryable")]
             local,
@@ -582,6 +578,7 @@ impl Registry {
     /// Tables for a face that has come: a set the arena lent that no face holds, empty, as its
     /// peer has said nothing yet. [`FacesFull`] when every set is held: the open lent one for each
     /// face the config admits, so the session refuses such a face before it comes.
+    #[cfg(any(feature = "listen", feature = "group", test))]
     pub(super) fn add_face(&mut self, id: FaceId) -> Result<(), FacesFull> {
         let at = self.free_set();
         if at >= self.sets.len() {
@@ -603,6 +600,7 @@ impl Registry {
 
     /// The first set no face holds, or the place past the last set. The lent sets lie first, so
     /// the first free set is a lent one while any is.
+    #[cfg(any(feature = "listen", feature = "group", test))]
     fn free_set(&self) -> usize {
         // The index is in set order with one entry for each held set, so the first entry whose set
         // lies past its own place in the index has a free set at that place, and with none the

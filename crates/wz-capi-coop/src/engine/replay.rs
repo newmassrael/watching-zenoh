@@ -160,7 +160,9 @@ impl Replay {
         TurnEnd::Kept
     }
 
-    /// How a link's declarations go out.
+    /// How a link's declarations go out: what a face added beside the dial role's is told its
+    /// declarations at, and what a test reads.
+    #[cfg(any(feature = "listen", all(test, feature = "std")))]
     pub(super) fn pacing(&self) -> Option<ReplayPacing> {
         self.pacing
     }
