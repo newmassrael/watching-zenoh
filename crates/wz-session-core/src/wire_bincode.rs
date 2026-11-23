@@ -157,7 +157,11 @@ pub fn push_option_string(out: &mut Vec<u8>, s: Option<&str>) {
 /// Read a single byte (a bincode `u8` / an `Option`-or-`bool` discriminant the
 /// caller interprets against its own typed error).
 pub fn read_u8(r: &mut Reader) -> Result<u8, WireError> {
-    Ok(r.read_bytes(1)?[0])
+    let [byte] = *r
+        .read_bytes(1)?
+        .first_chunk::<1>()
+        .ok_or(WireError::UnexpectedEof)?;
+    Ok(byte)
 }
 
 /// Read a `u32` as 4 little-endian bytes (a bincode enum-variant index).
