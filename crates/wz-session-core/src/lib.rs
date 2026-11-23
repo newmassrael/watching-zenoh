@@ -596,8 +596,6 @@ pub mod qos;
 // so the conflict is unrepresentable rather than merely rejected. Pure no_std +
 // no_alloc value types; unconditional (the per-mode cargo features gate what
 // `SessionLinkActions::apply_offer` can STAGE, not what the caller can NAME).
-// Totality debt TD-126 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod transport_mode;
 
 /// R311ed — session `CloseReason` discriminator (byte-valued enum whose
