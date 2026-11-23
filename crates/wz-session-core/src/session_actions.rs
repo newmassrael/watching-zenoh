@@ -13299,7 +13299,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
                     crate::request_build::query_value_shm_descriptors(query),
                     crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
-                    Self::REQUEST_ROUTE_PRIORITY,
+                    crate::declare_ext_qos::read_request_qos(request).priority(),
                 ),
                 _ => return None,
             },
@@ -13672,12 +13672,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    /// R3122 -- the priority a Request is ROUTED on: the data plane, zenoh's default
-    /// `Priority::Data`. One definition for the dispatch below and for the sender's handoff, which
-    /// must open its transaction on the link the dispatch will pick.
-    #[cfg(all(feature = "codec-request", feature = "alloc"))]
-    const REQUEST_ROUTE_PRIORITY: Priority = Priority::DEFAULT;
-
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
     #[cfg(feature = "alloc")]
@@ -13702,6 +13696,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let class = self.outbound_request_class(request);
+        // The band and the express bit come off the Request itself, as a Response's do. Upstream's
+        // transport reads both off the message:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.get_priority(),`
+        // and `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.is_express(),`,
+        // and an express message leaves its batch at once
+        // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
+        let qos = crate::declare_ext_qos::read_request_qos(request);
         let encode_body = crate::frame_encode::request_body(request);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
@@ -13709,16 +13710,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
         #[cfg(not(feature = "tx-lend-only"))]
         let len = wz_codecs::request::RequestWire::measure(request).len();
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             stage,
-            // Request/Response = the data plane; zenoh default `Priority::Data`.
-            Self::REQUEST_ROUTE_PRIORITY,
+            qos.priority(),
             reliable,
-            crate::declare_ext_qos::read_request_qos(request),
+            qos,
             len,
             class,
             as_encoder(&encode_body),
-        )
+        )?;
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() && ended == Dispatched::Sent {
+            self.flush_express(qos.priority());
+        }
+        Ok(ended)
     }
 
     /// See [`Self::dispatch_push`]. The linkstate-peer query RETURN path: a
@@ -16615,7 +16620,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let mut count = sce_forge_runtime::codec::CountSink::new();
             writer.encode(&mut count).map_or(0, |()| count.len())
         };
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
@@ -16623,12 +16628,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             size,
             crate::stats::NetworkStatsClass::unread(),
             as_encoder(&|sink| writer.encode(sink)),
-        )
-        .map(|_| ())?;
+        )?;
         #[cfg(feature = "transport-batching")]
-        if qos.is_express() {
+        if qos.is_express() && ended == Dispatched::Sent {
             self.flush_express(qos.priority());
         }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = ended;
         Ok(())
     }
 
@@ -16684,7 +16690,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // request_build::build_request_query_with_meta (the build/dispatch
             // split), so the seam-routed z_get path and this send_* wrapper
             // share one builder SSOT. This method keeps the dispatch half
-            // (reliable, no batch flush — a Query carries no express window).
+            // (reliable, at the band and with the express flush of the Request's own QoS).
             let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
                 .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
             let request = build_request_query_with_meta(rid, key, meta)?;
