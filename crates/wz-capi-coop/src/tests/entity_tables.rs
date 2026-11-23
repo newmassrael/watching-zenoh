@@ -451,6 +451,34 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
     );
 }
 
+/// A key past the session's own `MAX_KEYEXPR_BYTES`, lowered under the build's, is refused as one
+/// past the build's is, before an id is taken, a callback minted or anything sent; a key of the
+/// session's bound is taken.
+#[test]
+fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
+    let limits = lowered(|l| l.select_max_keyexpr_bytes(Quota::at_most(8)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let minted = Arc::new(AtomicUsize::new(0));
+    let past = "demo/k/10";
+    let before = router.seen(|s| s.declares);
+    assert_eq!(declare_subscriber(&engine, past, &minted), None);
+    assert_eq!(engine.acquire_keyexpr(past.to_owned()), None);
+    assert_eq!(filter(&engine, FilterPlane::Subscribers, past), None);
+    settle(&engine);
+    assert_eq!(
+        minted.load(Ordering::SeqCst),
+        0,
+        "no callback for a refusal"
+    );
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
+
+    assert!(
+        declare_subscriber(&engine, "demo/k/9", &minted).is_some(),
+        "a key of the session's bound is taken"
+    );
+}
+
 /// The rows of the session's own declarations keep their keys in one key arena of
 /// `KEY_ARENA_BYTES`: a key that finds no room there is refused as a full table refuses, before an
 /// id is taken, a callback minted or anything sent, and the key an undeclaration gives back is
