@@ -717,6 +717,23 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
         &self.peer
     }
 
+    /// The two halves apart: the application's RemoteQueryableTable<D, U, P> and the peer's RemoteQueryablePeer<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(
+        &mut self,
+    ) -> (
+        &mut RemoteQueryableTable<D, U, P>,
+        &mut RemoteQueryablePeer<P>,
+    ) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&RemoteQueryableTable<D, U, P>, &RemoteQueryablePeer<P>) {
+        (&self.table, &self.peer)
+    }
+
     /// [`RemoteQueryablePeer::limit_to`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {

@@ -3903,6 +3903,18 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
         &self.peer
     }
 
+    /// The two halves apart: the application's SubscriberTable<C, P> and the peer's SubscriberPeer<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(&mut self) -> (&mut SubscriberTable<C, P>, &mut SubscriberPeer<P>) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&SubscriberTable<C, P>, &SubscriberPeer<P>) {
+        (&self.table, &self.peer)
+    }
+
     /// [`SubscriberPeer::limit_aliases_to`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {

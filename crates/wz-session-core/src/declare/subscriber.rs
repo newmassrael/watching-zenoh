@@ -579,6 +579,23 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
         &self.peer
     }
 
+    /// The two halves apart: the application's RemoteSubscriberTable<D, U, P> and the peer's RemoteSubscriberPeer<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(
+        &mut self,
+    ) -> (
+        &mut RemoteSubscriberTable<D, U, P>,
+        &mut RemoteSubscriberPeer<P>,
+    ) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&RemoteSubscriberTable<D, U, P>, &RemoteSubscriberPeer<P>) {
+        (&self.table, &self.peer)
+    }
+
     /// [`RemoteSubscriberPeer::limit_to`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {

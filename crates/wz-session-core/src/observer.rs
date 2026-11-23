@@ -370,6 +370,143 @@ pub struct ApplicationLayerObserver {
     pub declarations_final: crate::decl_sink::SyncedSinks,
 }
 
+/// The application half of an [`ApplicationLayerObserver`], to change: what the program registers
+/// on the session (its subscribers, queryables, tokens, liveliness subscribers, switchboard rows and
+/// the listeners on what a peer declares), apart from anything a peer writes.
+///
+/// Reached only through [`ApplicationLayerObserver::with_app`] and
+/// [`ApplicationLayerObserver::with_parts`], whose closures cannot keep a borrow of it past their
+/// return: a session whose application half is shared with the other faces of its node keeps that
+/// half behind a lock of its own, taken while the face's observer is held and let go before it
+/// (`docs/c-abi-l3-tables.md`, section 7: the face's observer first, the shared half second, never
+/// the reverse).
+pub struct ObserverApp<'a> {
+    /// The local subscriptions.
+    pub subscribers: &'a mut crate::pubsub::SubscriberTable<crate::sink::BoxedSink>,
+    /// The statechart switchboard.
+    #[cfg(feature = "switchboard")]
+    pub switchboard: &'a mut SwitchboardRegistry,
+    /// The local queryables.
+    #[cfg(feature = "query-queryable")]
+    pub queryables: &'a mut QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+    /// The listeners on the subscribers a peer declares, and the matching watches.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a mut crate::declare::subscriber::RemoteSubscriberTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the queryables a peer declares, and the matching watches.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a mut crate::declare::queryable::RemoteQueryableTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the tokens a peer declares.
+    #[cfg(feature = "liveliness-token")]
+    pub liveliness: &'a mut LivelinessRegistry<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The tokens the session holds.
+    #[cfg(feature = "liveliness-token")]
+    pub local_tokens: &'a mut LocalTokenRegistry,
+    /// The local liveliness subscribers.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub liveliness_subscribers:
+        &'a mut crate::declare::liveliness_subscriber::LivelinessSubscriberTable<
+            crate::declare::liveliness_sample::BoxedLivelinessSampleSink,
+        >,
+    /// The observers told that a peer ended its initial declarations.
+    #[cfg(feature = "declarations-synced-event")]
+    pub declarations_final: &'a mut crate::decl_sink::SyncedSinks,
+}
+
+/// The application half of an [`ApplicationLayerObserver`], to read ([`ObserverApp`]).
+pub struct ObserverAppRef<'a> {
+    /// The local subscriptions.
+    pub subscribers: &'a crate::pubsub::SubscriberTable<crate::sink::BoxedSink>,
+    /// The statechart switchboard.
+    #[cfg(feature = "switchboard")]
+    pub switchboard: &'a SwitchboardRegistry,
+    /// The local queryables.
+    #[cfg(feature = "query-queryable")]
+    pub queryables: &'a QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+    /// The listeners on the subscribers a peer declares, and the matching watches.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a crate::declare::subscriber::RemoteSubscriberTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the queryables a peer declares, and the matching watches.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a crate::declare::queryable::RemoteQueryableTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the tokens a peer declares.
+    #[cfg(feature = "liveliness-token")]
+    pub liveliness:
+        &'a LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
+    /// The tokens the session holds.
+    #[cfg(feature = "liveliness-token")]
+    pub local_tokens: &'a LocalTokenRegistry,
+    /// The local liveliness subscribers.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub liveliness_subscribers:
+        &'a crate::declare::liveliness_subscriber::LivelinessSubscriberTable<
+            crate::declare::liveliness_sample::BoxedLivelinessSampleSink,
+        >,
+    /// The observers told that a peer ended its initial declarations.
+    #[cfg(feature = "declarations-synced-event")]
+    pub declarations_final: &'a crate::decl_sink::SyncedSinks,
+}
+
+/// The face half of an [`ApplicationLayerObserver`], to change: what the session's peer writes
+/// (its key aliases and interests, its subscribers, queryables and tokens) and the gets the session
+/// asked of it. It is the observer's own in every session, so it is borrowed directly
+/// ([`ApplicationLayerObserver::face`]).
+pub struct ObserverFace<'a> {
+    /// The peer's key aliases and the interests it asked.
+    pub subscribers: &'a mut crate::pubsub::SubscriberPeer,
+    /// The subscribers the peer declared.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a mut crate::declare::subscriber::RemoteSubscriberPeer,
+    /// The queryables the peer declared.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a mut crate::declare::queryable::RemoteQueryablePeer,
+    /// The tokens the peer declared.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub tokens: &'a mut crate::declare::liveliness_subscriber::PeerTokens,
+    /// The session's gets pending on the peer.
+    pub replies: &'a mut ReplyRegistry<
+        crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>,
+    >,
+    /// The session's liveliness gets pending on the peer.
+    #[cfg(feature = "liveliness-get")]
+    pub liveliness_gets: &'a mut LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
+}
+
+/// The face half of an [`ApplicationLayerObserver`], to read ([`ObserverFace`]).
+pub struct ObserverFaceRef<'a> {
+    /// The peer's key aliases and the interests it asked.
+    pub subscribers: &'a crate::pubsub::SubscriberPeer,
+    /// The subscribers the peer declared.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a crate::declare::subscriber::RemoteSubscriberPeer,
+    /// The queryables the peer declared.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a crate::declare::queryable::RemoteQueryablePeer,
+    /// The tokens the peer declared.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub tokens: &'a crate::declare::liveliness_subscriber::PeerTokens,
+    /// The session's gets pending on the peer.
+    pub replies:
+        &'a ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
+    /// The session's liveliness gets pending on the peer.
+    #[cfg(feature = "liveliness-get")]
+    pub liveliness_gets: &'a LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
+}
+
 impl Default for ApplicationLayerObserver {
     fn default() -> Self {
         Self::new()
@@ -491,6 +628,155 @@ impl ApplicationLayerObserver {
     /// handler) holds that stage to them.
     pub const fn reply_bounds(&self) -> crate::reply_stage::ReplyBounds {
         self.pending_replies.bounds()
+    }
+
+    /// Run `f` over the application half ([`ObserverApp`]), with this observer held: the one way
+    /// a caller changes what the program registered on the session.
+    pub fn with_app<Rt>(&mut self, f: impl FnOnce(ObserverApp<'_>) -> Rt) -> Rt {
+        f(self.parts_mut().0)
+    }
+
+    /// Run `f` over the application half, to read ([`Self::with_app`]).
+    pub fn read_app<Rt>(&self, f: impl FnOnce(ObserverAppRef<'_>) -> Rt) -> Rt {
+        f(self.parts_ref().0)
+    }
+
+    /// Run `f` over both halves at once: what a call that hands the peer's tables to a method of
+    /// the application's needs (a matching re-judgement, an answer to a peer's interest).
+    pub fn with_parts<Rt>(
+        &mut self,
+        f: impl FnOnce(ObserverApp<'_>, ObserverFace<'_>) -> Rt,
+    ) -> Rt {
+        let (app, face) = self.parts_mut();
+        f(app, face)
+    }
+
+    /// Run `f` over both halves at once, to read ([`Self::with_parts`]).
+    pub fn read_parts<Rt>(
+        &self,
+        f: impl FnOnce(ObserverAppRef<'_>, ObserverFaceRef<'_>) -> Rt,
+    ) -> Rt {
+        let (app, face) = self.parts_ref();
+        f(app, face)
+    }
+
+    /// The face half ([`ObserverFace`]), the observer's own in every session.
+    pub fn face(&mut self) -> ObserverFace<'_> {
+        self.parts_mut().1
+    }
+
+    /// The face half, to read ([`Self::face`]).
+    pub fn face_ref(&self) -> ObserverFaceRef<'_> {
+        self.parts_ref().1
+    }
+
+    /// Register a local subscription on `keyexpr_pattern` that hears what `allowed_origin`
+    /// admits, delivered to `sink`, and stage what it owes this observer's peer (a peer that holds
+    /// a future subscriber interest is told of it): both halves in one step, as
+    /// [`SubscriberRegistry::register_sink`] does.
+    pub fn register_subscriber(
+        &mut self,
+        keyexpr_pattern: &str,
+        allowed_origin: crate::locality::Locality,
+        sink: crate::sink::BoxedSink,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.subscribers
+            .register_sink(keyexpr_pattern, allowed_origin, sink)
+    }
+
+    /// Retire local subscription `id`, and stage what its going owes this observer's peer (the
+    /// retraction of an aggregate it alone stood for): both halves in one step, as
+    /// [`SubscriberRegistry::unregister`] does. Whether it was registered.
+    pub fn unregister_subscriber(&mut self, id: crate::pubsub::SubscriptionId) -> bool {
+        self.subscribers.unregister(id)
+    }
+
+    /// Both halves, borrowed apart.
+    fn parts_mut(&mut self) -> (ObserverApp<'_>, ObserverFace<'_>) {
+        let (subscribers, subscriber_peer) = self.subscribers.split_mut();
+        #[cfg(feature = "declare-subscriber")]
+        let (remote_subscribers, remote_subscriber_peer) = self.remote_subscribers.split_mut();
+        #[cfg(feature = "declare-queryable")]
+        let (remote_queryables, remote_queryable_peer) = self.remote_queryables.split_mut();
+        #[cfg(feature = "liveliness-subscriber")]
+        let (liveliness_subscribers, tokens) = self.liveliness_subscribers.split_mut();
+        (
+            ObserverApp {
+                subscribers,
+                #[cfg(feature = "switchboard")]
+                switchboard: &mut self.switchboard,
+                #[cfg(feature = "query-queryable")]
+                queryables: &mut self.queryables,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables,
+                #[cfg(feature = "liveliness-token")]
+                liveliness: &mut self.liveliness,
+                #[cfg(feature = "liveliness-token")]
+                local_tokens: &mut self.local_tokens,
+                #[cfg(feature = "liveliness-subscriber")]
+                liveliness_subscribers,
+                #[cfg(feature = "declarations-synced-event")]
+                declarations_final: &mut self.declarations_final,
+            },
+            ObserverFace {
+                subscribers: subscriber_peer,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: remote_subscriber_peer,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: remote_queryable_peer,
+                #[cfg(feature = "liveliness-subscriber")]
+                tokens,
+                replies: &mut self.replies,
+                #[cfg(feature = "liveliness-get")]
+                liveliness_gets: &mut self.liveliness_gets,
+            },
+        )
+    }
+
+    /// Both halves, borrowed apart, to read.
+    fn parts_ref(&self) -> (ObserverAppRef<'_>, ObserverFaceRef<'_>) {
+        let (subscribers, subscriber_peer) = self.subscribers.split();
+        #[cfg(feature = "declare-subscriber")]
+        let (remote_subscribers, remote_subscriber_peer) = self.remote_subscribers.split();
+        #[cfg(feature = "declare-queryable")]
+        let (remote_queryables, remote_queryable_peer) = self.remote_queryables.split();
+        #[cfg(feature = "liveliness-subscriber")]
+        let (liveliness_subscribers, tokens) = self.liveliness_subscribers.split();
+        (
+            ObserverAppRef {
+                subscribers,
+                #[cfg(feature = "switchboard")]
+                switchboard: &self.switchboard,
+                #[cfg(feature = "query-queryable")]
+                queryables: &self.queryables,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables,
+                #[cfg(feature = "liveliness-token")]
+                liveliness: &self.liveliness,
+                #[cfg(feature = "liveliness-token")]
+                local_tokens: &self.local_tokens,
+                #[cfg(feature = "liveliness-subscriber")]
+                liveliness_subscribers,
+                #[cfg(feature = "declarations-synced-event")]
+                declarations_final: &self.declarations_final,
+            },
+            ObserverFaceRef {
+                subscribers: subscriber_peer,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: remote_subscriber_peer,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: remote_queryable_peer,
+                #[cfg(feature = "liveliness-subscriber")]
+                tokens,
+                replies: &self.replies,
+                #[cfg(feature = "liveliness-get")]
+                liveliness_gets: &self.liveliness_gets,
+            },
+        )
     }
 
     /// New observer with empty registries, held to the build's limits. Callers register
@@ -3209,5 +3495,62 @@ mod queryable_interest_reply_tests {
             .all(|wire| !wire.starts_with("queryable")));
         let cancel = NetworkMessage::Interest(crate::interest_build::build_interest_final(13));
         assert!(answer(&mut observer, cancel).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    /// A session that shares nothing: the application half is a view of the observer's own tables,
+    /// so what is registered through it is what the observer holds.
+    #[test]
+    fn the_application_half_is_the_observers_own_tables() {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer
+            .with_app(|app| app.subscribers.register("demo/a", |_| {}))
+            .unwrap();
+        assert_eq!(observer.subscribers.len(), 1);
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 1);
+        assert!(observer.with_app(|app| app.subscribers.unregister(id)));
+        assert!(observer.subscribers.is_empty());
+    }
+
+    /// Registering through the observer reaches the same table as the half does, and retiring an
+    /// id it does not hold says so.
+    #[test]
+    fn a_subscriber_registered_on_the_observer_is_in_the_application_half() {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer
+            .register_subscriber(
+                "demo/b",
+                crate::locality::Locality::Any,
+                crate::sink::BoxedSink::new(|_| {}),
+            )
+            .unwrap();
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 1);
+        assert!(observer.unregister_subscriber(id));
+        assert!(!observer.unregister_subscriber(id));
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 0);
+    }
+
+    /// The face half is the observer's own peer side: nothing pending on a fresh observer, and the
+    /// two halves borrowed together read the same tables as each alone.
+    #[test]
+    fn the_face_half_is_the_observers_own_peer_side() {
+        let mut observer = ApplicationLayerObserver::new();
+        assert_eq!(observer.face().replies.len(), 0);
+        assert_eq!(observer.face_ref().replies.len(), observer.replies.len());
+        let both = observer.read_parts(|app, face| (app.subscribers.len(), face.replies.len()));
+        assert_eq!(both, (0, 0));
+        let (registered, pending) = observer.with_parts(|app, face| {
+            (
+                app.subscribers.register("demo/c", |_| {}).is_ok(),
+                face.replies.len(),
+            )
+        });
+        assert!(registered);
+        assert_eq!(pending, 0);
+        assert_eq!(observer.subscribers.len(), 1);
     }
 }
