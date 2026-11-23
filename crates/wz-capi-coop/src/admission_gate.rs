@@ -19,6 +19,7 @@ use alloc::rc::Rc;
 use core::cell::Cell;
 
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_mcu::dial::McuActions;
@@ -45,12 +46,12 @@ impl Admitted {
 /// `admitted` is granted.
 pub(crate) struct AdmissionGate<P, C: ClockSource + 'static> {
     pump: P,
-    actions: Rc<McuActions<C>>,
+    actions: SessionHandle<C>,
     admitted: Admitted,
 }
 
 impl<P, C: ClockSource + 'static> AdmissionGate<P, C> {
-    pub(crate) fn new(pump: P, actions: Rc<McuActions<C>>, admitted: Admitted) -> Self {
+    pub(crate) fn new(pump: P, actions: SessionHandle<C>, admitted: Admitted) -> Self {
         Self {
             pump,
             actions,

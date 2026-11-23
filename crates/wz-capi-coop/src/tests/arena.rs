@@ -1635,14 +1635,20 @@ fn print_the_arena_a_listener_reserves_at_each_default() {
     }
 }
 
-/// A plan with every row of the build, the links' cells, their gates' and the ABI's handle among
-/// them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
+/// A plan with every row of the build, the links' cells, their gates', their actions' and the
+/// ABI's handle among them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
 /// whichever build. A group that puts a row it does not count, or counts one it does not put,
 /// turns this red.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
     let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding_cells(64, 64))
+        .and_then(|plan| {
+            plan.holding_cells(crate::arena::LinkCells {
+                driver: 64,
+                gate: 64,
+                actions: 64,
+            })
+        })
         .and_then(|plan| plan.holding(core::alloc::Layout::new::<u64>()))
         .expect("the build's limits lay an arena out");
     assert_eq!(plan.rows().len(), crate::arena::ARENA_ROWS);

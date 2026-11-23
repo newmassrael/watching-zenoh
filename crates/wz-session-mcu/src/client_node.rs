@@ -27,7 +27,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::SessionLinks;
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
@@ -43,7 +45,7 @@ use crate::connect_manager::{ConnectManager, EndpointSource};
 use crate::dial::{EventSink, McuActions, UdpDialer};
 
 /// Builds the sink each dialled session reports to.
-type DialSink<C> = Box<dyn FnMut(&Rc<McuActions<C>>) -> EventSink>;
+type DialSink<C> = Box<dyn FnMut(&SessionHandle<C>) -> EventSink>;
 
 /// What the application asked the node to declare on every session.
 enum Declaration {
@@ -169,15 +171,15 @@ where
     /// Send each established session the declarations it has not heard, and forget the sessions
     /// that are gone. A declaration that cannot be sent now is tried again at the next tick.
     fn declare_on_new_sessions(&mut self) {
-        let live: Vec<&Rc<McuActions<C>>> =
+        let live: Vec<&SessionHandle<C>> =
             self.manager.sessions().map(|(_, s)| s.actions()).collect();
         self.declared
-            .retain(|(done, _)| live.iter().any(|a| Rc::as_ptr(a) == *done));
+            .retain(|(done, _)| live.iter().any(|a| CellRc::as_ptr(a) == *done));
         for actions in live {
             if !actions.is_established() {
                 continue;
             }
-            let key = Rc::as_ptr(actions);
+            let key = CellRc::as_ptr(actions);
             let row = match self.declared.iter().position(|(done, _)| *done == key) {
                 Some(row) => row,
                 None => {

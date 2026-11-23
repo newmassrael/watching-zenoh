@@ -2807,7 +2807,7 @@ mod wake_budget_tests {
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
-        let before = Rc::strong_count(&actions);
+        let before = crate::link_cells::CellRc::handles(&actions);
         let task = spawn_session_with_router(
             &local,
             Rc::clone(&link),
@@ -2836,13 +2836,13 @@ mod wake_budget_tests {
             !link.budgets.borrow().is_empty(),
             "the pump built in the task stepped its link"
         );
-        let running = Rc::strong_count(&actions);
+        let running = crate::link_cells::CellRc::handles(&actions);
         assert!(running > before, "the pump holds the handle to its session");
         task.abort();
         local.run_until_idle();
         assert_eq!(made.get(), 1, "a dropped task makes nothing more");
         assert!(
-            Rc::strong_count(&actions) < running,
+            crate::link_cells::CellRc::handles(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
     }

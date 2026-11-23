@@ -45,7 +45,8 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, LinkCells,
+    SessionArena,
 };
 use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SharedLane};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -88,6 +89,7 @@ use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -1507,6 +1509,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
     /// lent from the arena; none for a plan that laid out none.
     gate_cells: Option<LentByteCells>,
+    /// The cells each link's actions are placed in when the session makes the link, lent from the
+    /// arena; none for a plan that laid out none.
+    actions_cells: Option<LentByteCells>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
@@ -1596,7 +1601,7 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
 /// One link's half of the session: the actions that send over it. The task that runs the link,
 /// the link itself and its owner's waits for it are the driver's ([`Wire`]).
 struct LinkSession<C: ClockSource + 'static> {
-    actions: Rc<McuActions<C>>,
+    actions: SessionHandle<C>,
     /// Opened when the face is brought up (`bring_up`); until then the link gives the session
     /// nothing past its handshake, so the watchers hear the face come up before anything its link
     /// carried.
@@ -2023,7 +2028,7 @@ fn reply_shown(expose: bool, mut callback: ReplyCallback) -> ReplyCallback {
 pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
-    actions: Rc<McuActions<C>>,
+    actions: SessionHandle<C>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -2130,7 +2135,11 @@ pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
     config: &CoopConfig<E>,
 ) -> Result<ArenaPlan, ArenaRefused> {
     ArenaPlan::of(config, &resolve_limits(config)).and_then(|plan| {
-        plan.holding_cells(links.link_cell_bytes(), CellRc::<LinkGate<C>>::cell_bytes())
+        plan.holding_cells(LinkCells {
+            driver: links.link_cell_bytes(),
+            gate: CellRc::<LinkGate<C>>::cell_bytes(),
+            actions: CellRc::<McuActions<C>>::cell_bytes(),
+        })
     })
 }
 
@@ -2253,7 +2262,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The actions of every face whose link is up, which is what the session sends through. A
     /// face whose link is dialled or waits to be is not among them: what is declared then is
     /// declared when it comes up.
-    fn ups(&self) -> impl Iterator<Item = &Rc<McuActions<C>>> {
+    fn ups(&self) -> impl Iterator<Item = &SessionHandle<C>> {
         self.links
             .faces()
             .iter()
@@ -2264,7 +2273,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// [`Self::ups`], each with the id of its face.
-    fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &Rc<McuActions<C>>)> {
+    fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &SessionHandle<C>)> {
         self.links
             .faces()
             .iter()
@@ -2287,7 +2296,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The actions of face `id` while its link is up.
     #[cfg(feature = "query")]
-    fn up_actions(&self, id: FaceId) -> Option<&Rc<McuActions<C>>> {
+    fn up_actions(&self, id: FaceId) -> Option<&SessionHandle<C>> {
         self.links.faces().iter().find_map(|face| match &face.link {
             Link::Up(wire) if face.id == id => Some(&wire.actions),
             _ => None,
@@ -2398,7 +2407,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        let actions = McuActions::<C>::new_generic(sink, params, self.session_time.clone());
+        // The link's actions go in its cell of the session's table, as its gates do below.
+        let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
+        let actions: SessionHandle<C> = match &self.actions_cells {
+            Some(cells) => {
+                CellRc::place(cells, actions).map_err(|_| self.cells_exhausted(endpoint))?
+            }
+            None => CellRc::boxed(actions),
+        };
         // The link has its place in the session's admission before the handshake runs, which asks
         // it once the remote's zid is known: a second link to a node the session holds is refused
         // there, with nothing declared over it by either end, and not closed after it came up.
@@ -2481,12 +2497,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The gates go in the link's cell of the session's table, as the link's driver goes in
         // one of the stack's: a link past the cells is refused as one past the buffers is.
         let link = match &self.gate_cells {
-            Some(cells) => CellRc::place(cells, gate).map_err(|_| {
-                OpenError::Unreachable(EndpointRefusal::new(
-                    self.endpoint_text(endpoint),
-                    Refusal::Link(LinkOpenError::Exhausted),
-                ))
-            })?,
+            Some(cells) => {
+                CellRc::place(cells, gate).map_err(|_| self.cells_exhausted(endpoint))?
+            }
             None => CellRc::boxed(gate),
         }
         .into_link();
@@ -2634,6 +2647,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
     }
 
+    /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
+    /// stack's buffers is.
+    fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> OpenError {
+        OpenError::Unreachable(EndpointRefusal::new(
+            self.endpoint_text(endpoint),
+            Refusal::Link(LinkOpenError::Exhausted),
+        ))
+    }
+
     /// Dial from endpoint `from` on; when none answers, wait `redial_ms` to dial them all again,
     /// or end with the last endpoint's reason when the session redials none.
     ///
@@ -2711,7 +2733,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // then finds it lost, so the dial role's face dials again and tells everything over the
         // next link, and any other face goes.
         let up = match &face.link {
-            Link::Up(wire) if !wire.finished() => Some(Rc::clone(&wire.actions)),
+            Link::Up(wire) if !wire.finished() => Some(wire.actions.clone()),
             _ => None,
         };
         if let Some(actions) = up {
@@ -2849,7 +2871,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let mut told = 0;
         for at in 0..self.links.faces().len() {
             let actions = match &self.links.faces()[at].link {
-                Link::Up(wire) => Rc::clone(&wire.actions),
+                Link::Up(wire) => wire.actions.clone(),
                 _ => continue,
             };
             match self.begin_replay(at, &actions, now_ms) {
@@ -2883,7 +2905,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(wait) = wire.writability() {
             self.rooms.hold(face.id, wait);
         }
-        let actions = Rc::clone(&wire.actions);
+        let actions = wire.actions.clone();
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.abort_link(at);
         }
@@ -3659,9 +3681,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
-        let (link_cells, gate_cells) = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
-        if let Some(cells) = link_cells {
-            links.lend_cells(cells);
+        let cells = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
+        if let Some(driver_cells) = cells.driver {
+            links.lend_cells(driver_cells);
         }
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
@@ -3793,7 +3815,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             keys,
             own_space: session_space(&keyexprs),
             keyexprs,
-            gate_cells,
+            gate_cells: cells.gate,
+            actions_cells: cells.actions,
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,

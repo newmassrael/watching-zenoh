@@ -178,9 +178,9 @@ const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
 /// filters, matching listeners, interests and the key arena.
 const ENTITY_ROWS: usize =
     cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 5;
-/// The links' cells and their gates' cells, each a table of flags and cells
+/// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
-const CELL_ROWS: usize = 4;
+const CELL_ROWS: usize = 6;
 /// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
 const HANDLE_ROWS: usize = 2;
 
@@ -336,6 +336,19 @@ impl EntityRows {
     }
 }
 
+/// One of each table of a cell for each link: the link's driver's, its gates' and its session's
+/// actions'. A plan holds each table's cell bytes ([`ArenaPlan::holding_cells`]); an open, the
+/// tables the session's arena lends it (`SessionArena::lend_cells`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkCells<T> {
+    /// The cells of the stack's drivers of the links.
+    pub driver: T,
+    /// The cells of the gates each link's pump runs behind.
+    pub gate: T,
+    /// The cells of the bundle of each link's session actions.
+    pub actions: T,
+}
+
 /// What a session's arena holds, row by row, in the order the rows are lent from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
@@ -368,11 +381,9 @@ pub struct ArenaPlan {
     handle_bytes: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
-    /// The bytes of the cell each link's driver is placed in, none for a plan whose links place
-    /// theirs on the heap ([`Self::holding_cells`]).
-    link_cell_bytes: usize,
-    /// The bytes of the cell each link's gates are placed in ([`Self::holding_cells`]).
-    gate_cell_bytes: usize,
+    /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
+    /// for a table the plan does not hold ([`Self::holding_cells`]).
+    cell_bytes: LinkCells<usize>,
 }
 
 impl ArenaPlan {
@@ -458,8 +469,7 @@ impl ArenaPlan {
             )?,
             handle_bytes: 0,
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
-            link_cell_bytes: 0,
-            gate_cell_bytes: 0,
+            cell_bytes: LinkCells::default(),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -789,20 +799,24 @@ impl ArenaPlan {
         Ok(self)
     }
 
-    /// The plan with a cell for each of its links' drivers, `driver` bytes each, which the links
-    /// are placed in (`wz_runtime_coop::link_cells`, the stack's `SessionLinks::link_cell_bytes`),
-    /// and a cell for each link's gates, `gate` bytes each, which the session places them in when
-    /// it makes the link: a link the session opens then takes cells and no memory of the heap. Laid
-    /// out before the ABI's handle ([`Self::holding`]). A size of `0` adds no table, as a stack
-    /// that places its links on the heap asks.
-    pub fn holding_cells(mut self, driver: usize, gate: usize) -> Result<Self, ArenaRefused> {
-        if self.link_cell_bytes == 0 && driver != 0 {
-            self.link_cell_bytes = driver;
-            self.put_cells(["link cell flags", "link cells"], driver)?;
+    /// The plan with a table of a cell for each link of each kind `bytes` sizes: the links'
+    /// drivers, which the stack places them in (`wz_runtime_coop::link_cells`, its
+    /// `SessionLinks::link_cell_bytes`), and their gates and their actions, which the session
+    /// places them in when it makes the link: a link the session opens then takes cells and no
+    /// memory of the heap. Laid out before the ABI's handle ([`Self::holding`]). A size of `0`
+    /// adds no table, as a stack that places its links on the heap asks.
+    pub fn holding_cells(mut self, bytes: LinkCells<usize>) -> Result<Self, ArenaRefused> {
+        if self.cell_bytes.driver == 0 && bytes.driver != 0 {
+            self.cell_bytes.driver = bytes.driver;
+            self.put_cells(["link cell flags", "link cells"], bytes.driver)?;
         }
-        if self.gate_cell_bytes == 0 && gate != 0 {
-            self.gate_cell_bytes = gate;
-            self.put_cells(["link gate flags", "link gates"], gate)?;
+        if self.cell_bytes.gate == 0 && bytes.gate != 0 {
+            self.cell_bytes.gate = bytes.gate;
+            self.put_cells(["link gate flags", "link gates"], bytes.gate)?;
+        }
+        if self.cell_bytes.actions == 0 && bytes.actions != 0 {
+            self.cell_bytes.actions = bytes.actions;
+            self.put_cells(["link actions flags", "link actions"], bytes.actions)?;
         }
         Ok(self)
     }
@@ -1324,20 +1338,24 @@ impl SessionArena {
         Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
     }
 
-    /// Lend the cells `plan` lays out for its links' drivers and for their gates
+    /// Lend the cells `plan` lays out for its links' drivers, their gates and their actions
     /// ([`ArenaPlan::holding_cells`]), each `None` for a plan with no such table. Refused only by
     /// an arena reserved by another plan.
     pub(crate) fn lend_cells(
         &mut self,
         plan: &ArenaPlan,
-    ) -> Result<(Option<LentByteCells>, Option<LentByteCells>), ArenaRefused> {
+    ) -> Result<LinkCells<Option<LentByteCells>>, ArenaRefused> {
         let mut table = |bytes: usize| {
             (bytes != 0)
                 .then(|| self.arena.lend_byte_cells(bytes, plan.links))
                 .transpose()
                 .map_err(ArenaRefused::Lend)
         };
-        Ok((table(plan.link_cell_bytes)?, table(plan.gate_cell_bytes)?))
+        Ok(LinkCells {
+            driver: table(plan.cell_bytes.driver)?,
+            gate: table(plan.cell_bytes.gate)?,
+            actions: table(plan.cell_bytes.actions)?,
+        })
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
@@ -1435,8 +1453,7 @@ mod tests {
             key_bytes: 0,
             handle_bytes: 0,
             endpoint_rows: (0, 0),
-            link_cell_bytes: 0,
-            gate_cell_bytes: 0,
+            cell_bytes: LinkCells::default(),
         }
     }
 

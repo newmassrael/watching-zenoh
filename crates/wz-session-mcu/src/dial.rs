@@ -346,6 +346,7 @@ mod heap {
 
     use super::{dial_failed, parse_locator_for, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
+    use wz_runtime_coop::session_runtime::SessionHandle;
     use wz_session_core::locator_directory::DirectoryZid;
 
     /// What a dialled session reports its iterations to — typically
@@ -355,13 +356,13 @@ mod heap {
     /// A session this dialer started.
     pub struct UdpSession<C: ClockSource + 'static> {
         handle: CoopLocalJoinHandle<DriverOutcome>,
-        actions: Rc<McuActions<C>>,
+        actions: SessionHandle<C>,
         established: bool,
     }
 
     impl<C: ClockSource + 'static> UdpSession<C> {
         /// The session's action bundle, to publish or declare through.
-        pub fn actions(&self) -> &Rc<McuActions<C>> {
+        pub fn actions(&self) -> &SessionHandle<C> {
             &self.actions
         }
 
@@ -432,7 +433,7 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         local: &'a CoopLocalSet<C>,
         links: Rc<L>,
@@ -447,7 +448,7 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         /// A dialer spawning onto `local`, over `links`, with the handshake
         /// deadlines `timeouts`.
@@ -517,7 +518,7 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         type Session = UdpSession<C>;
 
@@ -955,6 +956,7 @@ mod tests {
     use wz_runtime_coop::session_drive::{
         spawn_session, LinkOpenError, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
     };
+    use wz_runtime_coop::session_runtime::SessionHandle;
     use wz_runtime_coop::{ClockSource, CoopLocalSet};
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::session_timeouts::SessionTimeouts;
@@ -1011,7 +1013,7 @@ mod tests {
         }
     }
 
-    fn quiet(_: &Rc<McuActions<FrozenClock>>) -> EventSink {
+    fn quiet(_: &SessionHandle<FrozenClock>) -> EventSink {
         Box::new(|_| {})
     }
 
