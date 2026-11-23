@@ -954,8 +954,6 @@ pub mod scouting_host;
 // M0 inline-fire reach with no AP change (wz-runtime-tokio still
 // enables `deferred-fire`).
 #[cfg(feature = "deferred-fire")]
-// Totality debt TD-069 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod deferred_fire;
 
 // Query-side enums (ConsolidationMode + QueryTarget) shared by the
