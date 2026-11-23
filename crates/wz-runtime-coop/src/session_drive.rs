@@ -1227,6 +1227,18 @@ pub type DefaultRouter = InPlaceReassembly;
 #[cfg(not(feature = "reassembly"))]
 pub type DefaultRouter = ();
 
+/// What a [`SessionPump`] is built of besides its receive and its engine, handed to
+/// `SessionPump::build_in` together: the session's runtime, link, actions, the source it draws
+/// its handshake secrets from, clock and drive config.
+struct PumpFields<C: ClockSource, L, D: BoxedLinkDriver + ?Sized + 'static> {
+    runtime: CoopRuntime<C, D>,
+    link: L,
+    actions: SessionHandle<C, D>,
+    entropy: SessionEntropy,
+    clock: CoopTime<C>,
+    config: SessionDriveConfig,
+}
+
 /// One MCU session, ready to be advanced one iteration at a time.
 ///
 /// R2364 — extracted from `run_session`, whose body this used to be
@@ -1424,12 +1436,14 @@ impl<
         unsafe {
             Self::build_in(
                 place,
-                runtime,
-                link,
-                actions,
-                entropy,
-                clock,
-                config,
+                PumpFields {
+                    runtime,
+                    link,
+                    actions,
+                    entropy,
+                    clock,
+                    config,
+                },
                 |_| {},
             );
             Some(place.assume_init_mut())
@@ -1455,12 +1469,14 @@ impl<
         unsafe {
             Self::build_in(
                 &mut place,
-                runtime,
-                link,
-                actions,
-                entropy,
-                clock,
-                config,
+                PumpFields {
+                    runtime,
+                    link,
+                    actions,
+                    entropy,
+                    clock,
+                    config,
+                },
                 |rx| {
                     let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
                 },
@@ -1487,14 +1503,17 @@ impl<
     #[inline(never)]
     unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C, D>,
-        link: L,
-        actions: SessionHandle<C, D>,
-        entropy: SessionEntropy,
-        clock: CoopTime<C>,
-        config: SessionDriveConfig,
+        fields: PumpFields<C, L, D>,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
+        let PumpFields {
+            runtime,
+            link,
+            actions,
+            entropy,
+            clock,
+            config,
+        } = fields;
         let SessionDriveConfig {
             timeouts,
             role,
@@ -2402,12 +2421,14 @@ impl<
         unsafe {
             SessionPump::build_in(
                 &mut *cell.pump.get(),
-                runtime,
-                link,
-                actions,
-                entropy,
-                clock,
-                config,
+                PumpFields {
+                    runtime,
+                    link,
+                    actions,
+                    entropy,
+                    clock,
+                    config,
+                },
                 // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
                 #[cfg(feature = "reassembly")]
                 |rx| {
