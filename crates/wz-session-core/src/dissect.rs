@@ -510,7 +510,9 @@ impl<'a> SpanCursor<'a> {
     /// on every call rather than tracked in a counter, so a sub-codec decode
     /// that advances the cursor behind this type's back cannot desync it.
     pub fn offset(&self) -> usize {
-        self.base + (self.len - self.cur.remaining())
+        // The cursor never holds more than the buffer it was made over.
+        self.base
+            .saturating_add(self.len.saturating_sub(self.cur.remaining()))
     }
 
     /// Bytes left to read.
@@ -521,13 +523,14 @@ impl<'a> SpanCursor<'a> {
     /// The next byte without consuming it — the peek-byte variant dispatch
     /// every envelope codec performs before decoding its body.
     pub fn peek_u8(&self) -> Result<u8, CodecError> {
-        Ok(self.cur.peek_slice(1)?[0])
+        let [byte] = *self.peek_array::<1>()?;
+        Ok(byte)
     }
 
     /// Read one byte.
     pub fn u8(&mut self, name: &'static str) -> Result<(u8, Field), CodecError> {
         let start = self.offset();
-        let v = self.cur.peek_slice(1)?[0];
+        let [v] = *self.peek_array::<1>()?;
         self.cur.advance(1)?;
         Ok((
             v,
@@ -546,8 +549,7 @@ impl<'a> SpanCursor<'a> {
     /// JOIN.
     pub fn u16_le(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
         let start = self.offset();
-        let raw = self.cur.peek_slice(2)?;
-        let v = raw[0] as u16 | ((raw[1] as u16) << 8);
+        let v = u16::from_le_bytes(*self.peek_array::<2>()?);
         self.cur.advance(2)?;
         Ok((
             v,
@@ -661,6 +663,16 @@ impl<'a> SpanCursor<'a> {
 
     /// Read `n` raw bytes.
     pub fn bytes(&mut self, name: &'static str, n: usize) -> Result<Field, CodecError> {
+        self.owned_bytes(name, n, FieldValue::Bytes)
+    }
+
+    /// The next `n` bytes, as a field called `name` whose value `value` makes of them.
+    fn owned_bytes(
+        &mut self,
+        name: &'static str,
+        n: usize,
+        value: fn(Vec<u8>) -> FieldValue,
+    ) -> Result<Field, CodecError> {
         let start = self.offset();
         let raw = self.cur.peek_slice(n)?.to_vec();
         self.cur.advance(n)?;
@@ -670,8 +682,17 @@ impl<'a> SpanCursor<'a> {
                 start,
                 end: self.offset(),
             },
-            value: FieldValue::Bytes(raw),
+            value: value(raw),
         })
+    }
+
+    /// The next `N` bytes without consuming them, as an array: a peek of a length the
+    /// compiler knows.
+    fn peek_array<const N: usize>(&self) -> Result<&'a [u8; N], CodecError> {
+        self.cur
+            .peek_slice(N)?
+            .first_chunk::<N>()
+            .ok_or(CodecError::NeedMoreBytes)
     }
 
     /// Read a ZenohId of `n` wire bytes, as a field called `name`.
@@ -698,14 +719,7 @@ impl<'a> SpanCursor<'a> {
         if n > crate::credential_identity::CREDENTIAL_ZID_BYTES {
             return Err(CodecError::LengthOutOfRange);
         }
-        let field = self.bytes(name, n)?;
-        let FieldValue::Bytes(raw) = field.value else {
-            unreachable!("bytes() builds a Bytes value")
-        };
-        Ok(Field {
-            value: FieldValue::Zid(raw),
-            ..field
-        })
+        self.owned_bytes(name, n, FieldValue::Zid)
     }
 
     /// Read every remaining byte.
@@ -1083,7 +1097,7 @@ fn walk_ext_zbuf_body(
 ) -> Option<Field> {
     let name = crate::ext_name::ext_name(carrier_kind, header)?;
     let (group_name, walk) = zbuf_body_walker(carrier_kind, name)?;
-    let end = base + body.len();
+    let end = base.saturating_add(body.len());
     let mut c = SpanCursor::with_base(body, base);
     let fields = walk(&mut c).ok()?;
     if c.remaining() != 0 {
@@ -1538,7 +1552,8 @@ fn narrowed_z64(value: u64, width: u32, zero_is_absent: bool, span: Span) -> Opt
     let mask = if width >= 64 {
         u64::MAX
     } else {
-        (1u64 << width) - 1
+        // At least one, since `width` is below 64.
+        (1u64 << width).saturating_sub(1)
     };
     let read_as = value & mask;
     let discarded = value & !mask;
@@ -1709,7 +1724,7 @@ fn zbuf_record_count(body: &[u8]) -> Option<usize> {
     let mut count = 0usize;
     while cursor.remaining() != 0 {
         crate::vle::read_zbuf(&mut cursor)?;
-        count += 1;
+        count = count.saturating_add(1);
     }
     Some(count)
 }
@@ -1949,7 +1964,7 @@ fn walk_zid_prefixed(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let carrier = hdr.span;
     let len_m1 = ((byte >> 4) & 0x0F) as u64;
     let mut out = alloc::vec![hdr, bits("zid_len_m1", carrier, len_m1)];
-    out.push(c.zid("zid", len_m1 as usize + 1)?);
+    out.push(c.zid("zid", (len_m1 as usize).saturating_add(1))?);
     Ok(out)
 }
 
@@ -2906,7 +2921,7 @@ pub fn walk_scout(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     // I-gated, and the LENGTH rides the same carrier: `(cbyte >> 4) + 1`.
     if (cbyte & 0x08) != 0 {
-        out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+        out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize).saturating_add(1))?);
     }
     Ok(out)
 }
@@ -2928,7 +2943,7 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
     ];
     out.extend(whatami_name(carrier, WhatAmI::from_wire(cbyte)));
     out.push(bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64));
-    out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+    out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize).saturating_add(1))?);
     if l {
         let (n, count) = c.vle_u64("num_locators")?;
         out.push(count);
@@ -3091,7 +3106,12 @@ fn walk_linkstate_body(body: &[u8], base: usize) -> Option<Field> {
     if c.remaining() != 0 {
         return None;
     }
-    Some(group("linkstate", base, base + body.len(), fields))
+    Some(group(
+        "linkstate",
+        base,
+        base.saturating_add(body.len()),
+        fields,
+    ))
 }
 
 fn walk_linkstate_list(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
@@ -3725,7 +3745,7 @@ fn dissect_records(
             && c.peek_u8()
                 .is_ok_and(|b| crate::network_message::is_transport_mid(b & 0x1F))
         {
-            covered = offset - base;
+            covered = offset.saturating_sub(base);
             break;
         }
         match walk_network_record(&mut c) {
@@ -3749,7 +3769,7 @@ fn dissect_records(
     }
     let unparsed_bytes = match halt {
         Some(DissectHalt::UnknownMid { offset, .. }) | Some(DissectHalt::Error { offset, .. }) => {
-            (base + payload.len()).saturating_sub(offset)
+            base.saturating_add(payload.len()).saturating_sub(offset)
         }
         None => 0,
     };
@@ -3822,7 +3842,13 @@ fn transport_carrier(mid: u8) -> crate::ext_name::ExtCarrier {
 /// human-readable form loses nothing -- and `bits` children would have repeated
 /// the complaint this closes, `0..3` being no more readable than `10`.
 fn sn_res_word(code: u8) -> &'static str {
-    SN_RES_WORDS[usize::from(code & 0b11)]
+    let [bits8, bits16, bits32, bits64] = SN_RES_WORDS;
+    match code & 0b11 {
+        0 => bits8,
+        1 => bits16,
+        2 => bits32,
+        _ => bits64,
+    }
 }
 
 /// The resolution words, indexed by the two-bit code, written once: the walker
@@ -3932,8 +3958,12 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.extend(whatami_name(cb_span, WhatAmI::from_wire(cbyte)));
-            out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(bits(
+                "zid_len",
+                cb_span,
+                (((cbyte >> 4) & 0xF).saturating_add(1)) as u64,
+            ));
+            out.push(c.zid("zid", (((cbyte >> 4) & 0xF) as usize).saturating_add(1))?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
@@ -3983,8 +4013,12 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.extend(whatami_name(cb_span, WhatAmI::from_wire(cbyte)));
-            out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(bits(
+                "zid_len",
+                cb_span,
+                (((cbyte >> 4) & 0xF).saturating_add(1)) as u64,
+            ));
+            out.push(c.zid("zid", (((cbyte >> 4) & 0xF) as usize).saturating_add(1))?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
@@ -4023,14 +4057,15 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 // remainder, so no capture byte goes unaccounted for.
                 let mut children = batch.records;
                 if batch.unparsed_bytes > 0 {
-                    let unparsed_start = payload_start + rem - batch.unparsed_bytes;
+                    // What was not parsed is the tail of the `rem` bytes the batch was read from.
+                    let parsed = rem.saturating_sub(batch.unparsed_bytes);
                     children.push(Field {
                         name: crate::dissect_schema::BATCH_REMAINDER.into(),
                         span: Span {
-                            start: unparsed_start,
-                            end: payload_start + rem,
+                            start: payload_start.saturating_add(parsed),
+                            end: payload_start.saturating_add(rem),
                         },
-                        value: FieldValue::Bytes(bytes[rem - batch.unparsed_bytes..].to_vec()),
+                        value: FieldValue::Bytes(bytes.get(parsed..).unwrap_or_default().to_vec()),
                     });
                 }
                 out.push(group("payload", payload_start, c.offset(), children));

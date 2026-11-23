@@ -1742,12 +1742,6 @@ pub mod byte_log;
 // `dissect`, which selects the whole codec-* MID space on purpose: an observer
 // reads every message it sees and encodes none.
 #[cfg(feature = "dissect")]
-// Totality debt TD-028 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
 pub mod dissect;
 
 /// The field tree as a selector's path sees it, and the declared shape of every
