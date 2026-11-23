@@ -142,12 +142,12 @@ fn parse_endpoint<const IPV6: bool>(
 /// and every radix, some 1.5 KB of an image's text; a stack without IPv6 needs this grammar alone.
 /// `the_ipv4_reader_reads_what_core_reads` holds the two to the same answer for every text.
 fn socket_addr_v4(text: &[u8]) -> Option<SocketAddrV4> {
-    let (octets, used) = ipv4_address(text)?;
-    let port = decimal(text[used..].strip_prefix(b":")?, u32::from(u16::MAX))?;
-    Some(SocketAddrV4::new(
-        Ipv4Addr::from(octets),
-        u16::try_from(port).ok()?,
-    ))
+    let mut text = Text(text);
+    let octets = ipv4_address(&mut text)?;
+    if !text.eat(b':') {
+        return None;
+    }
+    Some(SocketAddrV4::new(Ipv4Addr::from(octets), text.port()?))
 }
 
 /// `[address%scope]:port` read as `SocketAddrV6`'s `FromStr` reads it: an IPv6 address in
@@ -159,142 +159,164 @@ fn socket_addr_v4(text: &[u8]) -> Option<SocketAddrV4> {
 /// its reader of every family and radix (some 3 KB of an image's text).
 /// `the_ipv6_reader_reads_what_core_reads` holds the two to the same answer for every text.
 fn socket_addr_v6(text: &[u8]) -> Option<SocketAddrV6> {
-    let text = text.strip_prefix(b"[")?;
-    let (groups, used) = ipv6_address(text)?;
-    let mut rest = &text[used..];
-    let mut scope = 0;
-    if let Some(after) = rest.strip_prefix(b"%") {
-        let digits = after
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        scope = decimal(&after[..digits], u32::MAX)?;
-        rest = &after[digits..];
+    let mut text = Text(text);
+    if !text.eat(b'[') {
+        return None;
     }
-    let port = decimal(rest.strip_prefix(b"]:")?, u32::from(u16::MAX))?;
+    let groups = ipv6_address(&mut text)?;
+    let mut scope = 0;
+    if text.eat(b'%') {
+        let (digits, value) = text.number(10);
+        if digits == 0 {
+            return None;
+        }
+        scope = u32::try_from(value).ok()?;
+    }
+    if !(text.eat(b']') && text.eat(b':')) {
+        return None;
+    }
     Some(SocketAddrV6::new(
         Ipv6Addr::from(groups),
-        u16::try_from(port).ok()?,
+        text.port()?,
         0,
         scope,
     ))
 }
 
-/// The IPv6 address at the front of `text` as `core::net` reads one, and the bytes it took:
-/// up to eight groups, and when fewer, `::` and the rest, the groups `::` stands for being
-/// zeros. An embedded IPv4 address closes the groups after `::`, or all eight without it.
-fn ipv6_address(text: &[u8]) -> Option<([u16; 8], usize)> {
+/// The IPv6 address at the front of `text` as `core::net` reads one, taken from it: up to eight
+/// groups, and when fewer, `::` and the rest, the groups `::` stands for being zeros. An
+/// embedded IPv4 address closes the groups after `::`, or all eight without it.
+fn ipv6_address(text: &mut Text<'_>) -> Option<[u16; 8]> {
     let mut head = [0u16; 8];
-    let (head_size, head_ipv4, mut used) = ipv6_groups(text, &mut head);
+    let (head_size, head_ipv4) = ipv6_groups(text, &mut head);
     if head_size == head.len() {
-        return Some((head, used));
+        return Some(head);
     }
-    if head_ipv4 || text.get(used..used + 2) != Some(b"::".as_slice()) {
+    if head_ipv4 || !(text.eat(b':') && text.eat(b':')) {
         return None;
     }
-    used += 2;
     // `::` stands for one group at least, so the groups after it are seven at most.
     let mut tail = [0u16; 7];
-    let limit = head.len() - (head_size + 1);
-    let (tail_size, _, tail_used) = ipv6_groups(&text[used..], &mut tail[..limit]);
-    let at = head.len() - tail_size;
-    head[at..].copy_from_slice(&tail[..tail_size]);
-    Some((head, used + tail_used))
-}
-
-/// One run of an IPv6 address's groups at the front of `text`, as `core::net` reads one: up to
-/// `groups.len()` groups of one to four hexadecimal digits, `:` between two, the last two of
-/// which may be written as an IPv4 address. Answers how many groups it read, whether an IPv4
-/// address closed them, and the bytes it took; a separator that no group follows is not taken.
-fn ipv6_groups(text: &[u8], groups: &mut [u16]) -> (usize, bool, usize) {
-    let limit = groups.len();
-    let mut used = 0;
-    for index in 0..limit {
-        let start = if index == 0 {
-            used
-        } else if text.get(used) == Some(&b':') {
-            used + 1
-        } else {
-            return (index, false, used);
-        };
-        if index + 1 < limit {
-            if let Some((octets, taken)) = ipv4_address(&text[start..]) {
-                groups[index] = u16::from_be_bytes([octets[0], octets[1]]);
-                groups[index + 1] = u16::from_be_bytes([octets[2], octets[3]]);
-                return (index + 2, true, start + taken);
-            }
-        }
-        let digits = text[start..]
-            .iter()
-            .take_while(|byte| byte.is_ascii_hexdigit())
-            .count();
-        if digits == 0 || digits > 4 {
-            return (index, false, used);
-        }
-        groups[index] = text[start..start + digits]
-            .iter()
-            .fold(0u16, |group, &byte| (group << 4) | hex_digit(byte));
-        used = start + digits;
+    let room = tail.len().saturating_sub(head_size);
+    let (tail_size, _) = ipv6_groups(text, tail.get_mut(..room)?);
+    let at = head.len().saturating_sub(tail_size);
+    for (slot, group) in head.iter_mut().skip(at).zip(tail) {
+        *slot = group;
     }
-    (limit, false, used)
+    Some(head)
 }
 
-/// The IPv4 address at the front of `text` as `core::net` reads one, and the bytes it took: four
-/// octets of one to three decimal digits, `.` between two, none above 255 and none written with
-/// a leading zero. A fourth digit in an octet refuses the address. [`socket_addr_v4`] reads one
-/// before its port and [`ipv6_groups`] one as an IPv6 address's last two groups.
-fn ipv4_address(text: &[u8]) -> Option<([u8; 4], usize)> {
-    let mut octets = [0u8; 4];
-    let mut used = 0;
-    for (index, octet) in octets.iter_mut().enumerate() {
-        if index > 0 {
-            if text.get(used) != Some(&b'.') {
-                return None;
-            }
-            used += 1;
+/// One run of an IPv6 address's groups at the front of `text`, as `core::net` reads one, taken
+/// from it: up to `groups.len()` groups of one to four hexadecimal digits, `:` between two, the
+/// last two of which may be written as an IPv4 address. Answers how many groups it read and
+/// whether an IPv4 address closed them; a separator that no group follows is not taken.
+fn ipv6_groups(text: &mut Text<'_>, groups: &mut [u16]) -> (usize, bool) {
+    let limit = groups.len();
+    for index in 0..limit {
+        let mut group = *text;
+        if index > 0 && !group.eat(b':') {
+            return (index, false);
         }
-        let digits = text[used..]
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        let field = &text[used..used + digits];
-        if digits > 3 || (digits > 1 && field[0] == b'0') {
+        if index + 1 < limit {
+            let mut embedded = group;
+            if let (Some([a, b, c, d]), Some([high, low])) = (
+                ipv4_address(&mut embedded),
+                groups.get_mut(index..index + 2),
+            ) {
+                *high = u16::from_be_bytes([a, b]);
+                *low = u16::from_be_bytes([c, d]);
+                *text = embedded;
+                return (index + 2, true);
+            }
+        }
+        let (digits, value) = group.number(16);
+        match (digits, u16::try_from(value), groups.get_mut(index)) {
+            (1..=4, Ok(value), Some(slot)) => *slot = value,
+            _ => return (index, false),
+        }
+        *text = group;
+    }
+    (limit, false)
+}
+
+/// The IPv4 address at the front of `text` as `core::net` reads one, taken from it: four octets
+/// of one to three decimal digits, `.` between two, none above 255 and none written with a
+/// leading zero. A fourth digit in an octet refuses the address. [`socket_addr_v4`] reads one
+/// before its port and [`ipv6_groups`] one as an IPv6 address's last two groups.
+fn ipv4_address(text: &mut Text<'_>) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    for (index, octet) in octets.iter_mut().enumerate() {
+        if index > 0 && !text.eat(b'.') {
             return None;
         }
-        *octet = u8::try_from(decimal(field, u32::from(u8::MAX))?).ok()?;
-        used += digits;
+        let leading_zero = text.0.first() == Some(&b'0');
+        let (digits, value) = text.number(10);
+        if digits == 0 || digits > 3 || (digits > 1 && leading_zero) {
+            return None;
+        }
+        *octet = u8::try_from(value).ok()?;
     }
-    Some((octets, used))
+    Some(octets)
 }
 
-/// The value of one ASCII hexadecimal digit, either case.
-fn hex_digit(byte: u8) -> u16 {
-    u16::from(match byte {
+/// The text of an address still to be read, which each reader above takes its part from. A
+/// reader that may not take what it tried reads a copy and keeps it only when it reads.
+///
+/// One cursor over the bytes, so that no reader indexes the text: each step is a look at the
+/// front, and none has a bound to check or a panic to carry.
+#[derive(Clone, Copy)]
+struct Text<'a>(&'a [u8]);
+
+impl Text<'_> {
+    /// Take `byte` when the text begins with it.
+    fn eat(&mut self, byte: u8) -> bool {
+        match self.0 {
+            [first, rest @ ..] if *first == byte => {
+                self.0 = rest;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Take the run of digits of `radix` (10 or 16) at the front: how many there were, and their
+    /// value, held at `u64::MAX` once it passes it, which every reader refuses. `str::parse`
+    /// would also take a leading `+`, and is a copy of the integer reader for each width.
+    fn number(&mut self, radix: u8) -> (usize, u64) {
+        let (mut digits, mut value) = (0usize, 0u64);
+        while let [first, rest @ ..] = self.0 {
+            let Some(digit) = digit_of(*first, radix) else {
+                break;
+            };
+            value = value
+                .saturating_mul(u64::from(radix))
+                .saturating_add(u64::from(digit));
+            digits = digits.saturating_add(1);
+            self.0 = rest;
+        }
+        (digits, value)
+    }
+
+    /// The whole of the rest as a port: decimal digits only, leading zeros taken, none above
+    /// 65535.
+    fn port(mut self) -> Option<u16> {
+        let (digits, value) = self.number(10);
+        if digits == 0 || !self.0.is_empty() {
+            return None;
+        }
+        u16::try_from(value).ok()
+    }
+}
+
+/// The value of one ASCII digit of `radix` (10 or 16, either case), `None` for any other byte.
+fn digit_of(byte: u8, radix: u8) -> Option<u8> {
+    let value = match byte {
         b'0'..=b'9' => byte - b'0',
         b'a'..=b'f' => byte - b'a' + 10,
-        _ => byte - b'A' + 10,
-    })
-}
-
-/// `text` as decimal digits only (`str::parse` would also take a leading `+`), at most `max`:
-/// `None` for an empty text, another byte, or a number above `max`. One reader for the octets,
-/// the port and the scope, where a generic `str::parse` is a copy of the integer reader for each
-/// width. The sum is kept in 64 bits, so a `max` of `u32::MAX` cannot overflow it.
-fn decimal(text: &[u8], max: u32) -> Option<u32> {
-    if text.is_empty() {
-        return None;
-    }
-    let mut value = 0u64;
-    for &byte in text {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        value = value * 10 + u64::from(byte - b'0');
-        if value > u64::from(max) {
-            return None;
-        }
-    }
-    u32::try_from(value).ok()
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => return None,
+    };
+    (value < radix).then_some(value)
 }
 
 /// What a stack's refusal to open a link means for the dial: a protocol it has
@@ -1218,6 +1240,7 @@ mod tests {
         struct NoLinks;
         impl SessionLinks for NoLinks {
             type Pump = Rc<crate::memory::MemoryEnd>;
+            type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
             fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)
             }

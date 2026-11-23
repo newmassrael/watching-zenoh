@@ -340,6 +340,8 @@ impl MemoryLinks {
 impl SessionLinks for MemoryLinks {
     type Pump = Rc<MemoryEnd>;
 
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let end = self.net.bind(SocketAddr::new(self.host, port), None)?;
         Ok(Self::opened(end))

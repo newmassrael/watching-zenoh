@@ -1346,6 +1346,24 @@ pub trait BoxedLinkDriver {
     fn tx_slot_abort(&self, slot: TxSlot) {
         let _ = slot;
     }
+
+    /// Whether a slot the session holds past the call that took it (a batch frame left open
+    /// across messages) leaves the link's slots for the session's other links: `false` from a
+    /// link whose slots come from a pool its session's links share and which has none free
+    /// besides, so the session sends the frame now rather than keep it, and a link that asks for
+    /// a slot always finds one. The default is a link whose slots are its own.
+    fn tx_slot_spare(&self) -> bool {
+        true
+    }
+
+    /// Whether a slot would be lent now as far as the link's pool goes: `false` from a link whose
+    /// slots come from a pool its session's links share, which holds none, and every slot of which
+    /// another link holds for a frame its stream has not finished. Then no wait on this link's own
+    /// stack gives it room; the session's other links' steps do. The default is a link whose slots
+    /// are its own.
+    fn tx_slot_claimable(&self) -> bool {
+        true
+    }
 }
 
 /// The name of one outbound slot a link lent: the `slot_id` of ARCHITECTURE

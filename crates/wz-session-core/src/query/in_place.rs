@@ -55,10 +55,6 @@ enum Fallback {
     SlicedValue,
     /// Its keyexpr does not fit the bounded buffer.
     KeyexprPastBound,
-    /// It carries a timestamp stack, which the delivering node adds to: the stack is an owned
-    /// value the lent form has none of.
-    #[cfg(feature = "pubsub-ts-stack")]
-    Instrumented,
 }
 
 /// The target and the QoS a Request's extension chain carries, each by the rule the owned path
@@ -104,7 +100,13 @@ fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bo
 /// The Query's chain is walked where it lies, once for each field that reads it: the attachment,
 /// the source info and the value each scan it for their own extension, as they scanned the held
 /// chain, and the bytes they hand out stay in the frame.
-fn lent_projection<'q, 'f: 'q>(query: &'q QueryView<'f>) -> QueryProjection<'q> {
+///
+/// The timestamp stack is the Request's, read off its chain by the caller as the owned path reads
+/// it, so an instrumented query is dispatched where it lies in every build.
+fn lent_projection<'q, 'f: 'q>(
+    query: &'q QueryView<'f>,
+    #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&'q crate::ts_stack::TsStack>,
+) -> QueryProjection<'q> {
     #[cfg(not(any(
         feature = "query-attachment",
         feature = "query-source-info",
@@ -140,7 +142,7 @@ fn lent_projection<'q, 'f: 'q>(query: &'q QueryView<'f>) -> QueryProjection<'q> 
         #[cfg(feature = "alloc")]
         attachment_shared: None,
         #[cfg(feature = "pubsub-ts-stack")]
-        ts_stack: None,
+        ts_stack,
     }
 }
 
@@ -185,20 +187,12 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
                 self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
             }
-            #[cfg(all(feature = "pubsub-ts-stack", not(feature = "rx-lent-only")))]
-            Err(Fallback::Instrumented) => {
-                self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
-            }
             // With no allocator there is no owned projection to fall back on, and a build that
             // lends only (`rx-lent-only`) links none, so a Request the lent form cannot represent
             // reaches no queryable, and is owed its Final as a query that matched nobody is: the
             // requester's query ends with no reply, where a refused one would be left to time out.
             #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
-                pending_final_rids.owe(request.rid, qos);
-            }
-            #[cfg(all(feature = "pubsub-ts-stack", feature = "rx-lent-only"))]
-            Err(Fallback::Instrumented) => {
                 pending_final_rids.owe(request.rid, qos);
             }
         }
@@ -220,16 +214,11 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
         if has_sliced_value(walked(query.extensions.as_deref())) {
             return Err(Fallback::SlicedValue);
         }
-        // A Request the nodes record on is delivered with a stack of its own to add to.
+        // The stack the nodes recorded on the Request, decoded off its chain into a value of its
+        // own, as the owned path decodes it (`dispatch_request`): a queryable is shown it and its
+        // replies carry it back, and nothing else of the Request leaves the frame.
         #[cfg(feature = "pubsub-ts-stack")]
-        if crate::ext_view::find_by_eid_in(
-            walked(request.extensions.as_ref()),
-            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
-        )
-        .is_some()
-        {
-            return Err(Fallback::Instrumented);
-        }
+        let ts_stack = crate::ts_stack::read_ts_stack(walked(request.extensions.as_ref()));
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
@@ -238,8 +227,12 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
             Ok(None) => return Ok(DispatchOutcome::UNRESOLVED),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
-        let matched =
-            self.fire_projection(envelope, keyexpr, lent_projection(query), replies, true);
+        let projection = lent_projection(
+            query,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack.as_ref(),
+        );
+        let matched = self.fire_projection(envelope, keyexpr, projection, replies, true);
         Ok(DispatchOutcome::routed(matched))
     }
 
@@ -558,9 +551,9 @@ mod tests {
         );
     }
 
-    /// A Request that carries a timestamp stack is dispatched with it: the lent form has no stack
-    /// of its own for the nodes to add to, so it takes the owned path, and a queryable is shown
-    /// the same stack either way. A Request that carries none is shown none.
+    /// A Request that carries a timestamp stack is dispatched with it where it lies, in a build
+    /// that lends only too, and a queryable is shown the same stack on both paths. A Request that
+    /// carries none is shown none.
     #[cfg(feature = "pubsub-ts-stack")]
     #[test]
     fn an_instrumented_query_is_dispatched_with_its_stack_on_both_paths() {

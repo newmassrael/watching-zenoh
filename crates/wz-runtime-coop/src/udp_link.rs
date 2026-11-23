@@ -53,12 +53,14 @@ use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
     DEFAULT_LINK_MTU,
 };
+#[cfg(feature = "session-unicast-accept")]
+use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
-use crate::link_storage::{TxLender, TxStore};
+use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::LinkReadiness;
 #[cfg(feature = "session-slot")]
@@ -272,7 +274,7 @@ pub fn link_endpoints(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> 
 /// datagrams only; what anyone else sends is discarded and counted ([`Self::foreign`]). UDP is
 /// connectionless, so `open_blocking` / `close_blocking` are no-ops: the zenoh handshake and Close
 /// frame are the session's open and close.
-pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
+pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
     socket: S,
     binding: PeerBinding<SocketAddr>,
     /// The link's two ends, `udp/<ip>:<port>` each, written the first time they are asked for
@@ -362,7 +364,7 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     }
 }
 
-impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
+impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     /// An acceptor's link over the receive buffer `rx_buf`, building its frames in `tx`: no peer
     /// until the first `InitSyn` it takes names one.
     pub fn acceptor_in(socket: S, rx_buf: B, tx: T) -> Self {
@@ -376,7 +378,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
     }
 
     fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
-        let rx_len = rx_buf.as_mut().len();
+        let rx_len = rx_buf.capacity();
         Self {
             socket,
             binding: match peer {
@@ -473,9 +475,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
     }
 }
 
-impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static>
-    UdpDriver<S, B, T>
-{
+impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> UdpDriver<S, B, T> {
     /// Wait on the socket for a datagram, for as long as it is armed to wait.
     ///
     /// On a socket whose reads time out, the wait is the read: the datagram is taken into
@@ -496,7 +496,11 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
             self.socket.wait_readable(SERVICE_WAIT_MS);
             return;
         };
-        let bytes: &mut [u8] = buf.as_mut();
+        // A link of a pool that holds no buffer and finds none free waits by `poll` too.
+        let Some(bytes) = buf.bytes() else {
+            self.socket.wait_readable(SERVICE_WAIT_MS);
+            return;
+        };
         match self.socket.recv_waiting(bytes) {
             Ok(Some((len, from))) => {
                 if self.admit(from, datagram_of(bytes, len)) {
@@ -505,6 +509,10 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
             }
             Ok(None) => {}
             Err(e) => self.rx_error.set(Some(e)),
+        }
+        // A wait that left no datagram for the next receive leaves the buffer to its pool.
+        if B::POOLED && self.stash.get().is_none() && self.kept.get().is_none() {
+            buf.idle();
         }
     }
 
@@ -522,7 +530,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     }
 }
 
-impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver
+impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for UdpDriver<S, B, T>
 {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
@@ -563,6 +571,28 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         self.tx.release(slot);
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_spare(&self) -> bool {
+        self.tx.spare()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_claimable(&self) -> bool {
+        self.tx.claimable()
+    }
+
+    // The socket takes a datagram whole and at once, so the link's room is its slots': a link of
+    // a pool whose every slot another link holds is congested now, and does not wait under the
+    // session's lock for the step that frees one.
+    #[cfg(feature = "session-unicast-accept")]
+    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        if self.tx.claimable() {
+            RoomAnswer::at_once(LinkRoom::Free)
+        } else {
+            RoomAnswer::at_once(LinkRoom::Congested)
+        }
+    }
+
     fn open_blocking(&self) {}
 
     fn close_blocking(&self) {}
@@ -576,6 +606,11 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
             self.endpoints
                 .get_or_init(|| link_endpoints(LinkProto::Udp, self.socket.local(), peer)),
         )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(LinkProto::Udp.subject())
     }
 
     // A driver whose buffers are declared is bounded by them: the frame it sends is at most the
@@ -598,8 +633,8 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     }
 }
 
-impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static>
-    SessionDatagramLink for UdpDriver<S, B, T>
+impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
+    for UdpDriver<S, B, T>
 {
     fn service(&self) {
         // A link its owner waits on reads what is queued and does not wait here.
@@ -656,22 +691,30 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
-        if let Some(len) = self.kept.take() {
-            return Some(RxFrame::new(datagram_of(bytes, len).to_vec()));
-        }
-        match self.next_admitted(bytes) {
-            Ok(Some(len)) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
-            Ok(None) => None,
-            Err(e) => {
-                self.rx_error.set(Some(e));
-                None
-            }
-        }
+        let bytes = buf.bytes()?;
+        let frame = match self.kept.take() {
+            Some(len) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
+            None => match self.next_admitted(bytes) {
+                Ok(Some(len)) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
+                Ok(None) => None,
+                Err(e) => {
+                    self.rx_error.set(Some(e));
+                    None
+                }
+            },
+        };
+        // The datagram is copied out: the buffer holds nothing of the link's own.
+        buf.idle();
+        frame
     }
 
     fn holds_input(&self) -> bool {
         self.stash.get().is_some() || self.kept.get().is_some() || self.socket.holds_datagram()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
     }
 
     // The datagram lies in the link's own receive buffer, which nothing writes until the link
@@ -706,14 +749,22 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     // it, and a receive from inside `f` would be refused by the `RefCell`.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
+        // A link of a pool that holds no buffer and finds none free reads nothing: its datagrams
+        // wait in the stack (`SessionDatagramLink::waits_for_buffer`).
+        let Some(bytes) = buf.bytes() else {
+            return false;
+        };
         let len = match self.kept.take() {
             Some(len) => len,
             None => match self.next_admitted(bytes) {
                 Ok(Some(len)) => len,
-                Ok(None) => return false,
+                Ok(None) => {
+                    buf.idle();
+                    return false;
+                }
                 Err(e) => {
                     self.rx_error.set(Some(e));
+                    buf.idle();
                     return false;
                 }
             },
@@ -722,6 +773,9 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         f(datagram_of(bytes, len));
         if self.keeping.replace(false) {
             self.kept.set(Some(len));
+        } else {
+            // A datagram is whole: once lent and not kept, nothing of the link's own is left.
+            buf.idle();
         }
         true
     }

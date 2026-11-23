@@ -3298,7 +3298,7 @@ id = "MAX_TASKS"
 kconfig = "WZ_LIMIT_MAX_TASKS"
 kind = "bound"
 driven = "local"
-default = 8
+default = 16
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -3308,14 +3308,19 @@ help = '''
 The most tasks a runtime holds: a ceiling on the task table a fixed-memory
 image declares, which the image is checked against when it compiles, and on
 the task cells a session of the C ABI's cooperative engine reserves when it
-opens, one for each link and group its configuration admits. A link or a
-group past them is refused, at the open as out of memory and after it as a
-link past the faces the session admits.
+opens, one for each face and group its configuration admits (the dial role's
+and MAX_FACES besides). A face or a group past them is refused, at the open
+as out of memory and after it as a link past the faces the session admits,
+so a preset that admits faces admits a task for each.
 '''
 
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a wz runtime whose tables are fixed."
+
+[limit.pico_preset]
+value = 11
+reason = "One task for each face the pico preset admits: the dial role's and MAX_FACES (10) besides, as zenoh-pico runs a transport for each of its Z_LISTEN_MAX_CONNECTION_NB peers (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`). Fewer would refuse a peer pico takes."
 
 [[limit]]
 id = "MAX_TIMERS"
@@ -3495,6 +3500,76 @@ cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Number of links that may stay 
 [limit.pico_preset]
 value = 1
 reason = "zenoh-pico accepts one link at a time: its accept task runs the whole handshake of the link it took before it takes the next (`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`)."
+
+[[limit]]
+id = "RX_POOL_BUFFERS"
+kconfig = "WZ_LIMIT_RX_POOL_BUFFERS"
+kind = "parameter"
+range = [1, 4294967295]
+on_heap = "quota"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link that finds no buffer free leaves what its peer sent in its stack until
+# one is, so no byte a peer sees changes.
+wire = "none"
+help = '''
+How many receive buffers, each of the batch a session advertises, the links of a
+session share when its engine lends their buffers from the session's memory at
+open. A link holds one only while it holds part of a batch the stream has not
+finished, or a batch or datagram it was asked to keep; it reads into a free one
+otherwise. A link that finds none free reads nothing until one is: what its peer
+sent waits in the network stack, and nothing is lost. A pool larger than the
+links a session may hold is held to them. At least 1; a session may lower it and
+never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a zenoh transport reads each link into buffers of its own, and the count of wz's shared receive buffers is wz's own."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico reads every peer of a unicast transport into the transport's one receive buffer and keeps a stream peer's batch that arrived in part in a buffer of that peer's (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`, `vendor/zenoh-pico/src/transport/unicast/read.c` @ `static z_result_t _z_unicast_handle_remaining_data(_z_transport_unicast_t *ztu, _z_transport_peer_unicast_t *peer,`): one buffer read into and one part held."
+
+[[limit]]
+id = "TX_POOL_SLOTS"
+kconfig = "WZ_LIMIT_TX_POOL_SLOTS"
+kind = "parameter"
+range = [1, 4294967295]
+on_heap = "quota"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a frame a link would keep past its send while the pool is short leaves at once,
+# whole, so a peer reads the same frames, sent earlier.
+wire = "none"
+help = '''
+How many outbound slots, each of the batch a session advertises, the links of a
+session share when its engine lends their buffers from the session's memory at
+open. A link holds one from the moment it encodes a frame until the frame is
+written; a frame the stream took in part keeps it until the link's later steps
+have written the rest. A batch frame left open for later messages keeps one only
+while the pool keeps another free, and is sent with the messages it holds
+otherwise. A link that finds every slot held is congested, as one whose stream
+takes nothing is: a droppable message is dropped. A pool as large as the links a
+session may hold keeps every link's slot its own, and is held to them. At least
+1; a session may lower it and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a zenoh transport builds each link's batches in buffers of its own, and the count of wz's shared outbound slots is wz's own."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico encodes every message of a unicast transport into the transport's one write buffer and writes it to its peers before it takes the next (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._wbuf = _z_wbuf_make(wbuf_size, false);`, `vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`): one slot written into and one held by a frame a stream took in part."
 
 [[limit]]
 id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
@@ -3780,20 +3855,31 @@ id = "HANDSHAKE_COOKIE_BYTES"
 kconfig = "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"
 kind = "bound"
 driven = "remote"
-default = 128
+# The widest cookie a zenoh 1.10.2 node of any build hands out in its InitAck: the plaintext of
+# `Cookie` (io/zenoh-transport/src/unicast/establishment/cookie.rs:57-81) at most 176 bytes, a
+# multiple of the cipher's 16-byte block (commons/zenoh-crypto/src/cipher.rs:37-42), so 176.
+# zid 17 (len + 16), whatami 1, resolution 1, batch size 3, nonce 9 (VLE of a u64,
+# commons/zenoh-codec/src/core/zint.rs:21), QoS 9; multilink 79 (flag 1, challenge 9, the
+# initiator's 512-bit RSA key as n 1+64 and e 1+3: ext/multilink.rs:32,230-244,
+# ext/auth/pubkey.rs:189-192); shared memory 0 (ext/shm/auth.rs:483); auth 21 (count 1, pubkey
+# id 1 + challenge 9, usrpwd id 1 + nonce 9: ext/auth/mod.rs:184-219, ext/auth/pubkey.rs,
+# ext/auth/usrpwd.rs); lowlatency 1, compression 1, patch 1; region name 33 (len + 32:
+# commons/zenoh-protocol/src/core/region.rs:211).
+default = 176
 storage = "capacity"
 scope = "session"
-# Its fixed profile is a `session-slot` build, which holds the cookie in storage of fixed size.
+# Its fixed profile is a build whose session storage is fixed at its open (`session-fixed-storage`,
+# which `session-slot` and the C library's cooperative presets turn on), which holds the cookie
+# in storage of fixed size.
 binding_heap = "open"
 binding_fixed = "build"
 # `wire` is none: within the limit no byte a peer sees changes; past it, the cookie is left out.
 wire = "none"
 help = '''
-How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
+How many bytes of a peer's cookie a session keeps on a fixed-memory profile:
 the cookie in the peer's INIT acknowledgement, which the node echoes in its
 OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks
-against the one it issued. A longer cookie is not kept, so the node echoes none
-and the peer refuses its OPEN. At most 65535, the INIT cookie field's capacity, and for a
+against the one it issued. A longer cookie is refused where the message is read. At most 65535, the INIT cookie field's capacity, and for a
 node that accepts sessions at least the widest cookie it issues itself: a build
 with a smaller value does not compile. Each session holds buffers of this size,
 so the value is memory. The growable profile keeps a cookie of any length and

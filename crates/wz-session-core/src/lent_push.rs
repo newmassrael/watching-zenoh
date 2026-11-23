@@ -208,12 +208,11 @@ pub fn put_with_qos<'a>(
 /// The bytes of [`put_with_qos`] written straight into `sink`, without composing the codec's
 /// `Push` and walking its variants to encode it: the Push header, the key (the id, and a suffix
 /// with its length), the QoS extension when it rides, the Put header, the payload's length and
-/// the payload. A stream of equal messages sends this one shape, and the generic encoder's
-/// walk over a message of any shape was most of what encoding it cost. The two are the same
-/// bytes for every input (see the equality test), so the shape stays the codec's and this is
-/// only a faster way to write it, and it refuses what [`put_with_qos`] refuses, with the same
-/// `LengthOutOfRange` and before a byte is written.
-#[cfg(feature = "storage-profile")]
+/// the payload. The two are the same bytes for every input (see the equality test), so the shape
+/// stays the codec's, and it refuses what [`put_with_qos`] refuses, with the same
+/// `LengthOutOfRange` and before a byte is written. It is [`write_publication`]'s writer for a
+/// Put with no body field, which takes that writer's straight path.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
     mapping_id: crate::wire_id::ExprId,
@@ -226,53 +225,14 @@ where
 {
     #[cfg(test)]
     WRITER_RUNS.with(|runs| runs.set(runs.get() + 1));
-    if refuses(suffix, value) {
-        return Err(CodecError::LengthOutOfRange);
-    }
-    let with_qos = qos_rides(qos);
-    let header = wz_codecs::wire_const::N_MID_PUSH
-        | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
-        // `M`: the id is in the sender's space, which the codec derives from its
-        // `WireexprLocal` arm at encode time.
-        | FLAG_PUSH_M
-        // The header says an outer extension chain follows.
-        | if with_qos { 0x80 } else { 0 };
-    // The fixed fields are assembled on the stack and handed to the sink in one write each,
-    // not a byte at a time: every byte written through a lease is a call that checks the slot's
-    // room, and a message is five of them or more. The longest head is the header, a nine-byte
-    // id and a nine-byte suffix length (19 bytes); the longest tail is the QoS extension (its
-    // header and a one-byte value), the Put header and a nine-byte length (13 bytes).
-    let mut head = [0u8; 24];
-    let mut used = 0usize;
-    head[used] = header;
-    used += 1;
-    used = put_vle(&mut head, used, u64::from(mapping_id));
-    if let Some(text) = suffix {
-        used = put_vle(&mut head, used, text.len() as u64);
-        sink.write_bytes(&head[..used])?;
-        sink.write_bytes(text.as_bytes())?;
-        used = 0;
-    }
-    #[cfg(feature = "pubsub-qos")]
-    if with_qos {
-        // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the chain.
-        head[used] = 0x21;
-        used += 1;
-        used = put_vle(&mut head, used, u64::from(qos.raw));
-    }
-    head[used] = PUT_HEADER;
-    used += 1;
-    used = put_vle(&mut head, used, value.len() as u64);
-    sink.write_bytes(&head[..used])?;
-    sink.write_bytes(value)?;
-    Ok(())
+    write_push(sink, mapping_id, suffix, true, value, qos, &BodyParts::NONE)
 }
 
 /// The bytes [`write_plain_put`] writes for the same arguments, worked out from the parts with
 /// nothing written: what a send asks its link to lend, so the Put is written once, into the slot,
 /// and not first into a sink that only counts. Zero for a Put the writer refuses, which the encode
 /// that follows refuses with the same error.
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 pub fn plain_put_len(
     mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
@@ -297,7 +257,7 @@ pub fn plain_put_len(
 
 /// Whether [`write_plain_put`] refuses a Put on `suffix` carrying `value`: a key past the
 /// protocol's `u16` length or a payload past its `u32` length.
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 fn refuses(suffix: Option<&str>, value: &[u8]) -> bool {
     suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
         || u32::try_from(value.len()).is_err()
@@ -305,7 +265,7 @@ fn refuses(suffix: Option<&str>, value: &[u8]) -> bool {
 
 /// Whether the QoS extension rides a plain Put: `pubsub-qos` is built and the byte is not the
 /// default one.
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 fn qos_rides(qos: crate::sample::QosLevel) -> bool {
     #[cfg(feature = "pubsub-qos")]
     {
@@ -320,7 +280,7 @@ fn qos_rides(qos: crate::sample::QosLevel) -> bool {
 
 /// How many bytes [`put_vle`] writes `value` in: seven data bits a byte for the first eight, and
 /// a ninth that carries its eight bits whole.
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 fn vle_len(mut value: u64) -> usize {
     let mut len = 1;
     while value >= 0x80 && len < 9 {
@@ -362,6 +322,22 @@ struct BodyParts<'m> {
 
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
 impl<'m> BodyParts<'m> {
+    /// No body field: a plain Put, or a Del with nothing beside its key.
+    const NONE: Self = Self {
+        timestamp: None,
+        encoding: None,
+        source_info: None,
+        attachment: None,
+    };
+
+    /// Whether no body field rides, which is the case the writer's straight path takes.
+    fn is_plain(&self) -> bool {
+        self.timestamp.is_none()
+            && self.encoding.is_none()
+            && self.source_info.is_none()
+            && self.attachment.is_none()
+    }
+
     #[cfg_attr(
         not(all(
             feature = "pubsub-timestamp",
@@ -443,38 +419,91 @@ where
     CodecError: From<S::Error>,
 {
     let put = kind == crate::sample::SampleKind::Put;
-    let body = BodyParts::of(put, meta);
+    write_push(
+        sink,
+        mapping_id,
+        suffix,
+        put,
+        value,
+        meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT),
+        &BodyParts::of(put, meta),
+    )
+}
+
+/// The one writer of a Push of a Put or a Del from its parts, behind [`write_plain_put`] and
+/// [`write_publication`]. Out of line, so the two are one compiled writer for each sink.
+///
+/// The fixed fields are assembled on the stack and handed to the sink in one write each, not a
+/// byte at a time: every byte written through a lease is a call that checks the slot's room, and a
+/// message is five of them or more. A Put with no body field (the plain Put a stream of samples
+/// sends) is four writes at most, the head, the suffix, the tail with the payload's length, and the
+/// payload, in one pass with nothing allocated; a message with a body field writes its fields after
+/// the same head. The longest head is the header, a nine-byte id and a nine-byte suffix length (19
+/// bytes); the longest tail is the QoS extension (its header and a two-byte value), the body's
+/// header and a nine-byte length (13 bytes).
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+#[inline(never)]
+fn write_push<S: sce_forge_runtime::codec::SceSink>(
+    sink: &mut S,
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    put: bool,
+    value: &[u8],
+    qos: crate::sample::QosLevel,
+    body: &BodyParts<'_>,
+) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
     if suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
         || (put && u32::try_from(value.len()).is_err())
         || body.refused()
     {
         return Err(CodecError::LengthOutOfRange);
     }
-    let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
     let with_qos = qos_rides(qos);
-    sink.write_u8(
-        wz_codecs::wire_const::N_MID_PUSH
-            | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
-            | FLAG_PUSH_M
-            | if with_qos { 0x80 } else { 0 },
-    )?;
-    sink.write_vle_u64(u64::from(mapping_id))?;
+    let header = wz_codecs::wire_const::N_MID_PUSH
+        | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
+        // `M`: the id is in the sender's space, which the codec derives from its
+        // `WireexprLocal` arm at encode time.
+        | FLAG_PUSH_M
+        // The header says an outer extension chain follows.
+        | if with_qos { 0x80 } else { 0 };
+    let mut head = [0u8; 24];
+    let mut used = 0usize;
+    head[used] = header;
+    used += 1;
+    used = put_vle(&mut head, used, u64::from(mapping_id));
     if let Some(text) = suffix {
-        sink.write_vle_u64(text.len() as u64)?;
+        used = put_vle(&mut head, used, text.len() as u64);
+        sink.write_bytes(&head[..used])?;
         sink.write_bytes(text.as_bytes())?;
+        used = 0;
     }
     if with_qos {
         // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the outer chain.
-        sink.write_u8(0x21)?;
-        sink.write_vle_u64(u64::from(qos.raw))?;
+        head[used] = 0x21;
+        used += 1;
+        used = put_vle(&mut head, used, u64::from(qos.raw));
     }
     let extended = body.source_info.is_some() || body.attachment.is_some();
-    sink.write_u8(
-        if put { PUT_HEADER } else { DEL_HEADER }
-            | if body.timestamp.is_some() { 0x20 } else { 0 }
-            | if body.encoding.is_some() { 0x40 } else { 0 }
-            | if extended { 0x80 } else { 0 },
-    )?;
+    head[used] = if put { PUT_HEADER } else { DEL_HEADER }
+        | if body.timestamp.is_some() { 0x20 } else { 0 }
+        | if body.encoding.is_some() { 0x40 } else { 0 }
+        | if extended { 0x80 } else { 0 };
+    used += 1;
+    // The straight path: no body field, so the payload's length closes the tail.
+    if body.is_plain() {
+        if put {
+            used = put_vle(&mut head, used, value.len() as u64);
+        }
+        sink.write_bytes(&head[..used])?;
+        if put {
+            sink.write_bytes(value)?;
+        }
+        return Ok(());
+    }
+    sink.write_bytes(&head[..used])?;
     if let Some(stamp) = body.timestamp {
         sink.write_vle_u64(stamp.time)?;
         sink.write_vle_u64(stamp.zid.len() as u64)?;
@@ -514,7 +543,7 @@ where
     Ok(())
 }
 
-#[cfg(all(test, feature = "storage-profile"))]
+#[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
 std::thread_local! {
     /// How many times [`write_plain_put`] ran on this thread: what a test of how often a Put is
     /// written counts.
@@ -524,7 +553,7 @@ std::thread_local! {
 /// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
 /// bits a byte with the high bit set while more follow, at most eight such bytes, and a ninth
 /// that carries its eight bits whole (`SceSink::write_vle_u64`, byte for byte).
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 fn put_vle(buf: &mut [u8; 24], mut at: usize, mut value: u64) -> usize {
     let mut continued = 0u32;
     while value >= 0x80 && continued < 8 {
@@ -1033,6 +1062,59 @@ mod tests {
             } else {
                 assert_eq!(written, Ok(()));
                 assert!(!got.is_empty());
+            }
+        }
+    }
+
+    /// A Put with no body field is written by `write_publication` on the straight path the plain
+    /// writer takes: the same bytes in the same writes, four at most (the head, the suffix, the
+    /// tail and the payload), whatever the QoS byte and whether a suffix rides.
+    #[test]
+    fn a_plain_publication_takes_the_plain_writers_single_pass() {
+        use crate::metadata::PushMetadata;
+        use crate::sample::{QosLevel, SampleKind};
+
+        struct Writes {
+            bytes: alloc::vec::Vec<u8>,
+            calls: usize,
+        }
+        impl sce_forge_runtime::codec::SceSink for Writes {
+            type Error = CodecError;
+            fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn position(&self) -> usize {
+                self.bytes.len()
+            }
+        }
+        let fresh = || Writes {
+            bytes: alloc::vec::Vec::new(),
+            calls: 0,
+        };
+        for suffix in [None, Some("demo/thr")] {
+            for raw in [0x05u8, 0x1a] {
+                let qos = QosLevel::from_raw(raw);
+                let meta = PushMetadata {
+                    qos: Some(qos),
+                    ..PushMetadata::default()
+                };
+                let mut plain = fresh();
+                write_plain_put(&mut plain, 3, suffix, b"payload", qos).expect("plain");
+                let mut publication = fresh();
+                write_publication(
+                    &mut publication,
+                    3,
+                    suffix,
+                    SampleKind::Put,
+                    b"payload",
+                    &meta,
+                )
+                .expect("publication");
+                assert_eq!(publication.bytes, plain.bytes, "{suffix:?} {raw:#04x}");
+                assert_eq!(publication.calls, plain.calls, "{suffix:?} {raw:#04x}");
+                assert!(plain.calls <= 4, "{} writes", plain.calls);
             }
         }
     }
