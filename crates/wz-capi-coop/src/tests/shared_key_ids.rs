@@ -341,11 +341,11 @@ fn a_session_says_when_its_links_may_name_keys_their_own_way() {
     );
 }
 
-/// What a client that holds no dictionary hears of a put on `lab/rig/alpha` from a listener whose
-/// session form is `shared`, when the listener's endpoint is stated `endpoint_form` or not stated,
-/// followed by a put on `lab/mark`, which no dictionary entry covers and which every form sends as
-/// the literal.
-fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<String> {
+/// What a client that holds no dictionary hears of a put on `lab/rig/alpha`, which the listener's
+/// ABI names as `alpha` says, from a listener whose session form is `shared`, when the listener's
+/// endpoint is stated `endpoint_form` or not stated, followed by a put on `lab/mark`, which no
+/// dictionary entry covers and which every form sends as the literal.
+fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>, alpha: WireKey) -> Vec<String> {
     let at_open = KeyIdsAtOpen {
         ids: Some(dictionary()),
         links: endpoint_form
@@ -360,9 +360,9 @@ fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<Strin
         KeyWireForm::Declared,
     );
     let heard = hear(&client, "lab/**", WireKey::literal());
-    for key in ["lab/rig/alpha", "lab/mark"] {
+    for (key, wire) in [("lab/rig/alpha", alpha), ("lab/mark", WireKey::literal())] {
         listener
-            .publish_on_wire_all(key, &WireKey::literal(), b"value", &remote())
+            .publish_on_wire_all(key, &wire, b"value", &remote())
             .expect("a put the link carries");
     }
     eventually("the client to hear the literal put", || {
@@ -375,7 +375,7 @@ fn heard_from_a_shared_listener(endpoint_form: Option<KeyWireForm>) -> Vec<Strin
 #[test]
 fn a_link_stated_literal_names_its_keys_whole_under_a_shared_session() {
     assert_eq!(
-        heard_from_a_shared_listener(Some(KeyWireForm::Literal)),
+        heard_from_a_shared_listener(Some(KeyWireForm::Literal), WireKey::literal()),
         ["lab/rig/alpha", "lab/mark"]
     );
 }
@@ -383,9 +383,30 @@ fn a_link_stated_literal_names_its_keys_whole_under_a_shared_session() {
 #[test]
 fn a_link_left_to_the_shared_session_names_its_keys_by_the_dictionary() {
     assert_eq!(
-        heard_from_a_shared_listener(None),
+        heard_from_a_shared_listener(None, WireKey::literal()),
         ["lab/mark"],
         "CONTROL: the shared form sent the dictionary's id, which a client without it drops"
+    );
+}
+
+/// A link stated `declared` sends what a build without the dictionary sends, so a key the ABI names
+/// by the dictionary's id goes as the literal there, which a client without the dictionary reads.
+#[test]
+fn a_link_stated_declared_names_a_key_the_abi_named_by_a_shared_id_whole() {
+    assert_eq!(
+        heard_from_a_shared_listener(Some(KeyWireForm::Declared), WireKey::aliased(41, None)),
+        ["lab/rig/alpha", "lab/mark"]
+    );
+}
+
+/// The CONTROL of [`a_link_stated_declared_names_a_key_the_abi_named_by_a_shared_id_whole`]: a
+/// link left to the shared session sends the same key by the dictionary's id, which a client
+/// without the dictionary drops.
+#[test]
+fn a_link_left_to_the_shared_session_names_a_key_the_abi_named_by_a_shared_id_by_it() {
+    assert_eq!(
+        heard_from_a_shared_listener(None, WireKey::aliased(41, None)),
+        ["lab/mark"]
     );
 }
 
