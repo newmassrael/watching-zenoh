@@ -212,7 +212,14 @@ the declarations owed it (`id_map.rs`, `declaration_sync.rs`, `peer_table.rs`,
   one peer (`PooledIdMap`, `PooledRows`), and a lookup walks that face's rows as the scan of an
   inline table did. A session of one face (a client, dial-only) shares with no one: each of its
   tables takes a span of its own of that face's bound, laid out as the inline table laid its rows
-  out, with no link and no pool state.
+  out, with no link and no pool state. An own span is not copied: the session's pools hand it to
+  the first face's tables that ask and to no others, so no two tables lay rows over each other.
+  What a pool and a table do to their rows (the free list, the links, a walk, a removal and the
+  compaction of an own span, a clear, carving spans) is one untyped core that knows a row kind
+  only as values (its bytes and alignment in either layout, where a pool's row keeps its link, how
+  its item is dropped), compiled once for every kind and every bound and kept out of line; a row
+  kind is a thin typed wrapper that writes, reads and lends its item, and every `unsafe` of the
+  pools lies in that one module.
 - Lifetime: the face's; a lost link takes them with it (the observer's link-loss flush), and a face
   that goes gives its rows back to the pools, one step each and no other face's.
 - Exhausted: the peer's declaration is refused and counted, whether its face's table is at the
