@@ -1404,6 +1404,9 @@ impl<
     /// else has written no Router, and the pump is not built: `None`, with what it was to be made
     /// of dropped. `place` is overwritten without dropping what it held.
     #[cfg(feature = "reassembly")]
+    // The pump's parts are each the session's own and are written where they lie; grouping them
+    // would build the group on the stack this function exists to keep them off.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
@@ -1484,6 +1487,9 @@ impl<
     ///
     /// # Safety
     /// `write_rx` leaves the receive written in the place it is handed, or finds it written.
+    // The pump's parts are each the session's own and are written where they lie; grouping them
+    // would build the group on the stack this function exists to keep them off.
+    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
@@ -1846,6 +1852,7 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 /// dropped unmade: an engine that reserved its tables at its open tells its program the session
 /// has no room, where a handle that reads as a shut runtime would say the session ended.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     link: L,
