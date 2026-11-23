@@ -2882,8 +2882,6 @@ mod multicast_peer_rows;
     feature = "alloc",
     feature = "codec-declare"
 ))]
-// Totality debt TD-142 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 mod multicast_member_scope;
 
 // R311kt — the multicast JOIN datagram surface (encode the periodic TX

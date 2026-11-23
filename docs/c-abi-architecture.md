@@ -344,7 +344,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-138 | `wz-session-core` | `interval_meter` | `indexing_slicing` | 1 | open |
 | TD-140 | `wz-session-core` | `json` | `arithmetic_side_effects` | 1 | open |
 | TD-141 | `wz-session-core` | `limit_corpus` | `panic` | 1 | open |
-| TD-142 | `wz-session-core` | `multicast_member_scope` | `arithmetic_side_effects` | 1 | open |
 | TD-143 | `wz-session-core` | `passive_keyexpr` | `arithmetic_side_effects` | 1 | open |
 | TD-144 | `wz-session-core` | `process_limits` | `panic` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
