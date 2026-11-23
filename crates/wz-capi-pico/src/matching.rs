@@ -43,7 +43,7 @@ use wz_capi_port::{MatchId, MatchingSink};
 use crate::session::Engine;
 
 use crate::abi::handle_ref;
-use crate::ffi::{guarded, CClosure};
+use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
 use crate::prelude::*;
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
@@ -141,14 +141,26 @@ unsafe impl Sync for MatchingCClosure {}
 pub(crate) struct MatchingListenerState {
     shared: Arc<Engine>,
     id: MatchId,
+    /// Opens when the listener's closure has run its `drop(context)`. The undeclare waits on it
+    /// after the engine let go, so it returns only when no callback of the listener is still
+    /// running and the drop has run, as zenoh-pico's does.
+    released: Arc<ReleaseLatch>,
 }
 
 impl MatchingListenerState {
     /// Box this state into the owned C handle. Shared with the QUERIER twin
     /// (`crate::querier`) so the two declare forms cannot drift in how they
     /// hand the id back — the asymmetry this family has already paid for once.
-    pub(crate) fn into_handle(shared: Arc<Engine>, id: MatchId) -> z_owned_matching_listener_t {
-        let boxed = Box::new(MatchingListenerState { shared, id });
+    pub(crate) fn into_handle(
+        shared: Arc<Engine>,
+        id: MatchId,
+        released: Arc<ReleaseLatch>,
+    ) -> z_owned_matching_listener_t {
+        let boxed = Box::new(MatchingListenerState {
+            shared,
+            id,
+            released,
+        });
         z_owned_matching_listener_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [core::ptr::null_mut(); 2],
@@ -455,6 +467,7 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
         (*listener)._this = z_owned_matching_listener_t::null_value();
         let state = Box::from_raw(handle as *mut MatchingListenerState);
         state.shared.undeclare_matching_listener(state.id);
+        state.released.wait();
         Z_OK
     })
 }
@@ -485,19 +498,19 @@ pub(crate) unsafe fn declare_on_filter(
         *slot = z_owned_matching_listener_t::null_value();
     }
     // Take the closure FIRST, so an invalid entity still releases it.
-    let sink: MatchingSink = match consume_matching_closure(callback) {
-        Ok(sink) => sink,
+    let (sink, released) = match consume_matching_closure(callback) {
+        Ok(taken) => taken,
         Err(code) => return code,
     };
     let Some(filter) = filter else {
         // `sink` drops here, running the caller's `drop(context)`.
         return Z_ERR_NULL;
     };
-    let (shared, id) = filter.declare_matching_listener(sink);
+    let (shared, id) = filter.declare_matching_listener(sink, released.clone());
     match (listener, slot) {
         (None, _) => Z_OK,
         (Some(_), Some(slot)) => {
-            *slot = MatchingListenerState::into_handle(shared, id);
+            *slot = MatchingListenerState::into_handle(shared, id, released);
             Z_OK
         }
         (Some(_), None) => {
@@ -509,7 +522,8 @@ pub(crate) unsafe fn declare_on_filter(
     }
 }
 
-/// Consume a moved matching closure and adapt it to a [`MatchingSink`].
+/// Consume a moved matching closure and adapt it to a [`MatchingSink`], with the latch that
+/// opens once the closure's `drop(context)` has run.
 ///
 /// Shared by the PUBLISHER and QUERIER declare forms so the ownership contract
 /// — the caller's `drop(context)` runs exactly once, on every path — has one
@@ -517,7 +531,7 @@ pub(crate) unsafe fn declare_on_filter(
 /// holds the only clone, so releasing the sink releases the C context.
 pub(crate) unsafe fn consume_matching_closure(
     callback: *mut z_moved_closure_matching_status_t,
-) -> Result<MatchingSink, ZResult> {
+) -> Result<(MatchingSink, Arc<ReleaseLatch>), ZResult> {
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
@@ -527,14 +541,30 @@ pub(crate) unsafe fn consume_matching_closure(
     );
     let owned: Arc<MatchingCClosure> =
         Arc::new(CClosure::new(taken.context, taken.call, taken.drop));
-    Ok(Arc::new(move |matching: bool| {
-        if let Some(call) = owned.call {
-            let status = z_matching_status_t { matching };
-            // SAFETY: `context` is the caller's, alive until `drop` runs, which
-            // cannot overlap this call (the `Arc` is held for its duration).
-            call(&status, owned.context.0);
-        }
-    }))
+    let released = owned.release_latch();
+    Ok((matching_sink(owned), released))
+}
+
+/// The sink that hands each matching status to the C callback of `owned`.
+///
+/// The call is marked as one of the program's callbacks: an undeclare the callback makes of its
+/// own listener, or a drop of the entity that holds it, then leaves the closure to be released as
+/// the callback returns instead of waiting on itself (`ReleaseLatch::wait`).
+fn matching_sink(owned: Arc<MatchingCClosure>) -> MatchingSink {
+    Arc::new(move |matching: bool| {
+        let Some(call) = owned.call else {
+            return;
+        };
+        let status = z_matching_status_t { matching };
+        let ctx = owned.context.0;
+        let _in_callback = InCallback::enter();
+        // SAFETY: `context` is the caller's, alive until `drop` runs, which cannot overlap this
+        // call (the `Arc` is held for its duration). An unwind out of the C callback is caught
+        // here rather than crossing into the thread that delivers.
+        let _ = catch(|| unsafe {
+            call(&status, ctx);
+        });
+    })
 }
 
 #[cfg(test)]
