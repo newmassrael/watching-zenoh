@@ -396,6 +396,30 @@ impl SessionEngine for RouterState {
         FilteredPut::NotPlain
     }
 
+    // The node keeps no plain form: every write goes its general publish.
+    fn keep_write_filter_plain(
+        &self,
+        _filter: FilterId,
+        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
+    }
+
+    fn publish_filtered(
+        &self,
+        _filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        // The node's filters hold nothing back; a bare write is answered for the caller to send
+        // the general way.
+        match opts {
+            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
+            None => FilteredPut::NotPlain,
+        }
+    }
+
     fn batch_start_all(&self) -> usize {
         0
     }

@@ -427,6 +427,44 @@ impl SessionEngine for SharedSession {
         SharedSession::put_plain_filtered(self, filter, keyexpr, mapping_id, payload, params)
     }
 
+    fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
+        SharedSession::keep_write_filter_plain(self, filter, plain)
+    }
+
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        match opts {
+            // A link that names keys its own way is sent a bare write the general way.
+            #[cfg(feature = "shared-key-ids")]
+            None if SharedSession::names_keys_by_link(self) => {
+                if SharedSession::write_filter_holds_back(self, filter) {
+                    FilteredPut::Suppressed
+                } else {
+                    FilteredPut::NotPlain
+                }
+            }
+            None => SharedSession::put_kept_plain(self, filter, keyexpr, payload),
+            Some(opts) => {
+                if SharedSession::write_filter_holds_back(self, filter) {
+                    return FilteredPut::Suppressed;
+                }
+                FilteredPut::Sent(SharedSession::publish_on_wire_all(
+                    self, keyexpr, wire, payload, opts,
+                ))
+            }
+        }
+    }
+
     fn has_transport(&self) -> bool {
         !self.face_set().is_empty() || !SharedSession::listen_locators(self).is_empty()
     }

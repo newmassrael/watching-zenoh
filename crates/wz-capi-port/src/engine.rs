@@ -385,10 +385,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// State how a write of the entity holding write filter `filter` that brings nothing of its
     /// own goes the plain way: the facts it is sent from and the declaration naming its whole key,
     /// or `None` for the general way. Stated once, when the entity is declared; the filter's row
-    /// keeps it, so no caller keeps a plain form of its own. The provided answer keeps nothing,
-    /// and such an engine sends every write the general way.
-    fn keep_write_filter_plain(&self, _filter: FilterId, _plain: Option<(PlainPutParams, ExprId)>) {
-    }
+    /// keeps it, so no caller keeps a plain form of its own. Every engine states what it does
+    /// with it, so none sends a bare write the general way by omission.
+    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>);
 
     /// Publish what an entity holding write filter `filter` writes: the one entry a declared
     /// entity's put and delete go through. Nothing is sent when the filter holds the write back
@@ -403,15 +402,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         wire: &WireKey,
         payload: &[u8],
         opts: Option<&PublishOptions>,
-    ) -> FilteredPut {
-        if self.write_filter_holds_back(filter) {
-            return FilteredPut::Suppressed;
-        }
-        match opts {
-            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
-            None => FilteredPut::NotPlain,
-        }
-    }
+    ) -> FilteredPut;
 
     /// Whether the session has a transport to carry a batch window: a face, or a listener that
     /// takes one. This is zenoh-pico's `_z_transport_get_common` being non-NULL, which its three

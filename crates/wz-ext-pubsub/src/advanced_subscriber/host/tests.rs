@@ -229,6 +229,25 @@ impl SessionEngine for Script {
     ) -> FilteredPut {
         FilteredPut::NotPlain
     }
+    fn keep_write_filter_plain(
+        &self,
+        _filter: FilterId,
+        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
+    }
+    fn publish_filtered(
+        &self,
+        _filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        match opts {
+            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
+            None => FilteredPut::NotPlain,
+        }
+    }
     fn batch_start_all(&self) -> usize {
         0
     }

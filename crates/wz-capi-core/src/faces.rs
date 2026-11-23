@@ -268,6 +268,11 @@ struct FilterEntry {
     /// moved the answer is the same, which is what lets a put skip the work of asking.
     #[cfg(target_has_atomic = "64")]
     cache: Option<FilterCache>,
+    /// How a write of the filter's entity that brings nothing of its own goes the plain way,
+    /// stated once by the entity that declared the filter ([`SharedSession::keep_write_filter_plain`]):
+    /// the facts it is sent from and the declaration naming its whole key. `None` sends it the
+    /// general way.
+    plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
 }
 
 /// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
@@ -5705,6 +5710,49 @@ impl SharedSession {
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
+        self.put_filtered_plain(filter, keyexpr, payload, Some((*params, mapping_id)))
+    }
+
+    /// State how a write of the entity holding write filter `filter` that brings nothing of its
+    /// own goes the plain way: kept in the filter's row, read by [`Self::put_kept_plain`].
+    pub fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    ) {
+        if let Some(entry) = self.lock().filters.iter_mut().find(|e| e.id == filter) {
+            entry.plain = plain;
+        }
+    }
+
+    /// [`Self::put_plain_filtered`] for a write that brings nothing of its own, sent the plain way
+    /// the filter's row keeps, read in the same step of the registry as the filter's kept answer;
+    /// [`FilteredPut::NotPlain`], nothing sent, when the row keeps none.
+    pub fn put_kept_plain(&self, filter: FilterId, keyexpr: &str, payload: &[u8]) -> FilteredPut {
+        self.put_filtered_plain(filter, keyexpr, payload, None)
+    }
+
+    /// The plain form the row of write filter `filter` keeps.
+    fn kept_plain(
+        &self,
+        filter: FilterId,
+    ) -> Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)> {
+        self.lock()
+            .filters
+            .iter()
+            .find(|e| e.id == filter)
+            .and_then(|e| e.plain)
+    }
+
+    /// The body of [`Self::put_plain_filtered`] and [`Self::put_kept_plain`]: the plain form
+    /// `given`, or the one the filter's row keeps.
+    fn put_filtered_plain(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    ) -> FilteredPut {
         #[cfg(all(target_has_atomic = "64", not(debug_assertions)))]
         {
             let kept = {
@@ -5723,18 +5771,26 @@ impl SharedSession {
                         // for them; it is asked the long way, which reads them.
                         .filter(|entry| !entry.count_local)
                         .and_then(|entry| {
+                            let plain = given.or(entry.plain);
                             let token = guard.filter_token(entry.plane)?;
                             let kept = entry.cache?;
-                            ((kept.generation, kept.epoch_sum) == token)
-                                .then_some((kept.inactive, targets))
+                            ((kept.generation, kept.epoch_sum) == token).then_some((
+                                kept.inactive,
+                                targets,
+                                plain,
+                            ))
                         })
                 }
             };
-            if let Some((inactive, targets)) = kept {
+            if let Some((inactive, targets, plain)) = kept {
                 if inactive {
                     return FilteredPut::Suppressed;
                 }
-                return self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params);
+                let Some((params, mapping_id)) = plain else {
+                    return FilteredPut::NotPlain;
+                };
+                return self
+                    .put_plain_after_filter(&targets, keyexpr, mapping_id, payload, &params);
             }
         }
         let targets = self.fan_targets();
@@ -5747,7 +5803,10 @@ impl SharedSession {
         if self.write_filter_active(filter) {
             return FilteredPut::Suppressed;
         }
-        self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params)
+        let Some((params, mapping_id)) = given.or_else(|| self.kept_plain(filter)) else {
+            return FilteredPut::NotPlain;
+        };
+        self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, &params)
     }
 
     /// The part of [`Self::put_plain_declared`] that follows the filter, on faces already read.
@@ -6548,6 +6607,7 @@ impl SharedSession {
             count_local,
             #[cfg(target_has_atomic = "64")]
             cache: None,
+            plain: None,
         });
         Some(id)
     }
@@ -7967,6 +8027,46 @@ mod matching_aggregate_tests {
             put(crate::node_policy::NodePolicy::from_node_config(&stated).expect("compiles"))
                 .is_none(),
             "a node with a policy sends through the general publish, which judges the put"
+        );
+    }
+
+    /// A bare write reads the plain form its filter's row keeps: held back while the filter says
+    /// nothing matches, kept form or none, and answered `NotPlain`, nothing sent, once the row
+    /// that kept the form is gone.
+    #[test]
+    fn a_bare_put_reads_the_plain_form_its_filter_keeps() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let mapping = shared
+            .declare_keyexpr("wz/plain/kept".to_owned())
+            .expect("the first alias id is not exhausted");
+        let options = PublishOptions::put().with_locality(Locality::Remote);
+        let Some(params) = plain_params(&options) else {
+            assert!(!wz_session_core::publish_options::SENDS_PLAIN_PUTS);
+            return;
+        };
+        let filter = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/plain/kept".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::Suppressed
+        );
+        shared.keep_write_filter_plain(filter, Some((params, mapping)));
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::Suppressed
+        );
+        shared.undeclare_write_filter(filter);
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::NotPlain
         );
     }
 
