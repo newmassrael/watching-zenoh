@@ -701,6 +701,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/declare_routing_context.rs` | S2 | |
 | `crates/wz-session-core/src/deferred_fire.rs` | S2 | |
 | `crates/wz-session-core/src/delivery_lane.rs` | S1 | |
+| `crates/wz-session-core/src/diag.rs` | S3 | |
 | `crates/wz-session-core/src/dissect.rs` | S3 | |
 | `crates/wz-session-core/src/dissect_schema.rs` | S3 | |
 | `crates/wz-session-core/src/doc_out.rs` | S10 | |
