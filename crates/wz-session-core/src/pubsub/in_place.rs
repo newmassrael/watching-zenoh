@@ -450,12 +450,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             if repeats {
                 sample = sample.repeating_the_previous_key();
             }
-            self.fire_plain_to_subscribers(&sample, true, peer.class);
+            self.fire_plain_to_subscribers(&sample, peer.class);
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
-        for subscriber in self.subscribers.iter_mut() {
-            subscriber.sink.end_plain_frame();
-        }
+        crate::pubsub::LocalSubscribers::end_plain_frame(self);
     }
 }
 

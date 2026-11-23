@@ -881,6 +881,116 @@ fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     );
 }
 
+/// A peer's message is matched afresh where the delivery may not allocate (the in-place receive
+/// path), through the cache otherwise, and reaches only the subscribers that hear peers.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_peers_message_is_matched_afresh_where_it_may_not_allocate() {
+    use crate::bounded::Heap;
+    use crate::pubsub::{LocalSubscribers, PeerDelivery, MATCH_SCANS};
+    let scans = || MATCH_SCANS.with(|count| count.get());
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks, Heap>::new();
+    tables.limit_memo_to(4);
+    let peers = tables
+        .declare_subscriber(
+            "a/x",
+            Locality::Remote,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let own = tables
+        .declare_subscriber(
+            "a/x",
+            Locality::SessionLocal,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let lent = PeerDelivery {
+        no_allocation: true,
+        ..PeerDelivery::default()
+    };
+    let start = scans();
+    for _ in 0..2 {
+        assert_eq!(tables.deliver_from_peer("a/x", None, lent, count), 1);
+    }
+    assert_eq!(scans() - start, 2, "no cache slot is taken");
+    let start = scans();
+    for _ in 0..2 {
+        assert_eq!(
+            tables.deliver_from_peer("a/x", None, PeerDelivery::default(), count),
+            1
+        );
+    }
+    assert_eq!(scans() - start, 1, "the cache answers the second");
+    assert_eq!(
+        tables.subscribers().get(peers.handle).unwrap().callback().0,
+        4
+    );
+    assert_eq!(
+        tables.subscribers().get(own.handle).unwrap().callback().0,
+        0,
+        "a subscriber of the session's own messages hears no peer"
+    );
+}
+
+/// A sink that counts the plain frames it was told ended.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+struct FrameEnds(usize);
+
+#[cfg(feature = "alloc")]
+impl crate::sink::SampleSink for FrameEnds {
+    fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {}
+
+    fn end_plain_frame(&mut self) {
+        self.0 += 1;
+    }
+}
+
+/// Callbacks whose subscribers count the ends of plain frames.
+#[cfg(feature = "alloc")]
+enum FrameSinks {}
+
+#[cfg(feature = "alloc")]
+impl RowCallbacks for FrameSinks {
+    type Subscriber = FrameEnds;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+}
+
+/// The end of a plain frame is told to every subscriber, whatever it hears.
+#[cfg(feature = "alloc")]
+#[test]
+fn every_subscriber_is_told_a_plain_frame_ended() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = SessionTables::<FrameSinks>::new();
+    let any = tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), FrameEnds::default())
+        .unwrap();
+    let own = tables
+        .declare_subscriber(
+            "b",
+            Locality::SessionLocal,
+            KeyForm::default(),
+            FrameEnds::default(),
+        )
+        .unwrap();
+    tables.end_plain_frame();
+    assert_eq!(
+        tables.subscribers().get(any.handle).unwrap().callback().0,
+        1
+    );
+    assert_eq!(
+        tables.subscribers().get(own.handle).unwrap().callback().0,
+        1
+    );
+}
+
 #[test]
 fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
     use crate::pubsub::LocalSubscribers;

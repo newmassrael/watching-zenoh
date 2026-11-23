@@ -51,7 +51,9 @@ use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
-use crate::pubsub::{any_local_match, fire_into_memoized, MatchMemo, RowRef, SubscriberRows};
+use crate::pubsub::{
+    any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
+};
 use crate::registry_error::RegisterError;
 use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
@@ -1882,6 +1884,37 @@ where
             repeats_previous,
             deliver,
         )
+    }
+
+    /// The table set holds no key gate yet: a peer's message on any key is matched against
+    /// every subscription that hears peers.
+    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+        &mut self,
+        key: &str,
+        _class: Option<crate::key_gate::ClassId>,
+        how: crate::pubsub::PeerDelivery,
+        deliver: D,
+    ) -> usize {
+        if how.no_allocation && !P::ENFORCES_CAPACITY {
+            return scan_subscribers(&mut self.subscribers, key, true, deliver, |_| {})
+                .unwrap_or(0);
+        }
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.subscriber_epoch,
+            key,
+            true,
+            how.repeats_previous,
+            deliver,
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self) {
+        for (_, row) in self.subscribers.iter_mut() {
+            crate::sink::SampleSink::end_plain_frame(&mut row.callback);
+        }
     }
 }
 

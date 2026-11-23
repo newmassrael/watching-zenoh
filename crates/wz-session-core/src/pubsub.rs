@@ -948,38 +948,13 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     pub(super) fn fire_lent(&mut self, view: &dyn SampleView, class: Option<ClassId>) -> usize {
-        match self.admission(view.keyexpr(), true, class) {
-            Admission::Refused => return 0,
-            Admission::Numbered(key) => {
-                if let Some(fired) =
-                    self.deliver_by_selection(key, view.keyexpr(), |sink| sink.deliver(view))
-                {
-                    return fired;
-                }
-            }
-            Admission::Matched => {}
-        }
-        // A heap table's cache slot allocates the first time it sees a key (the key's text and
-        // the list of what it matched), which the in-place path's contract does not allow: it
-        // costs the heap nothing (the matcher reads the key as text). A fixed table's slots are
-        // already in place, so there the cache costs no allocation and is used.
-        if !P::ENFORCES_CAPACITY {
-            return scan_subscribers(
-                &mut self.subscribers,
-                view.keyexpr(),
-                true,
-                |sink| sink.deliver(view),
-                |_| {},
-            )
-            .unwrap_or(0);
-        }
-        fire_into_memoized(
-            &mut self.subscribers,
-            &mut self.memo,
-            self.epoch,
+        self.deliver_from_peer(
             view.keyexpr(),
-            true,
-            false,
+            class,
+            PeerDelivery {
+                no_allocation: true,
+                ..PeerDelivery::default()
+            },
             |sink| sink.deliver(view),
         )
     }
@@ -1998,23 +1973,21 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         is_remote: bool,
         class: Option<ClassId>,
     ) -> usize {
-        match self.admission(view.keyexpr(), is_remote, class) {
-            Admission::Refused => return 0,
-            Admission::Numbered(key) => {
-                if let Some(fired) =
-                    self.deliver_by_selection(key, view.keyexpr(), |sink| sink.deliver(view))
-                {
-                    return fired;
-                }
-            }
-            Admission::Matched => {}
+        if is_remote {
+            return self.deliver_from_peer(
+                view.keyexpr(),
+                class,
+                PeerDelivery::default(),
+                |sink| sink.deliver(view),
+            );
         }
+        // The application's own message: no key gate, matched as it is.
         fire_into_memoized(
             &mut self.subscribers,
             &mut self.memo,
             self.epoch,
             view.keyexpr(),
-            is_remote,
+            false,
             false,
             |sink| sink.deliver(view),
         )
@@ -2058,27 +2031,15 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     fn fire_plain_to_subscribers(
         &mut self,
         sample: &crate::sink::PlainSample<'_>,
-        is_remote: bool,
         class: Option<ClassId>,
     ) -> usize {
-        match self.admission(sample.keyexpr(), is_remote, class) {
-            Admission::Refused => return 0,
-            Admission::Numbered(key) => {
-                if let Some(fired) = self
-                    .deliver_by_selection(key, sample.keyexpr(), |sink| sink.deliver_plain(sample))
-                {
-                    return fired;
-                }
-            }
-            Admission::Matched => {}
-        }
-        fire_into_memoized(
-            &mut self.subscribers,
-            &mut self.memo,
-            self.epoch,
+        self.deliver_from_peer(
             sample.keyexpr(),
-            is_remote,
-            sample.repeats_previous_key(),
+            class,
+            PeerDelivery {
+                repeats_previous: sample.repeats_previous_key(),
+                ..PeerDelivery::default()
+            },
             |sink| sink.deliver_plain(sample),
         )
     }
@@ -2415,7 +2376,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
 ///
 /// Every route to a subscriber reaches it: the borrowed delivery, the plain one and the
 /// receive match cache's refill, so what a message reaches does not depend on which.
-fn scan_subscribers<R: SubscriberRows>(
+pub(crate) fn scan_subscribers<R: SubscriberRows>(
     rows: &mut R,
     keyexpr: &str,
     is_remote: bool,
@@ -4157,6 +4118,36 @@ pub trait LocalSubscribers {
     ) -> usize
     where
         Self: Sized;
+
+    /// Deliver a message a peer sent on `key`: through the table's key gate, which may drop
+    /// it or select its subscribers by the key's number, else to every subscription
+    /// [`Self::fire_matching`] reaches from a peer. `class` is the row of the image's
+    /// allowance the session found for the peer. How many sinks were handed it.
+    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+        &mut self,
+        key: &str,
+        class: Option<ClassId>,
+        how: PeerDelivery,
+        deliver: D,
+    ) -> usize
+    where
+        Self: Sized;
+
+    /// The frame whose plain `Put`s were just delivered has no more records: every sink is
+    /// told ([`SampleSink::end_plain_frame`]), matched or not.
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self);
+}
+
+/// How a message from a peer is delivered ([`LocalSubscribers::deliver_from_peer`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeerDelivery {
+    /// The key is the key of the message delivered just before, to the same table: the next
+    /// record of a frame naming the same key.
+    pub repeats_previous: bool,
+    /// The delivery may not allocate (the in-place receive path): a table whose match cache
+    /// allocates a slot the first time it sees a key matches afresh instead.
+    pub no_allocation: bool,
 }
 
 impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
@@ -4228,6 +4219,48 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
             repeats_previous,
             deliver,
         )
+    }
+
+    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+        &mut self,
+        key: &str,
+        class: Option<ClassId>,
+        how: PeerDelivery,
+        mut deliver: D,
+    ) -> usize {
+        match self.admission(key, true, class) {
+            Admission::Refused => return 0,
+            Admission::Numbered(id) => {
+                if let Some(fired) = self.deliver_by_selection(id, key, &mut deliver) {
+                    return fired;
+                }
+            }
+            Admission::Matched => {}
+        }
+        // A heap table's cache slot allocates the first time it sees a key (the key's text and
+        // the list of what it matched): where that is not allowed the key is matched as text,
+        // which costs the heap nothing. A fixed table's slots are already in place, so there the
+        // cache costs no allocation and is used.
+        if how.no_allocation && !P::ENFORCES_CAPACITY {
+            return scan_subscribers(&mut self.subscribers, key, true, deliver, |_| {})
+                .unwrap_or(0);
+        }
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            key,
+            true,
+            how.repeats_previous,
+            deliver,
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self) {
+        for subscriber in self.subscribers.iter_mut() {
+            subscriber.sink.end_plain_frame();
+        }
     }
 }
 
