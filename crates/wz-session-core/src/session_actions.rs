@@ -11990,11 +11990,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         let encode: &crate::frame_encode::BodyEncoder<'_> = encode_body;
-        // The heap path encodes into a vector, which cannot refuse, and treats
-        // a codec error as the bug it is; measuring runs the same encoder over
-        // nothing, so the same message cannot fail here either.
-        let body_len = crate::frame_encode::encoded_body_len(encode)
-            .expect("the encoder the heap path runs infallibly also measures");
+        // An encoder that refuses its message (a field past its codec bound) reaches here too:
+        // the slot of an open window answers its refusal as a message past the budget. It is
+        // refused typed, before a byte leaves, with the SN the caller minted for it given back,
+        // as `emit_fragment_chain` gives it back for a message past the reassembly cap.
+        let body_len = match crate::frame_encode::encoded_body_len(encode) {
+            Ok(len) => len,
+            Err(refused) => {
+                self.outbound_frame_sn
+                    .unmint(emit.ext_qos.unwrap_or(Priority::DEFAULT), emit.reliable);
+                return Err(SendWireError::Codec(refused));
+            }
+        };
         self.emit_fragment_chain(
             batch,
             crate::frame_encode::FragmentBody::Encoded(encode),

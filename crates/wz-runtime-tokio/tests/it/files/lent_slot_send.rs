@@ -940,6 +940,54 @@ fn a_message_past_the_budget_mid_window_leaves_no_frame_half_built() {
     link.assert_every_slot_home();
 }
 
+/// A message its encoder refuses (a key past the protocol's u16 length) inside a window over a
+/// lending link: the slot the window opens for it answers the refusal as a message past the
+/// budget, which takes the fragment path. The send is refused typed, the slot comes back, and the
+/// SN minted for it is given back: the next message's frame is the one a window holding only that
+/// message writes. CONTROL: that window, alone, on a fresh session.
+#[cfg(all(feature = "transport-batching", feature = "transport-fragmentation"))]
+#[test]
+fn a_message_its_encoder_refuses_mid_window_is_refused_and_spends_no_sn() {
+    let control_link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    run_window(&batching_session(control_link.clone()), &[b"after"]);
+    let control = control_link.lent();
+    assert_eq!(control.len(), 1, "CONTROL: one frame, lent");
+
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    let long_key = "k".repeat(usize::from(u16::MAX) + 1);
+    let refused = actions.send_plain_put_qos(
+        0,
+        Some(&long_key),
+        b"v",
+        None,
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(
+        matches!(
+            refused,
+            Some(Err(wz_session_core::send_wire_error::SendWireError::Codec(
+                _
+            )))
+        ),
+        "the encoder's refusal is the send's answer: {refused:?}"
+    );
+    actions
+        .send_push_literal("home/batch", b"after", true)
+        .expect("push");
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        link.lent(),
+        control,
+        "the next frame carries the SN given back"
+    );
+    assert!(link.heap().is_empty());
+    link.assert_every_slot_home();
+}
+
 /// A link with no slot free: the window is staged on the heap as it always was,
 /// with the same bytes, and the fallback is counted, not silent.
 #[cfg(feature = "transport-batching")]
