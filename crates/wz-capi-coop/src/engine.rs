@@ -144,7 +144,7 @@ use wz_session_mcu::dial::{parse_locator, McuActions};
 use {
     query::{CoopHolder, Onward, QueryPlane, QueryableCall, QueryableRow},
     wz_capi_port::{QblId, QueryableSink},
-    wz_session_core::query::{QueryDelivery, QueryResponder},
+    wz_session_core::query::QueryResponder,
     wz_session_core::query_sink::ReplyError,
     wz_session_core::query_sink::{ProvenQuery, QueryView},
     wz_session_core::reply_stage::ReplyParts,
@@ -227,7 +227,6 @@ use {
     registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
-    wz_session_core::declare::liveliness_subscriber::LivelinessDelivery,
     wz_session_core::session_tables::LivelinessSubscriberHandle,
 };
 
@@ -1650,7 +1649,15 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
 }
 
 #[cfg(feature = "liveliness")]
-impl LivelinessDelivery<LivelinessRow, LivelinessSubscriberHandle> for RoundDelivery {
+// Named by path, not imported: the delivery traits are implemented for every type on rows of no
+// callback, so one in scope would answer a method call of the same name on any receiver first
+// (the round's own `deliver`).
+impl
+    wz_session_core::declare::liveliness_subscriber::LivelinessDelivery<
+        LivelinessRow,
+        LivelinessSubscriberHandle,
+    > for RoundDelivery
+{
     fn deliver(
         &mut self,
         id: LivelinessSubscriberHandle,
@@ -1672,7 +1679,7 @@ impl LivelinessDelivery<LivelinessRow, LivelinessSubscriberHandle> for RoundDeli
 }
 
 #[cfg(feature = "queryable")]
-impl QueryDelivery<QueryableRow, QueryableHandle> for RoundDelivery {
+impl wz_session_core::query::QueryDelivery<QueryableRow, QueryableHandle> for RoundDelivery {
     fn ask(
         &mut self,
         id: QueryableHandle,
