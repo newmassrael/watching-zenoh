@@ -16,7 +16,8 @@ says a crate is missing, so "is anything left out?" had no answer but a reread.
 ## What this holds
 
 `docs/zenoh-logic-as-sce-kinds/crates.md` has one row per crate. The population
-is DERIVED: every tracked `crates/<dir>/Cargo.toml`. A finding is
+is DERIVED: every tracked `crates/<dir>/Cargo.toml`, the directory one level under `crates/`; a
+package nested deeper (a crate's own workspace) is its crate's content. A finding is
 
 - a crate with no row, or with two;
 - a row naming a directory that holds no tracked crate;
@@ -132,10 +133,26 @@ def findings(rows: list[tuple[str, str, str]], crates: set[str],
     return out
 
 
+def crate_dirs(paths: list[str]) -> set[str]:
+    """The crates among tracked manifest paths: the directory of each `crates/<dir>/Cargo.toml`.
+
+    A manifest deeper in a crate's directory (the packages of a workspace of its own, such as the
+    fuzz workspace's) is that crate's content, which its row already covers; read by the leaf of
+    its directory it would be a second crate under a name no `crates/<name>/` holds."""
+    out: set[str] = set()
+    for path in paths:
+        parts = path.split("/")
+        if len(parts) == 3 and parts[0] == "crates" and parts[2] == "Cargo.toml":
+            out.add(parts[1])
+    return out
+
+
 def tracked_crates(root: Path) -> set[str]:
+    # git's pathspec `*` matches across `/`, so this lists nested manifests too; `crate_dirs`
+    # keeps the crates.
     run = subprocess.run(["git", "-C", str(root), "ls-files", "crates/*/Cargo.toml"],
                          capture_output=True, text=True, check=True)
-    return {Path(p).parent.name for p in run.stdout.split()}
+    return crate_dirs(run.stdout.split())
 
 
 # ---- file level --------------------------------------------------------------------------
@@ -371,6 +388,11 @@ def selftest() -> int:
     expect("a crate name that is a prefix of another is not taken for it",
            findings([("ab", "S1", "")], {"ab"}, {"S1": "reads `abc` and crates/abc/"}) != [],
            True)
+    expect("a crate is a directory of crates/ holding a manifest",
+           crate_dirs(["crates/alpha/Cargo.toml", "crates/beta/Cargo.toml"]), {"alpha", "beta"})
+    expect("a manifest nested in a crate's directory is that crate's, not a crate",
+           crate_dirs(["crates/alpha/Cargo.toml", "crates/alpha/fuzz-one/Cargo.toml",
+                       "crates/alpha/a/b/Cargo.toml"]), {"alpha"})
     expect("an empty table reads as no rows, which the check refuses",
            parse_table("| Crate | Where | Reason |\n|---|---|---|\n")[0], [])
 
