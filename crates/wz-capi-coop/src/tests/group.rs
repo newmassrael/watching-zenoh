@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,

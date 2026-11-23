@@ -33,6 +33,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use crate::peers::PeerIdentity;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
     MatchingSink, NoRoomToHold, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId,
@@ -80,20 +81,28 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// (`wz_session_core::wire_id::next_u32_id`).
     fn next_entity_id(&self) -> Option<EntityId>;
 
-    /// The zid and the announced role of every established peer, the role in its 2-bit wire form
-    /// (0 router, 1 peer, 2 client), so the split between zenoh-pico's `z_info_routers_zid` and
-    /// `z_info_peers_zid` is made at the ABI, where pico makes it. A link whose handshake has not
-    /// completed is not listed.
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)>;
+    /// The established peer with the least key at or past `from`, and its key: its zid and the
+    /// role it announced, the role in its 2-bit wire form (0 router, 1 peer, 2 client), so the
+    /// split between zenoh-pico's `z_info_routers_zid` and `z_info_peers_zid` is made at the ABI,
+    /// where pico makes it. A link whose handshake has not completed is not listed.
+    ///
+    /// One peer a call, so a reader copies each identity out with nothing of the session held and
+    /// acts on it (a C callback) after: [`crate::each_peer`] walks them, asking from `0` and then
+    /// from each key answered plus one. The key is the engine's own. Where it is stable for the
+    /// life of a peer's link, a walk reads each peer that stands throughout it once; where it is a
+    /// position, a peer that goes during the walk may hide the one after it from that walk.
+    fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)>;
 
-    /// The zid of every member of every multicast group the session joined, as each group's
-    /// member table holds it, whatever role the member announced: zenoh-pico lists each of them
-    /// as a peer of its multicast transport (`vendor/zenoh-pico/src/transport/multicast.c` @
-    /// `void _zp_multicast_fetch_zid(`). A group's members are not [`Self::peer_identities`],
-    /// whose split by role is a link's. An engine that joins no group has none, the provided
-    /// answer.
-    fn group_member_zids(&self) -> Vec<Vec<u8>> {
-        Vec::new()
+    /// The member with the least key at or past `from` of the multicast groups the session
+    /// joined, and its key: its zid, as its group's member table holds it, whatever role it
+    /// announced. zenoh-pico lists each of them as a peer of its multicast transport
+    /// (`vendor/zenoh-pico/src/transport/multicast.c` @ `void _zp_multicast_fetch_zid(`). A
+    /// group's members are not [`Self::next_peer`]'s, whose split by role is a link's. Read one at
+    /// a time as [`Self::next_peer`] is ([`crate::each_group_member`]). An engine that joins no
+    /// group has none, the provided answer.
+    fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
+        let _ = from;
+        None
     }
 
     /// Ask every multicast group the session joined to send its JOIN now, between two beacons,

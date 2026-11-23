@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_posix::links::PosixLinks;

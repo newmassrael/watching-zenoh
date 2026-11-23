@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, ReplyCallback, SessionEngine, StatementNotHonoured, SubId, SubscriberSink, Tick,
-    TickerId, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink,
+    PeerIdentity, QblId, QueryableSink, ReplyCallback, SessionEngine, StatementNotHonoured, SubId,
+    SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -31,6 +31,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
 use super::RouterState;
@@ -176,12 +177,22 @@ impl SessionEngine for RouterState {
         self.engine.entity_id()
     }
 
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
+    /// A peer's key is its place among the node's faces.
+    fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
         self.forwarder
             .face_snapshots()
             .into_iter()
-            .map(|face| (face.zid.to_vec(), face.whatami))
-            .collect()
+            .enumerate()
+            .skip(usize::try_from(from).ok()?)
+            .find_map(|(at, face)| {
+                Some((
+                    at as u64,
+                    PeerIdentity {
+                        zid: SessionZid::new(&face.zid).ok()?,
+                        whatami: face.whatami,
+                    },
+                ))
+            })
     }
 
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {

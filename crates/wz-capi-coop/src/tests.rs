@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{FilterPlane, FilteredPut, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -1666,6 +1666,33 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     SessionDrive::start_read_task(&*engine).expect("a read task once a thread is given");
     assert!(SessionDrive::read_task_is_running(&*engine));
     SessionDrive::close(&*engine);
+}
+
+/// The session's peers are read one at a time, by key: the dial role's face is the one peer, a
+/// read past its key finds none, and the walk a C ABI makes hands each identity on with the
+/// session free, so what it is handed to may read the session again (a C callback may call into
+/// its session).
+#[test]
+fn the_peers_are_read_one_at_a_time_and_handed_on_with_the_session_free() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (key, peer) = engine.next_peer(0).expect("the router is a peer");
+    assert_eq!(peer.zid.to_vec(), vec![ROUTER_ZID; 4]);
+    assert_eq!(peer.whatami, 0, "a router, in its wire form");
+    assert_eq!(engine.next_peer(key + 1), None, "no peer past the one");
+    let mut handed = Vec::new();
+    wz_capi_port::each_peer(&*engine, |peer| {
+        assert!(
+            engine.next_peer(0).is_some(),
+            "the session is free while an identity is handed on"
+        );
+        handed.push(peer);
+    });
+    assert_eq!(handed, [peer]);
+    assert!(
+        engine.group_member_zids().is_empty(),
+        "a session that joined no group has no member"
+    );
 }
 
 /// An open asked for a place for the ABI's handle lends it from the session's arena, its last row:

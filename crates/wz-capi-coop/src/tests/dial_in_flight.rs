@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine};
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{
     LinkOpenError, Locator, OpenedLink, PendingDial, SessionLinks,

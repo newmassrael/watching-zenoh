@@ -887,7 +887,7 @@ impl Engine {
     /// (0 router, 1 peer, 2 client).
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+            Engine::Tokio(state) => state.shared.peer_identities(),
             Engine::Router(router) => router
                 .node
                 .forwarder()

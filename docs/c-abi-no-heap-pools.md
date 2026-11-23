@@ -485,12 +485,14 @@ suites (C1co, Layer Z) unchanged.
     value in `PicoSessionHandle`, its drop the close), so the open makes no box for it; and every
     key a `SessionEngine` method takes is `&str`, so a declaration hands the engine its own text
     and the engine copies it into its key arena, where it was copied already. The tokio engine
-    keeps its boxed drive, which holds its session's drop glue in its own crate. Left: the methods
-    returning `Vec` (`peer_identities`, `group_member_zids`, `face_snapshots`,
-    `listen_locators`, `linkstate_regions`, `keyexpr_declarations`), read only by the info,
-    connectivity and admin doors, whose form is a read by index under the session's lock, each id
-    copied out before the C callback runs (a buffer of every face would be MAX_FACES rows on the
-    stack, and a visitor would run the callback under the lock, which section 4 refuses); and the
+    keeps its boxed drive, which holds its session's drop glue in its own crate. The peers are
+    read one at a time (`next_peer`, `next_group_member`, walked by `each_peer` and
+    `each_group_member`): each read takes the session and lets it go, and the identity is copied
+    out before the C callback of `z_info_peers_zid` runs, so no callback runs under the lock and
+    no list is made (a buffer of every face would be MAX_FACES rows on the stack); a Rust caller
+    collects them through `PeerLists`. Left: the methods returning `Vec` that only the
+    connectivity and admin planes and the Rust API read (`face_snapshots`, whose rows own their
+    links' text, `listen_locators`, `linkstate_regions`, `keyexpr_declarations`); and the
     dispatch, which stays through the trait object because the engine's type is
     `CoopEngine<L, C>` over the links the build composes (the host's, with a secure channel or
     groups as features add them, and the program's transport beside them with `app-transport`),

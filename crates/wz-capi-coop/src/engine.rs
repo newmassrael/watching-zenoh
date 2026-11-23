@@ -61,8 +61,8 @@ use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, StatementNotHonoured, SubId,
-    SubscriberSink, WireKey,
+    PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
+    StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -5078,34 +5078,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
-        let Some(core) = self.live() else {
-            return Vec::new();
-        };
-        // A group's members are not listed here, as the tokio engine lists none:
-        // `group_member_zids` answers them, whatever role they announced.
+    fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
+        let core = self.live()?;
+        // A face's id is its key: faces are numbered as they come and keep their id while they
+        // stand. A group's members are not listed here, as the tokio engine lists none:
+        // `next_group_member` answers them, whatever role they announced.
         core.0
-            .ups()
-            .filter(|actions| actions.is_established())
-            .filter_map(
-                |actions| match (actions.peer_zid(), actions.peer_whatami_wire()) {
-                    (Some(zid), Some(role)) => Some((zid, role)),
-                    _ => None,
-                },
-            )
-            .collect()
+            .ups_by_id()
+            .filter(|(id, actions)| *id >= from && actions.is_established())
+            .filter_map(|(id, actions)| {
+                Some((
+                    id,
+                    PeerIdentity {
+                        zid: actions.peer_session_zid()?,
+                        whatami: actions.peer_whatami_wire()?,
+                    },
+                ))
+            })
+            .min_by_key(|(id, _)| *id)
     }
 
+    /// A member's key is its group's place in the session's groups above its own place in the
+    /// group's member table.
     #[cfg(feature = "group")]
-    fn group_member_zids(&self) -> Vec<Vec<u8>> {
-        let Some(core) = self.live() else {
-            return Vec::new();
-        };
+    fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
+        let core = self.live()?;
+        let (first_group, first_member) = (from >> 32, from & u64::from(u32::MAX));
         core.0
             .groups
             .iter()
-            .flat_map(GroupFace::member_zids)
-            .collect()
+            .enumerate()
+            .skip(usize::try_from(first_group).ok()?)
+            .find_map(|(at, group)| {
+                let from_member = if at as u64 == first_group {
+                    first_member
+                } else {
+                    0
+                };
+                let (member, zid) = group.member_zid_from(usize::try_from(from_member).ok()?)?;
+                Some((((at as u64) << 32) | member as u64, zid))
+            })
     }
 
     /// Each group's session sends its JOIN at its next step, which this call takes, as the tokio

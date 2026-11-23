@@ -9,8 +9,8 @@ use std::any::Any;
 
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
-    MatchingSink, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SubId,
-    SubscriberSink, WireKey,
+    MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
+    SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
@@ -141,13 +141,32 @@ impl SessionEngine for SharedSession {
         SharedSession::next_entity_id(self)
     }
 
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
-        SharedSession::peer_identities(self)
+    /// A peer's key is its place among the faces, in the order of their ids.
+    fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
+        SharedSession::face_sessions(self)
+            .into_iter()
+            .enumerate()
+            .skip(usize::try_from(from).ok()?)
+            .find_map(|(at, session)| {
+                let actions = session.actions();
+                Some((
+                    at as u64,
+                    PeerIdentity {
+                        zid: SessionZid::new(&actions.peer_zid()?).ok()?,
+                        whatami: actions.peer_whatami_wire()?,
+                    },
+                ))
+            })
     }
 
+    /// A member's key is its place in the list of every group's members.
     #[cfg(feature = "multicast-transport")]
-    fn group_member_zids(&self) -> Vec<Vec<u8>> {
+    fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
         SharedSession::group_member_zids(self)
+            .into_iter()
+            .enumerate()
+            .skip(usize::try_from(from).ok()?)
+            .find_map(|(at, zid)| Some((at as u64, SessionZid::new(&zid).ok()?)))
     }
 
     #[cfg(feature = "multicast-transport")]

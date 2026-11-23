@@ -133,8 +133,8 @@ impl SessionEngine for Script {
     fn next_entity_id(&self) -> Option<u32> {
         u32::try_from(self.take_id()).ok()
     }
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
-        Vec::new()
+    fn next_peer(&self, _from: u64) -> Option<(u64, wz_capi_port::PeerIdentity)> {
+        None
     }
     fn has_router_peer(&self) -> bool {
         false

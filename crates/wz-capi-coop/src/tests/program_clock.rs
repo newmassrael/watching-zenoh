@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine};
 use wz_runtime_coop::ClockSource;
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;

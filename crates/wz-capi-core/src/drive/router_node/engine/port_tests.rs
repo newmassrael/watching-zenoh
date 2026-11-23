@@ -40,6 +40,7 @@ use super::*;
 use crate::drive::{FaceDrive, NodeRole};
 use crate::faces::no_shm_clients;
 use crate::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
+use wz_capi_port::PeerLists;
 
 const WAIT: Duration = Duration::from_secs(15);
 
