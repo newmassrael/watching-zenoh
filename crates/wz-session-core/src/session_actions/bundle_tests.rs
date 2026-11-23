@@ -283,8 +283,9 @@ mod reply_egress_gate {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::bundle;
+    use crate::network_message::MessageRef;
     use crate::response_build::build_response_reply_literal;
-    use crate::session_actions::{ReplyEgress, ReplyEgressGate};
+    use crate::session_actions::ReplyEgressGate;
     use crate::wire::ResponseOwned;
 
     /// A gate that admits a reply when the test says so, and counts what it was asked.
@@ -306,9 +307,9 @@ mod reply_egress_gate {
         fn installed(&self) -> ReplyEgressGate {
             let asked = Arc::clone(&self.asked);
             let admits = Arc::clone(&self.admits);
-            Box::new(move |reply: ReplyEgress<'_>| {
+            Box::new(move |reply: MessageRef<'_>| {
                 asked.fetch_add(1, Ordering::SeqCst);
-                matches!(reply, ReplyEgress::Response(_)) && admits.load(Ordering::SeqCst)
+                matches!(reply, MessageRef::Response(_)) && admits.load(Ordering::SeqCst)
             })
         }
 
@@ -323,19 +324,6 @@ mod reply_egress_gate {
 
     fn reply() -> ResponseOwned {
         build_response_reply_literal(5, "demo/asked", b"answer").expect("a reply")
-    }
-
-    /// A reply the gate is asked of reads, made a network message for a policy that reads those,
-    /// as the reply it borrows.
-    #[test]
-    fn a_reply_asked_of_reads_as_its_network_message() {
-        let response = reply();
-        let crate::network_message::NetworkMessage::Response(owned) =
-            ReplyEgress::Response(&response).to_message()
-        else {
-            panic!("a Response");
-        };
-        assert_eq!(*owned, response);
     }
 
     /// A reply the installed gate denies is consumed and never reaches the link; one it admits

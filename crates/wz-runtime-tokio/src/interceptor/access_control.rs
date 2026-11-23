@@ -3,7 +3,7 @@
 
 //! The ACL enforcer ADAPTER — the wz mirror of zenoh
 //! `net/routing/interceptor/access_control.rs` (`IngressAclEnforcer` /
-//! `EgressAclEnforcer`). It is the bridge between the codec [`NetworkMessage`]
+//! `EgressAclEnforcer`). It is the bridge between the codec [`MessageRef`]
 //! and the pure [`wz_access_control`] policy engine: it dispatches on the
 //! message KIND (a single `match`, mirroring zenoh's match over
 //! `NetworkBodyMut`), maps the kind to an [`AclMessage`] action, resolves the
@@ -28,7 +28,7 @@ use wz_access_control::{AclFlow, AclMessage, AclPolicy, Permission};
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::push::PushOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::MessageRef;
 
 use super::{Interceptor, InterceptorCacheValue, InterceptorContext};
 
@@ -110,9 +110,9 @@ impl GovernedAction {
 /// flag — including the `Final` terminator, which zenoh also leaves unfiltered
 /// (`access_control.rs:593-599` on ingress) because routing rejects it if the
 /// Interest it closes was denied.
-fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
+fn acl_action(msg: MessageRef<'_>) -> Option<GovernedAction> {
     match msg {
-        NetworkMessage::Push(p) => match &p.body {
+        MessageRef::Push(p) => match &p.body {
             PushOwnedVariant::CodecZenohMsgPut(_) => Some(GovernedAction::decl(AclMessage::Put)),
             PushOwnedVariant::CodecZenohMsgDel(_) => Some(GovernedAction::decl(AclMessage::Delete)),
             _ => None,
@@ -128,7 +128,7 @@ fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
         // does carry Put / Del, so these arms are a deliberate SUPERSET on the
         // deny side: a body zenoh's protocol cannot express is governed rather
         // than silently admitted if one ever arrives.
-        NetworkMessage::Request(r) => match &r.body {
+        MessageRef::Request(r) => match &r.body {
             RequestOwnedVariant::CodecZenohQuery(_) => {
                 Some(GovernedAction::decl(AclMessage::Query))
             }
@@ -140,16 +140,16 @@ fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
         },
         // A query reply (a `Response`, Reply or Err body) — both bodies are a
         // `Reply` action. This arm does NOT cover the end-marker:
-        // [`ResponseFinal`](NetworkMessage::ResponseFinal) is its own
+        // [`ResponseFinal`](MessageRef::ResponseFinal) is its own
         // `NetworkMessage` variant (`wz_session_core::network_message`), not a
         // `Response` body, so it exits at the `_ => None` arm below and never
         // reaches the keyexpr branch at all — the same place zenoh puts it
         // (an explicitly unfiltered arm beside `Interest` and `OAM`,
         // net/routing/interceptor/access_control.rs:615-617 / :922-924).
-        NetworkMessage::Response(_) => Some(GovernedAction::decl(AclMessage::Reply)),
+        MessageRef::Response(_) => Some(GovernedAction::decl(AclMessage::Reply)),
         // The six governed declaration bodies, each (un)declare pair sharing one
         // action exactly as zenoh pairs them (`access_control.rs:451-554`).
-        NetworkMessage::Declare(d) => match &d.body {
+        MessageRef::Declare(d) => match &d.body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
                 Some(GovernedAction::decl(AclMessage::DeclareSubscriber))
             }
@@ -178,7 +178,7 @@ fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
         // 0b01, Future 0b10, CurrentFuture 0b11), the token flag in the body's
         // `to` bit. A Final Interest has NO body at all, so it takes the
         // no-token exit and is admitted here, which is zenoh's unfiltered arm.
-        NetworkMessage::Interest(i) => {
+        MessageRef::Interest(i) => {
             if !wz_session_core::interest_build::interest_body(&i.header_c_or_f)
                 .is_some_and(|b| b.to())
             {
@@ -201,7 +201,7 @@ impl Interceptor for AclInterceptor {
         super::InterceptorKind::AccessControl
     }
 
-    fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
+    fn intercept(&self, ctx: &dyn InterceptorContext, msg: MessageRef<'_>) -> bool {
         // A kind this atom does not govern is admitted (zenoh's unmatched arms).
         let Some(governed) = acl_action(msg) else {
             return true;
@@ -328,7 +328,7 @@ impl Interceptor for AclInterceptor {
     fn intercept_cached(
         &self,
         ctx: &dyn InterceptorContext,
-        msg: &NetworkMessage,
+        msg: MessageRef<'_>,
         cache: Option<&(dyn Any + Send + Sync)>,
     ) -> bool {
         let Some(cached) = cache.and_then(|c| c.downcast_ref::<AclKeyexprCache>()) else {
@@ -398,6 +398,7 @@ mod tests {
         build_interest_final, build_interest_liveliness_get, build_interest_liveliness_subscriber,
     };
     use wz_session_core::link::{InterceptorLink, LinkKind, LinkSubject};
+    use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::push_build::{
         build_push_aliased, build_push_del_literal, build_push_literal,
     };
@@ -471,7 +472,7 @@ mod tests {
         fn subject(&self) -> Option<Zid> {
             self.subject
         }
-        fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
+        fn full_keyexpr(&self, msg: MessageRef<'_>) -> Option<String> {
             crate::interceptor::keyexpr::resolve_governed_keyexpr(msg, &self.aliases)
         }
         fn link_subject(&self) -> Option<&LinkSubject> {
@@ -548,7 +549,10 @@ mod tests {
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("admin/secret", b"x").expect("build"),
         ));
-        assert!(!acl.intercept(&ctx, &put), "admin/secret Put is denied");
+        assert!(
+            !acl.intercept(&ctx, put.view()),
+            "admin/secret Put is denied"
+        );
     }
 
     #[test]
@@ -558,7 +562,7 @@ mod tests {
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("demo/data", b"x").expect("build"),
         ));
-        assert!(acl.intercept(&ctx, &put), "demo/data Put is admitted");
+        assert!(acl.intercept(&ctx, put.view()), "demo/data Put is admitted");
     }
 
     #[test]
@@ -570,7 +574,10 @@ mod tests {
         let del = NetworkMessage::Push(Box::new(
             build_push_del_literal("admin/secret").expect("build"),
         ));
-        assert!(!acl.intercept(&ctx, &del), "admin/secret Del is denied");
+        assert!(
+            !acl.intercept(&ctx, del.view()),
+            "admin/secret Del is denied"
+        );
     }
 
     /// OPEN-DEBT 655 (R2347) — the enforcer-level twin of the router-level
@@ -587,7 +594,7 @@ mod tests {
             build_push_literal("admin/secret", b"x").expect("build"),
         ));
         assert!(
-            !acl.intercept(&ctx, &put),
+            !acl.intercept(&ctx, put.view()),
             "a rule that does not name a peer denies a message it cannot attribute"
         );
         // The control: the same unattributable face on a keyexpr the rule does
@@ -597,7 +604,7 @@ mod tests {
             build_push_literal("demo/data", b"x").expect("build"),
         ));
         assert!(
-            acl.intercept(&ctx, &benign),
+            acl.intercept(&ctx, benign.view()),
             "outside the rule, the allow default still carries an unattributable message"
         );
     }
@@ -646,12 +653,12 @@ mod tests {
             ))
         };
         assert!(
-            !admin_deny_over(InterceptorLink::Tcp).intercept(&ctx, &put()),
+            !admin_deny_over(InterceptorLink::Tcp).intercept(&ctx, put().view()),
             "a rule narrowed to the protocol this face speaks reaches it, even \
              though the face has no attributable zid"
         );
         assert!(
-            admin_deny_over(InterceptorLink::Udp).intercept(&ctx, &put()),
+            admin_deny_over(InterceptorLink::Udp).intercept(&ctx, put().view()),
             "and a rule narrowed to a protocol it does NOT speak leaves it to \
              the allow default -- so the deny above is the link axis deciding, \
              not the keyexpr and action matching on their own"
@@ -700,12 +707,12 @@ mod tests {
         for kind in [LinkKind::QuicDatagram, LinkKind::Quic] {
             let ctx = MockCtx::with_link_protocol(None, kind);
             assert!(
-                !deny_over(InterceptorLink::Quic).intercept(&ctx, &put()),
+                !deny_over(InterceptorLink::Quic).intercept(&ctx, put().view()),
                 "a deny narrowed to `quic` must deny a {kind:?} face, as upstream's \
                  does for both of its QUIC links"
             );
             assert!(
-                deny_over(InterceptorLink::Udp).intercept(&ctx, &put()),
+                deny_over(InterceptorLink::Udp).intercept(&ctx, put().view()),
                 "a deny narrowed to `udp` must leave a {kind:?} face to the allow \
                  default -- otherwise the arm above holds for a rule that matches \
                  everything"
@@ -740,12 +747,12 @@ mod tests {
             "precondition: the message IS governed, so it reaches the keyexpr branch",
         );
         assert_eq!(
-            ctx.full_keyexpr(&put),
+            ctx.full_keyexpr(put.view()),
             None,
             "precondition: expr-id 7 is absent from the alias table",
         );
         assert!(
-            !acl.intercept(&ctx, &put),
+            !acl.intercept(&ctx, put.view()),
             "an undeclared expr-id is denied"
         );
     }
@@ -766,12 +773,12 @@ mod tests {
         };
         let put = aliased_put(7);
         assert_eq!(
-            ctx.full_keyexpr(&put).as_deref(),
+            ctx.full_keyexpr(put.view()).as_deref(),
             Some("demo/data"),
             "the declared prefix composes with the message suffix",
         );
         assert!(
-            acl.intercept(&ctx, &put),
+            acl.intercept(&ctx, put.view()),
             "a declared alias resolves and allows"
         );
     }
@@ -792,9 +799,9 @@ mod tests {
             username: None,
         };
         let put = aliased_put(7);
-        assert_eq!(ctx.full_keyexpr(&put).as_deref(), Some("admin/data"));
+        assert_eq!(ctx.full_keyexpr(put.view()).as_deref(), Some("admin/data"));
         assert!(
-            !acl.intercept(&ctx, &put),
+            !acl.intercept(&ctx, put.view()),
             "a declared alias resolving into admin/** is denied by the rule"
         );
     }
@@ -820,12 +827,12 @@ mod tests {
             "precondition: an Err body is a governed Reply",
         );
         assert_eq!(
-            ctx.full_keyexpr(&err),
+            ctx.full_keyexpr(err.view()),
             None,
             "precondition: the empty wireexpr resolves to nothing",
         );
         assert!(
-            !acl.intercept(&ctx, &err),
+            !acl.intercept(&ctx, err.view()),
             "the empty-keyexpr timeout Err is denied, as in zenoh"
         );
     }
@@ -859,12 +866,12 @@ mod tests {
             "ResponseFinal is ungoverned at the ACTION arm",
         );
         assert_eq!(
-            ctx.full_keyexpr(&fin),
+            ctx.full_keyexpr(fin.view()),
             None,
             "and it has no keyexpr, so admitting cannot be coming from there",
         );
         assert!(
-            acl.intercept(&ctx, &fin),
+            acl.intercept(&ctx, fin.view()),
             "the end-marker admits despite having no keyexpr"
         );
     }
@@ -914,19 +921,19 @@ mod tests {
             "precondition: an undeclare is governed under its declaration's action",
         );
         assert_eq!(
-            ctx.full_keyexpr(&denied).as_deref(),
+            ctx.full_keyexpr(denied.view()).as_deref(),
             Some("admin/secret"),
             "precondition: the ext_wire_expr is what supplies the keyexpr",
         );
         assert!(
-            !acl.intercept(&ctx, &denied),
+            !acl.intercept(&ctx, denied.view()),
             "admin/** undeclare is denied"
         );
 
         let allowed = build_undeclare_subscriber_with_keyexpr("demo/data").expect("build");
         let allowed = NetworkMessage::Declare(Box::new(allowed));
         assert!(
-            acl.intercept(&ctx, &allowed),
+            acl.intercept(&ctx, allowed.view()),
             "the same kind on an allowed keyexpr passes, so the deny is the RULE"
         );
     }
@@ -947,12 +954,12 @@ mod tests {
             "precondition: it IS governed, so it reaches the keyexpr branch",
         );
         assert_eq!(
-            ctx.full_keyexpr(&undecl),
+            ctx.full_keyexpr(undecl.view()),
             None,
             "precondition: an id-only undeclare has no ext_wire_expr to resolve",
         );
         assert!(
-            acl.intercept(&ctx, &undecl),
+            acl.intercept(&ctx, undecl.view()),
             "an ingress undeclare with no ext_wire_expr admits"
         );
     }
@@ -968,7 +975,7 @@ mod tests {
         let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let undecl = NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7)));
         assert!(
-            !acl.intercept(&ctx, &undecl),
+            !acl.intercept(&ctx, undecl.view()),
             "an egress undeclare with no ext_wire_expr is denied"
         );
     }
@@ -987,13 +994,16 @@ mod tests {
             acl_action(&denied),
             Some(GovernedAction::decl(AclMessage::LivelinessToken)),
         );
-        assert!(!acl.intercept(&ctx, &denied), "admin/** token is denied");
+        assert!(
+            !acl.intercept(&ctx, denied.view()),
+            "admin/** token is denied"
+        );
 
         let allowed = NetworkMessage::Declare(Box::new(
             build_declare_token(1, 0, Some("demo/alive")).expect("build decl token"),
         ));
         assert!(
-            acl.intercept(&ctx, &allowed),
+            acl.intercept(&ctx, allowed.view()),
             "demo/alive token is admitted"
         );
 
@@ -1004,7 +1014,10 @@ mod tests {
             Some(GovernedAction::undecl(AclMessage::LivelinessToken)),
             "the undeclare shares the declaration's action",
         );
-        assert!(!acl.intercept(&ctx, &undecl), "admin/** untoken is denied");
+        assert!(
+            !acl.intercept(&ctx, undecl.view()),
+            "admin/** untoken is denied"
+        );
     }
 
     #[test]
@@ -1089,12 +1102,12 @@ mod tests {
             build_interest_liveliness_get(1, 0, Some("admin/secret")).expect("build get"),
         );
         assert_eq!(
-            ctx.full_keyexpr(&denied).as_deref(),
+            ctx.full_keyexpr(denied.view()).as_deref(),
             Some("admin/secret"),
             "precondition: the keyexpr is read out of the Interest body",
         );
         assert!(
-            !acl.intercept(&ctx, &denied),
+            !acl.intercept(&ctx, denied.view()),
             "admin/** liveliness GET denied"
         );
 
@@ -1102,7 +1115,7 @@ mod tests {
             build_interest_liveliness_get(1, 0, Some("demo/alive")).expect("build get"),
         );
         assert!(
-            acl.intercept(&ctx, &allowed),
+            acl.intercept(&ctx, allowed.view()),
             "demo/alive liveliness GET is admitted"
         );
     }
@@ -1167,11 +1180,11 @@ mod tests {
             // table for ITS keyexpr — which is how the forwarder keys it. A message
             // whose keyexpr does not resolve has no table, exactly as in production.
             let cache = ctx
-                .full_keyexpr(msg)
+                .full_keyexpr(msg.view())
                 .and_then(|ke| acl.compute_keyexpr_cache(&ctx, &ke));
             assert_eq!(
-                acl.intercept_cached(&ctx, msg, cache.as_deref()),
-                acl.intercept(&ctx, msg),
+                acl.intercept_cached(&ctx, msg.view(), cache.as_deref()),
+                acl.intercept(&ctx, msg.view()),
                 "cached and direct verdicts diverged for: {name}"
             );
         }
@@ -1200,12 +1213,12 @@ mod tests {
             build_push_literal("admin/secret", b"x").expect("build push"),
         ));
         assert!(
-            !acl.intercept_cached(&ctx, &msg, None),
+            !acl.intercept_cached(&ctx, msg.view(), None),
             "the cache-miss fallback is the direct path, which now denies this"
         );
         assert_eq!(
-            acl.intercept_cached(&ctx, &msg, None),
-            acl.intercept(&ctx, &msg),
+            acl.intercept_cached(&ctx, msg.view(), None),
+            acl.intercept(&ctx, msg.view()),
             "cached and direct verdicts agree for a face that caches nothing"
         );
     }
@@ -1242,14 +1255,14 @@ mod tests {
         ] {
             let ctx = MockCtx::with_username(subject, name);
             assert_eq!(
-                acl.intercept(&ctx, &msg),
+                acl.intercept(&ctx, msg.view()),
                 admitted,
                 "direct verdict for {face}"
             );
             let cache = acl.compute_keyexpr_cache(&ctx, "admin/secret");
             assert!(cache.is_some(), "a resolved face caches a table ({face})");
             assert_eq!(
-                acl.intercept_cached(&ctx, &msg, cache.as_deref()),
+                acl.intercept_cached(&ctx, msg.view(), cache.as_deref()),
                 admitted,
                 "cached verdict for {face}"
             );
@@ -1301,8 +1314,8 @@ mod tests {
                     build_push_literal("demo/data", b"x").expect("build ungoverned push"),
                 ));
                 (
-                    chain.admit(&ctx, &governed).is_admitted(),
-                    chain.admit(&ctx, &ungoverned).is_admitted(),
+                    chain.admit(&ctx, governed.view()).is_admitted(),
+                    chain.admit(&ctx, ungoverned.view()).is_admitted(),
                 )
             })
         };

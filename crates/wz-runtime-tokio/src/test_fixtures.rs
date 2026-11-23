@@ -663,9 +663,12 @@ pub(crate) fn assert_emits_no_alias_of_its_own(
         };
         let records = parse_frame_payload(&payload).expect("the forwarder's own batch parses");
         for record in records {
-            let as_literal = crate::interceptor::keyexpr::resolve_governed_keyexpr(&record, &empty);
-            let via_source =
-                crate::interceptor::keyexpr::resolve_governed_keyexpr(&record, source_aliases);
+            let as_literal =
+                crate::interceptor::keyexpr::resolve_governed_keyexpr(record.view(), &empty);
+            let via_source = crate::interceptor::keyexpr::resolve_governed_keyexpr(
+                record.view(),
+                source_aliases,
+            );
             match (as_literal, via_source) {
                 (Some(k), _) => literals.push(k),
                 (None, Some(k)) => passed_through.push(k),

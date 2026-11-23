@@ -296,6 +296,62 @@ pub enum NetworkMessage {
     Unknown { mid: u8, body: Vec<u8> },
 }
 
+/// A [`NetworkMessage`] borrowed: each variant's record by reference. What a reader that only
+/// reads a message takes (an interceptor, the egress gate), so a message its sender holds by
+/// value, or as its record alone, is read where it is and never boxed to be asked of.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy)]
+pub enum MessageRef<'a> {
+    /// A `Request`.
+    #[cfg(feature = "codec-request")]
+    Request(&'a RequestOwned<WireStorage>),
+    /// A `Push`.
+    #[cfg(feature = "codec-push")]
+    Push(&'a PushOwned<WireStorage>),
+    /// A `ResponseFinal`.
+    #[cfg(feature = "codec-response-final")]
+    ResponseFinal(&'a ResponseFinalOwned),
+    /// An `Oam`.
+    Oam(&'a OamOwned),
+    /// An `Interest`.
+    Interest(&'a InterestOwned),
+    /// A `Response`.
+    #[cfg(feature = "codec-response")]
+    Response(&'a ResponseOwned<WireStorage>),
+    /// A `Declare`.
+    #[cfg(feature = "codec-declare")]
+    Declare(&'a DeclareOwned),
+    /// A message of an id with no decoder, as [`NetworkMessage::Unknown`] holds it.
+    Unknown {
+        /// Its id.
+        mid: u8,
+        /// Its bytes.
+        body: &'a [u8],
+    },
+}
+
+#[cfg(feature = "alloc")]
+impl NetworkMessage {
+    /// The message borrowed ([`MessageRef`]).
+    pub fn view(&self) -> MessageRef<'_> {
+        match self {
+            #[cfg(feature = "codec-request")]
+            Self::Request(request) => MessageRef::Request(request),
+            #[cfg(feature = "codec-push")]
+            Self::Push(push) => MessageRef::Push(push),
+            #[cfg(feature = "codec-response-final")]
+            Self::ResponseFinal(response_final) => MessageRef::ResponseFinal(response_final),
+            Self::Oam(oam) => MessageRef::Oam(oam),
+            Self::Interest(interest) => MessageRef::Interest(interest),
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => MessageRef::Response(response),
+            #[cfg(feature = "codec-declare")]
+            Self::Declare(declare) => MessageRef::Declare(declare),
+            Self::Unknown { mid, body } => MessageRef::Unknown { mid: *mid, body },
+        }
+    }
+}
+
 #[cfg(feature = "alloc")]
 impl NetworkMessage {
     /// The word the documents print for this message: the dissection's
