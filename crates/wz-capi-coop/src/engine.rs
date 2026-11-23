@@ -1150,7 +1150,33 @@ pub(crate) type LivelinessCallback = Arc<LiveLiveliness>;
 
 /// A queryable's callback, locked while it runs as a subscriber's is.
 #[cfg(feature = "queryable")]
-type QueryableCallback = Arc<Mutex<QueryCallback>>;
+type QueryableCallback = Arc<LiveQueryable>;
+
+/// A queryable's callback, held by its row, by the registry's sink that queues a query for it and
+/// by each query queued: minted once the registration took it, so a refused one mints none, and
+/// retired when the queryable is undeclared, so a query queued before is answered by nothing.
+#[cfg(feature = "queryable")]
+pub(super) struct LiveQueryable {
+    live: AtomicBool,
+    call: Mutex<Option<QueryCallback>>,
+}
+
+#[cfg(feature = "queryable")]
+impl LiveQueryable {
+    /// Call it on `query` with `responder`, unless it was retired or never minted.
+    fn call(
+        &self,
+        query: &dyn QueryView,
+        responder: &mut dyn wz_session_core::query_sink::ReplyOut,
+    ) {
+        if !self.live.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(call) = lock(&self.call).as_mut() {
+            call(query, responder);
+        }
+    }
+}
 
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
@@ -1185,13 +1211,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 /// it with the table's lock let go (`CoopEngine::target`).
 #[derive(Clone)]
 enum Target {
-    #[cfg(feature = "queryable")]
-    Queryable(QueryableCallback),
     /// One leg of a get, locked while it runs.
     #[cfg(feature = "query")]
     Reply(Arc<ReplyCallback>),
-    #[cfg(feature = "liveliness")]
-    Liveliness(LivelinessCallback),
 }
 
 /// Whose callback a [`Target`] is: the kind of what owns it, and that owner's id. The kinds are
@@ -1203,8 +1225,6 @@ enum TargetKey {
     Queryable(QblId),
     #[cfg(feature = "query")]
     Reply(u64),
-    #[cfg(feature = "liveliness")]
-    Liveliness(SubId),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -1626,6 +1646,8 @@ struct QblEntry {
     keyexpr: RowKey,
     wire: WireKey,
     complete: bool,
+    /// Its callback: retired when the queryable is undeclared and let go of with no lock held.
+    callback: QueryableCallback,
 }
 
 #[cfg(feature = "queryable")]
@@ -4052,12 +4074,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.registry.borrow().app.subscribers.len()
     }
 
-    /// How many callbacks the table of callbacks holds: what a test of the close reads.
-    #[cfg(all(test, feature = "std"))]
-    pub(crate) fn callbacks_held(&self) -> usize {
-        lock(&self.targets).len()
-    }
-
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
     /// one received sample counts.
     #[cfg(all(test, feature = "std"))]
@@ -4375,11 +4391,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut handed = false;
         while self.plane.queries.is_pending() {
             let next = self.plane.queries.lock().pop_front();
-            let Some((id, query, generation)) = next else {
+            let Some((id, callback, query, generation)) = next else {
                 break;
             };
             handed = true;
-            self.run_queryable(id, &query, generation);
+            self.run_queryable(id, &callback, &query, generation);
         }
         handed
     }
@@ -4388,15 +4404,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// send what it answered: its replies go out, then the hold its arrival took on the Final is let
     /// go. A queryable undeclared since lets go of the hold all the same.
     #[cfg(feature = "queryable")]
-    fn run_queryable(&self, id: QblId, query: &dyn QueryView, generation: u64) {
-        let callback = self
-            .target(TargetKey::Queryable(id))
-            .and_then(|target| match target {
-                Target::Queryable(callback) => Some(callback),
-                _ => None,
-            });
+    fn run_queryable(
+        &self,
+        id: QblId,
+        callback: &LiveQueryable,
+        query: &dyn QueryView,
+        generation: u64,
+    ) {
         let mut onward = Onward::to(self, generation);
-        if let Some(callback) = callback {
+        #[cfg(not(feature = "local-queryable"))]
+        let _ = id;
+        if callback.live.load(Ordering::Acquire) {
             let _answering =
                 query::Answering::enter(self as *const Self as usize, generation, query.rid());
             // A get of the session's own made from inside this callback reads it as running here,
@@ -4410,7 +4428,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.qos(),
                 &mut onward,
             );
-            (lock(&callback))(query, &mut responder);
+            callback.call(query, &mut responder);
         }
         self.answer(generation, query.rid(), true);
     }
@@ -4869,10 +4887,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ([`Registry::next_history_token`]), the lock is let go, the callback is called, and the next
     /// is looked for from where the last stood. A session closed meanwhile hands no more.
     #[cfg(feature = "liveliness")]
-    fn hand_history(&self, id: SubId) {
-        let Some(Target::Liveliness(callback)) = self.target(TargetKey::Liveliness(id)) else {
-            return;
-        };
+    fn hand_history(&self, id: SubId, callback: &LivelinessCallback) {
         // A callback that steps the session from inside its history hands out nothing itself, as
         // one inside a delivery does.
         let _delivering = self.deliveries.enter();
@@ -4914,7 +4929,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// The callback `key` names, while its owner holds it: the one look in the table every
     /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
-    #[cfg(any(feature = "queryable", feature = "query", feature = "liveliness"))]
+    #[cfg(feature = "query")]
     fn target(&self, key: TargetKey) -> Option<Target> {
         lock(&self.targets)
             .iter()
@@ -4923,7 +4938,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
-    #[cfg(any(feature = "queryable", feature = "query", feature = "liveliness"))]
+    #[cfg(feature = "query")]
     fn take_target(&self, key: TargetKey) -> Option<Target> {
         let taken = {
             let mut targets = lock(&self.targets);
@@ -5163,15 +5178,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // A callback that steps the session or asks a get from inside one of these hands out
             // nothing itself, as one inside a delivery does.
             let _delivering = self.deliveries.enter();
-            for &id in asked.iter() {
-                if self.deliveries.runs_here(TargetKey::Queryable(id)) {
+            for (id, callback) in asked.iter() {
+                if self.deliveries.runs_here(TargetKey::Queryable(*id)) {
                     self.plane.queries.lock().push_back((
-                        id,
+                        *id,
+                        Arc::clone(callback),
                         query::OwnedQuery::of(get),
                         query::LOCAL_QUERY,
                     ));
                 } else {
-                    self.run_queryable(id, get, query::LOCAL_QUERY);
+                    self.run_queryable(*id, callback, get, query::LOCAL_QUERY);
                 }
             }
         }
@@ -5626,13 +5642,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Some(entry)
         });
         #[cfg(feature = "liveliness")]
-        if live.is_some() {
-            let callback = self.take_target(TargetKey::Liveliness(id));
-            // A delivery that copied the callback out of the sink before hands it nothing more.
-            if let Some(Target::Liveliness(callback)) = &callback {
-                callback.retire();
-            }
-            drop((live, callback));
+        if let Some(entry) = live {
+            // A delivery that copied the callback out of the sink before hands it nothing more;
+            // the row, and its callback with it, is let go of here with no lock held.
+            entry.callback.retire();
+            drop(entry);
             return;
         }
         // The row is taken out of the table under the lock and let go of after it: its key may hold
@@ -6161,22 +6175,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(core.key_refusal(keyexpr));
         };
         let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
-        // The registry's queryable only copies a query out and holds its Final; the callback
-        // `sink` mints runs when the deliveries are handed out (`query`).
+        // The registry's queryable only copies a query out, with the row's callback, and holds its
+        // Final; the callback `sink` mints runs when the deliveries are handed out (`query`).
+        let callback: QueryableCallback = Arc::new(LiveQueryable {
+            live: AtomicBool::new(true),
+            call: Mutex::new(None),
+        });
         let plane = self.plane.clone();
+        let reached = Arc::clone(&callback);
         let registration = core.registry.borrow_mut().app.queryables.register_sink(
             keyexpr,
             allowed_origin,
             complete,
-            BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
+            BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, &reached, query)),
         )?;
         let holder = Arc::new(CoopHolder {
             engine: self.this.clone(),
         });
-        lock(&self.targets).push((
-            TargetKey::Queryable(id),
-            Target::Queryable(Arc::new(Mutex::new(sink(holder)))),
-        ));
+        *lock(&callback.call) = Some(sink(holder));
         let entry = QblEntry {
             id,
             registration,
@@ -6184,6 +6200,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             keyexpr: key,
             wire,
             complete,
+            callback,
         };
         core.announce(Kind::Queryable, |actions| entry.declare(actions));
         #[cfg(feature = "group")]
@@ -6621,8 +6638,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             entry.keyexpr.let_go();
             Some(entry)
         });
-        let callback = self.take_target(TargetKey::Queryable(id));
-        drop((entry, callback));
+        // A query queued before is answered by nothing; the row, its callback's last holder but
+        // for queued queries, is let go of here with no lock held.
+        if let Some(entry) = &entry {
+            entry.callback.live.store(false, Ordering::Release);
+        }
+        drop(entry);
         #[cfg(feature = "local-queryable")]
         self.deliver();
     }
@@ -6725,22 +6746,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The table of callbacks holds it before the sink does, so a sink the registration refuses
         // is not its last holder when it is dropped under the session's lock.
         let callback: LivelinessCallback = Arc::new(LiveLiveliness::new(sink));
-        lock(&self.targets).push((
-            TargetKey::Liveliness(id),
-            Target::Liveliness(Arc::clone(&callback)),
-        ));
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             keyexpr,
             history,
             liveliness::sample_sink(&callback, &self.samples),
         );
-        drop(callback);
-        // Refused by the observer, the declaration is refused, as a subscriber's is.
+        // Refused by the observer, the declaration is refused, as a subscriber's is; the callback
+        // the sink shared is let go of with no lock held.
         if let Err(refused) = registered {
             let refused = Declined::from(refused);
             drop(guard);
-            drop(self.take_target(TargetKey::Liveliness(id)));
+            drop(callback);
             return Err(refused);
         }
         // With `history`, the subscriber is handed the tokens the session already knows before
@@ -6750,13 +6767,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
             drop(guard);
-            self.hand_history(id);
+            self.hand_history(id, &callback);
             guard = match self.live() {
                 Some(guard) => guard,
-                None => {
-                    drop(self.take_target(TargetKey::Liveliness(id)));
-                    return Err(Declined::Closed);
-                }
+                None => return Err(Declined::Closed),
             };
         }
         let core = &mut guard.0;
@@ -6765,6 +6779,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             keyexpr: key,
             wire,
             history,
+            callback,
         };
         core.announce(Kind::LiveSub, |actions| entry.ask(actions));
         // And each group the session joined is asked, as its declarations say.
@@ -6853,8 +6868,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         while let Some(entry) = core.matches.pop() {
             listeners_gone.push(entry.sink);
         }
+        // A queryable's callback is retired and its row let go of with no lock held, below: the
+        // registry's sink is unregistered here, so the row and the queries still queued are its
+        // last holders.
         #[cfg(feature = "queryable")]
-        core.queryables.clear();
+        let queryables_gone = {
+            let mut gone = Vec::with_capacity(core.queryables.len());
+            let mut registry = core.registry.borrow_mut();
+            while let Some(mut entry) = core.queryables.pop() {
+                registry.app.queryables.unregister(entry.registration);
+                entry.callback.live.store(false, Ordering::Release);
+                entry.keyexpr.let_go();
+                gone.push(entry);
+            }
+            gone
+        };
         // A get still pending ends with its session: its entry goes here, its leg's callback with
         // the table.
         #[cfg(feature = "query")]
@@ -6865,8 +6893,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             }
         }
         // The session's tokens end with its link, and its liveliness subscribers with it.
-        // Their registrations go under the lock; the callbacks the sinks share with the table of
-        // callbacks are let go of with it, below.
+        // Their registrations go under the lock; their callbacks are retired, taken out of their
+        // rows and let go of with no lock held, below.
+        #[cfg(feature = "liveliness")]
+        let mut live_gone = Vec::with_capacity(core.live_subs.len());
         #[cfg(feature = "liveliness")]
         {
             core.tokens.clear();
@@ -6878,7 +6908,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                     .unregister(u64::from(entry.id));
             }
             drop(registry);
-            core.live_subs.clear();
+            while let Some(entry) = core.live_subs.pop() {
+                entry.callback.retire();
+                live_gone.push(entry.callback);
+            }
         }
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
         // of with no lock held.
@@ -6909,20 +6942,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
-        drop(core::mem::take(&mut *self.plane.queries.lock()));
+        {
+            drop(core::mem::take(&mut *self.plane.queries.lock()));
+            drop(queryables_gone);
+        }
         // Every callback the session held goes with it, in one take of the table: the ones of the
         // rows emptied above, and one whose row went before its callback (a get's leg whose link
         // was lost, its end not handed out yet). The removal is counted under the table's lock,
         // so what the deliveries kept is let go of first, and the rest with no lock held.
         drop((subscribers_gone, listeners_gone));
-        let taken = core::mem::take(&mut *lock(&self.targets));
         #[cfg(feature = "liveliness")]
-        for (_, target) in &taken {
-            if let Target::Liveliness(callback) = target {
-                callback.retire();
-            }
-        }
-        drop(taken);
+        drop(live_gone);
+        drop(core::mem::take(&mut *lock(&self.targets)));
     }
 
     fn is_closed(&self) -> bool {

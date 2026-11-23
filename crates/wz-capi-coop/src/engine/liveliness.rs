@@ -69,6 +69,9 @@ pub(super) struct LiveSubEntry {
     pub(super) keyexpr: super::RowKey,
     pub(super) wire: WireKey,
     pub(super) history: bool,
+    /// Its callback, which the registry's sink shares: retired when the subscriber is undeclared
+    /// or its session closed, and let go of with no lock held.
+    pub(super) callback: LivelinessCallback,
 }
 
 impl LiveSubEntry {
