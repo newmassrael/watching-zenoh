@@ -1707,11 +1707,15 @@ where
     R: RxReassembly + 'static,
 {
     /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
-    place: Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>,
+    place: TaskPlace<C, L, R, M>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
 }
+
+/// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
