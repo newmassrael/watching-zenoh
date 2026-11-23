@@ -525,6 +525,10 @@ pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;
+// zenoh-pico's reading of an endpoint's text, for the cooperative engine's open and the link a
+// group is reported by.
+#[cfg(any(not(feature = "engine-tokio"), feature = "connectivity"))]
+mod endpoint;
 pub mod entity;
 #[cfg(feature = "event-ring")]
 pub mod event_log;

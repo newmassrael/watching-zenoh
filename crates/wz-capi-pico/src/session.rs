@@ -1677,6 +1677,19 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         request.connect,
         Vec::new(),
     );
+    // The unicast endpoints as pico's links read them: the engine is handed what pico's link of
+    // the scheme reads, so a key that link does not know (`#iface=` on `tcp/`) is left out as pico
+    // leaves it, and what it reads stays for the engine to carry out or refuse.
+    let unicast = |endpoints: Vec<String>| -> Result<Vec<String>, ZResult> {
+        endpoints
+            .iter()
+            .map(|endpoint| crate::endpoint::engine_endpoint(endpoint.as_str()))
+            .collect()
+    };
+    let (listen, connect) = match (unicast(listen), unicast(connect)) {
+        (Ok(listen), Ok(connect)) => (listen, connect),
+        (Err(code), _) | (_, Err(code)) => return code,
+    };
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
