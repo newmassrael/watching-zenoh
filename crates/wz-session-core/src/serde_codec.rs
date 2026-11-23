@@ -286,10 +286,7 @@ impl<'a> ZDeserializer<'a> {
     /// `read_exact` over the borrowed slice: take `n` bytes or fail.
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ZDeserializeError> {
         let end = self.pos.checked_add(n).ok_or(ZDeserializeError)?;
-        if end > self.bytes.len() {
-            return Err(ZDeserializeError);
-        }
-        let slice = &self.bytes[self.pos..end];
+        let slice = self.bytes.get(self.pos..end).ok_or(ZDeserializeError)?;
         self.pos = end;
         Ok(slice)
     }
@@ -302,7 +299,10 @@ impl<'a> ZDeserializer<'a> {
         let mut result: u64 = 0;
         let mut shift: u32 = 0;
         loop {
-            let byte = self.read_bytes(1)?[0];
+            let [byte] = *self
+                .read_bytes(1)?
+                .first_chunk::<1>()
+                .ok_or(ZDeserializeError)?;
             if shift == 63 && byte != 0x00 && byte != 0x01 {
                 return Err(ZDeserializeError);
             }
@@ -313,7 +313,7 @@ impl<'a> ZDeserializer<'a> {
             if byte & 0x80 == 0 {
                 return Ok(result);
             }
-            shift += 7;
+            shift = shift.saturating_add(7);
         }
     }
 }
@@ -334,7 +334,7 @@ impl<T: Deserialize> Iterator for ZReadIter<'_, '_, T> {
         if self.len == 0 {
             return None;
         }
-        self.len -= 1;
+        self.len = self.len.saturating_sub(1);
         Some(T::deserialize(self.deserializer))
     }
 

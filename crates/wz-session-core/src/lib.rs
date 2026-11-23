@@ -1097,8 +1097,6 @@ pub mod vle;
 /// [`vle`] VLE SSOT for its `VarInt` length prefix. The `= ["alloc"]`
 /// feature implies `alloc`, so the gate subsumes the allocator need.
 #[cfg(feature = "ext-pubsub-serde-codec")]
-// Totality debt TD-101 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod serde_codec;
 
 /// R74 / R311di-11 — `NetworkMessage` application-layer envelope batch
