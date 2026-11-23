@@ -25,7 +25,6 @@ mod tests {
     use std::net::{TcpListener, UdpSocket};
 
     use wz_runtime_coop::session_drive::{Locator, SessionLinks};
-    use wz_session_core::link::BoxedLinkDriver;
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 

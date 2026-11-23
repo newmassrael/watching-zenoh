@@ -24,7 +24,6 @@ mod tests {
     use std::net::TcpListener;
 
     use wz_runtime_coop::session_drive::{Locator, SessionLinks};
-    use wz_session_core::link::BoxedLinkDriver;
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -52,8 +51,6 @@ mod tests {
     /// engine of the pico C ABI waits outside its lock on what these give.
     #[test]
     fn links_waited_by_their_owner_give_a_wait_on_each_socket() {
-        use wz_runtime_coop::session_drive::SessionDatagramLink;
-
         let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
         let port = listener.local_addr().expect("its port").port();
         let links = WindowsLinks::new(LOOPBACK, WindowsTcpDial).waited_by_owner();

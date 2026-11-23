@@ -31,7 +31,6 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_session_core::credential_identity::zid_from_spki_der;
-use wz_session_core::link::BoxedLinkDriver;
 use wz_tls_mbedtls::channel::{start, Identity, Zid};
 use wz_tls_mbedtls::stream::{HandshakeBudget, TlsDial};
 
