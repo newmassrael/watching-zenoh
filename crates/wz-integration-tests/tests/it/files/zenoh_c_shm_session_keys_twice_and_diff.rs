@@ -181,8 +181,13 @@ int main(int argc, char **argv) {
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, argv[2]) != Z_OK) { return 5; }
 
-    /* The provider first, so that every message below meets the key and not the build. */
-    printf("provider state=%d\n", (int)await_provider(z_loan(s)));
+    /* The provider first, so that every message below meets the key and not the build. One that
+       did not become ready sends every message plain, which reads nothing of the key: its pool
+       could not be made (upstream `mlock`s it whole, and a host whose RLIMIT_MEMLOCK is below the
+       pool refuses it, ERROR), so the run ends here and says the state it saw. */
+    z_shm_provider_state state = await_provider(z_loan(s));
+    printf("provider state=%d\n", (int)state);
+    if (state != Z_SHM_PROVIDER_STATE_READY) { printf("the provider is not ready\n"); return 11; }
 
     /* The queryable that replies is declared after the provider, so the receiver, which asks once
        it sees the queryable, asks a session whose provider is ready. */
@@ -405,7 +410,9 @@ int main(int argc, char **argv) {
     if (zc_config_from_file(&config, argv[1]) != Z_OK) { printf("config failed\n"); return 3; }
     z_owned_session_t s;
     if (z_open(&s, z_move(config), NULL) != Z_OK) { printf("open failed\n"); return 4; }
-    z_sleep_ms(500);
+    /* Read at once: both libraries make the subsystem before the open returns, upstream at the
+       end of its runtime's build (`zenoh_shm::init::init()`) and wz on the thread that opens
+       (`session_defaults::init_shared_memory`), so nothing maps it later. */
     printf("segments=%d\n", mapped_shm_objects());
     z_session_drop(z_session_move(&s));
     return 0;

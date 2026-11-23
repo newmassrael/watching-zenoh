@@ -9571,8 +9571,14 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # links split by a DECLARED class (upstream's `rel=`), the only way two
     # links of one protocol segregate once a link's class is its protocol's.
     # MEASURED: 9 passed on this command.
+    # 9 -> 11, and `transport-link-udp` joins this arm: a TCP link and a UDP
+    # link to one peer, no class declared on either end, split the reliable and
+    # the best-effort channel by their protocols' classes over real sockets, in
+    # both link orders. ML_FEATURES carries no UDP link, so without it those two
+    # cases are compiled out of every run; they ride this arm rather than a build
+    # of their own. MEASURED: 11 passed on this command.
     wz_test_args wz-runtime-tokio session_multilink_e2e
-    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ba 11 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos,transport-link-udp" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     wz_test_args wz-runtime-tokio session_multilink_deploy_e2e
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
@@ -12911,8 +12917,17 @@ layer_c1cf_reduced_features() {
 # does, and are graded on that digest alone. Every build, and the zenoh-pico reference, runs under
 # scripts/lib/build_normalization.py, so a reading carries no path or build time of the host that
 # made it, and a library that still holds a build path fails the lane.
+#
+# The hosted lane is a matrix of `WZ_C1CS_SHARDS` jobs, each building the cases the gate deals to
+# its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
+# of its 1200 s budget at run 45051019628. Each shard is a runner of its own, so the one-lane rule
+# above holds inside it. Unset, every case is built here, as before.
 layer_c1cs_capability_cost() {
-    python3 scripts/lib/capability_cost_gate.py --check || return 1
+    local c1cs_shard_args=()
+    if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
+        c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
+    fi
+    python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"} || return 1
 }
 
 # ─── Layer Z8 — upstream's own tests against the patched graph ──────────
@@ -26678,7 +26693,16 @@ _runci_build_capi_c_for_oracle() {
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
 
+# THE SHARED-MEMORY LEGS NEED LOCKABLE MEMORY, as E18's do and for the same reason: a session's
+# provider is a POSIX pool `mlock`ed whole (`commons/zenoh-shm/src/shm/unix.rs` @
+# `unsafe { mlock(ptr, len.get()) }?;` upstream, and wz's own copy of it), 16 MiB by default, and a reader locks the segment it opens too. A hosted
+# runner grants 8 MiB, so the sender's pool failed there, its provider read ERROR and every put of
+# the promotion differential went plain (run 45051019628, and every run since the test waits on
+# the provider's state); every build host grants GiB. Raised here, so the lane carries its own
+# precondition wherever it runs.
 layer_c1cc_api_compat_c() {
+    uring_raise_memlock $((64 * 1024 * 1024))
+    echo "  C1cc: RLIMIT_MEMLOCK soft=$(uring_soft_memlock_bytes) hard=$(uring_hard_memlock_bytes) bytes (-1 = unlimited)"
     _runci_build_capi_c_for_oracle C1cc || return 1
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     (cd crates && cargo clippy -p wz-capi-core --all-targets --quiet -- -D warnings) || return 1

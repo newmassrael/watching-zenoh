@@ -1963,6 +1963,37 @@ for leg in "${LEGS[@]}"; do
     fi
 done
 
+# Each leg's KEY, the name a hosted C1bnl shard plans it by (`census_shard_plan.py` over
+# `c1bnl_leg_weights.tsv`): its package, its filter (`*` for the whole crate) and the CRC of its
+# feature field, `~<n>` after a key an earlier row already took. A position in the table is no
+# name for a leg: a row inserted above would hand every row after it another row's weight. A key
+# moves only when its own row's package, filter or features change, and a row whose key the table
+# does not have is planned at the median and named, as an unmeasured census member is.
+LEG_KEYS=()
+leg_keys() {
+    local leg p f r n key
+    local -A seen=()
+    LEG_KEYS=()
+    for leg in "${LEGS[@]}"; do
+        IFS='|' read -r p _ f r _ <<<"$leg"
+        p="${p//[[:space:]]/}"
+        r="${r//[[:space:]]/}"
+        key="$p:${r:-*}:$(printf '%s' "$(leg_feats "$f")" | cksum | awk '{printf "%08x", $1}')"
+        n="${seen[$key]:-0}"
+        seen[$key]=$((n + 1))
+        (( n == 0 )) || key="$key~$n"
+        LEG_KEYS+=("$key")
+    done
+}
+
+# The legs' keys, one a line in table order: what a shard plans, and the names
+# `c1bnl_leg_weights.tsv` is written in.
+if [[ "${1:-}" == "--list-legs" ]]; then
+    leg_keys
+    printf '%s\n' "${LEG_KEYS[@]}"
+    exit 0
+fi
+
 if [[ "${1:-}" == "--list" ]]; then
     for leg in "${LEGS[@]}"; do
         IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
@@ -2286,10 +2317,18 @@ want_all=0
 
 # SHARDING (hosted C1bnl). The table only grows, and one job read `elapsed 1727s of 1800s
 # budget (95%)` with every leg green. Hosted CI therefore runs `--all-legs` as
-# `WZ_LEGS_SHARDS` jobs, each running the legs whose position in the table is congruent to its
-# `WZ_LEGS_SHARD`. Unset, every leg runs, which is what a local run and the hook want. The
+# `WZ_LEGS_SHARDS` jobs. Unset, every leg runs, which is what a local run and the hook want. The
 # partition covers the table only if ALL shards run, and this script cannot see a missing one:
 # `scripts/lib/shard_matrix_binding.py` holds the workflow's list to the count.
+#
+# Which legs a shard runs is planned by their measured cost, as the census's members are
+# (`census_shard_plan.py`, heaviest first to the least loaded shard), over the weights of
+# `c1bnl_leg_weights.tsv`, keyed by each leg's key (`leg_keys`). It used to be the legs whose
+# position was congruent to the shard, and a position says nothing about cost: run 45051019628
+# read its four shards at 869, 1647, 810 and 995 s of legs, the one with the 543 s `wz-capture`
+# leg and the 227 s `wz-runtime-tokio` one at 99 percent of its 1800 s budget, every leg green.
+# Every shard computes the same plan from the same tree, so the plan is a partition whatever the
+# weights say: they decide the balance, never which legs run.
 legs_shards="${WZ_LEGS_SHARDS:-1}"
 legs_shard="${WZ_LEGS_SHARD:-0}"
 if ! [[ "$legs_shards" =~ ^[1-9][0-9]*$ && "$legs_shard" =~ ^[0-9]+$ ]] ||
@@ -2299,6 +2338,24 @@ if ! [[ "$legs_shards" =~ ^[1-9][0-9]*$ && "$legs_shard" =~ ^[0-9]+$ ]] ||
     exit 1
 fi
 [[ $want_all -eq 1 && "$legs_shards" -gt 1 ]] && echo "  legs: shard $legs_shard of $legs_shards"
+declare -A shard_legs=()
+leg_keys
+if (( legs_shards > 1 )); then
+    planned_legs="$(printf '%s\n' "${LEG_KEYS[@]}" |
+        python3 "$here/census_shard_plan.py" --shards "$legs_shards" --shard "$legs_shard" \
+            --weights "$here/c1bnl_leg_weights.tsv")" || {
+        echo "nondefault-tests: FAIL -- census_shard_plan.py could not plan legs shard" \
+             "$legs_shard of $legs_shards" >&2
+        exit 1
+    }
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && shard_legs[$key]=1
+    done <<<"$planned_legs"
+fi
+# Whether the leg at table index $1 is this shard's.
+in_shard() {
+    (( legs_shards == 1 )) || [[ -n "${shard_legs[${LEG_KEYS[$1]}]:-}" ]]
+}
 
 rc=0
 
@@ -2330,7 +2387,7 @@ for leg in "${LEGS[@]}"; do
     IFS='|' read -r _p _s _f _r _h <<<"$leg"
     [[ "${_f//[[:space:]]/}" == *"runtime-tokio-uring"* ]] || continue
     [[ $want_all -eq 1 || "$_s" == "hook" ]] || continue
-    (( leg_idx % legs_shards == legs_shard )) || continue
+    in_shard "$leg_idx" || continue
     uring_legs+=("$_p")
 done
 if [[ ${#uring_legs[@]} -gt 0 ]]; then
@@ -2407,7 +2464,7 @@ for leg in "${LEGS[@]}"; do
         continue
     fi
     # Another shard's leg: it runs there, and the row checks above have already held it.
-    (( leg_idx % legs_shards == legs_shard )) || continue
+    in_shard "$leg_idx" || continue
     # Refused BY NAME, not merely absent. `--all-features` in a leg would make
     # `--census` vacuous -- the population is DEFINED as what all-features lists,
     # so such a leg covers it by construction and the check could never fire
@@ -2441,6 +2498,7 @@ for leg in "${LEGS[@]}"; do
     cargo_args+=(--quiet)
     [[ ${#skip_args[@]} -gt 0 ]] && cargo_args+=(-- "${skip_args[@]}")
 
+    leg_started=$SECONDS
     out="$(cd "$repo/crates" && cargo "${cargo_args[@]}" 2>&1)"
     status=$?
     reap_test_executables
@@ -2465,7 +2523,10 @@ for leg in "${LEGS[@]}"; do
         rc=1
         continue
     fi
-    echo "  nondefault-tests: $label -> $ran test(s)"
+    # The leg's key and its own cost, so that `c1bnl_leg_weights.tsv` can be refreshed from a
+    # run log.
+    echo "  nondefault-tests: $label -> $ran test(s)" \
+         "[${LEG_KEYS[$leg_idx]}, $((SECONDS - leg_started))s]"
 done
 
 # An omission must never read as coverage. Whatever this invocation did NOT run
