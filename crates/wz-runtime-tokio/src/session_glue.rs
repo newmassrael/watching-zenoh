@@ -2327,14 +2327,22 @@ mod tests {
         params.initial_sn = 100;
         let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
-        let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
-            .build()
-            .unwrap();
+        let response = ResponseReplyBuilder::new(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"21.0",
+        )
+        .build()
+        .unwrap();
         let expected_wire = encode_frame_with_response(
             100,
-            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
-                .build()
-                .unwrap(),
+            ResponseReplyBuilder::new(
+                42,
+                wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+                b"21.0",
+            )
+            .build()
+            .unwrap(),
             /*reliable=*/ true,
         );
         actions.send_response(response);
@@ -2461,9 +2469,13 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
         actions.send_response(
-            ResponseReplyBuilder::new(99, 0, Some("k"), b"v")
-                .build()
-                .unwrap(),
+            ResponseReplyBuilder::new(
+                99,
+                wz_session_core::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .build()
+            .unwrap(),
         );
         actions.send_response_final(99, wz_session_core::sample::QosLevel::DEFAULT);
 
