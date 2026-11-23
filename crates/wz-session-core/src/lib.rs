@@ -812,8 +812,6 @@ pub mod face;
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
 /// `RxBytes`' lent arm is: `Arc` needs pointer-width atomics.
 #[cfg(feature = "rx-shared-bytes")]
-// Totality debt TD-148 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod rx_profile;
 
 /// R2928 — a pushed message's congestion outcome and deadline, shared by the
