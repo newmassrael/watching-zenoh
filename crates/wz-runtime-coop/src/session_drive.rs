@@ -980,6 +980,20 @@ pub trait SessionLinks {
         let _ = tables;
     }
 
+    /// The bytes of a cell that holds any link the stack opens (`crate::link_cells`): what a
+    /// session's arena lays the cells of its link table out with. The default, `0`, is a stack
+    /// that places each link on the heap.
+    fn link_cell_bytes(&self) -> usize {
+        0
+    }
+
+    /// The cells every link the stack opens from now on is placed in, for the session the links
+    /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
+    /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
+    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells) {
+        let _ = cells;
+    }
+
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the
     /// dial is asked again ([`PendingDial::poll`]) until its link is made or refused, so a dial that
     /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the

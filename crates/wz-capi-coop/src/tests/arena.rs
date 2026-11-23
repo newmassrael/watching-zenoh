@@ -174,8 +174,15 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let plan = ArenaPlan::of(&super::config(&router), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding_links(host_cell_bytes()))
         .expect("the build's limits lay an arena out");
     assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
+}
+
+/// The bytes of a link's cell over the host's links the tests open with.
+fn host_cell_bytes() -> usize {
+    use wz_runtime_coop::session_drive::SessionLinks;
+    PosixLinks::new(super::LOOPBACK, PosixTcpDial).link_cell_bytes()
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
@@ -189,6 +196,7 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
         &dialling(&probe, SessionLimits::defaults()),
         &SessionLimits::defaults(),
     )
+    .and_then(|plan| plan.holding_links(host_cell_bytes()))
     .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     let refused = open_dialling(&probe, SessionLimits::defaults(), &NoMemory).err();

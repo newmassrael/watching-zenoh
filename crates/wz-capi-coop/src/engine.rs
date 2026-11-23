@@ -3596,13 +3596,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
+        let plan = ArenaPlan::of(&config, &resolve_limits(&config))
+            // A cell for each link's driver, as large as the largest the links open.
+            .and_then(|plan| plan.holding_links(links.link_cell_bytes()))
+            .map_err(OpenError::Arena)?;
         let plan = match handle {
             Some(handle) => plan.holding(handle).map_err(OpenError::Arena)?,
             None => plan,
         };
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
+        if let Some(cells) = arena.lend_link_cells(&plan).map_err(OpenError::Arena)? {
+            links.lend_cells(cells);
+        }
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));

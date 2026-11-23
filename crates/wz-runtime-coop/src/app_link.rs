@@ -58,9 +58,11 @@ use wz_session_core::app_link_table::{
     SendStep, StreamRead,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
+use wz_session_core::byte_cells::LentByteCells;
 
 use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
+use crate::link_cells::CellRc;
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator,
@@ -754,6 +756,8 @@ struct PendingAppLink {
     datagram: bool,
     /// Whether the link is waited on by its owner once it is up, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells the link is placed in once it is up, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
 impl PendingDial<HeapLink> for PendingAppLink {
@@ -771,28 +775,34 @@ impl PendingDial<HeapLink> for PendingAppLink {
             OpenProgress::Open => {
                 let held = self.held.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                Some(Ok(if self.datagram {
-                    heap_link(self.owner_waits.datagram(UdpDriver::initiator_in(
-                        AppDatagramSocket {
-                            held,
-                            peer: self.to,
-                            reads_sources: true,
-                        },
-                        self.to,
-                        rx,
-                        tx,
-                    )))
+                Some(if self.datagram {
+                    heap_link(
+                        self.cells.as_ref(),
+                        self.owner_waits.datagram(UdpDriver::initiator_in(
+                            AppDatagramSocket {
+                                held,
+                                peer: self.to,
+                                reads_sources: true,
+                            },
+                            self.to,
+                            rx,
+                            tx,
+                        )),
+                    )
                 } else {
-                    heap_link(self.owner_waits.stream(StreamDriver::over(
-                        AppStreamSocket {
-                            held,
-                            local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                            peer: self.to,
-                        },
-                        rx,
-                        tx,
-                    )))
-                }))
+                    heap_link(
+                        self.cells.as_ref(),
+                        self.owner_waits.stream(StreamDriver::over(
+                            AppStreamSocket {
+                                held,
+                                local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                                peer: self.to,
+                            },
+                            rx,
+                            tx,
+                        )),
+                    )
+                })
             }
         }
     }
@@ -1116,6 +1126,9 @@ pub struct AppLinks {
     lent: Option<LinkTables>,
     /// Whether each link is waited on by its owner ([`Self::waited_by_owner`]).
     owner_waits: OwnerWaits,
+    /// The cells of the session the links serve, when it lent some
+    /// ([`SessionLinks::lend_cells`]): every link is placed in one, and none on the heap.
+    cells: Option<LentByteCells>,
 }
 
 /// Whether the links of an [`AppLinks`] are waited on by their owner
@@ -1162,6 +1175,7 @@ impl AppLinks {
             open_bound: None,
             lent: None,
             owner_waits: OwnerWaits(false),
+            cells: None,
         }
     }
 
@@ -1213,8 +1227,9 @@ impl SessionLinks for AppLinks {
         match to.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-                Ok(heap_link(self.owner_waits.datagram(
-                    UdpDriver::initiator_in(
+                heap_link(
+                    self.cells.as_ref(),
+                    self.owner_waits.datagram(UdpDriver::initiator_in(
                         AppDatagramSocket::dial_bounded(
                             &self.transport,
                             to.at,
@@ -1223,16 +1238,16 @@ impl SessionLinks for AppLinks {
                         to.at,
                         rx,
                         tx,
-                    ),
-                )))
+                    )),
+                )
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                Ok(heap_link(self.owner_waits.stream(StreamDriver::over(
-                    self.dial.dial(to.at)?,
-                    rx,
-                    tx,
-                ))))
+                heap_link(
+                    self.cells.as_ref(),
+                    self.owner_waits
+                        .stream(StreamDriver::over(self.dial.dial(to.at)?, rx, tx)),
+                )
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
@@ -1262,6 +1277,7 @@ impl SessionLinks for AppLinks {
             to: to.at,
             datagram,
             owner_waits: self.owner_waits,
+            cells: self.cells,
         })))
     }
 
@@ -1274,6 +1290,7 @@ impl SessionLinks for AppLinks {
                 listener: self.dial.listen(at.at)?,
                 lent: self.lent,
                 owner_waits: self.owner_waits,
+                cells: self.cells,
             })),
             LinkProto::Udp => {
                 let locator = Locator::udp(at.at).to_string();
@@ -1289,6 +1306,7 @@ impl SessionLinks for AppLinks {
                     datagram_rx: self.datagram_rx,
                     lent: self.lent,
                     owner_waits: self.owner_waits,
+                    cells: self.cells,
                 }))
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1302,6 +1320,18 @@ impl SessionLinks for AppLinks {
     /// buffers from `tables`.
     fn lend_buffers(&mut self, tables: LinkTables) {
         self.lent = Some(tables);
+    }
+
+    /// The larger cell of these links' two: a datagram link's and a stream link's.
+    fn link_cell_bytes(&self) -> usize {
+        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>>::cell_bytes()
+            .max(CellRc::<StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>>::cell_bytes())
+    }
+
+    /// Every link opened from now on, and every one a listener opened after this takes, is placed
+    /// in a cell of `cells`.
+    fn lend_cells(&mut self, cells: LentByteCells) {
+        self.cells = Some(cells);
     }
 
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
@@ -1333,6 +1363,8 @@ struct AppDatagramListener {
     lent: Option<LinkTables>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells each accepted link is placed in, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
 impl LinkListener<HeapLink> for AppDatagramListener {
@@ -1358,10 +1390,12 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        Ok(Some(heap_link(
+        heap_link(
+            self.cells.as_ref(),
             self.owner_waits
                 .datagram(UdpDriver::initiator_in(socket, peer, rx, tx)),
-        )))
+        )
+        .map(Some)
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1378,6 +1412,8 @@ struct AppLinkListener {
     lent: Option<LinkTables>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells each accepted link is placed in, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
 impl LinkListener<HeapLink> for AppLinkListener {
@@ -1390,9 +1426,11 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        Ok(Some(heap_link(
+        heap_link(
+            self.cells.as_ref(),
             self.owner_waits.stream(StreamDriver::over(stream, rx, tx)),
-        )))
+        )
+        .map(Some)
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {

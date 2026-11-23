@@ -154,7 +154,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 30;
+pub const ARENA_ROWS: usize = 32;
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
@@ -327,6 +327,9 @@ pub struct ArenaPlan {
     handle_bytes: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
+    /// The bytes of the cell each link's driver is placed in, none for a plan whose links place
+    /// theirs on the heap ([`Self::holding_links`]).
+    link_cell_bytes: usize,
 }
 
 impl ArenaPlan {
@@ -412,6 +415,7 @@ impl ArenaPlan {
             )?,
             handle_bytes: 0,
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
+            link_cell_bytes: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -737,6 +741,32 @@ impl ArenaPlan {
         self.handle_bytes = handle.size();
         self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
         self.put("session handle", "", 1, handle.size())?;
+        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(self)
+    }
+
+    /// The plan with a cell for each of its links, `bytes` bytes each, which the links' drivers
+    /// are placed in (`wz_runtime_coop::link_cells`, the stack's `SessionLinks::link_cell_bytes`):
+    /// a link the session opens then takes a cell and no memory of the heap. Laid out before the
+    /// ABI's handle ([`Self::holding`]). `0` adds nothing, as a stack that places its links on
+    /// the heap asks.
+    pub fn holding_links(mut self, bytes: usize) -> Result<Self, ArenaRefused> {
+        if bytes == 0 || self.link_cell_bytes != 0 {
+            return Ok(self);
+        }
+        self.link_cell_bytes = bytes;
+        self.put(
+            "link cell flags",
+            "MAX_FACES + MAX_ACCEPT_PENDING",
+            self.links,
+            LentByteCells::FLAG_BYTES,
+        )?;
+        self.put(
+            "link cells",
+            "MAX_FACES + MAX_ACCEPT_PENDING",
+            self.links,
+            bytes,
+        )?;
         self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(self)
     }
@@ -1246,6 +1276,21 @@ impl SessionArena {
         Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
     }
 
+    /// Lend the cells `plan` lays out for its links' drivers ([`ArenaPlan::holding_links`]), none
+    /// for a plan with none. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_link_cells(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<Option<LentByteCells>, ArenaRefused> {
+        if plan.link_cell_bytes == 0 {
+            return Ok(None);
+        }
+        self.arena
+            .lend_byte_cells(plan.link_cell_bytes, plan.links)
+            .map(Some)
+            .map_err(ArenaRefused::Lend)
+    }
+
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
     /// in, for the session's life, each key at most `longest` bytes, the session's
     /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
@@ -1341,6 +1386,7 @@ mod tests {
             key_bytes: 0,
             handle_bytes: 0,
             endpoint_rows: (0, 0),
+            link_cell_bytes: 0,
         }
     }
 
