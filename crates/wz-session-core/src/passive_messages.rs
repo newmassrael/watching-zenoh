@@ -1195,7 +1195,7 @@ impl MessageList {
     /// `produced` belongs to, if it is one ([`Self::whole_units`]).
     fn whole_unit(&self, produced: u64) -> Option<&[u8]> {
         let (&first, (rows, bytes)) = self.whole_units.range(..=produced).next_back()?;
-        (produced < first.saturating_add(rows)).then_some(&**bytes)
+        (produced < first.saturating_add(*rows)).then_some(&**bytes)
     }
 
     /// What the chain fold made of the row at produced-index `produced`, which is
