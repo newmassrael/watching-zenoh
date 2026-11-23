@@ -2186,7 +2186,7 @@ reason = "No key of upstream's configuration bounds it: a zenoh session keeps ea
 
 [limit.pico_preset]
 value = 2048
-reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `char *keyexpr = \"demo/example/zenoh-pico-pub\";`). The preset holds each of the 34 rows of the engine's record at the preset's other values with a key of up to 52 bytes, about twice that, 60 bytes a block."
+reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds each of the 34 rows of the engine's record at the preset's other values with a key of up to 52 bytes, about twice that, 60 bytes a block."
 
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"
