@@ -274,6 +274,7 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
 #[cfg(feature = "multi-thread")]
 mod threads {
     use core::ffi::c_void;
+    use core::sync::atomic::{AtomicU32, Ordering};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_TIMEOUT, HANDLE, WAIT_OBJECT_0,
@@ -281,11 +282,11 @@ mod threads {
     use windows_sys::Win32::System::Threading::{
         AcquireSRWLockExclusive, CreateThread, InitializeConditionVariable, InitializeSRWLock,
         ReleaseSRWLockExclusive, SleepConditionVariableSRW, TryAcquireSRWLockExclusive,
-        WaitForSingleObject, WakeConditionVariable, CONDITION_VARIABLE, INFINITE, SRWLOCK,
+        WaitForSingleObject, WaitOnAddress, WakeByAddressSingle, WakeConditionVariable,
+        CONDITION_VARIABLE, INFINITE, SRWLOCK,
     };
 
     use super::{arith, clock_now, frequency, Clock};
-    use crate::prelude::Box;
     use crate::result::{ZResult, Z_ERR_GENERIC, Z_OK};
     use crate::sync::Z_ETIMEDOUT;
 
@@ -440,10 +441,15 @@ mod threads {
     // Task
     // ---------------------------------------------------------------------------
 
-    /// What a started thread needs, handed through the one pointer `CreateThread` passes.
-    struct Start {
+    /// What a started thread needs, handed through the one pointer `CreateThread` passes. It
+    /// lies in the frame of `task_spawn`, which waits until the thread has copied it out, so a
+    /// task takes no memory of the library's and the number of tasks is the system's to bound,
+    /// as zenoh-pico's are.
+    struct Handoff {
         fun: extern "C" fn(*mut c_void) -> *mut c_void,
         arg: *mut c_void,
+        /// 1 once the thread has copied `fun` and `arg`: what `task_spawn` waits on.
+        taken: AtomicU32,
     }
 
     /// The thread entry point, in the calling convention `CreateThread` uses. pico casts
@@ -452,14 +458,21 @@ mod threads {
     /// that is the right type and calls the C one itself. The C function's return value
     /// has nowhere to go (pico's thread exit code is the low half of that pointer and
     /// nothing reads it), so the exit code is 0.
-    unsafe extern "system" fn thread_main(start: *mut c_void) -> u32 {
-        let Start { fun, arg } = *Box::from_raw(start.cast::<Start>());
+    unsafe extern "system" fn thread_main(handoff: *mut c_void) -> u32 {
+        let handoff = handoff.cast_const().cast::<Handoff>();
+        let (fun, arg) = ((*handoff).fun, (*handoff).arg);
+        let taken = core::ptr::addr_of!((*handoff).taken);
+        // Once the word is set the spawning thread may return and its frame be gone: the wake
+        // names the address and reads nothing at it.
+        (*taken).store(1, Ordering::Release);
+        WakeByAddressSingle(taken.cast::<c_void>());
         fun(arg);
         0
     }
 
-    /// Start a thread running `fun(arg)` (`CreateThread`). `attr` is unused on Windows, as
-    /// in pico. No handle is pico's `_Z_ERR_SYSTEM_TASK_FAILED`.
+    /// Start a thread running `fun(arg)` (`CreateThread`), and return once it has taken
+    /// `fun` and `arg` from this frame. `attr` is unused on Windows, as in pico. No handle is
+    /// pico's `_Z_ERR_SYSTEM_TASK_FAILED`.
     ///
     /// # Safety
     /// `task` must be valid and writable.
@@ -469,18 +482,32 @@ mod threads {
         fun: extern "C" fn(*mut c_void) -> *mut c_void,
         arg: *mut c_void,
     ) -> ZResult {
-        let start = Box::into_raw(Box::new(Start { fun, arg }));
+        let handoff = Handoff {
+            fun,
+            arg,
+            taken: AtomicU32::new(0),
+        };
         let handle = CreateThread(
             core::ptr::null(),
             0,
             Some(thread_main),
-            start.cast::<c_void>(),
+            core::ptr::addr_of!(handoff).cast::<c_void>(),
             0,
             core::ptr::null_mut(),
         );
         if handle.is_null() {
-            drop(Box::from_raw(start));
             return Z_ERR_SYSTEM_TASK_FAILED;
+        }
+        let untaken = 0u32;
+        while handoff.taken.load(Ordering::Acquire) == 0 {
+            // Returns once the word differs from `untaken` or a wake came, and may return
+            // without either: the word is read again.
+            WaitOnAddress(
+                core::ptr::addr_of!(handoff.taken).cast::<c_void>(),
+                core::ptr::addr_of!(untaken).cast::<c_void>(),
+                core::mem::size_of::<u32>(),
+                INFINITE,
+            );
         }
         *task = handle;
         Z_OK

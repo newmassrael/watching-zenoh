@@ -19,6 +19,13 @@
 //! `HeapAlloc` does not promise is taken larger and aligned inside it, with the address
 //! `HeapAlloc` gave kept in the word before the block, from which it is released.
 //!
+//! On either host the heap holds what the library reserves before a session's traffic: its process
+//! pools and each session's arena, taken by the open. The host layer under the engine takes none of
+//! it after the open: a lock and a condition variable are a word of their owner's, a thread the
+//! library starts lies in a record of `wz-host-sync`'s static pool, a program's task is started
+//! from the spawning frame, and a wait over several sockets names them from the waiting stack
+//! (docs/c-abi-no-heap-pools.md, section 7).
+//!
 //! A panic ends the process, as a failed assertion in zenoh-pico does: a library without `std`
 //! does not unwind (docs/c-abi-engine-and-memory.md, section 3), and what is left to panic is a
 //! defect, since memory and the wire are refused by code. So the personality routine the
