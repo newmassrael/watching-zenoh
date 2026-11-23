@@ -170,6 +170,9 @@ impl LinkReadiness for FdReadiness {
         unsafe { libc::poll(&mut pfd, 1, timeout) };
     }
 
+    // Out of line: `wait_readable_among` is this wait for input alone, and both are entries of
+    // the readiness vtable, so an inlined copy would be a second body of the same wait.
+    #[inline(never)]
     fn wait_ready_among(
         &self,
         room: bool,
