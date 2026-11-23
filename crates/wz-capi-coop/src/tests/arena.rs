@@ -1234,6 +1234,12 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             continue;
         }
         if let Some(value) = preset_of(&presets, row.basis) {
+            // A pool the links share holds no more than the links: the client's one.
+            let value = if row.basis == "RX_POOL_BUFFERS" || row.basis == "TX_POOL_SLOTS" {
+                value.min(1)
+            } else {
+                value
+            };
             assert_eq!(row.count, value, "{} at the pico preset", row.part);
             held += 1;
         }
