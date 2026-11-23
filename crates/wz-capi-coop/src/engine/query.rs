@@ -753,11 +753,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
                 &self.keyexpr,
                 self.parameters.as_deref(),
                 self.qos,
-                &mut *replies,
+                &mut replies,
             );
             answer(&mut responder);
         }
-        engine.answer(generation, rid, &*replies, false);
+        engine.answer(generation, rid, &replies, false);
     }
 }
 

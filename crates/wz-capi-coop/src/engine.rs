@@ -4215,11 +4215,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.keyexpr(),
                 query.parameters(),
                 query.qos(),
-                &mut *replies,
+                &mut replies,
             );
             (lock(&callback))(query, &mut responder);
         }
-        self.answer(generation, query.rid(), &*replies, true);
+        self.answer(generation, query.rid(), &replies, true);
     }
 
     /// A build with no queryable is handed no query.

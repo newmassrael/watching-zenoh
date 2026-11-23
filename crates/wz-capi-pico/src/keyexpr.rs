@@ -1764,7 +1764,7 @@ mod arena_key_tests {
     }
 
     /// Whether the session's key arena has room for one more key of `len` bytes, asked and let go.
-    fn room_for(engine: &Engine, len: usize) -> bool {
+    fn room_for(engine: &Arc<Engine>, len: usize) -> bool {
         let keys = engine
             .key_arena()
             .expect("the cooperative engine keeps a key arena");
