@@ -202,7 +202,7 @@ mod tests {
     /// The endpoint the engine is handed for `written`.
     fn dialled(written: &str) -> Result<String, ZResult> {
         checked_endpoint(written)?;
-        Ok(with_engine_text(written, String::from))
+        Ok(with_engine_text(written, |text: &str| String::from(text)))
     }
 
     /// A TCP endpoint keeps what pico's TCP link reads and loses what it does not: an interface
@@ -260,7 +260,9 @@ mod tests {
         let kept = "udp/127.0.0.1:9000#iface=lo;tout=5";
         assert_eq!(read.text_len("#"), kept.len());
         assert_eq!(
-            with_engine_text("udp/127.0.0.1:9000#tout=5;iface=lo", String::from),
+            with_engine_text("udp/127.0.0.1:9000#tout=5;iface=lo", |text: &str| {
+                String::from(text)
+            }),
             kept
         );
 
