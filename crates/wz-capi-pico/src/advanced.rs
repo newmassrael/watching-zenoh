@@ -1476,7 +1476,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(&*engine);
+        let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
         let Some(id) = engine.declare_liveliness_subscriber_on_wire(
             &ke,

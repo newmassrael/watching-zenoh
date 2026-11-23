@@ -150,7 +150,7 @@ impl WriteFilter {
         let shared = session.engine.clone();
         // The key goes on the wire as the entity's own declaration: its id and the rest of
         // the key, or the literal when nothing covers it.
-        let wire = key.wire(&*shared);
+        let wire = key.wire(Arc::as_ref(&shared));
         let ask = interest_form(&shared, session.mode, key, &wire);
         let keyexpr = key.literal().to_owned();
         let id = shared

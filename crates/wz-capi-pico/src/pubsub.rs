@@ -1358,7 +1358,7 @@ impl PlainPublisher {
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
-            .zip(key.whole_key_mapping(&*session.engine));
+            .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1419,7 +1419,7 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
-        let wire = self.key.wire(&*self.shared);
+        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
         publish_code(
             self.shared
@@ -2667,7 +2667,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // A peer or router-hat session retracts the subscription naming ITS key
@@ -2758,7 +2758,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // Named before the key is dropped: the entry keeps it alive through

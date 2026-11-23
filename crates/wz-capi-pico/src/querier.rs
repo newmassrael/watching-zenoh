@@ -574,9 +574,9 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         }
         let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
-            &*state.shared,
+            Arc::as_ref(&state.shared),
             state.key.literal().to_owned(),
-            state.key.wire(&*state.shared),
+            state.key.wire(Arc::as_ref(&state.shared)),
             params_in,
             state.target,
             state.consolidation,

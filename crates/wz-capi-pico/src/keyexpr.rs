@@ -262,7 +262,7 @@ impl DeclaredKeyexpr {
     /// and that key is the one this is called on: for a subscriber it is not
     /// the key the subscription was announced on, which is the caller's.
     pub(crate) fn retraction_naming(&self, session: &PicoSession) -> Option<RetractionKey> {
-        self.retraction_naming_in(session.mode, &*session.engine)
+        self.retraction_naming_in(session.mode, Arc::as_ref(&session.engine))
     }
 
     /// [`Self::retraction_naming`] for a caller that holds the two facts it
@@ -333,7 +333,7 @@ impl DeclaredKeyexpr {
         // `_is_non_wild_prefix_optimized` arm).
         if let Some(existing) = existing {
             if existing
-                .declared_on(&**shared)
+                .declared_on(Arc::as_ref(shared))
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
                 return Ok(existing.share());
@@ -1453,7 +1453,7 @@ mod tests {
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.wire(&*shared);
+        let wire = key.wire(Arc::as_ref(&shared));
         assert_eq!(wire.mapping_id, declarations[0].0);
         assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
 
