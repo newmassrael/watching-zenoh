@@ -14,10 +14,11 @@
     number of chunks.
   * With `**` in a alone, or nowhere, keyexpr_walk walks b's chunks from a
     (relation 2, keyexpr_chunk_includes at each step).
-  * With `**` on both sides, keyexpr_includes_dp fills the table of their
+  * With `**` on both sides, keyexpr_relation_dp fills the table of their
     prefixes, its bits over b when b has at most 63 chunks and over a
     otherwise; two such texts of more than 63 chunks each are refused, the
-    bound of a uint64 row.
+    bound of a uint64 row. Only a's `**` stretches there, so the side a is
+    on (rows or bits) is the one whose `**` the table lets stretch.
 
   `wild_single`, `wild_double` and `wild_dsl` are the build's wildcard switches
   (`keyexpr-wildcard-single`, `keyexpr-wildcard-double`, `keyexpr-dollar-star`):
@@ -33,7 +34,7 @@
   <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
   <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
   <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
-  <sce:import kind="algorithm" src="keyexpr_includes_dp.scxml" as="keyexpr_includes_dp"/>
+  <sce:import kind="algorithm" src="keyexpr_relation_dp.scxml" as="keyexpr_relation_dp"/>
   <sce:signature>
     <sce:param name="a" type="bytes"/>
     <sce:param name="b" type="bytes"/>
@@ -72,10 +73,10 @@
         <sce:return expr="false"/>
       </sce:if>
       <sce:if cond="sb.chunks &lt;= 63">
-        <sce:return expr="keyexpr_includes_dp(a, b, false, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(a, b, true, false, true, wild_single, dsl)"/>
       </sce:if>
       <sce:if cond="sa.chunks &lt;= 63">
-        <sce:return expr="keyexpr_includes_dp(a, b, true, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(b, a, false, true, true, wild_single, dsl)"/>
       </sce:if>
       <sce:return expr="false"/>
     </sce:if>

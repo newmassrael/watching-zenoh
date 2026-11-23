@@ -4,18 +4,31 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
-  Whether the keys r and c, both well formed and at least one holding `**`,
-  share a key: a dynamic programme over their prefixes. P(i, j) is whether the
-  first i chunks of r and the first j of c share a key:
+  Whether the keys r and c, both well formed and both holding `**`, relate: a
+  dynamic programme over their prefixes, one for both relations the matcher
+  answers this way. R(i, j) is whether the first i chunks of r relate to the
+  first j of c:
 
-  * P(0, 0) holds.
-  * The i-th chunk of r is `**`: it matches nothing more, P(i - 1, j), or it
-    takes the j-th chunk of c, unless that chunk is VERBATIM, and stays,
-    P(i, j - 1).
-  * The j-th chunk of c is `**`: the same with the sides exchanged.
-  * Otherwise the two chunks meet (keyexpr_chunk_intersects) and P(i - 1, j - 1).
+  * R(0, 0) holds.
+  * The i-th chunk of r is `**` and r's `**` stretches (`row_star`): it takes
+    nothing more, R(i - 1, j), or it takes the j-th chunk of c, unless that
+    chunk is VERBATIM, and stays, R(i, j - 1).
+  * Otherwise, the j-th chunk of c is `**` and c's `**` stretches
+    (`col_star`): the same with the sides exchanged.
+  * Otherwise, when neither chunk is `**`, the two chunks relate and
+    R(i - 1, j - 1); a `**` that does not stretch relates to no single chunk.
 
-  One row of P is one uint64, a bit for each prefix of c, so c has at most 63
+  The two relations are two settings of the same table:
+  * intersection (`includes` false): a `**` stretches on either side, and two
+    chunks relate when they meet (keyexpr_chunk_intersects);
+  * inclusion (`includes` true): only the covering side's `**` stretches, a
+    chunk that is not `**` covering no run of chunks, so exactly one of
+    `row_star` and `col_star` is set and it names the covering side, and two
+    chunks relate when the covering one covers the other
+    (keyexpr_chunk_includes). A `**` of the covering side covers a `**` of
+    the other.
+
+  One row of R is one uint64, a bit for each prefix of c, so c has at most 63
   chunks (the caller picks the side that has); r has any number. Only the row
   above is kept. Every chunk of r is read once and the chunks of c once a row.
   `**` does not cross a VERBATIM chunk: zenoh's `it_intersect`.
@@ -25,14 +38,18 @@
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="algorithm"
-       name="keyexpr_intersects_dp"
+       name="keyexpr_relation_dp"
        version="1.0">
   <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
   <sce:import kind="algorithm" src="keyexpr_chunk_kind.scxml" as="keyexpr_chunk_kind"/>
   <sce:import kind="algorithm" src="keyexpr_chunk_intersects.scxml" as="keyexpr_chunk_intersects"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_includes.scxml" as="keyexpr_chunk_includes"/>
   <sce:signature>
     <sce:param name="r" type="bytes"/>
     <sce:param name="c" type="bytes"/>
+    <sce:param name="row_star" type="bool"/>
+    <sce:param name="col_star" type="bool"/>
+    <sce:param name="includes" type="bool"/>
     <sce:param name="wild_single" type="bool"/>
     <sce:param name="wild_dsl" type="bool"/>
     <sce:return type="bool"/>
@@ -40,8 +57,8 @@
   <sce:body>
     <sce:var name="rn" type="uint32" init="len(r)"/>
     <sce:var name="cn" type="uint32" init="len(c)"/>
-    <!-- Row 0: the empty prefix of r shares a key with a prefix of c that is
-         all `**`. -->
+    <!-- Row 0: the empty prefix of r relates to a prefix of c that is all
+         `**`, where c's `**` stretches. -->
     <!-- The bit `1 &lt;&lt; m` is a uint64: a literal takes the type of the uint64
          it is or-ed into, and a shift the type of its left operand. -->
     <sce:var name="prev" type="uint64" init="1"/>
@@ -54,7 +71,7 @@
         <sce:return expr="false"/>
       </sce:if>
       <sce:assign target="m" expr="m + 1"/>
-      <sce:if cond="keyexpr_chunk_kind(c, cs0, ce0) === 2">
+      <sce:if cond="col_star &amp;&amp; keyexpr_chunk_kind(c, cs0, ce0) === 2">
         <sce:var name="below0" type="uint32" init="m - 1"/>
         <sce:if cond="((prev &gt;&gt; below0) &amp; 1) === 1">
           <sce:assign target="prev" expr="prev | (1 &lt;&lt; m)"/>
@@ -74,8 +91,9 @@
       <sce:var name="re" type="uint32" init="keyexpr_chunk_end(r, rs)"/>
       <sce:var name="rkind" type="uint8" init="keyexpr_chunk_kind(r, rs, re)"/>
       <sce:var name="cur" type="uint64" init="0"/>
-      <!-- P(i, 0): the prefix of r ends in `**` and matches nothing more. -->
-      <sce:if cond="rkind === 2 &amp;&amp; (prev &amp; 1) === 1">
+      <!-- R(i, 0): the prefix of r ends in a `**` that stretches and takes
+           nothing more. -->
+      <sce:if cond="row_star &amp;&amp; rkind === 2 &amp;&amp; (prev &amp; 1) === 1">
         <sce:assign target="cur" expr="1"/>
       </sce:if>
       <sce:var name="j" type="uint32" init="0"/>
@@ -84,20 +102,33 @@
       <sce:while cond="cmore &amp;&amp; j &lt; 63">
         <sce:var name="ce" type="uint32" init="keyexpr_chunk_end(c, cs)"/>
         <sce:var name="ckind" type="uint8" init="keyexpr_chunk_kind(c, cs, ce)"/>
-        <!-- jb: the bit of P(i, j) for this chunk of c; j: its left neighbour. -->
+        <!-- jb: the bit of R(i, j) for this chunk of c; j: its left neighbour.
+             up: the cell one row above, the same bit; left: the cell to the
+             left in this row; diag: the cell above and to the left. -->
         <sce:var name="jb" type="uint32" init="j + 1"/>
         <sce:var name="up" type="bool" init="((prev &gt;&gt; jb) &amp; 1) === 1"/>
         <sce:var name="left" type="bool" init="((cur &gt;&gt; j) &amp; 1) === 1"/>
         <sce:var name="diag" type="bool" init="((prev &gt;&gt; j) &amp; 1) === 1"/>
         <sce:var name="v" type="bool" init="false"/>
-        <sce:if cond="rkind === 2">
+        <sce:if cond="row_star &amp;&amp; rkind === 2">
           <sce:assign target="v" expr="up || (ckind !== 3 &amp;&amp; left)"/>
           <sce:else>
-            <sce:if cond="ckind === 2">
+            <sce:if cond="col_star &amp;&amp; ckind === 2">
               <sce:assign target="v" expr="left || (rkind !== 3 &amp;&amp; up)"/>
               <sce:else>
-                <sce:if cond="diag">
-                  <sce:assign target="v" expr="keyexpr_chunk_intersects(r, rs, re, c, cs, ce, wild_single, wild_dsl)"/>
+                <sce:if cond="rkind !== 2 &amp;&amp; ckind !== 2 &amp;&amp; diag">
+                  <sce:if cond="includes">
+                    <!-- keyexpr_chunk_includes takes the covering chunk first. -->
+                    <sce:if cond="row_star">
+                      <sce:assign target="v" expr="keyexpr_chunk_includes(r, rs, re, c, cs, ce, wild_single, wild_dsl)"/>
+                      <sce:else>
+                        <sce:assign target="v" expr="keyexpr_chunk_includes(c, cs, ce, r, rs, re, wild_single, wild_dsl)"/>
+                      </sce:else>
+                    </sce:if>
+                    <sce:else>
+                      <sce:assign target="v" expr="keyexpr_chunk_intersects(r, rs, re, c, cs, ce, wild_single, wild_dsl)"/>
+                    </sce:else>
+                  </sce:if>
                 </sce:if>
               </sce:else>
             </sce:if>
