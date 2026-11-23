@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 340580b0c199e1888f810cbfa6b39b8a0ce86539fbd4279c75cc206a02538683
+// source-hash: 5c9b030c04da2321653512e78bd1f5d70f0a54cfa892806c84214b6e49ee07ab
 // source: keyexpr_intersects.scxml
 // SCE-MAP: keyexpr_intersects.scxml:25 :: _forge_body
 
@@ -15,7 +15,7 @@ use super::keyexpr_shape;
 use super::keyexpr_shape_schema;
 use super::keyexpr_range_equal;
 use super::keyexpr_walk;
-use super::keyexpr_intersects_dp;
+use super::keyexpr_relation_dp;
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
@@ -42,10 +42,10 @@ pub fn keyexpr_intersects(a: &[u8], b: &[u8], wild_single: bool, wild_double: bo
     let db: bool = wild_double && sb.double_star;
     if da && db {
         if sb.chunks <= 63 {
-            return keyexpr_intersects_dp::keyexpr_intersects_dp(a, b, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(a, b, true, true, false, wild_single, dsl);
         }
         if sa.chunks <= 63 {
-            return keyexpr_intersects_dp::keyexpr_intersects_dp(b, a, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(b, a, true, true, false, wild_single, dsl);
         }
         return false;
     }

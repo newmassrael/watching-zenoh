@@ -1,7 +1,7 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: df5b8da7aa38b157fab525f886744380d3ffaeec06481692477228e8b8a703b7
+// source-hash: 74d8b0ae0fde75e18e0cd70046341ae9977d35a52c7f2c2cf010e61504590b70
 // source: keyexpr_includes.scxml
-// SCE-MAP: keyexpr_includes.scxml:26 :: _forge_body
+// SCE-MAP: keyexpr_includes.scxml:27 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none
@@ -14,7 +14,7 @@
 use super::keyexpr_shape;
 use super::keyexpr_shape_schema;
 use super::keyexpr_walk;
-use super::keyexpr_includes_dp;
+use super::keyexpr_relation_dp;
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
@@ -41,10 +41,10 @@ pub fn keyexpr_includes(a: &[u8], b: &[u8], wild_single: bool, wild_double: bool
             return false;
         }
         if sb.chunks <= 63 {
-            return keyexpr_includes_dp::keyexpr_includes_dp(a, b, false, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(a, b, true, false, true, wild_single, dsl);
         }
         if sa.chunks <= 63 {
-            return keyexpr_includes_dp::keyexpr_includes_dp(a, b, true, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(b, a, false, true, true, wild_single, dsl);
         }
         return false;
     }
