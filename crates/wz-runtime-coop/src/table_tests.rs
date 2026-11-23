@@ -672,7 +672,8 @@ fn a_runtime_whose_task_holds_it_is_let_go_with_the_last_handle_outside_its_tabl
         task_bytes: 256,
         timers: 1,
     };
-    let makers: [(&str, fn() -> CoopRuntime<Released>); 3] = [
+    type Make = fn() -> CoopRuntime<Released>;
+    let makers: [(&str, Make); 3] = [
         ("grown", || CoopRuntime::new(Released(&RELEASED))),
         ("reserved", || {
             CoopRuntime::reserved(Released(&RELEASED), ROWS)
