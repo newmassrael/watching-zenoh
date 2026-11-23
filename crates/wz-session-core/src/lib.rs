@@ -2009,12 +2009,6 @@ pub mod stats;
 /// Pure data and encoding (`alloc` only, time supplied by the caller), so the
 /// runtime owns where it lives and how it is shared.
 #[cfg(feature = "alloc")]
-// Totality debt TD-021 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod stats_registry;
 
 /// SSOT for the Z_EXT_COMPRESSION establishment ext (`session-extcompression`) —
