@@ -349,8 +349,8 @@ pub unsafe extern "C" fn wz_ext_config_transport(
 /// came from, NUL-terminated, or NULL. The bytes are copied before this returns.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport, or NULL data with a length; Z_EINVAL for a source that
-/// is not UTF-8, or for more than the link could ever hold at once (a datagram past 65,535 bytes
-/// or named by a locator past 254, stream bytes past the link's whole queue);
+/// is not UTF-8, or for more than the link could ever hold at once (more bytes than its bound, a
+/// datagram past 65,535 bytes, a locator past 254);
 /// WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never gave, or a
 /// link the session let go whose close on the program has returned);
 /// WZ_EXT_ERR_LINK_NOT_OPEN before the link is up; WZ_EXT_ERR_LINK_CLOSED once it is closing or

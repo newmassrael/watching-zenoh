@@ -32,7 +32,6 @@
 //! not lost: the table counts writables, and an answer whose send began before the latest one is
 //! retried at once instead of parking.
 
-use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::task::Waker;
@@ -172,15 +171,14 @@ pub enum InboundRefusal {
     WrongKind,
     /// The link already queues its bound of bytes the session has not read, so nothing was
     /// taken. The program hands the same bytes in again once the session has read the queue
-    /// down: the transport tells it so with `drained` ([`Effects::drained`]).
+    /// down: the transport tells it so with `drained` ([`Due::Drained`]).
     Full,
     /// A group's datagram named no source: the session tells the members of a group apart by
     /// the locator each datagram came from.
     NoSource,
-    /// The call hands in more than the link could ever hold at once: a datagram longer than
-    /// [`DATAGRAM_MAX`] or named by a locator longer than [`SOURCE_MAX`], or stream bytes past
-    /// the link's whole storage. Handed in again it is refused again; a stream's bytes are taken
-    /// in smaller calls.
+    /// The call hands in more than the link could ever hold at once: more bytes than its bound, a
+    /// datagram longer than [`DATAGRAM_MAX`], or a locator longer than [`SOURCE_MAX`]. Handed in
+    /// again it is refused again; a stream's bytes are taken in smaller calls.
     TooLarge,
 }
 
@@ -250,81 +248,68 @@ impl<'a> QueuedDatagram<'a> {
     }
 }
 
-/// The tasks a table method found waiting, for the host to wake once the lock is let go. One
-/// link's opener, reader and writer are held in place, which is every wake a table method makes:
-/// the streams a released listener closes with it were never handed to the session, so nothing
-/// waits on them. A wake past those three would be kept on the heap.
+/// The tasks one link found waiting and has not had woken yet. A link's opener, reader and writer
+/// are held in place; a fourth, which only a host that leaves its effects undone while the same
+/// link is waited on again can leave, is kept on the heap.
 #[derive(Debug, Default)]
-pub struct Wakes {
+struct Wakes {
     held: [Option<Waker>; 3],
     spill: Vec<Waker>,
 }
 
 impl Wakes {
-    /// How many tasks are to be woken.
-    pub fn len(&self) -> usize {
-        self.held.iter().flatten().count() + self.spill.len()
-    }
-
-    /// Whether no task is to be woken.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
+    /// Keep `waker` to be woken, once: a waker that wakes the same task as one kept already is
+    /// that one.
     fn push(&mut self, waker: Waker) {
+        let mut kept = self.held.iter().flatten().chain(self.spill.iter());
+        if kept.any(|held| held.will_wake(&waker)) {
+            return;
+        }
         match self.held.iter_mut().find(|slot| slot.is_none()) {
             Some(slot) => *slot = Some(waker),
             None => self.spill.push(waker),
         }
     }
-}
 
-impl Extend<Waker> for Wakes {
-    fn extend<I: IntoIterator<Item = Waker>>(&mut self, wakers: I) {
-        for waker in wakers {
-            self.push(waker);
-        }
+    fn pop(&mut self) -> Option<Waker> {
+        self.spill
+            .pop()
+            .or_else(|| self.held.iter_mut().find_map(Option::take))
     }
 }
 
-impl IntoIterator for Wakes {
-    type Item = Waker;
-    type IntoIter = core::iter::Chain<
-        core::iter::Flatten<core::array::IntoIter<Option<Waker>, 3>>,
-        alloc::vec::IntoIter<Waker>,
-    >;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.held.into_iter().flatten().chain(self.spill)
-    }
-}
-
-/// What the host does after a method returns, with no lock held: call the program's `close` for
-/// each link in `close` and then report each with [`AppLinkTable::close_done`], tell the program
-/// of each link in `drained`, and wake every waker in `wake`.
-#[derive(Debug, Default)]
+/// What a table method left for the host to do, with no lock held: whether anything is due. What
+/// is due is held by the table, link by link, and the host takes it one item at a time with
+/// [`AppLinkTable::next_due`] until there is none, so no call collects a list of its own.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[must_use = "the program's close, its drained and the wakes are the host's to perform"]
 pub struct Effects {
-    /// The links whose program side the host closes.
-    pub close: Vec<LinkHandle>,
-    /// The links that refused the program's bytes for being full ([`InboundRefusal::Full`]) and
-    /// have since been read down to half their bound: the program may hand bytes in again.
-    pub drained: Vec<LinkHandle>,
-    /// The tasks to wake.
-    pub wake: Wakes,
+    due: bool,
 }
 
 impl Effects {
     /// Whether there is nothing to do.
     pub fn is_empty(&self) -> bool {
-        self.close.is_empty() && self.drained.is_empty() && self.wake.is_empty()
+        !self.due
     }
 
     fn absorb(&mut self, other: Effects) {
-        self.close.extend(other.close);
-        self.drained.extend(other.drained);
-        self.wake.extend(other.wake);
+        self.due |= other.due;
     }
+}
+
+/// One thing the host does for the table, in the order [`AppLinkTable::next_due`] hands them
+/// out: every close first, then every drained, then every wake.
+#[derive(Debug)]
+pub enum Due {
+    /// Call the program's `close` for the link, then report it with
+    /// [`AppLinkTable::close_done`].
+    Close(LinkHandle),
+    /// Tell the program the link, which refused its bytes for being full
+    /// ([`InboundRefusal::Full`]), has been read down to half its bound.
+    Drained(LinkHandle),
+    /// Wake the task.
+    Wake(Waker),
 }
 
 /// Where a link the session waits to open stands.
@@ -360,11 +345,12 @@ pub enum DatagramRead<T> {
     End,
 }
 
-/// What a listener's next accept found.
+/// What a listener's next accept found: `T` is what the reader made of the link and of the locator
+/// the program named for its remote end.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AcceptRead {
-    /// A stream the program accepted, and the locator it named for the remote end.
-    Accepted(LinkHandle, String),
+pub enum AcceptRead<T> {
+    /// A link the program accepted, as the reader took it.
+    Accepted(T),
     /// None waiting; the waker given is woken when one is accepted or the listener closes.
     Empty,
     /// The listener is closed.
@@ -535,19 +521,36 @@ impl RxRing {
     }
 }
 
-/// The storage a link of `kind` held to `queue` takes when it is made: the bound, and never less
-/// than the largest unit one call of the program's hands in, so an empty queue takes any datagram
-/// the wire can carry. A listener carries nothing; a link with no bound starts there and grows.
+/// The storage a link of `kind` held to `queue` takes when it is made: the bound, and room
+/// beside it for one datagram's head and widest locator, so an empty queue takes any datagram up
+/// to the bound. A bound of 0 is read as 1, as [`Link::admits`] reads it; a listener carries
+/// nothing; a link with no bound starts empty and grows.
 fn rx_capacity(kind: AppLinkKind, queue: Quota) -> usize {
-    if kind.is_listener() {
-        return 0;
+    match (kind.is_listener(), queue.most()) {
+        (true, _) | (false, None) => 0,
+        (false, Some(most)) if kind.is_datagram() => most.max(1) + RECORD_HEAD + SOURCE_MAX,
+        (false, Some(most)) => most.max(1),
     }
-    let unit = if kind.is_datagram() {
-        RECORD_HEAD + SOURCE_MAX + DATAGRAM_MAX
-    } else {
-        DATAGRAM_MAX
-    };
-    queue.most().map_or(unit, |most| most.max(unit))
+}
+
+/// The storage a link held to `queue` takes for the bytes a writer that cannot wait hands over
+/// ([`AppLinkTable::hold_remainder`]): the bound, read as 1 when it is 0.
+fn remainder_capacity(queue: Quota) -> usize {
+    queue.most().map_or(0, |most| most.max(1))
+}
+
+/// A link's machine, entered: the W3C SCXML 3.3 entry of the initial `Opening` leaf records no
+/// duty.
+fn new_machine() -> Engine<AppLinkPolicy<LinkDuties>> {
+    let mut machine = Engine::new(AppLinkPolicy::new_with_checked_session_id(
+        APP_LINK_SESSION_ID,
+        LinkDuties {
+            duties: DutyOutbox::default(),
+        },
+    ));
+    machine.initialize().unwrap_or_else(|never| match never {});
+    let _ = machine.policy().actions().duties.take();
+    machine
 }
 
 struct Link {
@@ -557,10 +560,16 @@ struct Link {
     /// The bytes the program handed in and the session has not read: what the bound counts, the
     /// datagrams' heads and locators left out.
     queued: usize,
-    /// The streams accepted on a listener and not yet taken by the session.
-    accepted: VecDeque<(LinkHandle, String)>,
-    /// The locator the program named for the remote end of an accepted stream.
-    remote: Option<String>,
+    /// The listener that accepted the link while the session has not taken it from there
+    /// ([`AppLinkTable::next_accepted`]); 0 for any other link.
+    accepted_by: LinkHandle,
+    /// The order the link was accepted in, which a listener hands its links out by.
+    accepted_order: u64,
+    /// The locator the program named for the remote end of an accepted link, in storage of
+    /// [`SOURCE_MAX`] bytes taken with the link's row.
+    remote: String,
+    /// Whether the program named `remote`: the link was accepted.
+    remote_named: bool,
     reader: Option<Waker>,
     writer: Option<Waker>,
     opener: Option<Waker>,
@@ -568,39 +577,41 @@ struct Link {
     writables: u64,
     /// A send was let through and not yet answered.
     sending: bool,
-    /// The session has let the link go; the row goes once the link is closed.
+    /// The session has let the link go; the row is free again once the link is closed.
     released: bool,
     /// The program's bytes were refused for the bound since the queue last drained: it is told
     /// when the session has read the queue down.
     refused_full: bool,
     /// Bytes a writer that cannot wait handed over and the program has not taken yet (an engine
-    /// whose stream seam takes every byte or fails; [`AppLinkTable::hold_remainder`]).
+    /// whose stream seam takes every byte or fails; [`AppLinkTable::hold_remainder`]), in
+    /// storage of the bound taken with the link's row.
     remainder: Vec<u8>,
     /// The most bytes the link queues in either direction: what the program handed in and the
     /// session has not read, and what a writer that cannot wait handed over and the program has
     /// not taken. The `APP_LINK_QUEUE_BYTES` of the session that opened the link, or of the
     /// listener it was accepted on.
     queue: Quota,
+    /// The program's close is due ([`Due::Close`]).
+    close_due: bool,
+    /// The program is due to be told the link drained ([`Due::Drained`]).
+    drained_due: bool,
+    /// The tasks due to be woken ([`Due::Wake`]).
+    wake_due: Wakes,
 }
 
 impl Link {
-    fn new(kind: AppLinkKind, queue: Quota) -> Self {
-        let mut machine = Engine::new(AppLinkPolicy::new_with_checked_session_id(
-            APP_LINK_SESSION_ID,
-            LinkDuties {
-                duties: DutyOutbox::default(),
-            },
-        ));
-        // W3C SCXML 3.3: enter the initial `Opening` leaf, which records no duty.
-        machine.initialize().unwrap_or_else(|never| match never {});
-        let _ = machine.policy().actions().duties.take();
+    /// A link with no handle yet, whose storage takes `rx` bytes for what the program hands in
+    /// and `remainder` for what a writer hands over.
+    fn with_storage(rx: usize, remainder: usize) -> Self {
         Self {
-            kind,
-            machine,
-            rx: RxRing::with_capacity(rx_capacity(kind, queue)),
+            kind: AppLinkKind::StreamDial,
+            machine: new_machine(),
+            rx: RxRing::with_capacity(rx),
             queued: 0,
-            accepted: VecDeque::new(),
-            remote: None,
+            accepted_by: 0,
+            accepted_order: 0,
+            remote: String::with_capacity(SOURCE_MAX),
+            remote_named: false,
             reader: None,
             writer: None,
             opener: None,
@@ -608,9 +619,40 @@ impl Link {
             sending: false,
             released: false,
             refused_full: false,
-            remainder: Vec::new(),
-            queue,
+            remainder: Vec::with_capacity(remainder),
+            queue: Quota::at_most(0),
+            close_due: false,
+            drained_due: false,
+            wake_due: Wakes::default(),
         }
+    }
+
+    /// Whether the row's storage holds what a link of `kind` held to `queue` takes.
+    fn fits(&self, kind: AppLinkKind, queue: Quota) -> bool {
+        self.rx.capacity() >= rx_capacity(kind, queue)
+            && self.remainder.capacity() >= remainder_capacity(queue)
+    }
+
+    /// Make the row a new link of `kind` held to `queue`, Opening, its storage kept. What is
+    /// due of the link the row held before stays due: a wake still reaches its task.
+    fn reset(&mut self, kind: AppLinkKind, queue: Quota) {
+        self.kind = kind;
+        self.machine = new_machine();
+        self.rx.consume(usize::MAX);
+        self.queued = 0;
+        self.accepted_by = 0;
+        self.accepted_order = 0;
+        self.remote.clear();
+        self.remote_named = false;
+        self.reader = None;
+        self.writer = None;
+        self.opener = None;
+        self.writables = 0;
+        self.sending = false;
+        self.released = false;
+        self.refused_full = false;
+        self.remainder.clear();
+        self.queue = queue;
     }
 
     /// Whether the link takes what would leave `count` bytes queued in one direction. A quota of
@@ -630,14 +672,14 @@ impl Link {
 
     /// After a read: a link that refused the program for being full and is now read down to half
     /// of its bound is one the program is told of. A link with no bound refuses nothing.
-    fn note_read(&mut self, handle: LinkHandle, drained: &mut Vec<LinkHandle>) {
+    fn note_read(&mut self) {
         let read_down = match self.queue.most() {
             Some(most) => self.queued() <= most.max(1) / 2,
             None => true,
         };
         if self.refused_full && read_down {
             self.refused_full = false;
-            drained.push(handle);
+            self.drained_due = true;
         }
     }
 
@@ -645,20 +687,38 @@ impl Link {
         matches!(self.state(), AppLinkState::Closing | AppLinkState::Closed)
     }
 
-    /// Run `event` and turn the duties it recorded into what the host does.
-    fn drive(&mut self, handle: LinkHandle, event: AppLinkEvent) -> Effects {
+    /// Whether the link has gone and its row holds nothing due that names it.
+    fn is_done(&self) -> bool {
+        self.released
+            && self.state() == AppLinkState::Closed
+            && !self.close_due
+            && !self.drained_due
+    }
+
+    /// Keep `waker`, when there is one, to be woken once the host does what is due.
+    fn wake(&mut self, waker: Option<Waker>) -> Effects {
+        match waker {
+            Some(waker) => {
+                self.wake_due.push(waker);
+                Effects { due: true }
+            }
+            None => Effects::default(),
+        }
+    }
+
+    /// Run `event` and keep what it asked of the host as due.
+    fn drive(&mut self, event: AppLinkEvent) -> Effects {
         self.machine.process_event(event);
         let duties = self.machine.policy().actions().duties.take();
         let mut effects = Effects::default();
         if duties.has(LinkDuties::WAKE) {
-            effects.wake.extend(
-                [self.opener.take(), self.reader.take(), self.writer.take()]
-                    .into_iter()
-                    .flatten(),
-            );
+            for waker in [self.opener.take(), self.reader.take(), self.writer.take()] {
+                effects.absorb(self.wake(waker));
+            }
         }
         if duties.has(LinkDuties::CLOSE) {
-            effects.close.push(handle);
+            self.close_due = true;
+            effects.due = true;
         }
         effects
     }
@@ -673,13 +733,26 @@ fn keep(slot: &mut Option<Waker>, waker: Option<&Waker>) {
     }
 }
 
+/// A row of the table: a link and its storage. A row whose link has gone keeps the storage and
+/// is free (handle 0) for the next link that fits it.
+struct Row {
+    handle: LinkHandle,
+    /// Taken for a session's links at its open ([`AppLinkTable::provision`]): the rows a link
+    /// the session opens or the program accepts takes. A listener and a group take rows of their
+    /// own, as they are no links of the session's count.
+    provisioned: bool,
+    link: Link,
+}
+
 /// The links of one transport. The transport may carry the links of several sessions, so each
-/// link keeps the queue bound of the session that opened it ([`Self::reserve`]).
+/// link keeps the queue bound of the session that opened it ([`Self::reserve`]). A row and its
+/// storage outlive the link in it: a link that comes later takes a free row that holds what it
+/// needs, and only a link that finds none allocates.
 pub struct AppLinkTable {
-    links: BTreeMap<LinkHandle, Link>,
+    rows: Vec<Row>,
     next: LinkHandle,
-    /// The links read down since the host last asked ([`Self::take_drained`]).
-    drained: Vec<LinkHandle>,
+    /// The order the next link a listener accepts is given.
+    accepted_order: u64,
 }
 
 impl Default for AppLinkTable {
@@ -692,48 +765,138 @@ impl AppLinkTable {
     /// A table with no link.
     pub const fn new() -> Self {
         Self {
-            links: BTreeMap::new(),
+            rows: Vec::new(),
             next: 1,
-            drained: Vec::new(),
+            accepted_order: 0,
         }
     }
 
-    /// The links read down since the last call, for the host to tell the program of.
+    /// Take now the rows `links` links of a session held to `queue` need, each with the storage
+    /// a link of any kind takes, so a link the session opens or the program accepts later finds
+    /// its row and allocates nothing. Free rows taken before that hold as much count toward them,
+    /// so a session opened again over the transport takes no more.
+    pub fn provision(&mut self, links: usize, queue: Quota) {
+        let free = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.handle == 0
+                    && row.provisioned
+                    && row.link.fits(AppLinkKind::DatagramAccepted, queue)
+            })
+            .count();
+        let more = links.saturating_sub(free);
+        self.rows.reserve(more);
+        for _ in 0..more {
+            self.rows.push(Row {
+                handle: 0,
+                provisioned: true,
+                link: Link::with_storage(
+                    rx_capacity(AppLinkKind::DatagramAccepted, queue),
+                    remainder_capacity(queue),
+                ),
+            });
+        }
+    }
+
+    /// The row of a link of `kind` held to `queue`: a free row that holds what it takes, the
+    /// smallest, else a new one. A listener and a group never take a provisioned row.
+    fn row_for(&mut self, kind: AppLinkKind, queue: Quota) -> usize {
+        let own = kind.is_listener() || kind == AppLinkKind::Group;
+        let free = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.handle == 0 && !(own && row.provisioned) && row.link.fits(kind, queue)
+            })
+            .min_by_key(|(_, row)| row.link.rx.capacity())
+            .map(|(at, _)| at);
+        free.unwrap_or_else(|| {
+            self.rows.push(Row {
+                handle: 0,
+                provisioned: false,
+                link: Link::with_storage(rx_capacity(kind, queue), remainder_capacity(queue)),
+            });
+            self.rows.len() - 1
+        })
+    }
+
+    fn at(&self, handle: LinkHandle) -> Option<usize> {
+        if handle == 0 {
+            return None;
+        }
+        self.rows.iter().position(|row| row.handle == handle)
+    }
+
+    fn link(&self, handle: LinkHandle) -> Option<&Link> {
+        let at = self.at(handle)?;
+        Some(&self.rows[at].link)
+    }
+
+    fn link_mut(&mut self, handle: LinkHandle) -> Option<&mut Link> {
+        let at = self.at(handle)?;
+        Some(&mut self.rows[at].link)
+    }
+
+    /// The next thing due for the host to do, taken from the table: a close, then a drained, then
+    /// a wake, until there is none. The host does each with no lock held.
+    pub fn next_due(&mut self) -> Option<Due> {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.link.close_due) {
+            row.link.close_due = false;
+            let handle = row.handle;
+            self.free_if_done(handle);
+            return Some(Due::Close(handle));
+        }
+        if let Some(row) = self.rows.iter_mut().find(|row| row.link.drained_due) {
+            row.link.drained_due = false;
+            let handle = row.handle;
+            self.free_if_done(handle);
+            return Some(Due::Drained(handle));
+        }
+        self.rows
+            .iter_mut()
+            .find_map(|row| row.link.wake_due.pop())
+            .map(Due::Wake)
+    }
+
+    /// Whether anything is due of the links read down: the host then tells the program of them
+    /// ([`Due::Drained`]).
     pub fn take_drained(&mut self) -> Effects {
         Effects {
-            drained: core::mem::take(&mut self.drained),
-            ..Effects::default()
+            due: self.rows.iter().any(|row| row.link.drained_due),
         }
     }
 
     /// How many links the table holds.
     pub fn len(&self) -> usize {
-        self.links.len()
+        self.rows.iter().filter(|row| row.handle != 0).count()
     }
 
     /// Whether the table holds no link.
     pub fn is_empty(&self) -> bool {
-        self.links.is_empty()
+        self.len() == 0
     }
 
     /// The state of a link, `None` for a handle the table does not hold.
     pub fn state(&self, handle: LinkHandle) -> Option<AppLinkState> {
-        self.links.get(&handle).map(Link::state)
+        self.link(handle).map(Link::state)
     }
 
     /// The kind of a link, `None` for a handle the table does not hold.
     pub fn kind(&self, handle: LinkHandle) -> Option<AppLinkKind> {
-        self.links.get(&handle).map(|link| link.kind)
+        self.link(handle).map(|link| link.kind)
     }
 
-    /// The locator the program named for the remote end of an accepted stream.
+    /// The locator the program named for the remote end of an accepted link.
     pub fn remote(&self, handle: LinkHandle) -> Option<&str> {
-        self.links.get(&handle)?.remote.as_deref()
+        let link = self.link(handle)?;
+        link.remote_named.then_some(link.remote.as_str())
     }
 
     /// How many bytes are queued on a link and not yet read.
     pub fn queued_bytes(&self, handle: LinkHandle) -> usize {
-        self.links.get(&handle).map_or(0, Link::queued)
+        self.link(handle).map_or(0, Link::queued)
     }
 
     fn take_handle(&mut self) -> LinkHandle {
@@ -744,19 +907,21 @@ impl AppLinkTable {
 
     /// A new link of `kind`, Opening, before the program is asked to open it, which queues at most
     /// `queue` bytes in each direction: the `APP_LINK_QUEUE_BYTES` of the session that opens it.
-    /// The link takes its storage now (its bound, and room for the widest datagram), and always
-    /// takes what the program hands in when its queue is empty and the storage holds it, so a
-    /// quota of 0 holds one chunk at a time. The streams or sources accepted on a listener keep
-    /// the listener's.
+    /// Its row's storage holds the bound, and a call of the program's that hands in more than the
+    /// bound at once is refused ([`InboundRefusal::TooLarge`]); a quota of 0 holds one byte at a
+    /// time. The links accepted on a listener keep the listener's bound.
     pub fn reserve(&mut self, kind: AppLinkKind, queue: Quota) -> LinkHandle {
+        let at = self.row_for(kind, queue);
         let handle = self.take_handle();
-        self.links.insert(handle, Link::new(kind, queue));
+        let row = &mut self.rows[at];
+        row.handle = handle;
+        row.link.reset(kind, queue);
         handle
     }
 
     /// What the program's `open` of `handle` answered.
     pub fn opened(&mut self, handle: LinkHandle, answer: ProgramOpen) -> Effects {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return Effects::default();
         };
         if link.state() != AppLinkState::Opening {
@@ -765,15 +930,15 @@ impl AppLinkTable {
             return Effects::default();
         }
         match answer {
-            ProgramOpen::Up => link.drive(handle, AppLinkEvent::LinkConnected),
+            ProgramOpen::Up => link.drive(AppLinkEvent::LinkConnected),
             ProgramOpen::Pending => Effects::default(),
-            ProgramOpen::Refused => link.drive(handle, AppLinkEvent::LinkClosed),
+            ProgramOpen::Refused => link.drive(AppLinkEvent::LinkClosed),
         }
     }
 
     /// Where a link the session waits to open stands; `waker` is kept while it is Opening.
     pub fn poll_open(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> OpenProgress {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return OpenProgress::Closed;
         };
         match link.state() {
@@ -792,43 +957,38 @@ impl AppLinkTable {
         handle: LinkHandle,
         event: ProgramEvent,
     ) -> Result<Effects, InboundRefusal> {
-        let link = self
-            .links
-            .get_mut(&handle)
-            .ok_or(InboundRefusal::NoSuchLink)?;
+        let link = self.link_mut(handle).ok_or(InboundRefusal::NoSuchLink)?;
         if link.state() == AppLinkState::Closed {
             return Err(InboundRefusal::Closed);
         }
         Ok(match event {
             ProgramEvent::Connected => match link.state() {
-                AppLinkState::Opening => link.drive(handle, AppLinkEvent::LinkConnected),
+                AppLinkState::Opening => link.drive(AppLinkEvent::LinkConnected),
                 // Said again of a link that is up: nothing changes.
                 _ => Effects::default(),
             },
             ProgramEvent::Closed => {
-                let mut effects = link.drive(handle, AppLinkEvent::LinkClosed);
+                let mut effects = link.drive(AppLinkEvent::LinkClosed);
                 effects.absorb(self.close_accepted_of(handle));
-                self.forget_if_done(handle);
+                self.free_if_done(handle);
                 effects
             }
             ProgramEvent::Writable => {
                 link.writables += 1;
-                link.drive(handle, AppLinkEvent::LinkWritable)
+                link.drive(AppLinkEvent::LinkWritable)
             }
         })
     }
 
-    /// The program accepted a stream on `listener`, whose remote end it names `remote`: a new
-    /// link, Open, which the session takes with [`Self::next_accepted`].
+    /// The program accepted a link on `listener`, whose remote end it names `remote`: a new
+    /// link, Open, which the session takes with [`Self::next_accepted`]. A locator longer than
+    /// [`SOURCE_MAX`] is refused ([`InboundRefusal::TooLarge`]).
     pub fn accepted(
         &mut self,
         listener: LinkHandle,
         remote: &str,
     ) -> Result<(LinkHandle, Effects), InboundRefusal> {
-        let link = self
-            .links
-            .get(&listener)
-            .ok_or(InboundRefusal::NoSuchLink)?;
+        let link = self.link(listener).ok_or(InboundRefusal::NoSuchLink)?;
         let Some(accepted_kind) = link.kind.accepted() else {
             return Err(InboundRefusal::WrongKind);
         };
@@ -837,23 +997,24 @@ impl AppLinkTable {
             AppLinkState::Closing | AppLinkState::Closed => return Err(InboundRefusal::Closed),
             AppLinkState::Open | AppLinkState::Blocked => {}
         }
+        if remote.len() > SOURCE_MAX {
+            return Err(InboundRefusal::TooLarge);
+        }
         let queue = link.queue;
-        let handle = self.take_handle();
-        let mut stream = Link::new(accepted_kind, queue);
-        stream.remote = Some(String::from(remote));
+        let handle = self.reserve(accepted_kind, queue);
+        let order = self.accepted_order;
+        self.accepted_order += 1;
+        let at = self.at(handle).ok_or(InboundRefusal::NoSuchLink)?;
+        let stream = &mut self.rows[at].link;
+        stream.remote.push_str(remote);
+        stream.remote_named = true;
+        stream.accepted_by = listener;
+        stream.accepted_order = order;
         // Nobody waits on the new link yet, so its entry wakes nobody.
-        let _ = stream.drive(handle, AppLinkEvent::LinkAccepted);
-        self.links.insert(handle, stream);
-        let listener_link = self
-            .links
-            .get_mut(&listener)
-            .ok_or(InboundRefusal::NoSuchLink)?;
-        listener_link
-            .accepted
-            .push_back((handle, String::from(remote)));
-        let mut effects = Effects::default();
-        effects.wake.extend(listener_link.reader.take());
-        Ok((handle, effects))
+        let _ = stream.drive(AppLinkEvent::LinkAccepted);
+        let listener_link = self.link_mut(listener).ok_or(InboundRefusal::NoSuchLink)?;
+        let reader = listener_link.reader.take();
+        Ok((handle, listener_link.wake(reader)))
     }
 
     /// The program hands in `bytes` that arrived on `handle` (with the locator a datagram came
@@ -865,10 +1026,7 @@ impl AppLinkTable {
         bytes: &[u8],
         source: Option<&str>,
     ) -> Result<Effects, InboundRefusal> {
-        let link = self
-            .links
-            .get_mut(&handle)
-            .ok_or(InboundRefusal::NoSuchLink)?;
+        let link = self.link_mut(handle).ok_or(InboundRefusal::NoSuchLink)?;
         if link.kind.is_listener() {
             return Err(InboundRefusal::WrongKind);
         }
@@ -880,16 +1038,18 @@ impl AppLinkTable {
         if link.kind == AppLinkKind::Group && source.is_none() {
             return Err(InboundRefusal::NoSource);
         }
-        let mut effects = Effects::default();
         // An empty stream chunk carries nothing; an empty datagram is a datagram.
         if bytes.is_empty() && link.kind.is_stream() {
-            return Ok(effects);
+            return Ok(Effects::default());
         }
         let datagram = link.kind.is_datagram();
         // A stream's bytes carry no locator: a source the program names with them is dropped.
         let source = if datagram { source } else { None };
-        if datagram
-            && (bytes.len() > DATAGRAM_MAX || source.is_some_and(|named| named.len() > SOURCE_MAX))
+        let widest = link.queue.most().map(|most| most.max(1));
+        if widest.is_some_and(|widest| bytes.len() > widest)
+            || (datagram
+                && (bytes.len() > DATAGRAM_MAX
+                    || source.is_some_and(|named| named.len() > SOURCE_MAX)))
         {
             return Err(InboundRefusal::TooLarge);
         }
@@ -898,14 +1058,11 @@ impl AppLinkTable {
         } else {
             bytes.len()
         };
-        if link.queue.is_unbounded() {
+        if widest.is_none() {
             link.rx.grow_for(stored);
-        } else if stored > link.rx.capacity() {
-            return Err(InboundRefusal::TooLarge);
         }
         // Past the bound nothing is taken, and the program learns when to hand it in again. An
-        // empty queue takes any unit its storage holds, so a datagram larger than the bound is
-        // not refused forever.
+        // empty queue takes whatever passed the checks above: the storage holds the bound.
         if !link.rx.is_empty()
             && (!link.admits(link.queued() + bytes.len()) || stored > link.rx.free())
         {
@@ -926,8 +1083,8 @@ impl AppLinkTable {
         }
         link.rx.push(bytes);
         link.queued += bytes.len();
-        effects.wake.extend(link.reader.take());
-        Ok(effects)
+        let reader = link.reader.take();
+        Ok(link.wake(reader))
     }
 
     /// Copy what is queued on stream `handle` into `buf`, as much as fits.
@@ -937,13 +1094,13 @@ impl AppLinkTable {
         buf: &mut [u8],
         waker: Option<&Waker>,
     ) -> StreamRead {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return StreamRead::End;
         };
         let copied = link.rx.take_into(buf);
         link.queued -= copied;
         if copied > 0 {
-            link.note_read(handle, &mut self.drained);
+            link.note_read();
             return StreamRead::Bytes(copied);
         }
         if buf.is_empty() {
@@ -956,14 +1113,15 @@ impl AppLinkTable {
         StreamRead::Empty
     }
 
-    /// Whether a read of `handle` would answer now: bytes or a datagram are queued, a stream is
+    /// Whether a read of `handle` would answer now: bytes or a datagram are queued, a link is
     /// waiting on the listener, or the link is closing or closed. `waker` is kept when it would
     /// not, and woken when it would.
     pub fn poll_readable(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> bool {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let waiting = self.rows.iter().any(|row| row.link.accepted_by == handle);
+        let Some(link) = self.link_mut(handle) else {
             return true;
         };
-        if !link.rx.is_empty() || !link.accepted.is_empty() || link.is_gone() {
+        if !link.rx.is_empty() || waiting || link.is_gone() {
             return true;
         }
         keep(&mut link.reader, waker);
@@ -978,7 +1136,7 @@ impl AppLinkTable {
         waker: Option<&Waker>,
         take: impl FnOnce(QueuedDatagram<'_>) -> T,
     ) -> DatagramRead<T> {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return DatagramRead::End;
         };
         // A stream's bytes are no datagrams; a listener holds none.
@@ -1010,19 +1168,34 @@ impl AppLinkTable {
         });
         link.rx.consume(len);
         link.queued -= len;
-        link.note_read(handle, &mut self.drained);
+        link.note_read();
         DatagramRead::Datagram(taken)
     }
 
-    /// The next stream accepted on `listener`. The session owns it from here, and releases it as
-    /// it releases any link.
-    pub fn next_accepted(&mut self, listener: LinkHandle, waker: Option<&Waker>) -> AcceptRead {
-        let Some(link) = self.links.get_mut(&listener) else {
+    /// The next link accepted on `listener`, the oldest first, lent to `take` with the locator
+    /// the program named for its remote end: what `take` made of them. The session owns the link
+    /// from here, and releases it as it releases any link.
+    pub fn next_accepted<T>(
+        &mut self,
+        listener: LinkHandle,
+        waker: Option<&Waker>,
+        take: impl FnOnce(LinkHandle, &str) -> T,
+    ) -> AcceptRead<T> {
+        if self.at(listener).is_none() {
+            return AcceptRead::End;
+        }
+        let oldest = self
+            .rows
+            .iter_mut()
+            .filter(|row| row.link.accepted_by == listener)
+            .min_by_key(|row| row.link.accepted_order);
+        if let Some(row) = oldest {
+            row.link.accepted_by = 0;
+            return AcceptRead::Accepted(take(row.handle, &row.link.remote));
+        }
+        let Some(link) = self.link_mut(listener) else {
             return AcceptRead::End;
         };
-        if let Some((handle, remote)) = link.accepted.pop_front() {
-            return AcceptRead::Accepted(handle, remote);
-        }
         if link.is_gone() {
             return AcceptRead::End;
         }
@@ -1036,7 +1209,7 @@ impl AppLinkTable {
     /// the send that follows meets its end and reports it. Nothing is begun, unlike
     /// [`Self::begin_send`]: this is the room a writer waits for before it builds what it sends.
     pub fn poll_writable(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> bool {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return true;
         };
         match link.state() {
@@ -1056,7 +1229,7 @@ impl AppLinkTable {
     /// Whether a send on `handle` may go to the program now. `waker` is kept when it may not and
     /// will later.
     pub fn begin_send(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> SendGate {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return SendGate::Closed;
         };
         if link.kind.is_listener() {
@@ -1094,7 +1267,7 @@ impl AppLinkTable {
         answer: ProgramSend,
     ) -> (SendStep, Effects) {
         let handle = ticket.handle;
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return (SendStep::Closed, Effects::default());
         };
         link.sending = false;
@@ -1103,10 +1276,9 @@ impl AppLinkTable {
             return (SendStep::Closed, Effects::default());
         }
         match answer {
-            ProgramSend::Wrote(written) if written > offered => (
-                SendStep::Failed,
-                link.drive(handle, AppLinkEvent::SendFailed),
-            ),
+            ProgramSend::Wrote(written) if written > offered => {
+                (SendStep::Failed, link.drive(AppLinkEvent::SendFailed))
+            }
             ProgramSend::Wrote(written) if written > 0 => {
                 (SendStep::Wrote(written), Effects::default())
             }
@@ -1115,20 +1287,11 @@ impl AppLinkTable {
                 if link.writables != ticket.writable_seen {
                     (SendStep::Retry, Effects::default())
                 } else {
-                    (
-                        SendStep::Blocked,
-                        link.drive(handle, AppLinkEvent::SendBlocked),
-                    )
+                    (SendStep::Blocked, link.drive(AppLinkEvent::SendBlocked))
                 }
             }
-            ProgramSend::Closed => (
-                SendStep::Closed,
-                link.drive(handle, AppLinkEvent::SendClosed),
-            ),
-            ProgramSend::Failed => (
-                SendStep::Failed,
-                link.drive(handle, AppLinkEvent::SendFailed),
-            ),
+            ProgramSend::Closed => (SendStep::Closed, link.drive(AppLinkEvent::SendClosed)),
+            ProgramSend::Failed => (SendStep::Failed, link.drive(AppLinkEvent::SendFailed)),
         }
     }
 
@@ -1136,16 +1299,14 @@ impl AppLinkTable {
     /// before: the remainder of a writer that cannot wait for the program (an engine whose stream
     /// seam takes every byte or fails), which offers it again from [`Self::remainder`] and drops
     /// what the program took with [`Self::drop_remainder`]. Refused, with nothing held, on a link
-    /// that is closing or closed, and past the bound ([`InboundRefusal::Full`]).
+    /// that is closing or closed, and past the bound ([`InboundRefusal::Full`]). The bytes go into
+    /// storage of the bound the link's row holds.
     pub fn hold_remainder(
         &mut self,
         handle: LinkHandle,
         bytes: &[u8],
     ) -> Result<(), InboundRefusal> {
-        let link = self
-            .links
-            .get_mut(&handle)
-            .ok_or(InboundRefusal::NoSuchLink)?;
+        let link = self.link_mut(handle).ok_or(InboundRefusal::NoSuchLink)?;
         if link.is_gone() {
             return Err(InboundRefusal::Closed);
         }
@@ -1158,64 +1319,66 @@ impl AppLinkTable {
 
     /// The bytes held on `handle` for the program, oldest first; empty for a link not held.
     pub fn remainder(&self, handle: LinkHandle) -> &[u8] {
-        self.links
-            .get(&handle)
+        self.link(handle)
             .map_or(&[][..], |link| link.remainder.as_slice())
     }
 
     /// The program took the first `taken` bytes of the remainder of `handle`.
     pub fn drop_remainder(&mut self, handle: LinkHandle, taken: usize) {
-        if let Some(link) = self.links.get_mut(&handle) {
+        if let Some(link) = self.link_mut(handle) {
             let taken = taken.min(link.remainder.len());
             link.remainder.drain(..taken);
         }
     }
 
-    /// The session lets `handle` go. A link that is not closed is closed: its handle is in the
-    /// effects' `close`, for the host to call the program's close with and then report with
-    /// [`Self::close_done`]. The row is forgotten once the link is closed. A listener's accepted
-    /// streams that the session never took go with it.
+    /// The session lets `handle` go. A link that is not closed is closed: its close is due
+    /// ([`Due::Close`]), for the host to call the program's close and then report it with
+    /// [`Self::close_done`]. The row is free again once the link is closed. A listener's accepted
+    /// links that the session never took go with it.
     pub fn release(&mut self, handle: LinkHandle) -> Effects {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return Effects::default();
         };
         link.released = true;
-        let mut effects = link.drive(handle, AppLinkEvent::SessionClose);
+        // A link the session lets go is no longer the listener's to hand out.
+        link.accepted_by = 0;
+        let mut effects = link.drive(AppLinkEvent::SessionClose);
         effects.absorb(self.close_accepted_of(handle));
-        self.forget_if_done(handle);
+        self.free_if_done(handle);
         effects
     }
 
     /// The program's close of `handle` returned.
     pub fn close_done(&mut self, handle: LinkHandle) -> Effects {
-        let Some(link) = self.links.get_mut(&handle) else {
+        let Some(link) = self.link_mut(handle) else {
             return Effects::default();
         };
-        let effects = link.drive(handle, AppLinkEvent::CloseDone);
-        self.forget_if_done(handle);
+        let effects = link.drive(AppLinkEvent::CloseDone);
+        self.free_if_done(handle);
         effects
     }
 
-    /// Release every stream accepted on `listener` that the session never took.
+    /// Release every link accepted on `listener` that the session never took.
     fn close_accepted_of(&mut self, listener: LinkHandle) -> Effects {
-        let pending: Vec<LinkHandle> = match self.links.get_mut(&listener) {
-            Some(link) => link.accepted.drain(..).map(|(handle, _)| handle).collect(),
-            None => Vec::new(),
-        };
         let mut effects = Effects::default();
-        for handle in pending {
+        while let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.link.accepted_by == listener)
+        {
+            row.link.accepted_by = 0;
+            let handle = row.handle;
             effects.absorb(self.release(handle));
         }
         effects
     }
 
-    fn forget_if_done(&mut self, handle: LinkHandle) {
-        if self
-            .links
-            .get(&handle)
-            .is_some_and(|link| link.released && link.state() == AppLinkState::Closed)
-        {
-            self.links.remove(&handle);
+    /// Free the row of `handle` once its link is gone and nothing due names it.
+    fn free_if_done(&mut self, handle: LinkHandle) {
+        if let Some(at) = self.at(handle) {
+            if self.rows[at].link.is_done() {
+                self.rows[at].handle = 0;
+            }
         }
     }
 }
@@ -1240,12 +1403,50 @@ mod tests {
         (counter.clone(), Waker::from(counter))
     }
 
-    fn wakes(effects: Effects) -> usize {
-        let n = effects.wake.len();
-        for waker in effects.wake {
-            waker.wake();
+    /// What a host did for what the table held due: the links it would close, the links it told
+    /// were drained, and how many tasks it woke.
+    #[derive(Debug, Default)]
+    struct Performed {
+        close: Vec<LinkHandle>,
+        drained: Vec<LinkHandle>,
+        wakes: usize,
+    }
+
+    /// Do what `effects` says is due, as a transport's perform does it, without a program: a
+    /// close is noted and not reported done.
+    fn perform(table: &mut AppLinkTable, effects: Effects) -> Performed {
+        let mut done = Performed::default();
+        if effects.is_empty() {
+            return done;
         }
-        n
+        while let Some(due) = table.next_due() {
+            match due {
+                Due::Close(link) => done.close.push(link),
+                Due::Drained(link) => done.drained.push(link),
+                Due::Wake(waker) => {
+                    waker.wake();
+                    done.wakes += 1;
+                }
+            }
+        }
+        done
+    }
+
+    /// How many tasks `call` made due to be woken, woken.
+    fn wakes(table: &mut AppLinkTable, call: impl FnOnce(&mut AppLinkTable) -> Effects) -> usize {
+        let effects = call(table);
+        perform(table, effects).wakes
+    }
+
+    /// The links the table is due to tell the program were drained, told.
+    fn drained(table: &mut AppLinkTable) -> Vec<LinkHandle> {
+        let effects = table.take_drained();
+        perform(table, effects).drained
+    }
+
+    /// A link a listener accepted and the locator the program named for it, as a reader takes them.
+    fn taken_link(handle: LinkHandle, remote: &str) -> (LinkHandle, String) {
+        (handle, String::from(remote))
     }
 
     /// The queue bound of a link whose test does not reach it.
@@ -1317,7 +1518,10 @@ mod tests {
         let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let (count, waker) = counter();
         assert_eq!(table.poll_open(handle, Some(&waker)), OpenProgress::Opening);
-        assert_eq!(wakes(table.opened(handle, ProgramOpen::Up)), 1);
+        assert_eq!(
+            wakes(&mut table, |table| table.opened(handle, ProgramOpen::Up)),
+            1
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(table.state(handle), Some(AppLinkState::Open));
         assert_eq!(table.poll_open(handle, None), OpenProgress::Open);
@@ -1332,7 +1536,9 @@ mod tests {
         let (_count, waker) = counter();
         let _ = table.poll_open(handle, Some(&waker));
         assert_eq!(
-            wakes(table.event(handle, ProgramEvent::Connected).unwrap()),
+            wakes(&mut table, |table| table
+                .event(handle, ProgramEvent::Connected)
+                .unwrap()),
             1
         );
         assert_eq!(table.state(handle), Some(AppLinkState::Open));
@@ -1359,7 +1565,11 @@ mod tests {
         let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let (_count, waker) = counter();
         let _ = table.poll_open(handle, Some(&waker));
-        assert_eq!(wakes(table.opened(handle, ProgramOpen::Refused)), 1);
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .opened(handle, ProgramOpen::Refused)),
+            1
+        );
         assert_eq!(table.poll_open(handle, None), OpenProgress::Closed);
         // A pending open the program later reports closed is the same.
         let other = table.reserve(AppLinkKind::StreamDial, QUEUE);
@@ -1390,7 +1600,9 @@ mod tests {
         );
         let mut program_buffer = *b"abc";
         assert_eq!(
-            wakes(table.received(handle, &program_buffer, None).unwrap()),
+            wakes(&mut table, |table| table
+                .received(handle, &program_buffer, None)
+                .unwrap()),
             1
         );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
@@ -1456,7 +1668,12 @@ mod tests {
             table.read_stream(handle, &mut buf, Some(&waker)),
             StreamRead::Empty
         );
-        assert_eq!(wakes(table.event(handle, ProgramEvent::Closed).unwrap()), 1);
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .event(handle, ProgramEvent::Closed)
+                .unwrap()),
+            1
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(table.read_stream(handle, &mut buf, None), StreamRead::End);
     }
@@ -1503,7 +1720,9 @@ mod tests {
         // Bytes still arrive while the write side is blocked.
         let _ = table.received(handle, b"in", None).unwrap();
         assert_eq!(
-            wakes(table.event(handle, ProgramEvent::Writable).unwrap()),
+            wakes(&mut table, |table| table
+                .event(handle, ProgramEvent::Writable)
+                .unwrap()),
             1
         );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
@@ -1534,7 +1753,9 @@ mod tests {
             "a blocked link takes nothing"
         );
         assert_eq!(
-            wakes(table.event(handle, ProgramEvent::Writable).unwrap()),
+            wakes(&mut table, |table| table
+                .event(handle, ProgramEvent::Writable)
+                .unwrap()),
             1
         );
         assert_eq!(count.0.load(Ordering::SeqCst), 1, "the waiter is woken");
@@ -1618,7 +1839,11 @@ mod tests {
             };
             let (got, effects) = table.send_answered(ticket, 2, answer);
             assert_eq!(got, step);
-            assert_eq!(wakes(effects), 1, "the reader hears the close");
+            assert_eq!(
+                perform(&mut table, effects).wakes,
+                1,
+                "the reader hears the close"
+            );
             assert_eq!(table.state(handle), Some(AppLinkState::Closed));
             assert_eq!(table.begin_send(handle, None), SendGate::Closed);
         }
@@ -1646,11 +1871,15 @@ mod tests {
         };
         let _ = table.send_answered(ticket, 8, ProgramSend::WouldBlock);
         let effects = table.release(handle);
-        assert_eq!(effects.close, [handle], "the program is asked to close it");
+        assert_eq!(
+            perform(&mut table, effects).close,
+            [handle],
+            "the program is asked to close it"
+        );
         assert_eq!(table.state(handle), Some(AppLinkState::Closing));
         assert!(table.received(handle, b"x", None).is_err());
         let done = table.close_done(handle);
-        assert_eq!(wakes(done), 1);
+        assert_eq!(perform(&mut table, done).wakes, 1);
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(table.state(handle), None, "released and closed: forgotten");
     }
@@ -1662,7 +1891,7 @@ mod tests {
         let _ = table.event(handle, ProgramEvent::Closed).unwrap();
         let effects = table.release(handle);
         assert!(
-            effects.close.is_empty(),
+            perform(&mut table, effects).close.is_empty(),
             "the program's side is already closed"
         );
         assert_eq!(table.state(handle), None);
@@ -1674,7 +1903,7 @@ mod tests {
         let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let _ = table.opened(handle, ProgramOpen::Pending);
         let effects = table.release(handle);
-        assert_eq!(effects.close, [handle]);
+        assert_eq!(perform(&mut table, effects).close, [handle]);
         // The program reporting closed while its close runs finishes it as well.
         let _ = table.event(handle, ProgramEvent::Closed).unwrap();
         assert_eq!(table.state(handle), None);
@@ -1695,11 +1924,11 @@ mod tests {
         let _ = table.opened(listener, ProgramOpen::Up);
         let (count, waker) = counter();
         assert_eq!(
-            table.next_accepted(listener, Some(&waker)),
+            table.next_accepted(listener, Some(&waker), taken_link),
             AcceptRead::Empty
         );
         let (stream, effects) = table.accepted(listener, "tcp/198.51.100.9:40001").unwrap();
-        assert_eq!(wakes(effects), 1);
+        assert_eq!(perform(&mut table, effects).wakes, 1);
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(table.kind(stream), Some(AppLinkKind::StreamAccepted));
         assert_eq!(table.state(stream), Some(AppLinkState::Open));
@@ -1707,10 +1936,13 @@ mod tests {
         // An accepted stream takes bytes at once.
         let _ = table.received(stream, b"hi", None).unwrap();
         assert_eq!(
-            table.next_accepted(listener, None),
-            AcceptRead::Accepted(stream, String::from("tcp/198.51.100.9:40001"))
+            table.next_accepted(listener, None, taken_link),
+            AcceptRead::Accepted((stream, String::from("tcp/198.51.100.9:40001")))
         );
-        assert_eq!(table.next_accepted(listener, None), AcceptRead::Empty);
+        assert_eq!(
+            table.next_accepted(listener, None, taken_link),
+            AcceptRead::Empty
+        );
         // A listener carries no bytes and takes no send.
         assert_eq!(
             table.received(listener, b"x", None).unwrap_err(),
@@ -1764,12 +1996,13 @@ mod tests {
         let _ = table.opened(listener, ProgramOpen::Up);
         let (stream, _) = table.accepted(listener, "tcp/198.51.100.9:40003").unwrap();
         let effects = table.release(listener);
-        assert!(effects.close.contains(&listener));
+        let performed = perform(&mut table, effects);
+        assert!(performed.close.contains(&listener));
         assert!(
-            effects.close.contains(&stream),
+            performed.close.contains(&stream),
             "the untaken stream is closed too"
         );
-        for handle in effects.close {
+        for handle in performed.close {
             let _ = table.close_done(handle);
         }
         assert!(table.is_empty());
@@ -1858,19 +2091,15 @@ mod tests {
             StreamRead::Bytes(3)
         );
         assert!(
-            table.take_drained().drained.is_empty(),
+            drained(&mut table).is_empty(),
             "five bytes still queued: above half the bound"
         );
         assert_eq!(
             table.read_stream(handle, &mut buf, None),
             StreamRead::Bytes(3)
         );
-        assert_eq!(
-            table.take_drained().drained,
-            [handle],
-            "two queued: at most half"
-        );
-        assert!(table.take_drained().drained.is_empty(), "told once");
+        assert_eq!(drained(&mut table), [handle], "two queued: at most half");
+        assert!(drained(&mut table).is_empty(), "told once");
         // The retry is taken.
         let _ = table.received(handle, b"i", None).unwrap();
         assert_eq!(table.queued_bytes(handle), 3);
@@ -1883,15 +2112,22 @@ mod tests {
         let _ = table.received(handle, b"abc", None).unwrap();
         let mut buf = [0u8; 8];
         let _ = table.read_stream(handle, &mut buf, None);
-        assert!(table.take_drained().drained.is_empty());
+        assert!(drained(&mut table).is_empty());
     }
 
     #[test]
-    fn an_empty_queue_takes_a_datagram_larger_than_the_bound() {
+    fn a_datagram_up_to_the_bound_is_taken_and_one_past_it_is_too_large() {
         let mut table = AppLinkTable::new();
         let handle = table.reserve(AppLinkKind::Datagram, Quota::at_most(4));
         let _ = table.opened(handle, ProgramOpen::Up);
-        let _ = table.received(handle, b"longer", None).unwrap();
+        assert_eq!(
+            table.received(handle, b"longer", None).unwrap_err(),
+            InboundRefusal::TooLarge,
+            "no queue of this link could take it"
+        );
+        let _ = table
+            .received(handle, b"four", Some("udp/198.51.100.4:7447"))
+            .unwrap();
         assert_eq!(
             table.received(handle, b"x", None).unwrap_err(),
             InboundRefusal::Full
@@ -1900,9 +2136,8 @@ mod tests {
             table.read_datagram(handle, None, |datagram| datagram.to_received()),
             DatagramRead::Datagram(_)
         ));
-        assert_eq!(table.take_drained().drained, [handle]);
+        assert_eq!(drained(&mut table), [handle]);
     }
-
     #[test]
     fn a_held_remainder_is_offered_in_order_and_dropped_as_taken() {
         let mut table = AppLinkTable::new();
@@ -1977,7 +2212,11 @@ mod tests {
     fn a_link_of_no_bytes_holds_one_byte_at_a_time() {
         let mut table = AppLinkTable::new();
         let handle = open_stream_under(&mut table, Quota::at_most(0));
-        let _ = table.received(handle, b"ab", None).unwrap();
+        assert_eq!(
+            table.received(handle, b"ab", None).unwrap_err(),
+            InboundRefusal::TooLarge
+        );
+        let _ = table.received(handle, b"a", None).unwrap();
         assert_eq!(
             table.received(handle, b"c", None).unwrap_err(),
             InboundRefusal::Full
@@ -2127,15 +2366,11 @@ mod tests {
             .unwrap();
         let stream = open_stream_under(&mut table, Quota::at_most(4));
         assert_eq!(
-            table
-                .received(stream, &alloc::vec![0u8; DATAGRAM_MAX + 1], None)
-                .unwrap_err(),
+            table.received(stream, b"fives", None).unwrap_err(),
             InboundRefusal::TooLarge
         );
         assert_eq!(table.queued_bytes(stream), 0, "nothing of it was taken");
-        let _ = table
-            .received(stream, &alloc::vec![0u8; DATAGRAM_MAX], None)
-            .unwrap();
+        let _ = table.received(stream, b"four", None).unwrap();
         // A link with no bound grows to what it is handed.
         let open = open_stream_under(&mut table, Quota::UNBOUNDED);
         let _ = table
@@ -2156,7 +2391,7 @@ mod tests {
         }
         assert_eq!(
             taken,
-            bound / (RECORD_HEAD + SOURCE_MAX + 1),
+            (bound + RECORD_HEAD + SOURCE_MAX) / (RECORD_HEAD + SOURCE_MAX + 1),
             "each datagram's head and locator take storage the bound does not count"
         );
         assert!(table.queued_bytes(handle) < bound / 2);
@@ -2170,7 +2405,7 @@ mod tests {
             table.read_datagram(handle, None, |_| ()),
             DatagramRead::Datagram(())
         ));
-        assert_eq!(table.take_drained().drained, [handle]);
+        assert_eq!(drained(&mut table), [handle]);
         let _ = table.received(handle, b"d", Some(source.as_str())).unwrap();
     }
 
@@ -2187,17 +2422,129 @@ mod tests {
     }
 
     #[test]
-    fn wakes_past_one_links_three_are_all_kept() {
+    fn a_task_due_to_be_woken_is_woken_once_however_many_wait() {
         let mut wakes = Wakes::default();
-        assert!(wakes.is_empty());
         let counters: Vec<_> = (0..5).map(|_| counter()).collect();
-        wakes.extend(counters.iter().map(|(_, waker)| waker.clone()));
-        assert_eq!(wakes.len(), 5);
-        for waker in wakes {
-            waker.wake();
+        for (_, waker) in &counters {
+            wakes.push(waker.clone());
+            // The same task again is the one kept.
+            wakes.push(waker.clone());
         }
+        let mut woken = 0;
+        while let Some(waker) = wakes.pop() {
+            waker.wake();
+            woken += 1;
+        }
+        assert_eq!(woken, 5, "past one link's three the rest are kept too");
         for (count, _) in &counters {
             assert_eq!(count.0.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// The rows the table holds, free or not.
+    fn rows(table: &AppLinkTable) -> usize {
+        table.rows.len()
+    }
+
+    #[test]
+    fn a_provisioned_row_is_taken_by_a_dial_and_by_an_accept_and_kept_for_the_next() {
+        let mut table = AppLinkTable::new();
+        let queue = Quota::at_most(64);
+        table.provision(2, queue);
+        assert_eq!(rows(&table), 2);
+        assert!(table.is_empty(), "a provisioned row holds no link");
+        let dial = table.reserve(AppLinkKind::StreamDial, queue);
+        let listener = table.reserve(AppLinkKind::StreamListen, queue);
+        assert_eq!(rows(&table), 3, "the listener takes a row of its own");
+        let _ = table.opened(listener, ProgramOpen::Up);
+        let (accepted, _) = table.accepted(listener, "tcp/198.51.100.9:40005").unwrap();
+        assert_eq!(
+            rows(&table),
+            3,
+            "the accepted link takes the other provisioned row"
+        );
+        // The accepted link's storage holds the whole bound.
+        let _ = table.opened(dial, ProgramOpen::Up);
+        let _ = table.received(accepted, &[7u8; 64], None).unwrap();
+        for link in [dial, accepted] {
+            let effects = table.release(link);
+            let _ = perform(&mut table, effects);
+            let _ = table.close_done(link);
+        }
+        assert_eq!(table.len(), 1, "the listener is left");
+        // The session opened again takes the rows it left free.
+        table.provision(2, queue);
+        assert_eq!(rows(&table), 3);
+        let again = table.reserve(AppLinkKind::Datagram, queue);
+        assert!(
+            again > accepted,
+            "a handle is never reused, though its row is"
+        );
+        assert_eq!(rows(&table), 3);
+        assert_eq!(
+            table.queued_bytes(again),
+            0,
+            "nothing of the row's last link is left"
+        );
+        // A link held to a wider bound than any free row holds takes a row of its own.
+        let _ = table.reserve(AppLinkKind::StreamDial, Quota::at_most(1 << 10));
+        assert_eq!(rows(&table), 4);
+    }
+
+    #[test]
+    fn a_listener_hands_out_its_links_oldest_first() {
+        let mut table = AppLinkTable::new();
+        let listener = table.reserve(AppLinkKind::StreamListen, QUEUE);
+        let _ = table.opened(listener, ProgramOpen::Up);
+        let (first, _) = table.accepted(listener, "tcp/198.51.100.9:1").unwrap();
+        let (second, _) = table.accepted(listener, "tcp/198.51.100.9:2").unwrap();
+        assert!(table.poll_readable(listener, None));
+        assert_eq!(
+            table.next_accepted(listener, None, taken_link),
+            AcceptRead::Accepted((first, String::from("tcp/198.51.100.9:1")))
+        );
+        assert_eq!(
+            table.next_accepted(listener, None, taken_link),
+            AcceptRead::Accepted((second, String::from("tcp/198.51.100.9:2")))
+        );
+        assert!(!table.poll_readable(listener, None));
+        let long = "t".repeat(SOURCE_MAX + 1);
+        assert_eq!(
+            table.accepted(listener, &long).unwrap_err(),
+            InboundRefusal::TooLarge
+        );
+    }
+
+    #[test]
+    fn what_is_due_is_handed_out_closes_first_then_drained_then_wakes() {
+        let mut table = AppLinkTable::new();
+        let full = open_stream_under(&mut table, Quota::at_most(2));
+        let _ = table.received(full, b"ab", None).unwrap();
+        assert!(table.received(full, b"c", None).is_err());
+        let (count, waker) = counter();
+        let closing = open_stream(&mut table);
+        let mut buf = [0u8; 2];
+        let _ = table.read_stream(closing, &mut buf, Some(&waker));
+        let _ = table.read_stream(full, &mut buf, None);
+        let _ = table.event(closing, ProgramEvent::Closed).unwrap();
+        let third = open_stream(&mut table);
+        let _ = table.release(third);
+        let mut order = Vec::new();
+        while let Some(due) = table.next_due() {
+            order.push(match due {
+                Due::Close(_) => "close",
+                Due::Drained(_) => "drained",
+                Due::Wake(waker) => {
+                    waker.wake();
+                    "wake"
+                }
+            });
+        }
+        // The program's own close of a link may or may not leave a close of the table's due; the
+        // order is what is asserted.
+        order.dedup();
+        assert_eq!(order, ["close", "drained", "wake"]);
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(table.next_due().is_none());
     }
 }

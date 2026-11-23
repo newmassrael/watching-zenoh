@@ -418,9 +418,13 @@ impl AppListener {
         let transport = &self.guard.transport;
         let listener = self.guard.handle;
         let (handle, remote) = poll_fn(|cx| {
-            let next = transport.with(|table| table.next_accepted(listener, Some(cx.waker())));
+            let next = transport.with(|table| {
+                table.next_accepted(listener, Some(cx.waker()), |handle, remote| {
+                    (handle, String::from(remote))
+                })
+            });
             match next {
-                AcceptRead::Accepted(handle, remote) => Poll::Ready(Ok((handle, remote))),
+                AcceptRead::Accepted(accepted) => Poll::Ready(Ok(accepted)),
                 AcceptRead::Empty => Poll::Pending,
                 AcceptRead::End => Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,

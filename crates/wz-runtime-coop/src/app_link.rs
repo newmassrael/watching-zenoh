@@ -791,15 +791,16 @@ impl StreamListen for AppStreamListener {
     }
 
     fn accept(&self) -> Result<Option<AppStreamSocket>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         match next {
-            AcceptRead::Accepted(handle, remote) => Ok(Some(AppStreamSocket {
+            AcceptRead::Accepted((handle, peer)) => Ok(Some(AppStreamSocket {
                 held: Held::accepted(&self.held.transport, handle),
                 local: self.at,
-                peer: socket_of(&remote),
+                peer,
             })),
             AcceptRead::Empty => Ok(None),
             AcceptRead::End => Err(LinkOpenError::Unsupported),
@@ -847,11 +848,11 @@ impl AppDatagramSocket {
     }
 
     /// The datagram link of the source the program accepted on a datagram listener as `handle`,
-    /// naming it `remote`.
-    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
+    /// at `peer`, the address of the locator the program named for it.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, peer: SocketAddr) -> Self {
         Self {
             held: Held::accepted(transport, handle),
-            peer: socket_of(remote),
+            peer,
             reads_sources: false,
         }
     }
@@ -1289,8 +1290,10 @@ impl SessionLinks for AppLinks {
     /// which is what the table opens as a group. Any other endpoint is no group the program's
     /// transport carries, and is refused before the program is asked.
     /// Every link opened from now on, and every one a listener opened after this takes, claims its
-    /// buffers from `tables`.
+    /// buffers from `tables`, and its row of the program's transport is taken now, one for each
+    /// link the tables hold.
     fn lend_buffers(&mut self, tables: LinkTables) {
+        self.transport.provision(tables.links());
         self.lent = Some(tables);
     }
 
@@ -1324,13 +1327,14 @@ impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         let socket = match next {
-            AcceptRead::Accepted(handle, remote) => {
-                AppDatagramSocket::accepted(&self.held.transport, handle, &remote)
+            AcceptRead::Accepted((handle, peer)) => {
+                AppDatagramSocket::accepted(&self.held.transport, handle, peer)
             }
             AcceptRead::Empty => return Ok(None),
             AcceptRead::End => return Err(LinkOpenError::Unsupported),
@@ -1952,12 +1956,14 @@ mod tests {
         transport
             .accepted(listening, "udp/198.51.100.3:50000")
             .unwrap();
-        let AcceptRead::Accepted(handle, remote) =
-            transport.with(|table| table.next_accepted(listening, None))
-        else {
+        let AcceptRead::Accepted((handle, peer)) = transport.with(|table| {
+            table.next_accepted(listening, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        }) else {
             panic!("the accepted source waits on the listener");
         };
-        let socket = AppDatagramSocket::accepted(&transport, handle, &remote);
+        let socket = AppDatagramSocket::accepted(&transport, handle, peer);
         // The program names another source, and then none: both are the accepted source's.
         transport
             .received(handle, b"one", Some("udp/203.0.113.7:9"))
