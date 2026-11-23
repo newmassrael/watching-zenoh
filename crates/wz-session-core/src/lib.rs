@@ -282,8 +282,6 @@ pub mod replay_cursor;
 /// against three bounds and says where a sample's bytes go; the bytes are the host's. It reads no
 /// clock, starts no task and allocates nothing, so every host uses the one set of rules.
 /// Unconditional, no_std and no_alloc.
-// Totality debt TD-010 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod delivery_lane;
 
 // The closed key set (`key-set-closed`). These three modules are documented from inside
