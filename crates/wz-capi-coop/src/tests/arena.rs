@@ -370,6 +370,44 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
     );
 }
 
+/// The tokens of faces that went before each was retracted are owed apart from the sets those
+/// faces gave back, a table of them lent at the open with a row for each row of the session's token
+/// pool: a face owes apart only while its tokens hold a row of the pool, so the faces owing at
+/// once are never more. A session of one face, whose one face never goes, is lent none.
+#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+#[test]
+fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
+    let many = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 3,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let pools = many.peers().pools;
+    assert!(pools.shared, "a session of many faces shares its pools");
+    assert_eq!(many.peers().owed_tokens(), pools.remote_decls);
+    assert_eq!(row(&many, "owed tokens").count, pools.remote_decls);
+    let one = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        !one.peers().pools.shared,
+        "CONTROL: one face shares nothing"
+    );
+    assert_eq!(one.peers().owed_tokens(), 0);
+    assert!(
+        one.rows().iter().all(|row| row.part != "owed tokens"),
+        "a session of one face is lent no table of tokens owed"
+    );
+}
+
 /// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
 /// `DELIVERY_LANE_CALLBACKS` state and two of its longest key, each lowered with its limit, and are
 /// laid out right after the lane's area, the order the open lends them in.
@@ -1103,6 +1141,7 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
 
 /// A session whose config admits no face besides the dial role's attaches none, as its arena holds
 /// the buffers of one link; the CONTROL is the plan of the same config.
+#[cfg(feature = "listen")]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_face_past_max_faces_is_not_attached() {
@@ -1471,8 +1510,28 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         );
     }
 
-    assert_eq!(peer.rows().len(), client.rows().len());
-    for (theirs, ours) in peer.rows().iter().zip(client.rows()) {
+    // The tokens the faces that went owe apart are the peer's alone: a client's one face never
+    // goes. A row for each row of the session's token pool.
+    let owed: Vec<_> = peer
+        .rows()
+        .iter()
+        .filter(|row| row.part == "owed tokens")
+        .collect();
+    let owes = cfg!(all(
+        feature = "liveliness",
+        any(feature = "listen", feature = "group")
+    ));
+    assert_eq!(owed.len(), usize::from(owes), "{owed:?}");
+    if let Some(row) = owed.first() {
+        assert_eq!(row.count, peer.peers().pools.remote_decls);
+    }
+    let rows: Vec<_> = peer
+        .rows()
+        .iter()
+        .filter(|row| row.part != "owed tokens")
+        .collect();
+    assert_eq!(rows.len(), client.rows().len());
+    for (theirs, ours) in rows.into_iter().zip(client.rows()) {
         assert_eq!(
             (theirs.part, theirs.basis),
             (ours.part, ours.basis),

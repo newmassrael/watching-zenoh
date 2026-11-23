@@ -80,6 +80,11 @@ pub(super) type FaceId = u64;
 /// beneath it.
 pub(super) const DIAL_FACE: FaceId = 1 << 62;
 
+/// The tokens a face that went still owes the liveliness subscribers, held apart from the set it
+/// gave back, their rows in the session's pool (`Registry::owed`).
+#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>;
+
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
@@ -102,7 +107,8 @@ pub(super) struct FaceTables {
     pub(super) gets: Gets,
     /// The face's link was lost and the tokens its peer declared are still to be retracted to the
     /// liveliness subscribers: they stay in `peer` until the round of deliveries has taken each
-    /// `Delete` (`Registry::retract_owed`), and the set is not given back until then.
+    /// `Delete` (`Registry::retract_owed`), or until the face goes, when they are kept apart
+    /// from the set and the set is given back (`Registry::owe_tokens_of`).
     #[cfg(feature = "liveliness")]
     retracting: bool,
 }
@@ -327,11 +333,18 @@ pub(super) struct Registry {
     /// them free at any time. Its room is reserved at the open for every set the open lent, so a
     /// face coming or going moves entries within it.
     held: Vec<HeldSet>,
-    /// The sets of faces that went while the tokens their peers declared were still to be
-    /// retracted (`FaceTables::retracting`): held by no face, and given back once retracted. Its
-    /// room is reserved at the open, as `held`'s is.
-    #[cfg(feature = "liveliness")]
-    leaving: Vec<HeldSet>,
+    /// The tokens of faces that went before each was retracted, in the order the faces went: each
+    /// the token table the face's set held, its rows still in the session's pool, the set given
+    /// back as the face went. Lent at the open, a row for each row of the session's token pool,
+    /// as a table owed holds one of them at least (`FacePeers::owed_tokens`); none for a session
+    /// of one face, whose one face never goes. A session of no face besides the dial role's (a
+    /// build without `listen` and `group`) removes none, and keeps no table of them.
+    #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+    owed: wz_session_core::bounded::BoundedVec<
+        OwedTokens,
+        { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS },
+        Lent,
+    >,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
@@ -388,6 +401,8 @@ impl Registry {
     ) -> Result<Self, LendRefused> {
         let app = App::lent(arena, keys, rows, limits)?;
         let mut pools = PeerPools::lent(arena, peers.pools)?;
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        let owed = arena.lend(peers.owed_tokens())?;
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
         // lends one set; a build without pools keeps each set's rows inline.
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
@@ -409,14 +424,12 @@ impl Registry {
                 &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
             )?;
         }
-        #[cfg(feature = "liveliness")]
-        let leaving = Vec::with_capacity(sets.capacity());
         Ok(Self {
             app,
             sets,
             held,
-            #[cfg(feature = "liveliness")]
-            leaving,
+            #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+            owed,
             limits: *limits,
             keys,
             pools,
@@ -579,19 +592,9 @@ impl Registry {
         self.held.insert(place, HeldSet { at, id });
     }
 
-    /// The first set no face holds and none that went is still retracting from, or the place past
-    /// the last set. The lent sets lie first, so the first free set is a lent one while any is.
+    /// The first set no face holds, or the place past the last set. The lent sets lie first, so
+    /// the first free set is a lent one while any is.
     fn free_set(&self) -> usize {
-        #[cfg(feature = "liveliness")]
-        if !self.leaving.is_empty() {
-            let taken = |at: usize| {
-                self.held.iter().any(|held| held.at == at)
-                    || self.leaving.iter().any(|gone| gone.at == at)
-            };
-            return (0..self.sets.len())
-                .find(|&at| !taken(at))
-                .unwrap_or(self.sets.len());
-        }
         // The index is in set order with one entry for each held set, so the first entry whose set
         // lies past its own place in the index has a free set at that place, and with none the
         // first free set is the one past the last entry.
@@ -612,10 +615,7 @@ impl Registry {
             self.writing();
             let gone = self.held.remove(place);
             #[cfg(feature = "liveliness")]
-            if self.sets[gone.at].retracting {
-                self.leaving.push(gone);
-                return;
-            }
+            self.owe_tokens_of(gone.at);
             self.sets[gone.at].give_back();
         }
     }
@@ -632,10 +632,8 @@ impl Registry {
             }
             !accepted
         });
-        #[cfg(feature = "liveliness")]
-        for gone in self.leaving.drain(..) {
-            self.sets[gone.at].give_back();
-        }
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        self.owed.clear();
     }
 
     /// The tables of face `id`, while the session holds it.
@@ -872,7 +870,7 @@ impl Registry {
 
     /// The link of face `id` was lost: every token its peer declared is gone, and the liveliness
     /// subscribers are to be told each is. The face's set owes them the retractions until
-    /// `Self::retract_owed` has handed every one.
+    /// `Self::retract_owed` has handed every one, or the face goes and they are owed apart.
     #[cfg(feature = "liveliness")]
     pub(super) fn lose_tokens(&mut self, id: FaceId) {
         if let Some(face) = self.held_mut(id) {
@@ -881,8 +879,9 @@ impl Registry {
     }
 
     /// Retract the tokens of every face whose link was lost, a token at a time while `room` says
-    /// its `Delete` can be taken now; a set that went is given back once its last is retracted.
-    /// Whether none is owed any more. The tokens left wait in their sets, in order.
+    /// its `Delete` can be taken now: those of the faces held first, then those of the faces that
+    /// went, in the order they went, each face's in ascending id. Whether none is owed any more.
+    /// The tokens left wait where they are, in order.
     #[cfg(feature = "liveliness")]
     pub(super) fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         self.writing();
@@ -890,7 +889,8 @@ impl Registry {
             app,
             sets,
             held,
-            leaving,
+            #[cfg(any(feature = "listen", feature = "group"))]
+            owed,
             ..
         } = self;
         for face in held.iter() {
@@ -904,18 +904,38 @@ impl Registry {
                 }
             }
         }
-        while let Some(gone) = leaving.last().copied() {
-            let Some(set) = sets.get_mut(gone.at) else {
-                leaving.pop();
-                continue;
-            };
-            if !app.flush_liveliness_on_link_loss_while(&mut set.peer, room) {
+        // The faces that went, in the order they went.
+        #[cfg(any(feature = "listen", feature = "group"))]
+        while let Some(tokens) = owed.first_mut() {
+            if !app.flush_tokens_on_link_loss_while(tokens, room) {
                 return false;
             }
-            set.give_back();
-            leaving.pop();
+            owed.remove(0);
         }
         true
+    }
+
+    /// Keep apart what the set at `at` still owes the liveliness subscribers as its face goes:
+    /// the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after those
+    /// owed before them. The set is given back all the same, its token table left empty and taking
+    /// rows of the session's pool.
+    #[cfg(feature = "liveliness")]
+    fn owe_tokens_of(&mut self, at: usize) {
+        let Some(set) = self.sets.get_mut(at) else {
+            return;
+        };
+        if !core::mem::take(&mut set.retracting) {
+            return;
+        }
+        #[cfg(any(feature = "listen", feature = "group"))]
+        if let Some(tokens) = set.peer.tokens.split_off() {
+            if tokens.count() > 0 {
+                // A table owed holds a row of the session's token pool at least, and the open lent
+                // a row of this table for each row of the pool.
+                let kept = self.owed.push(tokens).is_ok();
+                debug_assert!(kept, "the tokens owed fit the rows of the pool they hold");
+            }
+        }
     }
 
     /// Declare a matching listener on the publishers' plane: it fires when any face's peer comes
@@ -1381,41 +1401,104 @@ mod tests {
         holds_one_final(next);
     }
 
-    /// A face whose link was lost and that goes before its peer's tokens are retracted keeps its
-    /// set out of the next face's reach until the retraction is done: a face that comes meanwhile
-    /// takes another set, and the set is given back once `retract_owed` has handed every token.
-    /// The CONTROL is a face that goes with nothing owed, whose set the next face takes at once.
-    #[cfg(feature = "liveliness")]
+    /// A face that goes owing retractions gives its set back at once, and the next face takes it,
+    /// its token table empty; the tokens owed wait apart, their rows kept in the session's pool,
+    /// and are retracted in the order the faces went, each face's in ascending id. The CONTROL is
+    /// a retraction refused for room, which hands nothing and keeps every token owed.
+    #[cfg(all(
+        feature = "std",
+        feature = "liveliness",
+        any(feature = "listen", feature = "group")
+    ))]
     #[test]
-    fn a_face_that_goes_owing_retractions_keeps_its_set_until_they_are_handed() {
+    fn a_face_that_goes_owing_retractions_gives_its_set_back_at_once() {
+        use std::sync::{Arc, Mutex};
+        use wz_session_core::declare::liveliness_sample::{
+            BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind,
+        };
+        use wz_session_core::declare_build::build_declare_token;
+
         let mut held = held(3);
+        let heard: Arc<Mutex<Vec<(String, u64)>>> = Arc::default();
+        let into = Arc::clone(&heard);
+        held.registry
+            .register_liveliness_subscriber(
+                1,
+                "demo/**",
+                false,
+                BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
+                    if sample.kind == LivelinessSampleKind::Delete {
+                        into.lock()
+                            .unwrap()
+                            .push((sample.keyexpr.to_owned(), sample.token_id));
+                    }
+                }),
+            )
+            .expect("the subscriber is registered");
         held.registry.add_face(5);
-        let owing: *const FaceTables = face(&mut held.registry, 5);
-        held.registry.lose_tokens(5);
-        held.registry.remove_face(5);
-        assert_eq!(
-            held.registry.leaving.len(),
-            1,
-            "the set waits for its retractions"
-        );
         held.registry.add_face(6);
-        let other: *const FaceTables = face(&mut held.registry, 6);
-        assert!(!ptr::eq(other, owing), "the next face took another set");
+        for (id, tokens) in [(5, [3_u64, 1]), (6, [4, 2])] {
+            let at = held
+                .registry
+                .held_at(id)
+                .expect("the registry holds the face");
+            let Registry { app, sets, .. } = &mut held.registry;
+            let peer = &mut sets[at].peer;
+            for token in tokens {
+                let key = std::format!("demo/{id}/{token}");
+                let declare = build_declare_token(token, 0, Some(&key)).expect("a declaration");
+                app.liveliness_subscribers.dispatch_declare(
+                    &mut peer.tokens,
+                    &declare.body,
+                    peer.subscribers.mapping_spaces(),
+                );
+            }
+            assert_eq!(peer.tokens.count(), 2, "face {id} holds its peer's tokens");
+        }
+        let lies_at: *const FaceTables = face(&mut held.registry, 5);
+        held.registry.lose_tokens(5);
+        held.registry.lose_tokens(6);
+        held.registry.remove_face(5);
+        held.registry.remove_face(6);
+        assert_eq!(held.registry.owed.len(), 2, "each face's tokens owed apart");
+        let tokens_used = |held: &Held| held.registry.pools.counts().map(|c| c.tokens.used);
+        assert_eq!(
+            tokens_used(&held),
+            Some(4),
+            "their rows kept in the session's pool"
+        );
+        assert!(
+            !held.registry.retract_owed(&mut || false),
+            "CONTROL: no room, so still owed"
+        );
+        assert!(heard.lock().unwrap().is_empty(), "CONTROL: nothing handed");
+        held.registry.add_face(7);
+        let next: *const FaceTables = face(&mut held.registry, 7);
+        assert!(
+            ptr::eq(next, lies_at),
+            "the next face took the set given back"
+        );
+        assert_eq!(
+            face(&mut held.registry, 7).peer.tokens.count(),
+            0,
+            "its token table empty"
+        );
         assert!(
             held.registry.retract_owed(&mut || true),
-            "retracted, nothing is owed"
+            "every token retracted"
         );
-        assert!(
-            held.registry.leaving.is_empty(),
-            "and the set was given back"
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [
+                ("demo/5/1".to_owned(), 1),
+                ("demo/5/3".to_owned(), 3),
+                ("demo/6/2".to_owned(), 2),
+                ("demo/6/4".to_owned(), 4),
+            ],
+            "in the order the faces went, each face's in ascending id"
         );
-        held.registry.remove_face(6);
-        held.registry.add_face(7);
-        let first_free: *const FaceTables = face(&mut held.registry, 7);
-        assert!(
-            ptr::eq(first_free, owing),
-            "CONTROL: the set given back is the first free one again"
-        );
+        assert!(held.registry.owed.is_empty());
+        assert_eq!(tokens_used(&held), Some(0), "and their rows went back");
     }
 
     /// The faces' sets given back in place leave the arena's pools as full as before the faces

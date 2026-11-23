@@ -147,7 +147,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 32;
+pub const ARENA_ROWS: usize = 33;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -250,6 +250,20 @@ pub struct FacePeers {
     pub tables: usize,
     /// The rows of each pool of what the faces' peers write, which the faces share.
     pub pools: PeerPoolRows,
+}
+
+impl FacePeers {
+    /// The rows of the table of what the faces that went still owe the liveliness subscribers
+    /// (the registry's tokens owed): one for each row of the session's token pool, as a face owes
+    /// apart only while its tokens hold a row of the pool at least, so the faces owing at once
+    /// are never more. None for a session of one face, whose one face never goes.
+    pub const fn owed_tokens(&self) -> usize {
+        if self.pools.shared {
+            self.pools.remote_decls
+        } else {
+            0
+        }
+    }
 }
 
 impl EntityRows {
@@ -532,6 +546,19 @@ impl ArenaPlan {
             ] {
                 plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?)?;
             }
+        }
+        // The tokens the faces that went still owe, lent with the pools
+        // (`engine::registry::Registry::new`).
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        if plan.peers.owed_tokens() > 0 {
+            plan.put(
+                "owed tokens",
+                "SESSION_MAX_REMOTE_DECLS",
+                plan.peers.owed_tokens(),
+                core::mem::size_of::<
+                    wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
+                >(),
+            )?;
         }
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?

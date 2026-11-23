@@ -3913,7 +3913,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// publish and a get reach its peer, and what its peer declares counts with the others'. It
     /// is dialled once: a link that is lost or never completes takes the face with it, where the
     /// dial role's face is dialled again. [`OpenError::Unreachable`] when the session is closed,
-    /// holds as many faces as `max_faces` admits, or the endpoint is not reached.
+    /// holds as many faces as `max_faces` admits, or the endpoint is not reached. A build of faces
+    /// besides the dial role's only (`listen`), whose faces' peers share the session's pools.
+    #[cfg(feature = "listen")]
     pub fn attach_face(&self, endpoint: &str) -> Result<u64, OpenError> {
         let Some(mut guard) = self.live() else {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
