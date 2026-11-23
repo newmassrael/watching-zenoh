@@ -55,7 +55,6 @@ use wz_session_core::multicast_tx::{
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded, MulticastTxItem,
 };
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
@@ -946,9 +945,10 @@ impl GroupFace {
 
     /// Put a publication on the group, naming its key by the declaration the group was told when
     /// it is told the session's keyexprs (`GroupDeclarations::declares_keyexprs`), and in full
-    /// otherwise, as a group whose session tells it its entities, or less, is. Built by the session
-    /// core's Push builders, as a link's is, framed with the sequence number of its channel as it
-    /// is pushed onto the group's stage, and written by this call ([`Self::push`]). A group whose
+    /// otherwise, as a group whose session tells it its entities, or less, is. Written from its parts
+    /// by the session core's publication writer, as a link's is, framed with the sequence number of
+    /// its channel as it is pushed onto the group's stage, and written by this call
+    /// ([`Self::push_lent`]). A group whose
     /// session ended is sent nothing.
     pub(super) fn publish(&self, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         if self.has_ended() {
@@ -957,13 +957,13 @@ impl GroupFace {
         // A group told the session's keyexprs is sent the key by its declaration, as the tokio
         // engine's group is; any other by its literal.
         let key = self.join.declarations.key(put.keyexpr, put.wire);
-        // Written from its parts, the bytes the owned Push below encodes to; the owned Push is built
-        // only for a publication the writer refuses, whose error the builder reports.
+        // Written from its parts, the bytes of the owned Push the builders would make; a key, a
+        // payload or a field past its bound is refused as the builders refuse it.
         let suffix = match key.mapping_id {
             0 => Some(put.keyexpr),
             _ => key.suffix,
         };
-        if multicast_tx_publication(
+        multicast_tx_publication(
             key.mapping_id,
             suffix,
             put.kind,
@@ -973,33 +973,7 @@ impl GroupFace {
             put.priority,
             |message| self.push_lent(message),
         )
-        .is_some()
-        {
-            return Ok(0);
-        }
-        let push = match (put.kind, key.mapping_id) {
-            (SampleKind::Put, 0) => {
-                push_build::build_push_literal_with_meta(put.keyexpr, put.payload, put.meta)
-            }
-            (SampleKind::Del, 0) => {
-                push_build::build_push_del_literal_with_meta(put.keyexpr, put.meta)
-            }
-            (SampleKind::Put, mapping_id) => push_build::build_push_aliased_with_meta(
-                mapping_id,
-                key.suffix,
-                put.payload,
-                put.meta,
-            ),
-            (SampleKind::Del, mapping_id) => {
-                push_build::build_push_del_aliased_with_meta(mapping_id, key.suffix, put.meta)
-            }
-        }
         .map_err(|_| FanoutError::ExceedsCapacity)?;
-        self.push(MulticastTxItem::Push {
-            push: alloc::boxed::Box::new(push),
-            reliable: put.reliable,
-            priority: put.priority,
-        });
         Ok(0)
     }
 }

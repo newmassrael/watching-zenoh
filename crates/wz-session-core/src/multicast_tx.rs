@@ -1075,8 +1075,8 @@ pub fn multicast_tx_group_retraction<R>(
 /// A Put or a Del a group session publishes, written from its parts
 /// ([`crate::lent_push::write_publication`]) and handed to `f` as a message lent for the call:
 /// framed as the owned Push of the same publication is, on `priority` and the channel
-/// `reliable`. `None` when the writer refuses it, with `f` not called: the caller sends the owned
-/// Push.
+/// `reliable`. The writer's refusal, `LengthOutOfRange` (a key, a payload or a field past its
+/// bound, which the owned builders refuse alike), with `f` not called.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 // The key, the kind and value, the metadata, the channel and band, and what is done with it.
 #[allow(clippy::too_many_arguments)]
@@ -1089,7 +1089,7 @@ pub fn multicast_tx_publication<R>(
     reliable: bool,
     priority: Priority,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
-) -> Option<R> {
+) -> Result<R, sce_forge_runtime::codec::CodecError> {
     #[cfg(feature = "pubsub-qos")]
     let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
     #[cfg(not(feature = "pubsub-qos"))]
@@ -1097,8 +1097,8 @@ pub fn multicast_tx_publication<R>(
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
-    let size = encoded_size(&body)?;
-    Some(f(&MulticastTxEncoded {
+    let size = encoded_size(&body).ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+    Ok(f(&MulticastTxEncoded {
         framing: MulticastTxFraming::Publication {
             qos,
             reliable,
