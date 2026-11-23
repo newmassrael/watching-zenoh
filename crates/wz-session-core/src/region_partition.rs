@@ -32,17 +32,17 @@
 //!   with `all`, so a remote that reports no interface at all satisfies any
 //!   interface filter. That is upstream's reading and it is kept.
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 use wz_codecs::whatami::WhatAmIMatcher;
 
 use crate::extbound::{Bound, Region};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 use crate::zid_hex::canonical_zid;
 
 /// What a node's south is: the one preset, or a list of subregions
@@ -56,15 +56,16 @@ pub enum SouthPartition {
     /// Subregion `i` is `subregions[i]`; a remote is assigned the first one whose
     /// filters match it.
     ///
-    /// Heap profile only: the list is owned text and zids. A node with no allocator
-    /// is on the `auto` preset, which is the only partition it can state.
-    #[cfg(feature = "alloc")]
+    /// With `south-subregions` only, which needs the heap profile: the list is owned
+    /// text and zids. A build without it is on the `auto` preset, the only partition
+    /// it can state.
+    #[cfg(feature = "south-subregions")]
     Custom(Vec<SouthSubregion>),
 }
 
 /// One south subregion's membership rule
 /// (`commons/zenoh-config/src/gateway.rs` @ `pub struct GatewayExplicitSouthConf {`).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SouthSubregion {
     /// `None` matches every remote, an empty list matches none.
@@ -73,7 +74,7 @@ pub struct SouthSubregion {
 
 /// One filter of a subregion
 /// (`commons/zenoh-config/src/gateway.rs` @ `pub struct GatewayFiltersConf {`).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionFilter {
     /// The roles the remote may have.
@@ -144,7 +145,7 @@ impl core::fmt::Display for RegionError {
 }
 
 /// `is_match` for one subregion's filter list.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "south-subregions")]
 fn matches_filters(filters: Option<&[RegionFilter]>, remote: &RemoteFacts<'_>) -> bool {
     let Some(filters) = filters else {
         return true;
@@ -189,7 +190,7 @@ pub fn transient_region_of(
     partition: &SouthPartition,
     remote: &RemoteFacts<'_>,
 ) -> Result<Option<Region>, RegionError> {
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "south-subregions")]
     {
         let SouthPartition::Custom(subregions) = partition else {
             return Ok(None);
@@ -210,8 +211,8 @@ pub fn transient_region_of(
             None => Ok(Some(Region::North)),
         }
     }
-    // Without an allocator the one partition is `Auto`: no rule places a remote.
-    #[cfg(not(feature = "alloc"))]
+    // Without subregions the one partition is `Auto`: no rule places a remote.
+    #[cfg(not(feature = "south-subregions"))]
     {
         let SouthPartition::Auto = partition;
         let _ = (mode, remote);
@@ -293,13 +294,11 @@ pub fn region_of(
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
-    use alloc::vec;
 
     use super::*;
     use WhatAmI::{Client, Peer, Router};
 
     const ZID_A: [u8; 4] = [0xaa; 4];
-    const ZID_B: [u8; 4] = [0xbb; 4];
 
     fn facts<'a>(zid: &'a [u8], whatami: WhatAmI) -> RemoteFacts<'a> {
         RemoteFacts {
@@ -308,147 +307,6 @@ mod tests {
             region_name: None,
             interfaces: &[],
         }
-    }
-
-    fn only(filter: RegionFilter) -> SouthSubregion {
-        SouthSubregion {
-            filters: Some(vec![filter]),
-        }
-    }
-
-    fn by_zid(zid: &[u8]) -> RegionFilter {
-        RegionFilter {
-            zids: Some(vec![zid.to_vec()]),
-            ..RegionFilter::default()
-        }
-    }
-
-    fn by_mode(modes: WhatAmIMatcher) -> RegionFilter {
-        RegionFilter {
-            modes: Some(modes),
-            ..RegionFilter::default()
-        }
-    }
-
-    /// A subregion whose filter list is this one filter.
-    fn passes(filter: &RegionFilter, remote: &RemoteFacts<'_>) -> bool {
-        matches_filters(Some(core::slice::from_ref(filter)), remote)
-    }
-
-    // ── the filters, field by field ──
-
-    /// No filter list matches every remote; an empty list matches none.
-    #[test]
-    fn a_missing_filter_list_matches_everyone_and_an_empty_one_nobody() {
-        let r = facts(&ZID_A, Peer);
-        assert!(matches_filters(None, &r));
-        assert!(!matches_filters(Some(&[]), &r));
-    }
-
-    /// Any filter of the list may match.
-    #[test]
-    fn a_remote_matching_any_one_filter_matches_the_list() {
-        let r = facts(&ZID_B, Peer);
-        let list = [by_zid(&ZID_A), by_zid(&ZID_B)];
-        assert!(matches_filters(Some(&list), &r));
-        assert!(!matches_filters(Some(&list[..1]), &r));
-    }
-
-    /// All fields of one filter must match, not any of them.
-    #[test]
-    fn every_present_field_of_a_filter_must_match() {
-        let both = RegionFilter {
-            zids: Some(vec![ZID_A.to_vec()]),
-            modes: Some(WhatAmIMatcher::empty().client()),
-            ..RegionFilter::default()
-        };
-        assert!(passes(&both, &facts(&ZID_A, Client)));
-        assert!(
-            !passes(&both, &facts(&ZID_A, Peer)),
-            "right zid, wrong mode"
-        );
-        assert!(
-            !passes(&both, &facts(&ZID_B, Client)),
-            "right mode, wrong zid"
-        );
-    }
-
-    /// `modes` is a set of roles.
-    #[test]
-    fn the_modes_field_is_a_role_set() {
-        let rp = by_mode(WhatAmIMatcher::empty().router().peer());
-        assert!(passes(&rp, &facts(&ZID_A, Router)));
-        assert!(passes(&rp, &facts(&ZID_A, Peer)));
-        assert!(!passes(&rp, &facts(&ZID_A, Client)));
-    }
-
-    /// `region_names` needs the remote to have announced a name among them.
-    #[test]
-    fn the_region_names_field_needs_an_announced_name() {
-        let f = RegionFilter {
-            region_names: Some(vec!["lab".to_string()]),
-            ..RegionFilter::default()
-        };
-        let named = |name| RemoteFacts {
-            region_name: name,
-            ..facts(&ZID_A, Peer)
-        };
-        assert!(passes(&f, &named(Some("lab"))));
-        assert!(!passes(&f, &named(Some("plant"))));
-        assert!(
-            !passes(&f, &named(None)),
-            "a remote that announced no name is in no named region"
-        );
-    }
-
-    /// `interfaces` is an ALL over the remote's interfaces, so a remote that
-    /// reports none satisfies any interface filter. That is upstream's reading.
-    #[test]
-    fn the_interfaces_field_requires_all_of_the_remotes_interfaces() {
-        let f = RegionFilter {
-            interfaces: Some(vec!["lo".to_string(), "eth0".to_string()]),
-            ..RegionFilter::default()
-        };
-        let on = |ifaces: &'static [&'static str]| RemoteFacts {
-            interfaces: ifaces,
-            ..facts(&ZID_A, Peer)
-        };
-        assert!(passes(&f, &on(&["lo"])));
-        assert!(passes(&f, &on(&["lo", "eth0"])));
-        assert!(
-            !passes(&f, &on(&["lo", "wlan0"])),
-            "one interface outside the list is enough to fail"
-        );
-        assert!(
-            passes(&f, &on(&[])),
-            "no interface is vacuously all of them"
-        );
-    }
-
-    /// A zid is matched as a zid, not as a byte string: the pin compares two
-    /// `ZenohIdProto`s, each a 16-byte id, so trailing zero bytes on either the
-    /// rule's or the remote's spelling do not make them two nodes.
-    #[test]
-    fn a_zid_matches_whatever_its_trailing_zero_bytes() {
-        let rule = by_zid(&[0x01]);
-        assert!(passes(&rule, &facts(&[0x01, 0x00], Peer)));
-        let padded = by_zid(&[0x01, 0x00, 0x00]);
-        assert!(passes(&padded, &facts(&[0x01], Peer)));
-        assert!(
-            !passes(&rule, &facts(&[0x00, 0x01], Peer)),
-            "a leading zero byte is part of the id"
-        );
-    }
-
-    /// `negated` inverts the verdict of the fields.
-    #[test]
-    fn negation_inverts_a_filters_verdict() {
-        let not_a = RegionFilter {
-            negated: true,
-            ..by_zid(&ZID_A)
-        };
-        assert!(!passes(&not_a, &facts(&ZID_A, Peer)));
-        assert!(passes(&not_a, &facts(&ZID_B, Peer)));
     }
 
     // ── the transient region and bound ──
@@ -471,68 +329,7 @@ mod tests {
         }
     }
 
-    /// The first matching subregion wins, carries the remote's own mode, and a
-    /// remote no subregion matches is in the north region.
-    #[test]
-    fn a_remote_is_in_the_first_matching_subregion_or_the_north() {
-        let partition = SouthPartition::Custom(vec![
-            only(by_zid(&ZID_A)),
-            only(by_mode(WhatAmIMatcher::empty().peer())),
-        ]);
-        let region = |zid: &[u8], mode| transient_region_of(Router, &partition, &facts(zid, mode));
-        assert_eq!(
-            region(&ZID_A, Peer),
-            Ok(Some(Region::South { id: 0, mode: Peer })),
-            "matches both; the first wins"
-        );
-        assert_eq!(
-            region(&ZID_B, Peer),
-            Ok(Some(Region::South { id: 1, mode: Peer }))
-        );
-        assert_eq!(
-            region(&ZID_A, Client),
-            Ok(Some(Region::South {
-                id: 0,
-                mode: Client
-            })),
-            "the subregion holds the remote's own mode"
-        );
-        assert_eq!(region(&ZID_B, Client), Ok(Some(Region::North)));
-        assert_eq!(
-            transient_bound_of(Router, &partition, &facts(&ZID_B, Peer)),
-            Ok(Some(Bound::South))
-        );
-        assert_eq!(
-            transient_bound_of(Router, &partition, &facts(&ZID_B, Client)),
-            Ok(Some(Bound::North))
-        );
-    }
-
-    /// A router remote may be put in a subregion only by a router.
-    #[test]
-    fn a_router_remote_is_a_subregion_member_only_of_a_router() {
-        let partition = SouthPartition::Custom(vec![SouthSubregion::default()]);
-        let r = facts(&ZID_A, Router);
-        assert_eq!(
-            transient_region_of(Router, &partition, &r),
-            Ok(Some(Region::South {
-                id: 0,
-                mode: Router
-            }))
-        );
-        for mode in [Peer, Client] {
-            assert_eq!(
-                transient_region_of(mode, &partition, &r),
-                Err(RegionError::RouterSubregionOfNonRouter)
-            );
-        }
-    }
-
     // ── compute_region_of, arm by arm ──
-
-    fn custom_south_peers() -> SouthPartition {
-        SouthPartition::Custom(vec![only(by_mode(WhatAmIMatcher::empty().peer()))])
-    }
 
     /// Arm `(None, None)`: no rule and no announcement, the auto table.
     #[test]
@@ -581,16 +378,6 @@ mod tests {
         );
     }
 
-    /// Arm `(Some(South), None)`: our rule puts it in a subregion, it announced
-    /// nothing, so it is in that subregion and north-bound.
-    #[test]
-    fn arm_our_rule_puts_it_south_and_it_announced_nothing() {
-        assert_eq!(
-            region_of(Router, &custom_south_peers(), &facts(&ZID_A, Peer), None),
-            Ok((Region::South { id: 0, mode: Peer }, Bound::North))
-        );
-    }
-
     /// Arm `(None, Some(North))`: no rule of ours, the remote calls us north. The
     /// auto table must agree the remote is north-bound, else the pin refuses.
     #[test]
@@ -614,83 +401,6 @@ mod tests {
             ),
             Err(RegionError::RemoteCustomConflictsWithAuto),
             "the auto table calls a router north of a client, remote bound south"
-        );
-    }
-
-    /// Arm `(Some(North), None)`: our rule puts it north. The auto table must not
-    /// put it in a subregion, else the pin refuses.
-    #[test]
-    fn arm_our_rule_puts_it_north_and_the_auto_table_must_not_put_it_south() {
-        let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
-        assert_eq!(
-            region_of(Peer, &to_north, &facts(&ZID_A, Router), None),
-            Ok((Region::North, Bound::South)),
-            "a router is north of a peer in the auto table, remote bound south"
-        );
-        assert_eq!(
-            region_of(Router, &to_north, &facts(&ZID_A, Peer), None),
-            Err(RegionError::AutoConflictsWithCustom),
-            "the auto table would put a peer south of a router"
-        );
-    }
-
-    /// Arm `(Some(North), Some(North))`: both ends call the other north, which is
-    /// valid only between nodes of one mode.
-    #[test]
-    fn arm_both_ends_north_needs_equal_modes() {
-        let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
-        assert_eq!(
-            region_of(
-                Router,
-                &to_north,
-                &facts(&ZID_A, Router),
-                Some(Bound::North)
-            ),
-            Ok((Region::North, Bound::North))
-        );
-        assert_eq!(
-            region_of(Router, &to_north, &facts(&ZID_A, Peer), Some(Bound::North)),
-            Err(RegionError::NorthNorth {
-                mode: Router,
-                remote: Peer
-            })
-        );
-    }
-
-    /// Arm `(Some(South), Some(South))`: both ends put the other in a subregion.
-    #[test]
-    fn arm_both_ends_south_is_refused() {
-        assert_eq!(
-            region_of(
-                Router,
-                &custom_south_peers(),
-                &facts(&ZID_A, Peer),
-                Some(Bound::South)
-            ),
-            Err(RegionError::SouthSouth)
-        );
-    }
-
-    /// Arms `(Some(North), Some(South))` and `(Some(South), Some(North))`: the two
-    /// ends agree on the boundary, the node's rule places the remote and the
-    /// remote's announcement is its bound.
-    #[test]
-    fn arm_the_ends_agree_on_a_boundary() {
-        assert_eq!(
-            region_of(
-                Router,
-                &custom_south_peers(),
-                &facts(&ZID_A, Peer),
-                Some(Bound::North)
-            ),
-            Ok((Region::South { id: 0, mode: Peer }, Bound::North)),
-            "our rule: south; remote: north of it"
-        );
-        let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
-        assert_eq!(
-            region_of(Peer, &to_north, &facts(&ZID_A, Router), Some(Bound::South)),
-            Ok((Region::North, Bound::South)),
-            "our rule: north; remote: south of it"
         );
     }
 
@@ -722,5 +432,305 @@ mod tests {
             RegionError::ClientClient.to_string(),
             "North-north client-client configuration (invalid)"
         );
+    }
+
+    /// The rules of a partitioned south, which only a build with `south-subregions` states.
+    #[cfg(feature = "south-subregions")]
+    mod subregions {
+        use alloc::vec;
+
+        use super::*;
+
+        const ZID_B: [u8; 4] = [0xbb; 4];
+
+        fn only(filter: RegionFilter) -> SouthSubregion {
+            SouthSubregion {
+                filters: Some(vec![filter]),
+            }
+        }
+
+        fn by_zid(zid: &[u8]) -> RegionFilter {
+            RegionFilter {
+                zids: Some(vec![zid.to_vec()]),
+                ..RegionFilter::default()
+            }
+        }
+
+        fn by_mode(modes: WhatAmIMatcher) -> RegionFilter {
+            RegionFilter {
+                modes: Some(modes),
+                ..RegionFilter::default()
+            }
+        }
+
+        /// A subregion whose filter list is this one filter.
+        fn passes(filter: &RegionFilter, remote: &RemoteFacts<'_>) -> bool {
+            matches_filters(Some(core::slice::from_ref(filter)), remote)
+        }
+
+        // ── the filters, field by field ──
+
+        /// No filter list matches every remote; an empty list matches none.
+        #[test]
+        fn a_missing_filter_list_matches_everyone_and_an_empty_one_nobody() {
+            let r = facts(&ZID_A, Peer);
+            assert!(matches_filters(None, &r));
+            assert!(!matches_filters(Some(&[]), &r));
+        }
+
+        /// Any filter of the list may match.
+        #[test]
+        fn a_remote_matching_any_one_filter_matches_the_list() {
+            let r = facts(&ZID_B, Peer);
+            let list = [by_zid(&ZID_A), by_zid(&ZID_B)];
+            assert!(matches_filters(Some(&list), &r));
+            assert!(!matches_filters(Some(&list[..1]), &r));
+        }
+
+        /// All fields of one filter must match, not any of them.
+        #[test]
+        fn every_present_field_of_a_filter_must_match() {
+            let both = RegionFilter {
+                zids: Some(vec![ZID_A.to_vec()]),
+                modes: Some(WhatAmIMatcher::empty().client()),
+                ..RegionFilter::default()
+            };
+            assert!(passes(&both, &facts(&ZID_A, Client)));
+            assert!(
+                !passes(&both, &facts(&ZID_A, Peer)),
+                "right zid, wrong mode"
+            );
+            assert!(
+                !passes(&both, &facts(&ZID_B, Client)),
+                "right mode, wrong zid"
+            );
+        }
+
+        /// `modes` is a set of roles.
+        #[test]
+        fn the_modes_field_is_a_role_set() {
+            let rp = by_mode(WhatAmIMatcher::empty().router().peer());
+            assert!(passes(&rp, &facts(&ZID_A, Router)));
+            assert!(passes(&rp, &facts(&ZID_A, Peer)));
+            assert!(!passes(&rp, &facts(&ZID_A, Client)));
+        }
+
+        /// `region_names` needs the remote to have announced a name among them.
+        #[test]
+        fn the_region_names_field_needs_an_announced_name() {
+            let f = RegionFilter {
+                region_names: Some(vec!["lab".to_string()]),
+                ..RegionFilter::default()
+            };
+            let named = |name| RemoteFacts {
+                region_name: name,
+                ..facts(&ZID_A, Peer)
+            };
+            assert!(passes(&f, &named(Some("lab"))));
+            assert!(!passes(&f, &named(Some("plant"))));
+            assert!(
+                !passes(&f, &named(None)),
+                "a remote that announced no name is in no named region"
+            );
+        }
+
+        /// `interfaces` is an ALL over the remote's interfaces, so a remote that
+        /// reports none satisfies any interface filter. That is upstream's reading.
+        #[test]
+        fn the_interfaces_field_requires_all_of_the_remotes_interfaces() {
+            let f = RegionFilter {
+                interfaces: Some(vec!["lo".to_string(), "eth0".to_string()]),
+                ..RegionFilter::default()
+            };
+            let on = |ifaces: &'static [&'static str]| RemoteFacts {
+                interfaces: ifaces,
+                ..facts(&ZID_A, Peer)
+            };
+            assert!(passes(&f, &on(&["lo"])));
+            assert!(passes(&f, &on(&["lo", "eth0"])));
+            assert!(
+                !passes(&f, &on(&["lo", "wlan0"])),
+                "one interface outside the list is enough to fail"
+            );
+            assert!(
+                passes(&f, &on(&[])),
+                "no interface is vacuously all of them"
+            );
+        }
+
+        /// A zid is matched as a zid, not as a byte string: the pin compares two
+        /// `ZenohIdProto`s, each a 16-byte id, so trailing zero bytes on either the
+        /// rule's or the remote's spelling do not make them two nodes.
+        #[test]
+        fn a_zid_matches_whatever_its_trailing_zero_bytes() {
+            let rule = by_zid(&[0x01]);
+            assert!(passes(&rule, &facts(&[0x01, 0x00], Peer)));
+            let padded = by_zid(&[0x01, 0x00, 0x00]);
+            assert!(passes(&padded, &facts(&[0x01], Peer)));
+            assert!(
+                !passes(&rule, &facts(&[0x00, 0x01], Peer)),
+                "a leading zero byte is part of the id"
+            );
+        }
+
+        /// `negated` inverts the verdict of the fields.
+        #[test]
+        fn negation_inverts_a_filters_verdict() {
+            let not_a = RegionFilter {
+                negated: true,
+                ..by_zid(&ZID_A)
+            };
+            assert!(!passes(&not_a, &facts(&ZID_A, Peer)));
+            assert!(passes(&not_a, &facts(&ZID_B, Peer)));
+        }
+
+        /// The first matching subregion wins, carries the remote's own mode, and a
+        /// remote no subregion matches is in the north region.
+        #[test]
+        fn a_remote_is_in_the_first_matching_subregion_or_the_north() {
+            let partition = SouthPartition::Custom(vec![
+                only(by_zid(&ZID_A)),
+                only(by_mode(WhatAmIMatcher::empty().peer())),
+            ]);
+            let region =
+                |zid: &[u8], mode| transient_region_of(Router, &partition, &facts(zid, mode));
+            assert_eq!(
+                region(&ZID_A, Peer),
+                Ok(Some(Region::South { id: 0, mode: Peer })),
+                "matches both; the first wins"
+            );
+            assert_eq!(
+                region(&ZID_B, Peer),
+                Ok(Some(Region::South { id: 1, mode: Peer }))
+            );
+            assert_eq!(
+                region(&ZID_A, Client),
+                Ok(Some(Region::South {
+                    id: 0,
+                    mode: Client
+                })),
+                "the subregion holds the remote's own mode"
+            );
+            assert_eq!(region(&ZID_B, Client), Ok(Some(Region::North)));
+            assert_eq!(
+                transient_bound_of(Router, &partition, &facts(&ZID_B, Peer)),
+                Ok(Some(Bound::South))
+            );
+            assert_eq!(
+                transient_bound_of(Router, &partition, &facts(&ZID_B, Client)),
+                Ok(Some(Bound::North))
+            );
+        }
+
+        /// A router remote may be put in a subregion only by a router.
+        #[test]
+        fn a_router_remote_is_a_subregion_member_only_of_a_router() {
+            let partition = SouthPartition::Custom(vec![SouthSubregion::default()]);
+            let r = facts(&ZID_A, Router);
+            assert_eq!(
+                transient_region_of(Router, &partition, &r),
+                Ok(Some(Region::South {
+                    id: 0,
+                    mode: Router
+                }))
+            );
+            for mode in [Peer, Client] {
+                assert_eq!(
+                    transient_region_of(mode, &partition, &r),
+                    Err(RegionError::RouterSubregionOfNonRouter)
+                );
+            }
+        }
+
+        fn custom_south_peers() -> SouthPartition {
+            SouthPartition::Custom(vec![only(by_mode(WhatAmIMatcher::empty().peer()))])
+        }
+
+        /// Arm `(Some(South), None)`: our rule puts it in a subregion, it announced
+        /// nothing, so it is in that subregion and north-bound.
+        #[test]
+        fn arm_our_rule_puts_it_south_and_it_announced_nothing() {
+            assert_eq!(
+                region_of(Router, &custom_south_peers(), &facts(&ZID_A, Peer), None),
+                Ok((Region::South { id: 0, mode: Peer }, Bound::North))
+            );
+        }
+
+        /// Arm `(Some(North), None)`: our rule puts it north. The auto table must not
+        /// put it in a subregion, else the pin refuses.
+        #[test]
+        fn arm_our_rule_puts_it_north_and_the_auto_table_must_not_put_it_south() {
+            let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
+            assert_eq!(
+                region_of(Peer, &to_north, &facts(&ZID_A, Router), None),
+                Ok((Region::North, Bound::South)),
+                "a router is north of a peer in the auto table, remote bound south"
+            );
+            assert_eq!(
+                region_of(Router, &to_north, &facts(&ZID_A, Peer), None),
+                Err(RegionError::AutoConflictsWithCustom),
+                "the auto table would put a peer south of a router"
+            );
+        }
+
+        /// Arm `(Some(North), Some(North))`: both ends call the other north, which is
+        /// valid only between nodes of one mode.
+        #[test]
+        fn arm_both_ends_north_needs_equal_modes() {
+            let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
+            assert_eq!(
+                region_of(
+                    Router,
+                    &to_north,
+                    &facts(&ZID_A, Router),
+                    Some(Bound::North)
+                ),
+                Ok((Region::North, Bound::North))
+            );
+            assert_eq!(
+                region_of(Router, &to_north, &facts(&ZID_A, Peer), Some(Bound::North)),
+                Err(RegionError::NorthNorth {
+                    mode: Router,
+                    remote: Peer
+                })
+            );
+        }
+
+        /// Arm `(Some(South), Some(South))`: both ends put the other in a subregion.
+        #[test]
+        fn arm_both_ends_south_is_refused() {
+            assert_eq!(
+                region_of(
+                    Router,
+                    &custom_south_peers(),
+                    &facts(&ZID_A, Peer),
+                    Some(Bound::South)
+                ),
+                Err(RegionError::SouthSouth)
+            );
+        }
+
+        /// Arms `(Some(North), Some(South))` and `(Some(South), Some(North))`: the two
+        /// ends agree on the boundary, the node's rule places the remote and the
+        /// remote's announcement is its bound.
+        #[test]
+        fn arm_the_ends_agree_on_a_boundary() {
+            assert_eq!(
+                region_of(
+                    Router,
+                    &custom_south_peers(),
+                    &facts(&ZID_A, Peer),
+                    Some(Bound::North)
+                ),
+                Ok((Region::South { id: 0, mode: Peer }, Bound::North)),
+                "our rule: south; remote: north of it"
+            );
+            let to_north = SouthPartition::Custom(vec![only(by_zid(&ZID_B))]);
+            assert_eq!(
+                region_of(Peer, &to_north, &facts(&ZID_A, Router), Some(Bound::South)),
+                Ok((Region::North, Bound::South)),
+                "our rule: north; remote: south of it"
+            );
+        }
     }
 }

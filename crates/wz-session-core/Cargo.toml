@@ -54,6 +54,7 @@ default = [
     "keyexpr-includes",
     "request-put-del",
     "log",
+    "south-subregions",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -64,6 +65,15 @@ default = [
 # its log calls out unless a level is chosen when it is built. On by default, for the runtimes that
 # install a logger; a build that takes the crate without its defaults and wants the records names it.
 log = []
+
+# `south-subregions`: a node whose south is a list of subregions a remote is placed in by rule (the
+# pin's `gateway/south` given as a list): `region_partition::SouthPartition::Custom`, its filters,
+# and the bound a session decides from them and announces on its Open. Without it the one partition
+# is `Auto`, which places no remote by a rule, so a session announces no bound, as zenoh-pico's never
+# does; the peer's region name and the bound it announces are still read and refused when malformed.
+# It needs the heap profile, a rule being owned text and zids. On by default; named by the runtime
+# and the C ABI engine that read a partition from a config.
+south-subregions = ["alloc"]
 
 # The Put and Del bodies of a Request, which zenoh-pico's decoder takes and zenoh 1.10.1's does not
 # (its `RequestBody` has the Query alone): the arms of `wz-codecs/request-put-del` and the code that
