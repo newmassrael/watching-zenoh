@@ -2303,8 +2303,6 @@ pub mod chain_staging;
 /// binary carries, and a return type gated more narrowly than its function
 /// breaks precisely the feature arm between the two — measured, on
 /// `--features dissect` without `reassembly`.
-// Totality debt TD-112 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod chain_loss;
 
 #[cfg(feature = "reassembly")]

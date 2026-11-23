@@ -37,7 +37,7 @@ pub struct ChainLoss {
 impl ChainLoss {
     /// Fold another sweep's loss in.
     pub fn absorb(&mut self, other: Self) {
-        self.chains += other.chains;
-        self.bytes += other.bytes;
+        self.chains = self.chains.saturating_add(other.chains);
+        self.bytes = self.bytes.saturating_add(other.bytes);
     }
 }
