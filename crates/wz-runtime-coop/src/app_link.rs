@@ -2211,7 +2211,7 @@ mod tests {
         }) else {
             panic!("the accepted source waits on the listener");
         };
-        let socket = AppDatagramSocket::accepted(&transport, handle, peer);
+        let socket = AppDatagramSocket::accepted(&transport, &wait::Waits::new(), handle, peer);
         // The program names another source, and then none: both are the accepted source's.
         transport
             .received(handle, b"one", Some("udp/203.0.113.7:9"))

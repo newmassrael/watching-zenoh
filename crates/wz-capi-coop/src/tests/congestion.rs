@@ -16,15 +16,26 @@ use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
 use crate::engine::{Holder, LinkRooms, Room};
 
-/// The waits of a test stack: the room each face's handle answers, as the test set it, and how
-/// long each ask of it was for.
+/// One face's handle in a test stack: the room it answers, as the test set it, and how long each
+/// ask of it was for.
+struct Face {
+    handle: usize,
+    room: bool,
+    asked: Vec<u64>,
+}
+
+/// The waits of a test stack: its faces' handles.
 #[derive(Clone, Default)]
-struct Answers(Arc<Mutex<Vec<(usize, bool, Vec<u64>)>>>);
+struct Answers(Arc<Mutex<Vec<Face>>>);
 
 impl Answers {
     /// A face's handle, `handle`, whose room answers `room`.
     fn face(&self, handle: usize, room: bool) -> WaitOn {
-        self.0.lock().unwrap().push((handle, room, Vec::new()));
+        self.0.lock().unwrap().push(Face {
+            handle,
+            room,
+            asked: Vec::new(),
+        });
         WaitOn::Socket(handle)
     }
 
@@ -34,8 +45,8 @@ impl Answers {
             .lock()
             .unwrap()
             .iter()
-            .find(|(held, ..)| *held == handle)
-            .map(|(.., asked)| asked.clone())
+            .find(|face| face.handle == handle)
+            .map(|face| face.asked.clone())
             .unwrap_or_default()
     }
 }
@@ -48,10 +59,10 @@ impl LinkWaits for Answers {
             return true;
         };
         let mut faces = self.0.lock().unwrap();
-        match faces.iter_mut().find(|(held, ..)| *held == handle) {
-            Some((_, room, asked)) => {
-                asked.push(timeout_us);
-                *room
+        match faces.iter_mut().find(|face| face.handle == handle) {
+            Some(face) => {
+                face.asked.push(timeout_us);
+                face.room
             }
             None => true,
         }
