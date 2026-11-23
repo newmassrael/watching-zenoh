@@ -1121,14 +1121,16 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         1,
         "zenoh-pico accepts one link at a time"
     );
+    // What a peer writes keeps the build's bounds: the peer decides how much it sends, and
+    // zenoh-pico takes each as it comes.
     for id in [
         "MAX_REMOTE_DECLS",
         "MAX_PEER_KEYEXPR_ALIASES",
         "MAX_INBOUND_SUB_INTERESTS",
     ] {
         assert!(
-            preset_of(&presets, id).is_some(),
-            "the generated Kconfig states the pico preset of {id}"
+            preset_of(&presets, id).is_none(),
+            "the pico preset lowers no limit of what a peer writes, {id}"
         );
     }
     let limits = pico_preset_limits();

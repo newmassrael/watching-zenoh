@@ -2830,10 +2830,6 @@ the subscribers of the moment, not the later ones.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the interests of its peers a session remembers."
 
-[limit.pico_preset]
-value = 3
-reason = "zenoh-pico keeps the interests its peers declare in a list on the heap with no count; one is remembered for each publisher a peer holds with a write filter, and the default is sized against MAX_SUBSCRIPTIONS, so the preset is that limit's preset, the three subscribers its API tests hold on one session (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_declare_subscriber(z_session_loan(&s2), &sub2, z_view_keyexpr_loan(&k_pub),`)."
-
 [[limit]]
 id = "MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"
@@ -2859,10 +2855,6 @@ that names it is dropped, as one naming an undeclared id is.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: zenoh holds the key ids a peer declared in a map of its face that grows with each declaration."
 cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico keeps the key ids a peer declares in a list on the heap with no count. The default holds as many as MAX_REMOTE_DECLS, and so does the preset: a peer of the preset names at most one key for each declaration of one kind it holds."
 
 [[limit]]
 id = "MAX_SHARED_KEY_IDS"
@@ -2912,10 +2904,6 @@ counted, and the application is not told of it.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds the declarations of its peers in maps that grow with each one."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) remote_subscribers: HashMap<SubscriberId, KeyExpr<'static>>,`", "`zenoh/src/api/session.rs` @ `pub(crate) remote_queryables: HashMap<Id, (KeyExpr<'static>, bool)>,`"]
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico keeps the subscribers, queryables and tokens its peers declare in lists on the heap with no count; the most of one kind one of its sessions is told of at once is the four queryables the other session of a matching test declares (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `void test_matching_listener_querier(bool complete, bool background) {`), the most of one kind a peer of the preset declares (MAX_QUERYABLES), against three subscribers and two tokens."
 
 [[limit]]
 id = "MAX_PENDING_REPLIES"
