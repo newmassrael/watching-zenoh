@@ -141,6 +141,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,6 +675,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,10 +1167,12 @@ dependencies = [
 name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
+ "log",
  "portable-atomic",
  "sce-forge-runtime",
  "wz-capi-port",
  "wz-runtime-coop",
+ "wz-runtime-posix",
  "wz-session-core",
  "wz-session-mcu",
 ]
@@ -1146,6 +1185,7 @@ dependencies = [
  "tokio",
  "wz-capi-port",
  "wz-codecs",
+ "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio",
  "wz-session-core",
@@ -1159,6 +1199,27 @@ dependencies = [
  "wz-cdylib-build",
  "wz-session-core",
  "wz-tls-record",
+]
+
+[[package]]
+name = "wz-capi-pico"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "libc",
+ "windows-sys 0.61.2",
+ "wz-abi-stamp",
+ "wz-app-frame",
+ "wz-capi-coop",
+ "wz-capi-core",
+ "wz-capi-port",
+ "wz-cdylib-build",
+ "wz-codecs",
+ "wz-conformance-build",
+ "wz-ext-pubsub",
+ "wz-node-time",
+ "wz-runtime-posix",
+ "wz-session-core",
 ]
 
 [[package]]
@@ -1210,6 +1271,8 @@ dependencies = [
 name = "wz-ext-pubsub"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
+ "hashbrown 0.15.5",
  "log",
  "wz-capi-port",
  "wz-node-time",
@@ -1248,6 +1311,15 @@ name = "wz-fuzz-ingress-common"
 version = "0.1.0"
 dependencies = [
  "wz-session-wire-fixtures",
+]
+
+[[package]]
+name = "wz-fuzz-pico-ext"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "wz-capi-pico",
+ "wz-fuzz-ingress-common",
 ]
 
 [[package]]
@@ -1334,11 +1406,23 @@ name = "wz-runtime-core"
 version = "0.1.0"
 
 [[package]]
+name = "wz-runtime-posix"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "windows-sys 0.61.2",
+ "wz-runtime-coop",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
  "allocator-api2",
  "arc-swap",
+ "futures-util",
  "getrandom 0.2.17",
  "hashbrown 0.15.5",
  "libc",
@@ -1357,6 +1441,7 @@ dependencies = [
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-storage",
  "zeroize",
 ]
 
@@ -1395,6 +1480,14 @@ dependencies = [
 [[package]]
 name = "wz-session-wire-fixtures"
 version = "0.1.0"
+
+[[package]]
+name = "wz-storage"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "wz-session-core",
+]
 
 [[package]]
 name = "wz-tls-record"

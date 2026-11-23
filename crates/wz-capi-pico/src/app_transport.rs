@@ -347,9 +347,10 @@ pub unsafe extern "C" fn wz_ext_config_transport(
 /// came from, NUL-terminated, or NULL. The bytes are copied before this returns.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport, or NULL data with a length; Z_EINVAL for a source that
-/// is not UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold;
+/// is not UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never
+/// gave, or a link the session let go whose close on the program has returned);
 /// WZ_EXT_ERR_LINK_NOT_OPEN before the link is up; WZ_EXT_ERR_LINK_CLOSED once it is closing or
-/// closed; WZ_EXT_ERR_LINK_KIND for a listener.
+/// closed and still held; WZ_EXT_ERR_LINK_KIND for a listener.
 ///
 /// # Safety
 /// `transport` is null or a loan of a live transport; `data` is null or `len` readable bytes;
@@ -391,7 +392,8 @@ pub unsafe extern "C" fn wz_ext_transport_received(
 /// The program says `event` happened to `link`.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event; WZ_EXT_ERR_LINK_UNKNOWN for
-/// a link the transport does not hold; WZ_EXT_ERR_LINK_CLOSED for a link already closed.
+/// a link the transport does not hold (as `wz_ext_transport_received` says);
+/// WZ_EXT_ERR_LINK_CLOSED for a link already closed and still held.
 ///
 /// # Safety
 /// `transport` is null or a loan of a live transport.
@@ -423,7 +425,8 @@ pub unsafe extern "C" fn wz_ext_transport_event(
 /// stream from here on.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport, remote or out_link; Z_EINVAL for a remote that is not
-/// UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a listener the transport does not hold;
+/// UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a listener the transport does not hold (as
+/// `wz_ext_transport_received` says);
 /// WZ_EXT_ERR_LINK_NOT_OPEN before it is listening; WZ_EXT_ERR_LINK_CLOSED once it is closing or
 /// closed; WZ_EXT_ERR_LINK_KIND for a link that is not a listener. `*out_link` is 0 on every
 /// error.

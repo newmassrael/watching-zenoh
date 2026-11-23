@@ -9,7 +9,8 @@
 #
 #   bash scripts/verify.sh coverage                 the units' tests instrumented; the merged export
 #   bash scripts/verify.sh tsan tests|programs      the units' tests, or the C programs, under ThreadSanitizer
-#   bash scripts/verify.sh asan tests|programs      the same under AddressSanitizer
+#   bash scripts/verify.sh asan tests|programs      the same under AddressSanitizer; each C program
+#                                                   then again under UndefinedBehaviorSanitizer
 #   bash scripts/verify.sh miri                     the interpreter's units
 #   bash scripts/verify.sh units LANE               print the lane's units as they resolve
 #
@@ -102,7 +103,7 @@ passed_in() {
 # for the process cargo started; this reads the report of a child process a test started and did
 # not judge.
 reported_in() {
-    grep -Eq '(WARNING|ERROR): (ThreadSanitizer|AddressSanitizer|LeakSanitizer)|SUMMARY: (ThreadSanitizer|AddressSanitizer)' "$1"
+    grep -Eq '(WARNING|ERROR): (ThreadSanitizer|AddressSanitizer|LeakSanitizer)|SUMMARY: (ThreadSanitizer|AddressSanitizer|UndefinedBehaviorSanitizer)|: runtime error: ' "$1"
 }
 
 # Run one unit's tests, streamed and kept in LOG:
@@ -218,10 +219,15 @@ coverage() {
 
 # The C programs of verify_plan.py --programs, each built against the library made with the
 # sanitizer and run (scripts/pico-c-program.sh under WZ_PICO_SANITIZER): the package's build, the
-# cooperative engine with the profile's capabilities.
+# cooperative engine with the profile's capabilities. Under AddressSanitizer each program is run
+# again under the C compiler's UndefinedBehaviorSanitizer, which instruments the program alone and
+# links the library built without a sanitizer, so that run sees none of the lane's flags.
 programs() {
-    local lane="$1" sanitizer="$2" features listing line program what log rc fail=0 ran=0
-    local -a program_lines=()
+    local lane="$1" sanitizer="$2" features listing line program what log rc fail=0 ran=0 pass
+    local -a program_lines=() passes=("$sanitizer")
+    if [[ "$sanitizer" == address ]]; then
+        passes+=(undefined)
+    fi
     bash "$repo_root/scripts/provision-kconfiglib.sh"
     if ! features="$(cd "$repo_root" && plain python3 "$plan_py" --library-features)"; then
         echo "verify.sh: the C library's capabilities did not resolve" >&2
@@ -230,25 +236,33 @@ programs() {
     listing="$(python3 "$plan_py" --programs)"
     mapfile -t program_lines <<<"$listing"
     mkdir -p "$out_home/$lane"
-    for line in "${program_lines[@]}"; do
-        IFS='|' read -r program what <<<"$line"
-        log="$out_home/$lane/program-$(basename "${program%.c}").log"
-        set +e
-        (cd "$repo_root" && WZ_PICO_ENGINE=coop WZ_PICO_SANITIZER="$sanitizer" WZ_EXAMPLE_GROUP_IFACE=lo \
-            bash scripts/pico-c-program.sh "$program" "$what" "$features") 2>&1 | tee "$log"
-        rc=${PIPESTATUS[0]}
-        set -e
-        if ((rc != 0)); then
-            echo "verify.sh: FAIL $lane $program -- exit $rc; log $log" >&2
-            fail=1
-        elif reported_in "$log"; then
-            echo "verify.sh: FAIL $lane $program -- a sanitizer reported; log $log" >&2
-            fail=1
-        else
-            ran=$((ran + 1))
-        fi
+    for pass in "${passes[@]}"; do
+        for line in "${program_lines[@]}"; do
+            IFS='|' read -r program what <<<"$line"
+            log="$out_home/$lane/program-$(basename "${program%.c}")-$pass.log"
+            set +e
+            if [[ "$pass" == "$sanitizer" ]]; then
+                (cd "$repo_root" && WZ_PICO_ENGINE=coop WZ_PICO_SANITIZER="$pass" WZ_EXAMPLE_GROUP_IFACE=lo \
+                    bash scripts/pico-c-program.sh "$program" "$what" "$features") 2>&1 | tee "$log"
+            else
+                (cd "$repo_root" && plain env WZ_PICO_ENGINE=coop WZ_PICO_SANITIZER="$pass" \
+                    WZ_EXAMPLE_GROUP_IFACE=lo UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
+                    bash scripts/pico-c-program.sh "$program" "$what" "$features") 2>&1 | tee "$log"
+            fi
+            rc=${PIPESTATUS[0]}
+            set -e
+            if ((rc != 0)); then
+                echo "verify.sh: FAIL $lane $pass $program -- exit $rc; log $log" >&2
+                fail=1
+            elif reported_in "$log"; then
+                echo "verify.sh: FAIL $lane $pass $program -- a sanitizer reported; log $log" >&2
+                fail=1
+            else
+                ran=$((ran + 1))
+            fi
+        done
     done
-    echo "verify.sh: $lane -- $ran of ${#program_lines[@]} C program(s) passed"
+    echo "verify.sh: $lane -- $ran of $((${#program_lines[@]} * ${#passes[@]})) C program run(s) passed"
     return "$fail"
 }
 

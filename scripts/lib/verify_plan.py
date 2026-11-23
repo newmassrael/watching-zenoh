@@ -162,6 +162,7 @@ PROGRAMS: tuple[tuple[str, str], ...] = (
     ("crates/wz-capi-pico/examples/c/profiles.c", "example of pub/sub and query under profiles"),
     ("crates/wz-capi-pico/examples/c/transports.c", "example of tcp, udp and a group"),
     ("crates/wz-capi-pico/tests/c/pico_app_transport.c", "a transport the program supplies"),
+    ("crates/wz-capi-pico/tests/c/pico_app_transport_dial.c", "a dial over the program's transport, woken by its report"),
     ("crates/wz-capi-pico/examples/c/own_transport.c", "a network stack of the program's own"),
     ("crates/wz-capi-pico/examples/c/batching.c", "batching on and off with a flush"),
     ("crates/wz-capi-pico/examples/c/e2e.c", "end-to-end protection across a session"),

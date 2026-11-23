@@ -10,6 +10,10 @@ copy of them.
     fuzz_seeds.py --targets              print the targets, one a line
     fuzz_seeds.py --packages             print each target and the package it is a binary of
     fuzz_seeds.py --reads <target>       print the target whose corpus <target> also reads
+    fuzz_seeds.py --features-of <package>
+                                         print the features a package is built with, resolved
+                                         (empty for a package whose manifest states them)
+    fuzz_seeds.py --resolved-packages    print the packages whose features are resolved
     fuzz_seeds.py --selftest             check every target writes seeds
 
 Each seed is the input layout its target's header comment states:
@@ -28,11 +32,18 @@ Each seed is the input layout its target's header comment states:
   and the sender calls of `crates/wz-capi-c/tests/e2e_sender_roundtrip.rs`,
   written here in the target's layout.
 - `ingress_frames`, `codec_roundtrip`, `session_unicast`, `slot_session`,
-  `coop_read`: a few bytes of arguments, then the units a session reads off
-  its link, each behind its two-byte little-endian length: each UDP payload of
-  the captures is one, a TCP payload holds them already framed so, and a few
-  written here (an empty Frame each way, a KeepAlive) stand for a capture
-  that holds none.
+  `coop_read`, `pico_transport`: a few bytes of arguments, then the units a
+  session reads off its link, each behind its two-byte little-endian length:
+  each UDP payload of the captures is one, a TCP payload holds them already
+  framed so, and a few written here (an empty Frame each way, a KeepAlive)
+  stand for a capture that holds none.
+- `pico_config`, `pico_e2e`, `pico_instance_key`, `pico_catalog`,
+  `pico_payload`: the pico C ABI's own doors, with the documents, profiles,
+  schemas and catalogs the crate's own tests use (`crates/wz-capi-pico/tests`,
+  `crates/wz-app-frame/catalog/synthetic.json5`, the `.proto` files of
+  `crates/wz-capture/testdata/nanopb/`), written here in the target's layout:
+  arguments, texts each to a NUL, then operations each behind its two-byte
+  little-endian length.
 
 The output is a pure function of the tree: names are the SHA-256 of the
 bytes, so writing twice changes nothing.
@@ -43,6 +54,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import pathlib
+import re
 import struct
 import sys
 
@@ -60,7 +72,13 @@ MAX_PAYLOADS = 256
 # walks and engines behind them.
 INGRESS = ("ingress_frames", "codec_roundtrip", "session_unicast", "slot_session", "coop_read")
 
-TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender", "selector_term", *INGRESS)
+# The targets of the pico C ABI's own doors (`wz_ext_*`), built as the release
+# package builds the library (`crates/wz-fuzz/pico-ext`). `pico_transport`
+# reads its input as an ingress target does.
+PICO_EXT = ("pico_transport", "pico_config", "pico_e2e", "pico_instance_key", "pico_catalog", "pico_payload")
+
+TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender", "selector_term",
+           *INGRESS, *PICO_EXT)
 
 # The package of the fuzz workspace each target is a binary of, where it is
 # not `wz-fuzz` itself. Cargo unifies the features of the packages one
@@ -72,8 +90,19 @@ PACKAGES = {
     "session_unicast": "wz-fuzz-session-heap",
     "slot_session": "wz-fuzz-session-slot",
     "coop_read": "wz-fuzz-coop-engine",
+    **{target: "wz-fuzz-pico-ext" for target in PICO_EXT},
 }
 DEFAULT_PACKAGE = "wz-fuzz"
+
+# The packages whose features are not written in their manifest but resolved
+# when they are built, and the manifest whose `[features]` forwards each name
+# to the library unchanged. The pico C ABI's own doors are fuzzed in the build
+# the release package makes, `configs/profiles/host-peer-ext.conf` resolved by
+# the resolver the verification lanes use (`verify_plan.Resolver.profile`), so
+# the targets follow the profile with no second copy of its list to drift.
+RESOLVED_PACKAGES = {"wz-fuzz-pico-ext": "crates/wz-fuzz/pico-ext/Cargo.toml"}
+# The library whose features the resolved packages forward.
+FORWARDED_TO = "wz-capi-pico"
 
 # How many units, and how many bytes of them, one ingress seed holds at most:
 # a session target steps its session a few times for each unit.
@@ -88,6 +117,9 @@ INGRESS_HEADS = {
     "session_unicast": (bytes([0]), bytes([5])),
     "slot_session": (bytes([0]), bytes([5])),
     "coop_read": (bytes([0]), bytes([5])),
+    # A stream handed in a unit at a time, a datagram link, a stream handed in
+    # seven bytes at a time.
+    "pico_transport": (bytes([0]), bytes([1]), bytes([7 << 1])),
 }
 
 # Units no capture is needed for: an empty reliable Frame, an empty
@@ -353,7 +385,7 @@ def derived(target: str) -> list[bytes]:
     if target == "live":
         # The six ways of opening a handle (`Feed`), in turn.
         return [bytes([n % 2, n % 6, 0, 128, 1, 1, 0, 0x44]) + c for n, c in enumerate(captures())]
-    if target in INGRESS:
+    if target in INGRESS or target == "pico_transport":
         heads = INGRESS_HEADS[target]
         return [heads[n % len(heads)] + stream for n, stream in enumerate(ingress_streams())]
     if target == "transport":
@@ -400,7 +432,247 @@ def derived(target: str) -> list[bytes]:
         # The choices byte, the first counter, the profile, the values, the payload.
         return [bytes([choices]) + struct.pack("<Q", first) + E2E_PROFILE + b"\0" + values + b"\0" + payload
                 for choices, first, values, payload in SENDERS]
+    if target in PICO_EXT:
+        return pico_ext_seeds(target)
     raise SystemExit(f"fuzz_seeds: no target `{target}`; the targets are {', '.join(TARGETS)}")
+
+# ─── the pico C ABI's own doors ─────────────────────────────────────────────
+
+# The catalog the reader's tests use, which the `pico_catalog` seeds are made
+# of and `pico_payload` makes its payloads for.
+SYNTHETIC_CATALOG = ROOT / "crates" / "wz-app-frame" / "catalog" / "synthetic.json5"
+
+# A profile whose identifier is judged and whose message cell names a sender
+# derived from the node's address, as the crate's door tests make one, and its
+# header values. Synthetic.
+E2E_JUDGED_PROFILE = b"""{
+  "name": "door-demo",
+  "fields": [
+    {"name": "length", "bytes": 2},
+    {"name": "ident", "bytes": 3, "xor": "0x3C3C3C",
+     "split": [{"name": "app", "lsb": 12, "width": 12}, {"name": "msg", "lsb": 0, "width": 12}]},
+    {"name": "crc", "bytes": 2},
+    {"name": "cell", "bytes": 4,
+     "split": [{"name": "kind", "lsb": 28, "width": 4},
+               {"name": "sender", "lsb": 0, "width": 28,
+                "derive": {"from": "address", "mask": "0x0F00FF00", "xor": "0x77"}}]},
+    {"name": "counter", "bytes": 2}
+  ],
+  "crc": {"field": "crc", "width": 16, "poly": "0x1021", "init": "0xFFFF",
+          "refin": false, "refout": false, "xorout": "0x0000",
+          "cover": ["length", "ident", "cell", "@payload", "counter"]},
+  "length": {"field": "length", "counts": "frame"},
+  "counter": {"field": "counter", "max_gap": 2, "timeout_ms": 50},
+  "judge": {"ident": "ident", "length": true},
+  "cell": {"field": "cell", "kind": "kind", "sender": "sender"}
+}"""
+E2E_JUDGED_VALUES = b'{"ident": {"app": 801, "msg": 99}, "cell": {"kind": 5}, "@address": 4660}'
+
+# The schema and the description of the instance keys' door tests: three bays
+# and two tilts, six instances. Synthetic.
+KEYED_SCHEMA = (
+    b'syntax = "proto3";\npackage syn.door;\n'
+    b"message Reading {\n  optional uint32 bay = 1;\n  sint32 tilt = 2;\n  bytes body = 3;\n}\n"
+)
+KEYED_DESCRIPTION = (
+    b'{"message": "syn.door.Reading", "fields": [{"path": "bay", "values": [12, 30, 44]}, '
+    b'{"path": "tilt", "values": [-3, 5]}], "report_interval_ms": 1000}'
+)
+
+# The schema of the message payloads' door tests. Synthetic.
+PAYLOAD_SCHEMA = (
+    b'syntax = "proto3";\npackage syn.door;\n'
+    b"enum Tone {\n  TONE_NONE = 0;\n  TONE_WARM = 1;\n  TONE_COLD = 2;\n}\n"
+    b"message Point {\n  sint32 x = 1;\n  sint32 y = 2;\n}\n"
+    b"message Pose {\n  uint32 serial = 1;\n  int32 offset = 2;\n  double weight = 3;\n  bool lit = 4;\n"
+    b"  string label = 5;\n  bytes blob = 6;\n  Tone tone = 7;\n  Point origin = 8;\n"
+    b"  repeated Point path = 9;\n  optional uint64 stamp = 10;\n}\n"
+)
+
+# The operations of the `pico_config` seeds: zenoh documents, policies,
+# profiles, key ids, key-wire forms, a runtime's limits, locators, and the
+# question of what an open would ask of the system (the target's header comment
+# states each op).
+CONFIG_OPS = (
+    b"\0" + b'{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }',
+    b"\0" + b'{ mode: "peer", wz: { profile: "upstream" } }',
+    b"\0" + b"{ wz: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
+    b"\0" + b"{ wz: { limits: { NO_SUCH_LIMIT: 1 } } }",
+    b"\0" + b"{ wz: {}, wz: {} }",
+    b"\0" + b"not a document",
+    b"\x01" + b"key-set\0closed\0",
+    b"\x01" + b"sn-resolution\0bits-16\0",
+    b"\x01" + b"no-such-policy\0on\0",
+    b"\x02" + b"upstream\0",
+    b"\x02" + b"no-such-profile\0",
+    b"\x03\x02" + struct.pack("<H", 40) + b"lab/rig\0" + struct.pack("<H", 41) + b"lab/rig/alpha\0",
+    b"\x03\x01" + struct.pack("<H", 0) + b"lab/a\0",
+    b"\x03\x00",
+    b"\x04" + b"tcp/192.0.2.7:7447\0declared\0",
+    b"\x04" + b"\0shared\0",
+    b"\x05" + b"{ wz: { limits: { MESSAGE_CATALOG_ENTRIES: 4 } } }",
+    b"\x05" + b'{ wz: { profile: "upstream" } }',
+    bytes([6 + 8]) + b"tcp/192.0.2.7:7447\0",
+    bytes([6 + 16]) + b"udp/192.0.2.8:7447\0",
+    bytes([6]) + b"peer\0",
+    b"\x07",
+)
+
+
+def varint(value: int) -> bytes:
+    """`value` as a protobuf varint."""
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value == 0:
+            out.append(byte)
+            return bytes(out)
+        out.append(byte | 0x80)
+
+
+def keyed_reading(bay: int, tilt: int, body: bytes) -> bytes:
+    """A `syn.door.Reading` of `bay` and `tilt` (zigzag, as `sint32` is) with `body`."""
+    zigzag = ((tilt << 1) ^ (tilt >> 31)) & 0xFFFFFFFF
+    return (varint(1 << 3) + varint(bay) + varint(2 << 3) + varint(zigzag)
+            + varint((3 << 3) | 2) + varint(len(body)) + body)
+
+
+def proto_messages(text: bytes) -> list[bytes]:
+    """The full names of the top-level messages a `.proto` text declares."""
+    package = re.search(rb"^\s*package\s+([\w.]+)\s*;", text, re.M)
+    prefix = package.group(1) + b"." if package else b""
+    return [prefix + name for name in re.findall(rb"^message\s+(\w+)", text, re.M)]
+
+
+def pico_ext_seeds(target: str) -> list[bytes]:
+    if target == "pico_config":
+        return [unit_stream(list(CONFIG_OPS)), unit_stream(list(CONFIG_OPS[6:])),
+                unit_stream([CONFIG_OPS[0], CONFIG_OPS[-1]]), unit_stream([CONFIG_OPS[-1]])]
+    if target == "pico_e2e":
+        def e2e(choices: int, first: int, gap: int, profile: bytes, values: bytes, ops: list[bytes]) -> bytes:
+            return (bytes([choices]) + struct.pack("<Q", first) + bytes([gap]) + profile + b"\0" + values
+                    + b"\0" + unit_stream(ops))
+        # Choices: bits 3 to 5 the streams, bit 2 the expected values, bit 1
+        # the CRC cache, bit 0 wrapping, bits 6 and 7 the judge's keying.
+        one, two, expected = 1 << 3, 2 << 3, 4
+        return [
+            e2e(one | expected, 0, 0, E2E_PROFILE, E2E_VALUES,
+                [b"\x01hi", b"\x01hi", b"\x00\x03\x12\x34\x07\x00\x08\x01\x02hi", b"\x02" + struct.pack("<Q", 5),
+                 b"\x01x"]),
+            e2e(two | expected | 3, 254, 2, E2E_PROFILE, E2E_VALUES, [b"\x01a", b"\x04b", b"\x01a", b"\x01a"]),
+            e2e(one | expected, 0, 0, E2E_JUDGED_PROFILE, E2E_JUDGED_VALUES, [b"\x01hello", b"\x00abc"]),
+            e2e(two | expected | (1 << 6), 0, 0, E2E_JUDGED_PROFILE, E2E_JUDGED_VALUES,
+                [b"\x01hello", b"\x00" + bytes(16)]),
+            e2e(two | expected | (2 << 6), 7, 0, E2E_JUDGED_PROFILE, E2E_JUDGED_VALUES, [b"\x01hello"]),
+            e2e(one, 0, 0, b"{}", b"{}", [b"\x00x"]),
+        ]
+    if target == "pico_instance_key":
+        def keyed(choices: int, ops: list[bytes]) -> bytes:
+            return (bytes([choices]) + b"door.proto\0" + KEYED_SCHEMA + b"\0" + KEYED_DESCRIPTION + b"\0"
+                    + unit_stream(ops))
+        ops = [b"\x00" + keyed_reading(12, -3, b"\0\0"), b"\x00" + keyed_reading(30, 5, b"x"), b"\x00\xff\xff",
+               b"\x01", b"\x03" + bytes([16]), b"\x07" + bytes([2]), b"\x02set", b"\x03" + bytes([16]),
+               b"\x00" + keyed_reading(99, -3, b""), b"\x05", b"\x00" + keyed_reading(44, 5, bytes(40))]
+        # Bit 0 keeps last values; bits 1 to 3 choose the room: 16 bytes, then 1.
+        return [keyed(1 | (4 << 1), ops), keyed(0, ops), keyed(1, ops)]
+    if target == "pico_catalog":
+        text = SYNTHETIC_CATALOG.read_bytes()
+        names = b"demo/catalog/pose\0south\0nobody\0"
+        return [text + b"\0" + names, text.replace(b"id: 402", b"id: 401") + b"\0" + names,
+                text.replace(b"replay_depth: 6", b"replay_depth: 100000") + b"\0", b"{}\0", b"not a catalog\0"]
+    if target == "pico_payload":
+        def payload(choices: int, message: bytes, name: bytes, text: bytes, ops: list[bytes]) -> bytes:
+            return bytes([choices]) + message + b"\0" + name + b"\0" + text + b"\0" + unit_stream(ops)
+        pose = b"\x08\x01" + b"\x2a\x02hi" + b"\x4a\x02\x08\x02" + b"\x50\x07"
+        ops = [b"\x00" + pose, b"\x01offset\0" + struct.pack("<q", -5), b"\x02serial\0" + struct.pack("<Q", 7),
+               b"\x03weight\0" + struct.pack("<d", 1.5), b"\x04lit\0\x01", b"\x05label\0hello\0",
+               b"\x05tone\0TONE_WARM\0", b"\x06blob\0\x01\x02", b"\x07label\0", b"\x07path[0].x\0", b"\x07path\0",
+               b"\x0fstamp\0", b"\x09offset\0" + struct.pack("<q", 3), b"\x10" + pose, b"\x00\xff"]
+        out = [payload(choices, b"syn.door.Pose", b"syn/door.proto", PAYLOAD_SCHEMA, ops) for choices in (0, 1, 4, 2)]
+        for path in sorted(PROTOS.glob("*.proto")):
+            text = path.read_bytes()
+            for message in proto_messages(text)[:1]:
+                out.append(payload(0, message, path.name.encode(), text, [b"\x00\x08\x01", b"\x07a\0"]))
+        return out
+    raise SystemExit(f"fuzz_seeds: no seeds of `{target}`")
+
+
+class FeatureError(Exception):
+    """A package's features that cannot be resolved, said in a sentence."""
+
+
+def forwarded(manifest: str) -> dict[str, list[str]]:
+    """The `[features]` table of a manifest's text: each feature and the names it lists, each row on
+    one line, as the resolved packages write theirs."""
+    out: dict[str, list[str]] = {}
+    inside = False
+    for line in manifest.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            inside = stripped == "[features]"
+            continue
+        if not inside or not stripped or stripped.startswith("#"):
+            continue
+        name, sep, value = stripped.partition("=")
+        value = value.strip()
+        if not sep or not value.startswith("[") or not value.endswith("]"):
+            raise FeatureError(f"a [features] row that is not `name = [...]` on one line: {line}")
+        out[name.strip()] = re.findall(r'"([^"]*)"', value)
+    return out
+
+
+def forwarding_findings(table: dict[str, list[str]]) -> list[str]:
+    """The rows of a resolved package's `[features]` that do not forward their own name."""
+    if not table:
+        return ["the manifest forwards no feature"]
+    return [f"`{name}` names {names}, not [\"{FORWARDED_TO}/{name}\"]" for name, names in table.items()
+            if names != [f"{FORWARDED_TO}/{name}"]]
+
+
+def features_of(package: str) -> str:
+    """The features `package` is built with, comma separated: the release profile's, for a package of
+    `RESOLVED_PACKAGES`, and none for a package whose manifest states its own."""
+    manifest = RESOLVED_PACKAGES.get(package)
+    if manifest is None:
+        return ""
+    table = forwarded((ROOT / manifest).read_text(encoding="utf-8"))
+    findings = forwarding_findings(table)
+    if findings:
+        raise FeatureError(f"{manifest}: " + "; ".join(findings))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from verify_plan import Refused, Resolver  # noqa: E402  (a sibling: the one resolver of the profile)
+
+    try:
+        wanted = Resolver().profile()[2].split(",")
+    except Refused as error:
+        raise FeatureError(str(error)) from None
+    missing = [feature for feature in wanted if feature not in table]
+    if missing:
+        raise FeatureError(f"the release profile names {', '.join(missing)}, which {manifest} does not forward: "
+                           f"add a row `<name> = [\"{FORWARDED_TO}/<name>\"]` for each")
+    return ",".join(wanted)
+
+
+def resolved_findings() -> list[str]:
+    """What is wrong with the resolved packages' manifests, read without resolving the profile: each
+    forwards every feature under its own name, and builds every target `PACKAGES` gives it."""
+    findings: list[str] = []
+    for package, manifest in RESOLVED_PACKAGES.items():
+        path = ROOT / manifest
+        if not path.is_file():
+            findings.append(f"{package}: {manifest} does not exist")
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            findings += [f"{manifest}: {f}" for f in forwarding_findings(forwarded(text))]
+        except FeatureError as error:
+            findings.append(f"{manifest}: {error}")
+        bins = set(re.findall(r'^name = "([^"]+)"', text, re.M))
+        for target, owner in PACKAGES.items():
+            if owner == package and target not in bins:
+                findings.append(f"{manifest}: builds no target `{target}`")
+    return findings
 
 
 def write(target: str, out_dir: pathlib.Path) -> int:
@@ -438,6 +710,26 @@ def selftest() -> int:
             print(f"fuzz_seeds: FAIL -- target `{target}` has no seed", file=sys.stderr)
             return 1
         print(f"fuzz_seeds: {target}: {count} seed(s)")
+    # The packages built with a resolved feature list forward each feature
+    # under its own name and build their targets; read without the resolver.
+    findings = resolved_findings()
+    for finding in findings:
+        print(f"fuzz_seeds: FAIL -- {finding}", file=sys.stderr)
+    if findings:
+        return 1
+    for text, needle in (("[features]\nx = [\n  \"y\",\n]\n", "one line"),):
+        try:
+            forwarded(text)
+        except FeatureError as error:
+            assert needle in str(error), str(error)
+        else:
+            print("fuzz_seeds: FAIL -- a [features] row on several lines was read", file=sys.stderr)
+            return 1
+    table = forwarded("[package]\nname = \"p\"\n[features]\n# a note\na = [\"wz-capi-pico/a\"]\n"
+                      "b = [\"wz-capi-pico/c\"]\n[dependencies]\nd = \"1\"\n")
+    if table != {"a": ["wz-capi-pico/a"], "b": ["wz-capi-pico/c"]} or len(forwarding_findings(table)) != 1:
+        print(f"fuzz_seeds: FAIL -- the [features] reader read {table}", file=sys.stderr)
+        return 1
     print("fuzz_seeds: selftest OK")
     return 0
 
@@ -451,6 +743,16 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ["--selftest"]:
         return selftest()
+    if argv == ["--resolved-packages"]:
+        print("\n".join(RESOLVED_PACKAGES))
+        return 0
+    if len(argv) == 2 and argv[0] == "--features-of":
+        try:
+            print(features_of(argv[1]))
+        except (FeatureError, OSError) as error:
+            print(f"fuzz_seeds: the features of {argv[1]} did not resolve: {error}", file=sys.stderr)
+            return 1
+        return 0
     if len(argv) == 2 and argv[0] == "--reads":
         if argv[1] not in TARGETS:
             print(f"fuzz_seeds: no target `{argv[1]}`", file=sys.stderr)

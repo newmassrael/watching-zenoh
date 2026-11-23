@@ -1662,7 +1662,12 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * program may report it connected, or hand in its first bytes, from its own
  * thread before open returns. A stream the program accepts on a listener is
  * named by wz_ext_transport_accepted, which returns its handle. A handle is
- * never 0 and never reused while the transport lives.
+ * never 0 and never reused while the transport lives. When the session lets a
+ * link go it closes it on the program (close): until that close returns, a
+ * call that names the link answers WZ_EXT_ERR_LINK_CLOSED; once it has
+ * returned, the transport holds the handle no more and the call answers
+ * WZ_EXT_ERR_LINK_UNKNOWN. A program whose receive runs on a thread of its own
+ * can meet either while its close runs, and reads both as the end of the link.
  *
  * BUFFERS. The bytes of send are valid only during the call: the program
  * copies what it keeps. The bytes of wz_ext_transport_received are copied
@@ -1730,10 +1735,13 @@ typedef uint8_t wz_ext_link_event_t;
 /* What the program's calls into the transport return beyond Z_OK, Z_ERR_NULL
  * and Z_EINVAL (-75). wz's own, as WZ_EXT_ERR_POLICY_OFF is. */
 #define WZ_EXT_ERR_LINK_UNKNOWN (-4)  /* the transport holds no such link: it
-                                         never did, or the session let it go */
+                                         never gave the handle, or the session
+                                         let the link go and the program's
+                                         close of it returned */
 #define WZ_EXT_ERR_LINK_NOT_OPEN (-5) /* not up yet: bytes or an accept before
                                          CONNECTED */
-#define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed: nothing taken */
+#define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed, and still held:
+                                         nothing taken */
 #define WZ_EXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
                                          listener, an accept on a stream */
 #define WZ_EXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
