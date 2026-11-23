@@ -257,6 +257,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/e2e_receiver.rs` | S12 | |
 | `crates/wz-capi-pico/src/e2e_sender.rs` | S12 | |
 | `crates/wz-capi-pico/src/encoding.rs` | S7 | |
+| `crates/wz-capi-pico/src/endpoint.rs` | S7 | |
 | `crates/wz-capi-pico/src/entity.rs` | S7 | |
 | `crates/wz-capi-pico/src/event_log.rs` | S7 | |
 | `crates/wz-capi-pico/src/ext_interface.rs` | S12 | |
@@ -333,6 +334,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/os.rs` | S7 | |
 | `crates/wz-capi-port/src/peers.rs` | S7 | |
 | `crates/wz-capi-port/src/query.rs` | S7 | |
+| `crates/wz-capi-port/src/refusal.rs` | S7 | |
 | `crates/wz-capi-port/src/runtime_limits.rs` | S7 | |
 | `crates/wz-capi-port/src/sync.rs` | S7 | |
 | `crates/wz-capi-port/src/time_base.rs` | S7 | |
