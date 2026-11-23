@@ -718,8 +718,6 @@ pub mod snapshot;
 // supervisor of `wz-session-core`.
 #[cfg(feature = "e2e-supervision")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-198 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod stream_supervision;
 pub mod string_array;
 #[cfg(feature = "supervision")]
