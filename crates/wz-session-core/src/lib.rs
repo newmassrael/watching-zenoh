@@ -842,8 +842,6 @@ pub mod rx_profile;
 /// unicast session and the multicast transmission pipeline. Alloc-gated with
 /// the two modules it reads ([`link`] and [`session_init_params`]).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-127 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod tx_deadline;
 
 /// Inbound-parse error surface + ext-chain depth ceiling. Precursor
