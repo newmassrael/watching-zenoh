@@ -3962,6 +3962,12 @@ layer_c0_test_discipline() {
     # section past it leaves a name no host library defines, which only the Windows linker refuses.
     _runci_leg coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --selftest
     _runci_leg coop_critical_section_gate --after coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --check
+    # The release code of the C ABI library's core crates is total (docs/c-abi-architecture.md P6):
+    # each crate denies the totality lints outside a test build, and a module still allowed them
+    # is a row of the register in that document's section 7, which only shrinks. The selftest
+    # drives each rule over a fixture crate.
+    _runci_leg totality_debt_gate.selftest -- python3 scripts/lib/totality_debt_gate.py --selftest
+    _runci_leg totality_debt_gate --after totality_debt_gate.selftest -- python3 scripts/lib/totality_debt_gate.py --check
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.
