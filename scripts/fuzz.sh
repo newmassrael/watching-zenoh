@@ -5,6 +5,7 @@
 # fuzz.sh -- build, replay and run the fuzz targets of `crates/wz-fuzz`: the
 # C ABI doors of `wz-capi-dissect`, `wz-capi-replay` and `wz-capi-c` (the
 # config verdict and the end-to-end sender) a consumer hands outside bytes to,
+# the pico C ABI's own doors (`wz_ext_*`) in the build of its release package,
 # and the network ingress, the bytes a peer sends into a session (the
 # transport decoders and record walks, the reassembly, and a session of each
 # profile behind them; `crates/wz-fuzz/README.md`).
@@ -119,14 +120,35 @@ build() {
         [[ -n "$package" ]] || { echo "fuzz.sh: no target '$target'" >&2; exit 2; }
         bins_of[$package]+=" --bin $target"
     done
+    # A package whose features are the release build's resolves them from the
+    # profile (`fuzz_seeds.py --features-of`), which needs the pinned Kconfig
+    # interpreter; the others state theirs in their manifests.
+    local -A resolved=()
+    while read -r package; do
+        if [[ -n "$package" ]]; then
+            resolved[$package]=1
+        fi
+    done < <(python3 "$seeds_py" --resolved-packages)
+    local provisioned=0 features
     # From inside the fuzz directory, so its rust-toolchain.toml picks the
     # compiler and not the product workspace's stable. `--target` keeps the
     # flags off build scripts and proc macros, as cargo-fuzz does.
     for package in "${!bins_of[@]}"; do
+        local -a feature_args=()
+        if [[ -n "${resolved[$package]:-}" ]]; then
+            if ((!provisioned)); then
+                bash "$repo_root/scripts/provision-kconfiglib.sh"
+                provisioned=1
+            fi
+            features="$(python3 "$seeds_py" --features-of "$package")" ||
+                { echo "fuzz.sh: the features of $package did not resolve" >&2; exit 1; }
+            [[ -n "$features" ]] || { echo "fuzz.sh: $package resolved to no feature" >&2; exit 1; }
+            feature_args=(--features "$features")
+        fi
         # shellcheck disable=SC2086 # each `--bin NAME` pair is two words
         (cd "$fuzz_dir" && RUSTFLAGS="${fuzz_rustflags[*]}" \
             cargo build --release --locked --target "$triple" --target-dir "$build_dir" \
-            -p "$package" ${bins_of[$package]})
+            -p "$package" "${feature_args[@]}" ${bins_of[$package]})
     done
 }
 

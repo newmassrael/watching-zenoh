@@ -997,4 +997,109 @@ mod tests {
         opts.allowed_destination = Locality::Remote;
         assert_eq!(opts.remote_finals(0), 0, "a group with no member owes none");
     }
+
+    /// A target is read, and carried on the wire, only where the build carries the slot
+    /// (`query-target`). Elsewhere it is not read even when the field is written past the setter,
+    /// so a build that cannot put a target on the wire does not select queryables by one either.
+    #[test]
+    fn a_pinned_target_is_read_only_where_the_build_carries_the_slot() {
+        let pinned = QueryOptions::get().with_target(QueryTarget::AllComplete);
+        let mut written = QueryOptions::get();
+        written.target = Some(QueryTarget::AllComplete);
+        let honoured = if cfg!(feature = "query-target") {
+            Some(QueryTarget::AllComplete)
+        } else {
+            None
+        };
+        assert_eq!(pinned.effective_target(), honoured);
+        assert_eq!(
+            written.effective_target(),
+            honoured,
+            "the field written past the setter"
+        );
+        assert_eq!(
+            pinned.query_metadata().target,
+            honoured,
+            "what goes on the wire"
+        );
+        assert_eq!(
+            QueryOptions::get().effective_target(),
+            None,
+            "a get that names none"
+        );
+    }
+
+    /// A timeout is honoured only where the build carries the slot (`query-timeout`), and there a
+    /// get that names none waits the platform's default rather than for ever. Elsewhere no deadline
+    /// is armed and none goes on the wire, whatever the field holds.
+    #[test]
+    fn a_timeout_is_resolved_and_carried_only_where_the_build_carries_the_slot() {
+        let pinned = QueryOptions::get().with_timeout_ms(250);
+        let named_none = QueryOptions::get();
+        let mut written = QueryOptions::get();
+        written.timeout_ms = 250;
+        #[cfg(feature = "query-timeout")]
+        {
+            assert_eq!(pinned.effective_timeout_ms(), 250);
+            assert_eq!(written.effective_timeout_ms(), 250);
+            assert_eq!(named_none.effective_timeout_ms(), DEFAULT_QUERY_TIMEOUT_MS);
+            assert_eq!(
+                pinned.query_metadata().timeout_ms,
+                250,
+                "what goes on the wire"
+            );
+        }
+        #[cfg(not(feature = "query-timeout"))]
+        {
+            assert_eq!(
+                pinned.effective_timeout_ms(),
+                0,
+                "the setter stored nothing"
+            );
+            assert_eq!(written.effective_timeout_ms(), 0, "the field is not read");
+            assert_eq!(named_none.effective_timeout_ms(), 0);
+            assert_eq!(
+                pinned.query_metadata().timeout_ms,
+                0,
+                "no timeout on the wire"
+            );
+        }
+    }
+
+    /// A consolidation is put on the wire and installed at the sink only where the build carries
+    /// the slot (`query-consolidation`), and there a get that names none resolves to `Latest` on
+    /// both. Elsewhere the wire field is elided and the sink passes every reply through.
+    #[test]
+    fn a_consolidation_is_put_on_the_wire_only_where_the_build_carries_the_slot() {
+        let pinned = QueryOptions::get().with_consolidation(ConsolidationMode::Monotonic);
+        let named_none = QueryOptions::get();
+        if cfg!(feature = "query-consolidation") {
+            assert_eq!(
+                pinned.wire_consolidation(),
+                Some(ConsolidationMode::Monotonic)
+            );
+            assert_eq!(
+                pinned.resolved_consolidation(),
+                ConsolidationMode::Monotonic
+            );
+            assert_eq!(
+                named_none.wire_consolidation(),
+                Some(ConsolidationMode::Latest)
+            );
+            assert_eq!(
+                named_none.resolved_consolidation(),
+                ConsolidationMode::Latest
+            );
+        } else {
+            assert_eq!(pinned.wire_consolidation(), None, "the field is elided");
+            assert_eq!(pinned.resolved_consolidation(), ConsolidationMode::None);
+            assert_eq!(named_none.wire_consolidation(), None);
+            assert_eq!(named_none.resolved_consolidation(), ConsolidationMode::None);
+        }
+        assert_eq!(
+            pinned.query_metadata().consolidation,
+            pinned.wire_consolidation(),
+            "the wire carries the wire reading"
+        );
+    }
 }

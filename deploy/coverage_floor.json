@@ -1,6 +1,6 @@
 {
-  "about": "The line, branch and function coverage of the cooperative engine's crates, one row per crate. Layer Vcov runs the tests of each unit of scripts/lib/verify_plan.py (each crate in the feature sets the C library and the MCU kit images build it in) instrumented with -Cinstrument-coverage -Zcoverage-options=branch on the nightly crates/wz-fuzz/rust-toolchain.toml pins, merges the profiles, and `scripts/lib/coverage_floor_gate.py --check` judges the merged llvm-cov export against these rows. A row holds each measure as the covered share in percent, rounded down to two places, to that floor less `tolerance` percentage points: a reading below it fails, a reading above it passes and prints the tighter row to commit. A null measure is not measured yet and reads NOT-MEASURED, never a pass; `--fill <export>` prints the rows an export writes, and never loosens a filled one. A crate's sources are its files under crates/<crate>/src/ without the files that hold only tests; a line counts once whichever test executable reached it. A row is written from the gate's own output for an export, never by hand.",
-  "schema": "wz-coverage-floor/1",
+  "about": "The line, branch and function coverage of the cooperative engine's crates, one row per crate, and one row per door module of the pico C ABI's own doors (the doors zenoh-pico does not have, docs/release-proof-pico-windows.md section 8): a module is the path of a source file under a crate's src/, its figure that file and the files of its directory. Layer Vcov runs the tests of each unit of scripts/lib/verify_plan.py (each crate in the feature sets the C library and the MCU kit images build it in) instrumented with -Cinstrument-coverage -Zcoverage-options=branch on the nightly crates/wz-fuzz/rust-toolchain.toml pins, merges the profiles, and `scripts/lib/coverage_floor_gate.py --check` judges the merged llvm-cov export against these rows. A row holds each measure as the covered share in percent, rounded down to two places, to that floor less `tolerance` percentage points: a reading below it fails, a reading above it passes and prints the tighter row to commit. A null measure is not measured yet and reads NOT-MEASURED, never a pass; `--fill <export>` prints the rows an export writes, and never loosens a filled one. A crate's sources, and a module's, are its files under crates/<crate>/src/ without the files that hold only tests; a line counts once whichever test executable reached it. A row is written from the gate's own output for an export, never by hand.",
+  "schema": "wz-coverage-floor/2",
   "tolerance": 0.1,
   "crates": {
     "wz-capi-pico": {
@@ -24,6 +24,103 @@
       "functions": null
     },
     "wz-session-mcu": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    }
+  },
+  "modules": {
+    "crates/wz-capi-pico/src/app_transport.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/config_policy.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/conformance.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/key_ids.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/device_requires.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/redeclare.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/get_to_peer.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/e2e.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/e2e_sender.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/e2e_receiver.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/stream_supervision.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/instance_key.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/proto_file.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/message_catalog.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/message_payload.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/replay_publisher.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/replay_subscriber.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/ext_interface.rs": {
+      "lines": null,
+      "branches": null,
+      "functions": null
+    },
+    "crates/wz-capi-pico/src/additional.rs": {
       "lines": null,
       "branches": null,
       "functions": null

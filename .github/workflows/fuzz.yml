@@ -46,7 +46,8 @@ jobs:
         # The targets `scripts/fuzz.sh targets` prints; Layer C0 does not read
         # this list, so a target added there is added here in the same commit.
         target: [pcap, live, transport, text, proto, e2e, replay, config, sender, selector_term,
-                 ingress_frames, codec_roundtrip, session_unicast, slot_session, coop_read]
+                 ingress_frames, codec_roundtrip, session_unicast, slot_session, coop_read,
+                 pico_transport, pico_config, pico_e2e, pico_instance_key, pico_catalog, pico_payload]
     env:
       WZ_FUZZ_SECONDS: ${{ github.event.inputs.seconds || '1200' }}
     steps:

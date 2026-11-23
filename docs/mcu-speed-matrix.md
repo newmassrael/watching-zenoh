@@ -235,7 +235,11 @@ gives three.
 ## 6. Where it runs
 
 By hand, through `bx` (section 3), until the table is filled from a first good run; Layer C0 holds the
-gate's selftest and the table's population on every hosted run meanwhile. Once the table is filled the
+gate's selftest and the table's population on every hosted run meanwhile. What a run builds is held on
+every hosted run already: Layer Qzp builds arm W's two images with `scripts/mcu-speed.sh --images-only
+--arms W` (the stack gate of arm W included) and boots the single-threaded one under QEMU against a
+zenohd until its `MCU-SPEED READY workload=sub` line, so a change that breaks the pico C ABI's image
+fails a hosted run and not the next run of the matrix. Once the table is filled the
 matrix can become a hosted lane, unlike the host matrix: what it holds tightest are instruction counts and
 memory, which a neighbour on the runner does not move. The job that would carry it is the one that already
 provisions the Zephyr toolchain, QEMU and a zenohd for Layer Qza; the lane would ask cmake and a C compiler

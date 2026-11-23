@@ -45,8 +45,11 @@ compile_error!(
 // per-session slot profile (`session-slot` without `alloc`) compiles the session
 // machinery against fixed storage and links NO allocator: a `Vec`, a `String` or a
 // `Box` named by code that profile compiles is refused here, by the compiler, and is
-// not left for the image's link to find.
-#[cfg(feature = "alloc")]
+// not left for the image's link to find. A unit test links std (below), so the test build of
+// that profile has the allocator anyway and its tests name `alloc` as every other build's do;
+// the library that profile ships is the build without `test`, which still refuses it (Layer G and
+// the no-default-features clippy of this crate build exactly that).
+#[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
 // R311ds — host-run unit tests use std (Arc + Mutex capture cells for
@@ -544,10 +547,9 @@ pub mod close_reason;
 pub mod ext_chain_role;
 
 // R311ef — script-action dispatch trace counters (`ActionTrace`, a bag
-// of `u32` counters + a `CloseReason` field, all `Copy`). Pure no_std +
-// no_alloc; unconditional. DP3 leaf lifted from
-// `wz-runtime-tokio::session_glue`; the live `R::Mutex<ActionTrace>`
-// slot + the `trace_snapshot` accessor stay in the tokio crate.
+// of `u32` counters, all `Copy`). Pure no_std + no_alloc; the type is
+// unconditional, while the live `R::Mutex<ActionTrace>` slot on the session
+// and its `trace_snapshot` accessor exist only with `action-trace`.
 pub mod action_trace;
 
 // R311ep — scouting script-action dispatch trace counters (`ScoutTrace`,

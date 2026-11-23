@@ -1369,6 +1369,11 @@ round_fed_gates=(
     # MEASURED: 2.3s, of which the whole cost is 27 `cargo tree` calls
     # (lru_cached from 163 requests); metadata only, no compilation.
     "lane_feature_membership_gate.py"
+    # Every non-default feature of the engine and session crates is turned on by a leg of
+    # nondefault-tests-gate.sh, or a checked row of the gate says where else it is exercised.
+    # Round-fed by that table and the five crates' manifests and sources. A text read, no build.
+    "nondefault_feature_legs_gate.py --selftest"
+    "nondefault_feature_legs_gate.py --check"
     # R2672 (item 774) — no two tests may JOIN the same multicast address. A
     # multicast group is machine-wide, and cargo runs test functions AND test
     # binaries concurrently, so two tests that pick the same (group, port) read

@@ -40,11 +40,18 @@ tighter row to commit, a row not filled yet is NOT-MEASURED, which fails the lan
 test reached are written to `target/verify/coverage/uncovered.txt` (the hosted job uploads it and
 `summary.json` as the artifact `coverage`): each is a test to write.
 
+The same table holds a row for each door module of the doors the pico C ABI has and zenoh-pico does
+not (`modules`, a module named by its file, its figure that file and the files of its directory),
+so that one door's share cannot fall behind a rise elsewhere in its crate; those rows are the
+coverage floor of section 8 of `docs/release-proof-pico-windows.md`. A module with no branch has
+none to cover and passes that measure; a module the export holds no line of fails, as a crate does.
+
 Proves: the share of each crate's lines, branches and functions the tests of all five crates
-execute, in the shipped feature sets, and that the share does not fall unnoticed. A test of a
-table hands its frame on through one stand-in for the receive (`driver_loop::deliver_frame` in
-`wz-session-core`), so in the build that lends every record (the C library's and the MCU kit's)
-the share counts the lent receive those builds ship, and not an owned path they do not link.
+execute, in the shipped feature sets, and that the share does not fall unnoticed; and the same of
+each door module of the pico C ABI's own doors. A test of a table hands its frame on through one
+stand-in for the receive (`driver_loop::deliver_frame` in `wz-session-core`), so in the build that
+lends every record (the C library's and the MCU kit's) the share counts the lent receive those
+builds ship, and not an owned path they do not link.
 
 Does not prove: that an executed line was checked by an assertion (Layer Cmut measures that, by
 mutation, `docs/mutation-testing.md`); anything about code only another feature set compiles;
@@ -58,9 +65,14 @@ package's programs built by `scripts/pico-c-program.sh` with `WZ_PICO_SANITIZER=
 `-Zsanitizer=thread`, the standard library rebuilt under it, `halt_on_error=1`. Any report fails,
 including one a test's child process printed.
 
+The tests include `files::ext_handles_across_threads` of `wz-capi-pico`'s integration tests: the
+handles of the additional doors (an end-to-end sender and receiver, an instance keyer, a message
+catalog and a payload schema) each shared by several threads at once, as their documentation
+allows, so that the lock each handle holds its state behind is what this lane reads.
+
 Proves: no data race and no lock-order inversion on any interleaving the runs took, in the
-multi-threaded arm of the engine, its host lock and the C ABI's threads, with std's own
-synchronisation seen.
+multi-threaded arm of the engine, its host lock, the C ABI's threads and the handles of its
+additional doors, with std's own synchronisation seen.
 
 Does not prove: freedom from races on interleavings no run took (the detector observes; it does not
 explore); anything about the MCU builds, whose concurrency is interrupts and a single core.
@@ -71,11 +83,19 @@ The same units and programs with `-Zsanitizer=address` and the standard library 
 Leak detection is off: the tests leak the areas they lend on purpose, and a leak is not a
 memory-safety defect.
 
+The leg `programs` then runs each C program again under the C compiler's UndefinedBehaviorSanitizer
+(`WZ_PICO_SANITIZER=undefined`: `-fsanitize=undefined -fno-sanitize-recover=undefined`), the library
+built without a sanitizer, so the run sees none of the lane's flags: a program's signed overflow, a
+misaligned, null or out-of-bounds access through a pointer the library handed it, or a shift past
+its width, ends the run with its report.
+
 Proves: no out-of-bounds access, use after free, double free or use after return on the paths the
-runs took, in Rust code, in std where wz handed it memory, and in the C programs.
+runs took, in Rust code, in std where wz handed it memory, and in the C programs; and no undefined
+behaviour the C compiler's sanitizer detects in the C programs on those paths.
 
 Does not prove: anything about paths not run; leaks; uninitialised reads (MemorySanitizer, which
-this tree does not run).
+this tree does not run); undefined behaviour in Rust code, which no sanitizer reads (the
+interpreter's lane, Layer Vmiri, reads it for its units).
 
 ## Layer Vmiri: the interpreter
 
@@ -117,4 +137,4 @@ bx --checks ci -- python3 scripts/lib/runci_plan.py --only Vcov,Vtsan,Vasan,Vmir
 
 The first measurement fills `deploy/coverage_floor.json`: after a Vcov run, `python3
 scripts/lib/coverage_floor_gate.py --fill target/verify/coverage/export.json` prints the `crates`
-object to commit. A row is never written by hand, and `--fill` never loosens a filled one.
+and `modules` objects to commit. A row is never written by hand, and `--fill` never loosens a filled one.

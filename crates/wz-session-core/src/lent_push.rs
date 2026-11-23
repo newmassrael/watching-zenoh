@@ -900,7 +900,9 @@ mod tests {
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
                 attachment: (fields & 16 != 0).then(|| alloc::vec![3u8; 200]),
                 qos: (fields & 32 != 0).then(|| QosLevel::from_raw(0x1a)),
-                ..PushMetadata::default()
+                // A publication starts no timestamp stack; a build with the slot states it empty.
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: None,
             };
             for (id, suffix) in keys {
                 for kind in [SampleKind::Put, SampleKind::Del] {

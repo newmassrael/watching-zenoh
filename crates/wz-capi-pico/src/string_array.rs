@@ -51,22 +51,26 @@ use crate::result::ZResult;
 /// `wz-capi-c` implements the two spellings differently. A third dialect
 /// split, alongside the keyexpr and encoding ones.
 struct StringArrayEntry {
-    value: String,
+    /// The bytes `view` reads, as the program gave them: pico copies a string's bytes without
+    /// asking them to be UTF-8, and so does this array.
+    _bytes: Box<[u8]>,
     view: z_loaned_string_t,
 }
 
 impl StringArrayEntry {
-    /// An entry over a copy of `value`.
+    /// An entry over `bytes`, a copy of its own.
     ///
     /// The view is derived BEFORE the move, which is sound because moving a
-    /// `String` moves the three-word header and never the heap buffer the view
-    /// points at.
-    fn new(value: String) -> Box<Self> {
+    /// box moves the pointer and never the bytes the view points at.
+    fn new(bytes: Box<[u8]>) -> Box<Self> {
         let view = z_loaned_string_t {
-            _start: value.as_ptr(),
-            _len: value.len(),
+            _start: bytes.as_ptr(),
+            _len: bytes.len(),
         };
-        Box::new(Self { value, view })
+        Box::new(Self {
+            _bytes: bytes,
+            view,
+        })
     }
 }
 
@@ -101,7 +105,33 @@ enum Items {
 impl StringArrayState {
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
         Box::new(Self {
-            items: Items::Owned(items.into_iter().map(StringArrayEntry::new).collect()),
+            items: Items::Owned(
+                items
+                    .into_iter()
+                    .map(|item| StringArrayEntry::new(item.into_bytes().into_boxed_slice()))
+                    .collect(),
+            ),
+        })
+    }
+
+    /// A deep copy: every entry's bytes copied as they are, a lent entry's included.
+    ///
+    /// An alias is COPIED here on purpose: the callers are the deep-copy paths
+    /// (`z_string_array_clone`, the hello clone), and a copy that kept
+    /// borrowing would silently extend the caller's lifetime obligation to an
+    /// array it never pushed to.
+    pub(crate) fn copied(&self) -> Box<Self> {
+        let entries = (0..self.len())
+            .filter_map(|k| self.view(k))
+            .map(|view| {
+                // SAFETY: an entry's view reads its own bytes, and a lent view a live string
+                // (`Self::lent`).
+                let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
+                StringArrayEntry::new(Box::from(bytes.unwrap_or(&[])))
+            })
+            .collect();
+        Box::new(Self {
+            items: Items::Owned(entries),
         })
     }
 
@@ -137,26 +167,6 @@ impl StringArrayState {
             Items::Owned(entries) => entries.get(k).map(|entry| &entry.view),
             // SAFETY: `k` is within the views, which outlive the array (`Self::lent`).
             Items::Lent { views, len } => (k < *len).then(|| unsafe { &*views.add(k) }),
-        }
-    }
-
-    /// Every entry as an OWNED string.
-    ///
-    /// An alias is COPIED here on purpose: the callers are the deep-copy paths
-    /// (`z_string_array_clone`, the hello clone), and a copy that kept
-    /// borrowing would silently extend the caller's lifetime obligation to an
-    /// array it never pushed to.
-    pub(crate) fn to_strings(&self) -> Vec<String> {
-        match &self.items {
-            Items::Owned(entries) => entries.iter().map(|entry| entry.value.clone()).collect(),
-            Items::Lent { .. } => (0..self.len())
-                .filter_map(|k| self.view(k))
-                .map(|view| {
-                    // SAFETY: a lent view reads a live string (`Self::lent`).
-                    let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-                    String::from_utf8_lossy(bytes.unwrap_or(&[])).into_owned()
-                })
-                .collect(),
         }
     }
 }
@@ -429,9 +439,7 @@ unsafe fn string_array_push(
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
         return len;
     };
-    entries.push(StringArrayEntry::new(
-        String::from_utf8_lossy(bytes).into_owned(),
-    ));
+    entries.push(StringArrayEntry::new(Box::from(bytes)));
     entries.len()
 }
 
@@ -452,7 +460,7 @@ pub unsafe extern "C" fn z_string_array_clone(
         return crate::result::Z_ERR_NULL;
     };
     *dst = z_owned_string_array_t {
-        handle: Box::into_raw(StringArrayState::new(state.to_strings())) as *mut c_void,
+        handle: Box::into_raw(state.copied()) as *mut c_void,
         _pad: [core::ptr::null_mut(); 3],
     };
     crate::result::Z_OK
@@ -637,7 +645,60 @@ mod tests {
             assert_eq!(z_string_array_push_by_copy(&mut loaned, &pushed), 2);
             assert_eq!(z_string_array_len(&loaned), 2);
         }
-        assert_eq!(state.to_strings(), strings);
+        assert_eq!(entries(&state), strings.map(|s| s.as_bytes().to_vec()));
+    }
+
+    /// Every entry's bytes, read through its view.
+    fn entries(state: &StringArrayState) -> Vec<Vec<u8>> {
+        (0..state.len())
+            .filter_map(|k| state.view(k))
+            // SAFETY: an entry's view reads its own bytes or a live lent string.
+            .map(|view| unsafe { crate::abi::view_bytes(view._start, view._len) })
+            .map(|bytes| bytes.unwrap_or(&[]).to_vec())
+            .collect()
+    }
+
+    /// A pushed string keeps its bytes as the program gave them, as pico's copy does, whether
+    /// or not they are UTF-8, and a clone copies them as they are into storage of its own.
+    /// Turned red by a push or a clone that replaces an invalid sequence.
+    #[test]
+    fn a_pushed_string_keeps_its_bytes_through_a_clone() {
+        let raw: &[u8] = &[b'a', 0xFF, 0xFE, b'z'];
+        // SAFETY: every pointer is a live value of its type this test owns, and each array is
+        // dropped once.
+        unsafe {
+            let mut arr = z_owned_string_array_t::null_value();
+            z_string_array_new(&mut arr);
+            let value = z_loaned_string_t {
+                _start: raw.as_ptr(),
+                _len: raw.len(),
+            };
+            assert_eq!(
+                z_string_array_push_by_copy(z_string_array_loan_mut(&mut arr), &value),
+                1
+            );
+            let mut copy = z_owned_string_array_t::null_value();
+            assert_eq!(
+                z_string_array_clone(&mut copy, z_string_array_loan(&arr)),
+                crate::result::Z_OK
+            );
+            for array in [&arr, &copy] {
+                let state = string_array_state(z_string_array_loan(array)).expect("an array");
+                assert_eq!(entries(state), [raw.to_vec()]);
+            }
+            let source = &*z_string_array_get(z_string_array_loan(&arr), 0);
+            let cloned = &*z_string_array_get(z_string_array_loan(&copy), 0);
+            assert_ne!(source._start, raw.as_ptr(), "the push copied");
+            assert_ne!(cloned._start, source._start, "the clone copied");
+            let mut none = z_owned_string_array_t::null_value();
+            assert_eq!(
+                z_string_array_clone(&mut none, core::ptr::null()),
+                crate::result::Z_ERR_NULL
+            );
+            assert!(!z_internal_string_array_check(&none));
+            z_string_array_drop(z_string_array_move(&mut arr));
+            z_string_array_drop(z_string_array_move(&mut copy));
+        }
     }
 
     /// Taking a lent array copies it and leaves it lent: the owned one holds strings of its own,
@@ -669,7 +730,7 @@ mod tests {
                 strings[0].as_ptr(),
                 "the owned array holds a copy"
             );
-            assert_eq!(state.to_strings(), strings);
+            assert_eq!(entries(&state), strings.map(|s| s.as_bytes().to_vec()));
             z_string_array_drop(z_string_array_move(&mut owned));
         }
     }

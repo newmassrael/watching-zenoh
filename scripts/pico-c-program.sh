@@ -51,8 +51,12 @@
 # the shape of a program whose sessions cannot share a thread, as two single-threaded sessions
 # that dial each other cannot. The program passes when every process exits 0.
 #
-# WZ_PICO_SANITIZER, when set, is `thread` or `address`: the library and the program built under
-# that sanitizer, on Linux, for the library with `std` (scripts/verify.sh, Layers Vtsan and Vasan).
+# WZ_PICO_SANITIZER, when set, is `thread`, `address` or `undefined`, on Linux, for the library with
+# `std` (scripts/verify.sh, Layers Vtsan and Vasan). `undefined` is the C compiler's
+# UndefinedBehaviorSanitizer over the program alone, every report fatal (`-fno-sanitize-recover`), and
+# the library built as it is without a sanitizer: Rust has no such sanitizer, and its own undefined
+# behaviour is the interpreter's lane (Layer Vmiri). With `thread` or `address` the library and the
+# program are built under that sanitizer.
 # The library is built by the nightly crates/wz-fuzz/rust-toolchain.toml pins, with `-Zsanitizer` and
 # its standard library rebuilt under it (`-Zbuild-std`, for the host's own target, so it lives in a
 # target directory of its own). The program is compiled with the C compiler's `-fsanitize` and linked
@@ -115,6 +119,12 @@ lib_dir="$WZ_ARTIFACTS/crates/target/debug"
 sanitizer="${WZ_PICO_SANITIZER:-}"
 case "$sanitizer" in
     "") ;;
+    undefined)
+        if [ "$os" != Linux ] || [ "$form" != std ]; then
+            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux, for the library with \`std\`" >&2
+            exit 2
+        fi
+        ;;
     thread | address)
         if [ "$os" != Linux ] || [ "$form" != std ]; then
             echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux, for the library with \`std\`" >&2
@@ -129,7 +139,7 @@ case "$sanitizer" in
         export RUSTFLAGS="-Zsanitizer=$sanitizer -Cforce-frame-pointers=yes"
         ;;
     *)
-        echo "pico-c-program: WZ_PICO_SANITIZER is \`thread\` or \`address\`, not \`$sanitizer\`" >&2
+        echo "pico-c-program: WZ_PICO_SANITIZER is \`thread\`, \`address\` or \`undefined\`, not \`$sanitizer\`" >&2
         exit 2
         ;;
 esac
@@ -173,7 +183,7 @@ if [ "$form" = nostd ]; then
         --target "$host_triple")
     lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/capi-nostd"
 fi
-if [ -n "$sanitizer" ]; then
+if [ "$sanitizer" = thread ] || [ "$sanitizer" = address ]; then
     host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
     if [ -z "$host_triple" ]; then
         say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
@@ -277,7 +287,11 @@ case "$os" in
         ;;
     Linux)
         compiler=cc
-        if [ -n "$sanitizer" ]; then
+        if [ "$sanitizer" = undefined ]; then
+            cc -std=gnu11 -DZENOH_LINUX -fsanitize=undefined -fno-sanitize-recover=undefined \
+                -fno-omit-frame-pointer -g -I"$inc" -I"$ext_inc" "$src" -o "$exe" \
+                -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        elif [ -n "$sanitizer" ]; then
             case "$sanitizer" in
                 thread) runtime_name=tsan ;;
                 *) runtime_name=asan ;;

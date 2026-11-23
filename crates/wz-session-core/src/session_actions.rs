@@ -1734,6 +1734,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `target_has_atomic = "ptr"`.
     #[cfg(feature = "tx-lend-only")]
     pub tx_refusals: R::Mutex<TxRefusalCounts>,
+    /// How many times each action of the machine ran ([`SessionLinkActions::trace_snapshot`]);
+    /// held only by a build that keeps the counters (`action-trace`).
+    #[cfg(feature = "action-trace")]
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
@@ -2240,7 +2243,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// session with no policy, and then [`Self::set_egress_reply_gate`]'s flag keeps the test to
     /// one atomic read.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -2251,7 +2254,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// Whether [`Self::egress_reply_gate`] holds a gate: the data path reads this and takes the
     /// lock only when it is set.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -3031,8 +3034,10 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// The heap profile's: the hand-off is a boxed closure and the job it runs owns
     /// the encoded message. A session in a slot has no second thread to hand to, and
     /// sends a block-first message as a blocking one, which is what a session with
-    /// no hand-off installed does.
-    #[cfg(feature = "alloc")]
+    /// no hand-off installed does. So does a lend-only session (`tx-lend-only`): the
+    /// job's encoded copy of the message is a frame built on the heap, which that
+    /// profile never builds, and its runtimes have no second thread to hand to.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
 }
 
@@ -3048,8 +3053,8 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
 /// [`SessionLinkActions::run_block_first_job`].
 ///
 /// A build with no dispatch arm sends no network message, so nothing there
-/// builds or reads one.
-#[cfg(feature = "alloc")]
+/// builds or reads one, and a lend-only build (`tx-lend-only`) schedules none.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 #[cfg_attr(
     not(any(
         feature = "codec-push",
@@ -3100,7 +3105,7 @@ enum DispatchStage {
     Fresh,
     /// A block-first message's background push: already observed, already
     /// holding its slot, so it is pushed as it stands.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     Scheduled,
     /// A send that may not wait for room: every ask is made with a wait of zero, and a message
     /// that finds none is neither dropped nor the reason for a close, it is reported as
@@ -3595,7 +3600,7 @@ where
 /// R2952 — the runtime's hand-off: run a [`BlockFirstJob`] off the sending
 /// thread (tokio: `spawn_blocking`, upstream's own seam). `Send + Sync` because
 /// the session it lives in is shared across the runtime's threads.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
@@ -3606,7 +3611,7 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
 /// to count references with, so the gate is called where it is stored (under its slot's lock)
 /// and never cloned out.
 #[cfg(all(
-    feature = "alloc",
+    feature = "reply-egress-gate",
     any(
         feature = "codec-response",
         feature = "liveliness-token",
@@ -4383,7 +4388,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link: Self::hold_link(link),
             core: Self::hold_core(core),
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
         }
     }
@@ -4408,7 +4413,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Self::init_link(core::ptr::addr_of_mut!((*at).link), driver, &seed);
             Self::init_core(core::ptr::addr_of_mut!((*at).core), params, clock, seed);
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             core::ptr::addr_of_mut!((*at).block_first_handoff).write(R::new_mutex(None));
         }
     }
@@ -4513,6 +4518,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 fragment_tx_budget: R::new_mutex(usize::MAX),
                 #[cfg(feature = "tx-lend-only")]
                 tx_refusals: R::new_mutex(TxRefusalCounts::default()),
+                #[cfg(feature = "action-trace")]
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
@@ -4596,7 +4602,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     noted_requests,
                 )),
                 #[cfg(all(
-                    feature = "alloc",
+                    feature = "reply-egress-gate",
                     any(
                         feature = "codec-response",
                         feature = "liveliness-token",
@@ -4605,7 +4611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 ))]
                 egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
                 #[cfg(all(
-                    feature = "alloc",
+                    feature = "reply-egress-gate",
                     any(
                         feature = "codec-response",
                         feature = "liveliness-token",
@@ -4728,7 +4734,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::wrap_actions(Self {
             core,
             link,
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
         })
     }
@@ -5800,6 +5806,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5874,6 +5881,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Called by the runtime's hand-off, off the thread that sent it.
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5923,6 +5931,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is ever scheduled and there is nothing to run.
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         not(any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5944,7 +5953,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// function that runs [`Self::run_block_first_job`] off the calling
     /// thread. Installed by a runtime that has one (tokio, from its
     /// `wrap_actions`); a session without one sends block-first as blocking.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn install_block_first_handoff(&self, handoff: BlockFirstHandoff) {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
@@ -9916,8 +9925,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.link.shm_rx, |slot| slot.take_update())
     }
 
+    #[cfg(feature = "action-trace")]
     pub fn trace_snapshot(&self) -> ActionTrace {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
+    }
+
+    /// Count one run of an action in the trace (`count` names its counter). A build without
+    /// `action-trace` keeps no trace, and the count is no code at all: no lock is taken for it.
+    #[inline(always)]
+    pub(crate) fn note_action(&self, count: impl FnOnce(&mut ActionTrace)) {
+        #[cfg(feature = "action-trace")]
+        R::with_mutex_mut(&self.trace, count);
+        #[cfg(not(feature = "action-trace"))]
+        let _ = count;
     }
 
     /// The reason the session FSM staged for this link's Close frame: the
@@ -10715,7 +10735,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
+            self.note_action(|t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
@@ -10954,8 +10974,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Every sender names its [`DispatchStage`]: a send of its own is `Fresh`
     /// (only a `Probe` can end in [`Dispatched::NoRoom`]), and a block-first
     /// message's background push re-enters here as `Scheduled`
-    /// ([`Self::run_block_first_job`]), which is neither observed again nor
-    /// scheduled again.
+    /// (`Self::run_block_first_job`), which is neither observed again nor
+    /// scheduled again; a lend-only build schedules none.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -11017,8 +11037,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R2952 — also the band a scheduled block-first push dispatches at.
         let message_priority = priority;
         // Read only by the stats counters and by the block-first schedule (which owns a
-        // copy of the message, so needs the heap): neither exists in this build.
-        #[cfg(not(any(feature = "alloc", feature = "transport-stats")))]
+        // copy of the message, so needs the heap and is not the lend-only profile's):
+        // neither exists in this build.
+        #[cfg(not(any(
+            all(feature = "alloc", not(feature = "tx-lend-only")),
+            feature = "transport-stats"
+        )))]
         let _ = (stage, message_priority);
         // A send under room its sender already holds: only a Push is sent that way, and only a
         // build with a heap has a permit to hold.
@@ -11178,8 +11202,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // after link selection, and its lowlatency transport, returned above,
         // has no block-first at all): see [`Self::schedule_block_first`].
         // Scheduled or dropped, it is a sent message to the caller, as
-        // upstream's `schedule` reports it.
-        #[cfg(feature = "alloc")]
+        // upstream's `schedule` reports it. A lend-only session sends it as a blocking one.
+        #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
         if stage == DispatchStage::Fresh
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
@@ -15221,7 +15245,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // denied is announced anyway the first time a peer's Interest reaches it. Asked of the
         // key as the user wrote it, before the namespace below decorates it, as a query reply
         // is; a denied answer is consumed, and the chain's `DeclareFinal`, which no policy
-        // governs, still ends the peer's Interest.
+        // governs, still ends the peer's Interest. A build with no egress gate
+        // (`reply-egress-gate`) asks nothing.
+        #[cfg(feature = "reply-egress-gate")]
         let declare = if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -15275,6 +15301,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             return;
         }
+        #[cfg(feature = "reply-egress-gate")]
         if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -16781,20 +16808,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// counted a reply twice would halve itself.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn reply_egress_verdict(&self, response: ResponseOwned) -> Option<ResponseOwned> {
-        if !self
-            .egress_reply_gate_set
-            .load(core::sync::atomic::Ordering::Acquire)
+        #[cfg(feature = "reply-egress-gate")]
         {
-            return Some(response);
+            if !self
+                .egress_reply_gate_set
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                return Some(response);
+            }
+            let message =
+                crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
+            if !self.reply_gate_admits(&message) {
+                return None;
+            }
+            match message {
+                crate::network_message::NetworkMessage::Response(response) => Some(*response),
+                _ => None,
+            }
         }
-        let message =
-            crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-        if !self.reply_gate_admits(&message) {
-            return None;
-        }
-        match message {
-            crate::network_message::NetworkMessage::Response(response) => Some(*response),
-            _ => None,
+        // A build with no egress gate admits every reply.
+        #[cfg(not(feature = "reply-egress-gate"))]
+        {
+            Some(response)
         }
     }
 
@@ -16808,6 +16843,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if cfg!(feature = "transport-stats") {
             return false;
         }
+        #[cfg(feature = "reply-egress-gate")]
         if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -16839,7 +16875,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Called under the slot's lock: the gate takes the session's chain and mapping locks and
     /// never this one, so it cannot meet itself here.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -16858,7 +16894,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the session's observer lock (the observer's own pending replies are sent from inside it),
     /// so it must not take that lock.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -16950,7 +16986,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // worker emit) must take the same pre-drain.
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
+            self.note_action(|t| t.send_close_frame_with_reason += 1);
             // R311y839 — the S flag is derived, not literal: this path tears down
             // ONE link, so it announces a whole-session close only when no other
             // link survives it. See `close_scope_is_session`.
@@ -16998,7 +17034,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+            self.note_action(|t| t.send_keep_alive += 1);
             let bytes = crate::handshake_encode::encode_keep_alive();
             // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must
             // ride the physical link this drive loop monitors (so that link's
@@ -17023,7 +17059,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the frames it may pass are the other carriage's or the companion's own best-effort ones.
     #[cfg(feature = "transport-keepalive")]
     pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
-        R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+        self.note_action(|t| t.send_keep_alive += 1);
         let bytes = crate::handshake_encode::encode_keep_alive();
         self.send_wire_urgent_this_link(&bytes, class);
     }
@@ -18059,7 +18095,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
     fn stage_close_reason(&self, reason: CloseReason) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.set_close_reason_count += 1);
+        self.inner.note_action(|t| t.set_close_reason_count += 1);
         R::with_mutex_mut(&self.link().close_reason, |slot| *slot = Some(reason));
     }
 }
@@ -18122,7 +18158,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn link_driver_open(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.link_driver_open += 1);
+        a.note_action(|t| t.link_driver_open += 1);
         a.link_driver().open_blocking();
     }
 
@@ -18135,7 +18171,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
+            a.note_action(|t| t.send_init_syn += 1);
             // This node dialled the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(false);
@@ -18236,7 +18272,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_open_syn += 1);
+            a.note_action(|t| t.send_open_syn += 1);
             // R3b — initiator usrpwd response (Zbuf {user, hmac}) staged into
             // the OpenSyn chain; HMACs over the nonce captured from InitAck.
             #[cfg(feature = "session-extauth")]
@@ -18304,7 +18340,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
+            a.note_action(|t| t.send_init_ack_with_cookie += 1);
             // This node accepted the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(true);
@@ -18529,7 +18565,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_open_ack += 1);
+            a.note_action(|t| t.send_open_ack += 1);
             // R3b — responder usrpwd accept (Unit) staged into the OpenAck
             // chain (reached only after accept_recv_open_syn verified the HMAC).
             #[cfg(feature = "session-extauth")]
@@ -18581,7 +18617,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(feature = "codec-close")]
         {
             let a = &self.inner;
-            R::with_mutex_mut(&a.trace, |t| t.send_close_frame_with_reason += 1);
+            a.note_action(|t| t.send_close_frame_with_reason += 1);
             // Every transition into Closing stages a reason first; the
             // wire's own default answers an entry driven without one.
             let staged = R::with_mutex_mut(&self.link().close_reason, |r| *r);
@@ -18606,7 +18642,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn release_link(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
+        a.note_action(|t| t.release_link += 1);
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
         // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
@@ -18627,13 +18663,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn enable_rx_tx_regions(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.enable_rx_tx_regions += 1);
+        self.inner.note_action(|t| t.enable_rx_tx_regions += 1);
     }
 
     #[inline(never)]
     fn record_established_at(&mut self) {
         let a = &self.inner;
-        R::with_mutex_mut(&a.trace, |t| t.record_established_at += 1);
+        a.note_action(|t| t.record_established_at += 1);
         // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
         // clock (same epoch as last_inbound_at +
         // drive_session_until_terminal) so the lease comparator's u64
@@ -18670,7 +18706,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn start_lease_monitor(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.start_lease_monitor += 1);
+        self.inner.note_action(|t| t.start_lease_monitor += 1);
         // The monitor is the drive loop's lease deadline; arming it is what
         // gives this link one (`drive::lease_wake_deadline`).
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
@@ -18678,7 +18714,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.stop_lease_monitor += 1);
+        self.inner.note_action(|t| t.stop_lease_monitor += 1);
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
     }
 
@@ -18690,7 +18726,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // (`SESSION_HOST_REALIZATION`).
         #[cfg(feature = "transport-keepalive")]
         {
-            R::with_mutex_mut(&self.inner.trace, |t| t.start_keepalive_worker += 1);
+            self.inner.note_action(|t| t.start_keepalive_worker += 1);
             // The worker is the drive loops' keepalive deadline and the AP
             // pacer; both emit only while this is set.
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
@@ -18701,14 +18737,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
-            R::with_mutex_mut(&self.inner.trace, |t| t.stop_keepalive_worker += 1);
+            self.inner.note_action(|t| t.stop_keepalive_worker += 1);
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
         }
     }
 
     #[inline(never)]
     fn free_pool_slots(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |t| t.free_pool_slots += 1);
+        self.inner.note_action(|t| t.free_pool_slots += 1);
     }
 
     #[inline(never)]
@@ -18806,7 +18842,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// guard actually fired (vs. R57's `bind_bool` placeholder which never
     /// executed any dynamic check).
     pub fn cookie_valid(&self) -> bool {
-        R::with_mutex_mut(&self.trace, |t| t.cookie_valid_check += 1);
+        self.note_action(|t| t.cookie_valid_check += 1);
         if self.fixed_cookie() {
             return self.fixed_cookie_echoed();
         }

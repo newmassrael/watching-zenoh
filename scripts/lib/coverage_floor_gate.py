@@ -18,13 +18,21 @@ every feature set a unit built.
 
 ## The table
 
-`deploy/coverage_floor.json`, schema `wz-coverage-floor/1`: a `tolerance` in percentage points and one row
-a crate,
+`deploy/coverage_floor.json`, schema `wz-coverage-floor/2`: a `tolerance` in percentage points, one row
+a crate (`crates`) and one row a module (`modules`),
 
     {"lines": <percent or null>, "branches": <percent or null>, "functions": <percent or null>}
 
-each the covered share of the crate's lines, branches and functions, rounded DOWN to two places so
-that a floor never sits above the reading it was set from.
+each the covered share of the crate's or the module's lines, branches and functions, rounded DOWN to
+two places so that a floor never sits above the reading it was set from.
+
+A module is named by the path of its file from the tree's root, under the sources of a crate of the
+table (`crates/wz-capi-pico/src/e2e_receiver.rs`), and its figure is the sum over that file and the
+files of its directory (`crates/wz-capi-pico/src/e2e_receiver/`), the files that hold only tests left
+out as they are from a crate's. A crate's row says the crate as a whole does not fall; a module's
+row says one door of it does not, which a crate's sum hides when another file rises: the doors the
+pico C ABI has and zenoh-pico does not are each held to a row of their own
+(`docs/release-proof-pico-windows.md`, section 8).
 
 ## The rules of --check
 
@@ -45,12 +53,13 @@ when no instantiation of it ran, so a generic that one test reached through one 
 ## Modes
 
     --selftest               every rule driven through a fixture that breaks it, and a clean one
-    --declared               the table well formed, and its crates exactly the coverage lane's
-                             (`verify_plan.py --crates coverage`), each with its sources
+    --declared               the table well formed, its crates exactly the coverage lane's
+                             (`verify_plan.py --crates coverage`), each with its sources, and each
+                             module a source file of one of them
     --check EXPORT           judge an export against the table; `--summary-out` and `--uncovered-out`
                              write the per-crate summary (JSON) and the uncovered functions
-    --fill EXPORT            print the `crates` object an export writes, to commit; a filled row is never
-                             loosened by it
+    --fill EXPORT            print the `crates` and `modules` objects an export writes, to commit; a
+                             filled row is never loosened by it
 
 `--table PATH` reads another table than the committed one.
 """
@@ -68,10 +77,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TABLE = Path("deploy/coverage_floor.json")
-SCHEMA = "wz-coverage-floor/1"
+SCHEMA = "wz-coverage-floor/2"
 SUMMARY_SCHEMA = "wz-coverage-summary/1"
 EXPORT_TYPE = "llvm.coverage.json.export"
-TABLE_KEYS = {"about", "schema", "tolerance", "crates"}
+TABLE_KEYS = {"about", "schema", "tolerance", "crates", "modules"}
+# What a row is the floor of, by the table's key that holds it.
+KINDS = {"crates": "crate", "modules": "module"}
 MEASURES = ("lines", "branches", "functions")
 NOUN = {"lines": "line", "branches": "branch", "functions": "function"}
 # The tolerance is in percentage points; a run's interleaving can move which lines a threaded
@@ -95,6 +106,8 @@ class Judged:
     outcome: str
     sentence: str
     figure: float | None = None
+    # The table's key the row is in (`KINDS`); `crate` is then the row's name, a crate or a module.
+    kind: str = "crates"
 
 
 def floor_percent(covered: int, count: int) -> float:
@@ -168,11 +181,24 @@ def _unescape(part: str) -> str:
 
 @dataclass
 class Reading:
-    """What an export says of the crates: each measure's covered and counted, and the functions
-    no instantiation of which ran."""
+    """What an export says of the crates: each measure's covered and counted, by crate and by
+    source file (its path from the tree's root), and the functions no instantiation of which ran."""
 
     tallies: dict
     uncovered: dict
+    files: dict
+
+
+@dataclass
+class Table:
+    """A table read: the tolerance, and the rows of each kind (`KINDS`) by name."""
+
+    tolerance: float
+    crates: dict
+    modules: dict
+
+    def rows(self, kind: str) -> dict:
+        return self.crates if kind == "crates" else self.modules
 
 
 def read_export(doc: object, crates: list[str]) -> Reading:
@@ -182,15 +208,20 @@ def read_export(doc: object, crates: list[str]) -> Reading:
     if not isinstance(data, list) or not data or not isinstance(data[0], dict):
         raise Refused("the export holds no data object")
     tallies = {crate: {m: [0, 0] for m in MEASURES} for crate in crates}
+    files: dict[str, dict[str, list[int]]] = {}
     for entry in data[0].get("files") or []:
         where = place(str(entry.get("filename", "")), crates)
         if where is None:
             continue
         summary = entry.get("summary") or {}
+        own = files.setdefault(where[1], {m: [0, 0] for m in MEASURES})
         for measure in MEASURES:
             figures = summary.get(measure) or {}
-            tallies[where[0]][measure][0] += int(figures.get("covered", 0))
-            tallies[where[0]][measure][1] += int(figures.get("count", 0))
+            covered, count = int(figures.get("covered", 0)), int(figures.get("count", 0))
+            tallies[where[0]][measure][0] += covered
+            tallies[where[0]][measure][1] += count
+            own[measure][0] += covered
+            own[measure][1] += count
     ran: dict[tuple[str, str, int], tuple[int, str]] = {}
     for function in data[0].get("functions") or []:
         filenames = function.get("filenames") or []
@@ -211,7 +242,29 @@ def read_export(doc: object, crates: list[str]) -> Reading:
     for (crate, path, line), (count, name) in sorted(ran.items()):
         if count == 0:
             uncovered[crate].append(f"{path}:{line}\t{name}")
-    return Reading(tallies, uncovered)
+    return Reading(tallies, uncovered, files)
+
+
+def module_tallies(reading: Reading, modules: list[str]) -> dict:
+    """Each module's measures: the sum over its file and the files of its directory."""
+    out: dict = {}
+    for module in modules:
+        tally = {m: [0, 0] for m in MEASURES}
+        directory = module[: -len(".rs")] + "/" if module.endswith(".rs") else module + "/"
+        for path, own in reading.files.items():
+            if path == module or path.startswith(directory):
+                for measure in MEASURES:
+                    tally[measure][0] += own[measure][0]
+                    tally[measure][1] += own[measure][1]
+        out[module] = tally
+    return out
+
+
+def tallies_of(reading: Reading, table: "Table", kind: str) -> dict:
+    """The measures of the rows of `kind`, by name."""
+    if kind == "crates":
+        return reading.tallies
+    return module_tallies(reading, list(table.modules))
 
 
 def _number(value: object) -> bool:
@@ -227,7 +280,31 @@ def refuse_duplicates(pairs: list[tuple[str, object]]) -> dict:
     return seen
 
 
-def load_table(text: str) -> tuple[float, dict[str, dict[str, float | None]]]:
+def _rows_of(raw: object, kind: str, findings: list[str]) -> dict[str, dict[str, float | None]]:
+    """The rows of one kind of a table, each finding of a malformed one added to `findings`."""
+    rows: dict[str, dict[str, float | None]] = {}
+    if not isinstance(raw, dict):
+        findings.append(f"`{kind}` is not an object of rows")
+        return rows
+    for name, row in raw.items():
+        if not isinstance(row, dict) or set(row) != set(MEASURES):
+            findings.append(f"{name}: a row has exactly the keys {', '.join(MEASURES)}")
+            continue
+        for measure in MEASURES:
+            value = row[measure]
+            if value is None:
+                continue
+            if not _number(value) or not 0 <= value <= 100:
+                findings.append(f"{name} {measure}: a floor is null or a percent from 0 to 100, "
+                                f"not {value!r}")
+            elif abs(value * 100 - round(value * 100)) > 1e-6:
+                findings.append(f"{name} {measure}: the floor {value} has more than two decimal "
+                                f"places, which no row --fill writes has")
+        rows[name] = {m: row[m] for m in MEASURES}
+    return rows
+
+
+def load_table(text: str) -> Table:
     """The tolerance and the rows of a table; Refused with every finding when it is not one."""
     try:
         doc = json.loads(text, object_pairs_hook=refuse_duplicates)
@@ -242,106 +319,124 @@ def load_table(text: str) -> tuple[float, dict[str, dict[str, float | None]]]:
     if not _number(tolerance) or not 0 <= tolerance < MAX_TOLERANCE:
         findings.append(f"`tolerance` is a number of percentage points from 0 up to, not including, "
                         f"{MAX_TOLERANCE}")
-    raw = doc["crates"]
-    rows: dict[str, dict[str, float | None]] = {}
-    if not isinstance(raw, dict) or not raw:
+    if not isinstance(doc["crates"], dict) or not doc["crates"]:
         findings.append("`crates` holds no crate, and a table of none holds nothing")
-    else:
-        for crate, row in raw.items():
-            if not isinstance(row, dict) or set(row) != set(MEASURES):
-                findings.append(f"{crate}: a row has exactly the keys {', '.join(MEASURES)}")
-                continue
-            for measure in MEASURES:
-                value = row[measure]
-                if value is None:
-                    continue
-                if not _number(value) or not 0 <= value <= 100:
-                    findings.append(f"{crate} {measure}: a floor is null or a percent from 0 to 100, "
-                                    f"not {value!r}")
-                elif abs(value * 100 - round(value * 100)) > 1e-6:
-                    findings.append(f"{crate} {measure}: the floor {value} has more than two decimal "
-                                    f"places, which no row --fill writes has")
-            rows[crate] = {m: row[m] for m in MEASURES}
+    crates = _rows_of(doc["crates"], "crates", findings)
+    modules = _rows_of(doc["modules"], "modules", findings)
+    for module in modules:
+        owner = module_crate(module)
+        if owner is None or not module.endswith(".rs"):
+            findings.append(f"{module}: a module is the path of a source file under crates/<crate>/src/")
+        elif owner not in crates:
+            findings.append(f"{module}: a module of {owner}, which the table has no row for, so the "
+                            f"export is not read for it")
     if findings:
         raise Refused("; ".join(findings))
-    return float(tolerance), rows
+    return Table(float(tolerance), crates, modules)
 
 
-def judge(reading: Reading, tolerance: float, rows: dict) -> list[Judged]:
+def module_crate(module: str) -> str | None:
+    """The crate whose sources `module` is a file of, or None when it names none."""
+    parts = module.split("/")
+    if len(parts) < 4 or parts[0] != "crates" or parts[2] != "src" or is_test_file("/".join(parts[3:])):
+        return None
+    return parts[1]
+
+
+def judge(reading: Reading, table: Table) -> list[Judged]:
     out: list[Judged] = []
-    for crate, row in rows.items():
-        tally = reading.tallies.get(crate)
-        if tally is None or tally["lines"][1] == 0:
-            out.append(Judged(crate, "lines", "FAIL",
-                              "the export holds no line of the crate's sources: its tests did not run "
-                              "under the instrumented build, or the export left them out"))
-            continue
-        for measure in MEASURES:
-            covered, count = tally[measure]
-            if count == 0:
-                why = (" (no branch region: the build was not made with branch coverage, "
-                       "-Zcoverage-options=branch)" if measure == "branches" else "")
-                out.append(Judged(crate, measure, "FAIL", f"the export counts no {NOUN[measure]}{why}"))
+    tolerance = table.tolerance
+    for kind, noun in KINDS.items():
+        tallies = tallies_of(reading, table, kind)
+        for name, row in table.rows(kind).items():
+            tally = tallies.get(name)
+            if tally is None or tally["lines"][1] == 0:
+                out.append(Judged(name, "lines", "FAIL",
+                                  f"the export holds no line of the {noun}'s sources: its tests did not "
+                                  "run under the instrumented build, or the export left them out",
+                                  kind=kind))
                 continue
-            figure = floor_percent(covered, count)
-            floor = row[measure]
-            shown = f"{figure:.2f}% ({covered} of {count})"
-            if floor is None:
-                out.append(Judged(crate, measure, "NOT-MEASURED",
-                                  f"{shown}; the row is not filled yet", figure))
-            elif figure < floor - tolerance - 1e-9:
-                out.append(Judged(crate, measure, "FAIL",
-                                  f"{shown} is below its floor {floor:.2f}% by more than the tolerance "
-                                  f"of {tolerance} point(s)", figure))
-            elif figure > floor + 1e-9:
-                out.append(Judged(crate, measure, "PASS",
-                                  f"{shown} is above its floor {floor:.2f}%: commit the tighter row",
-                                  figure))
-            else:
-                out.append(Judged(crate, measure, "PASS", f"{shown}, floor {floor:.2f}%", figure))
+            for measure in MEASURES:
+                covered, count = tally[measure]
+                if count == 0:
+                    # A module with no branch has no branch to cover; a crate with none was not
+                    # built with branch coverage.
+                    if kind == "modules" and measure != "lines":
+                        out.append(Judged(name, measure, "PASS", f"the {noun} has no {NOUN[measure]}",
+                                          kind=kind))
+                        continue
+                    why = (" (no branch region: the build was not made with branch coverage, "
+                           "-Zcoverage-options=branch)" if measure == "branches" else "")
+                    out.append(Judged(name, measure, "FAIL", f"the export counts no {NOUN[measure]}{why}",
+                                      kind=kind))
+                    continue
+                figure = floor_percent(covered, count)
+                floor = row[measure]
+                shown = f"{figure:.2f}% ({covered} of {count})"
+                if floor is None:
+                    out.append(Judged(name, measure, "NOT-MEASURED",
+                                      f"{shown}; the row is not filled yet", figure, kind))
+                elif figure < floor - tolerance - 1e-9:
+                    out.append(Judged(name, measure, "FAIL",
+                                      f"{shown} is below its floor {floor:.2f}% by more than the tolerance "
+                                      f"of {tolerance} point(s)", figure, kind))
+                elif figure > floor + 1e-9:
+                    out.append(Judged(name, measure, "PASS",
+                                      f"{shown} is above its floor {floor:.2f}%: commit the tighter row",
+                                      figure, kind))
+                else:
+                    out.append(Judged(name, measure, "PASS", f"{shown}, floor {floor:.2f}%", figure, kind))
     return out
 
 
-def filled_rows(judged: list[Judged], rows: dict) -> dict:
-    """The rows a reading writes: each measure's figure where it is above the row or the row is not
-    filled, and the row as it is otherwise."""
-    out = {crate: dict(row) for crate, row in rows.items()}
+def filled_rows(judged: list[Judged], table: Table) -> dict:
+    """The rows a reading writes, by kind: each measure's figure where it is above the row or the
+    row is not filled, and the row as it is otherwise."""
+    out = {kind: {name: dict(row) for name, row in table.rows(kind).items()} for kind in KINDS}
     for item in judged:
         if item.figure is None:
             continue
-        floor = out[item.crate][item.measure]
+        floor = out[item.kind][item.crate][item.measure]
         if floor is None or item.figure > floor:
-            out[item.crate][item.measure] = item.figure
+            out[item.kind][item.crate][item.measure] = item.figure
     return out
 
 
 def format_rows(rows: dict) -> str:
-    body = ",\n".join(f"    {json.dumps(crate)}: {json.dumps(row)}" for crate, row in rows.items())
-    return '  "crates": {\n' + body + "\n  }"
+    parts = []
+    for kind in KINDS:
+        body = ",\n".join(f"    {json.dumps(name)}: {json.dumps(row)}" for name, row in rows[kind].items())
+        parts.append(f'  "{kind}": {{\n' + body + "\n  }" if body else f'  "{kind}": {{}}')
+    return ",\n".join(parts)
 
 
-def summary_of(reading: Reading) -> dict:
-    return {"schema": SUMMARY_SCHEMA, "crates": {
-        crate: {m: {"covered": c, "count": n, "percent": floor_percent(c, n) if n else None}
-                for m, (c, n) in tally.items()}
-        for crate, tally in reading.tallies.items()}}
+def summary_of(reading: Reading, table: "Table | None" = None) -> dict:
+    def shape(tallies: dict) -> dict:
+        return {name: {m: {"covered": c, "count": n, "percent": floor_percent(c, n) if n else None}
+                       for m, (c, n) in tally.items()}
+                for name, tally in tallies.items()}
+
+    out = {"schema": SUMMARY_SCHEMA, "crates": shape(reading.tallies)}
+    if table is not None:
+        out["modules"] = shape(module_tallies(reading, list(table.modules)))
+    return out
 
 
 def check(doc: object, table_text: str, summary_out: Path | None = None,
           uncovered_out: Path | None = None) -> int:
     try:
-        tolerance, rows = load_table(table_text)
-        reading = read_export(doc, list(rows))
+        table = load_table(table_text)
+        reading = read_export(doc, list(table.crates))
     except Refused as error:
         print(f"  coverage-floor FAIL: {error}", file=sys.stderr)
         return 1
     if summary_out is not None:
-        summary_out.write_text(json.dumps(summary_of(reading), indent=2) + "\n", encoding="utf-8")
+        summary_out.write_text(json.dumps(summary_of(reading, table), indent=2) + "\n", encoding="utf-8")
     if uncovered_out is not None:
         lines = [f"{crate}\t{entry}" for crate, entries in reading.uncovered.items() for entry in entries]
         uncovered_out.write_text(f"# functions no test reached: {len(lines)}\n" + "".join(
             line + "\n" for line in lines), encoding="utf-8")
-    judged = judge(reading, tolerance, rows)
+    judged = judge(reading, table)
     for item in judged:
         stream = sys.stderr if item.outcome == "FAIL" else sys.stdout
         print(f"  coverage-floor {item.outcome} {item.crate} {item.measure}: {item.sentence}", file=stream)
@@ -351,7 +446,7 @@ def check(doc: object, table_text: str, summary_out: Path | None = None,
     unmeasured = any(item.outcome == "NOT-MEASURED" for item in judged)
     if not failed and (unmeasured or any("tighter" in item.sentence for item in judged)):
         print("  coverage-floor: the rows this reading writes, to commit in " + str(TABLE) + ":")
-        print(format_rows(filled_rows(judged, rows)))
+        print(format_rows(filled_rows(judged, table)))
     if failed:
         return 1
     if unmeasured:
@@ -363,29 +458,32 @@ def check(doc: object, table_text: str, summary_out: Path | None = None,
 
 def fill(doc: object, table_text: str) -> tuple[dict | None, list[str]]:
     try:
-        tolerance, rows = load_table(table_text)
-        reading = read_export(doc, list(rows))
+        table = load_table(table_text)
+        reading = read_export(doc, list(table.crates))
     except Refused as error:
         return None, [str(error)]
-    judged = judge(reading, tolerance, rows)
+    judged = judge(reading, table)
     notes = [f"{i.crate} {i.measure}: {i.sentence}" for i in judged if i.outcome == "FAIL"]
     notes += [f"{i.crate} {i.measure}: kept at its floor, above this reading" for i in judged
-              if i.figure is not None and rows[i.crate][i.measure] is not None
-              and i.figure < rows[i.crate][i.measure]]
-    return filled_rows(judged, rows), notes
+              if i.figure is not None and table.rows(i.kind)[i.crate][i.measure] is not None
+              and i.figure < table.rows(i.kind)[i.crate][i.measure]]
+    return filled_rows(judged, table), notes
 
 
 def declared(table_text: str, plan_crates: list[str], root: Path = ROOT) -> list[str]:
     try:
-        _tolerance, rows = load_table(table_text)
+        table = load_table(table_text)
     except Refused as error:
         return [str(error)]
+    rows = table.crates
     findings = [f"{crate}: the coverage lane tests it and the table has no row for it"
                 for crate in plan_crates if crate not in rows]
     findings += [f"{crate}: a row of the table, and the coverage lane tests no such crate"
                  for crate in rows if crate not in plan_crates]
     findings += [f"{crate}: crates/{crate}/src is not a directory of the tree"
                  for crate in rows if not (root / "crates" / crate / "src").is_dir()]
+    findings += [f"{module}: no such source file in the tree" for module in table.modules
+                 if not (root / module).is_file()]
     return findings
 
 
@@ -412,8 +510,9 @@ def _export(files: list[dict], functions: list[dict], kind: str = EXPORT_TYPE) -
     return {"type": kind, "version": "2.0.1", "data": [{"files": files, "functions": functions}]}
 
 
-def _table(rows: dict, tolerance: object = 0.1, schema: str = SCHEMA) -> str:
-    return json.dumps({"about": "fixture", "schema": schema, "tolerance": tolerance, "crates": rows})
+def _table(rows: dict, tolerance: object = 0.1, schema: str = SCHEMA, modules: dict | None = None) -> str:
+    return json.dumps({"about": "fixture", "schema": schema, "tolerance": tolerance, "crates": rows,
+                       "modules": modules or {}})
 
 
 def _row(lines: object = None, branches: object = None, functions: object = None) -> dict:
@@ -485,7 +584,7 @@ def selftest() -> int:
     status, shown = _run(doc, _table({"wz-a": _row(70.0, 50.0, 80.0), "wz-b": b_held}))
     assert status == 0 and "tighter" in shown and '"lines": 80.0' in shown, shown
     rows, notes = fill(doc, _table({"wz-a": _row(90.0, 40.0, None), "wz-b": b_held}))
-    assert rows is not None and rows["wz-a"] == _row(90.0, 50.0, 80.0), rows
+    assert rows is not None and rows["crates"]["wz-a"] == _row(90.0, 50.0, 80.0), rows
     assert any("kept at its floor" in note for note in notes), notes
     cases += 1
 
@@ -525,6 +624,58 @@ def selftest() -> int:
         assert status == 1 and needle in shown, f"a table with {needle!r} was used: {shown}"
         cases += 1
 
+    # A module is its file and its directory's files, without the files that hold only tests and
+    # without a file whose name only begins like it.
+    door = "crates/wz-a/src/door.rs"
+    mod_doc = _export([
+        _file(a_lib, (80, 100), (5, 10), (8, 10)),
+        _file("/r/crates/wz-a/src/door.rs", (6, 10), (1, 2), (2, 2)),
+        _file("/r/crates/wz-a/src/door/inner.rs", (4, 10), (1, 2), (1, 2)),
+        _file("/r/crates/wz-a/src/door/tests.rs", (10, 10), (1, 1), (1, 1)),
+        _file("/r/crates/wz-a/src/doorway.rs", (0, 10), (0, 2), (0, 1)),
+        _file("/r/crates/wz-a/src/flat.rs", (5, 5), (0, 0), (1, 1)),
+    ], [])
+    mod_reading = read_export(mod_doc, ["wz-a"])
+    assert module_tallies(mod_reading, [door]) == {
+        door: {"lines": [10, 20], "branches": [2, 4], "functions": [3, 4]}}, module_tallies(mod_reading, [door])
+    a_all = _row(70.37, 43.75, 75.0)
+    door_held = _row(50.0, 50.0, 75.0)
+    status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules={door: door_held}))
+    assert status == 0 and "FAIL" not in shown, shown
+    cases += 1
+
+    # A module's row not filled is NOT-MEASURED and its row is printed; --fill writes it.
+    status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules={door: _row()}))
+    assert status == 3 and f'"{door}": {{"lines": 50.0, "branches": 50.0, "functions": 75.0}}' in shown, shown
+    rows, _notes = fill(mod_doc, _table({"wz-a": a_all}, modules={door: _row()}))
+    assert rows is not None and rows["modules"][door] == door_held, rows
+    cases += 1
+
+    # A module that falls past the tolerance fails though its crate holds.
+    status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules={door: _row(60.0, 50.0, 75.0)}))
+    assert status == 1 and f"FAIL {door} lines" in shown, shown
+    cases += 1
+
+    # A module with no branch has none to cover; a module the export holds no line of fails.
+    flat = "crates/wz-a/src/flat.rs"
+    status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules={flat: _row(100.0, 0.0, 100.0)}))
+    assert status == 0 and "has no branch" in shown, shown
+    status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules={"crates/wz-a/src/gone.rs": _row()}))
+    assert status == 1 and "no line of the module" in shown, shown
+    cases += 1
+
+    # A module is a source file of a crate of the table, and not a file of tests.
+    for modules, needle in (
+        ({"crates/wz-z/src/a.rs": _row()}, "has no row for"),
+        ({"crates/wz-a/a.rs": _row()}, "path of a source file"),
+        ({"crates/wz-a/src/door_tests.rs": _row()}, "path of a source file"),
+        ({"crates/wz-a/src/door": _row()}, "path of a source file"),
+        ({door: {"lines": 1.0}}, "exactly the keys"),
+    ):
+        status, shown = _run(mod_doc, _table({"wz-a": a_all}, modules=modules))
+        assert status == 1 and needle in shown, f"a module row with {needle!r} was used: {shown}"
+        cases += 1
+
     # --declared ties the table to the lane's crates and to the tree.
     clean = _table({"wz-session-core": _row(), "wz-capi-coop": _row()})
     assert declared(clean, ["wz-session-core", "wz-capi-coop"]) == []
@@ -534,6 +685,11 @@ def selftest() -> int:
     assert any("has no row" in f for f in found), found
     found = declared(_table({"wz-no-such-crate": _row()}), ["wz-no-such-crate"])
     assert any("not a directory" in f for f in found), found
+    with_modules = _table({"wz-session-core": _row(), "wz-capi-coop": _row()},
+                          modules={"crates/wz-capi-coop/src/lib.rs": _row(),
+                                   "crates/wz-capi-coop/src/no_such_module.rs": _row()})
+    found = declared(with_modules, ["wz-session-core", "wz-capi-coop"])
+    assert found == ["crates/wz-capi-coop/src/no_such_module.rs: no such source file in the tree"], found
     cases += 1
 
     print(f"coverage_floor_gate selftest: {cases} cases pass")
@@ -567,10 +723,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  coverage-floor FAIL: {finding}", file=sys.stderr)
         if findings:
             return 1
-        _tolerance, rows = load_table(table_text)
-        measured = sum(1 for row in rows.values() for value in row.values() if value is not None)
-        print(f"  coverage-floor: {len(rows)} crate(s) declared, {measured} of "
-              f"{len(rows) * len(MEASURES)} floor(s) measured")
+        table = load_table(table_text)
+        rows = [row for kind in KINDS for row in table.rows(kind).values()]
+        measured = sum(1 for row in rows for value in row.values() if value is not None)
+        print(f"  coverage-floor: {len(table.crates)} crate(s) and {len(table.modules)} module(s) "
+              f"declared, {measured} of {len(rows) * len(MEASURES)} floor(s) measured")
         return 0
     path = args.check if args.check is not None else args.fill
     try:

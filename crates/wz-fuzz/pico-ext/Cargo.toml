@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The targets of the pico C ABI's own doors (`wz_ext_*`, fuzz_targets/), against the library as
+# the release package builds it: `wz-capi-pico` in the build `configs/profiles/host-peer-ext.conf`
+# resolves to. A package of its own so the features cargo unifies for it are that build's alone
+# (../README.md).
+#
+# The feature list is not written here. `scripts/fuzz.sh build` resolves the profile
+# (`scripts/lib/fuzz_seeds.py --features-of`) and names the result on cargo's command line, each
+# name a feature of this package that forwards to the library's own feature of that name, so the
+# build follows the profile without a second copy of it to drift. A capability the profile comes
+# to name that no row below forwards is refused by name there; the rows are the capabilities a
+# host library on the cooperative engine may name, which the lock file is resolved over.
+[package]
+name = "wz-fuzz-pico-ext"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+std = ["wz-capi-pico/std"]
+engine-coop = ["wz-capi-pico/engine-coop"]
+peer = ["wz-capi-pico/peer"]
+link-udp = ["wz-capi-pico/link-udp"]
+scout = ["wz-capi-pico/scout"]
+multicast-transport = ["wz-capi-pico/multicast-transport"]
+multicast-declarations = ["wz-capi-pico/multicast-declarations"]
+query = ["wz-capi-pico/query"]
+queryable = ["wz-capi-pico/queryable"]
+liveliness = ["wz-capi-pico/liveliness"]
+liveliness-get = ["wz-capi-pico/liveliness-get"]
+advanced = ["wz-capi-pico/advanced"]
+multi-thread = ["wz-capi-pico/multi-thread"]
+unstable-api = ["wz-capi-pico/unstable-api"]
+connectivity = ["wz-capi-pico/connectivity"]
+admin-space = ["wz-capi-pico/admin-space"]
+local-subscriber = ["wz-capi-pico/local-subscriber"]
+local-queryable = ["wz-capi-pico/local-queryable"]
+remote-declaration-watch = ["wz-capi-pico/remote-declaration-watch"]
+declarations-synced-event = ["wz-capi-pico/declarations-synced-event"]
+app-transport = ["wz-capi-pico/app-transport"]
+config-policy = ["wz-capi-pico/config-policy"]
+conformance-digest = ["wz-capi-pico/conformance-digest"]
+config-document = ["wz-capi-pico/config-document"]
+shared-key-ids = ["wz-capi-pico/shared-key-ids"]
+e2e-sender = ["wz-capi-pico/e2e-sender"]
+e2e-receiver = ["wz-capi-pico/e2e-receiver"]
+e2e-sender-demux = ["wz-capi-pico/e2e-sender-demux"]
+e2e-supervision = ["wz-capi-pico/e2e-supervision"]
+instance-key = ["wz-capi-pico/instance-key"]
+message-catalog = ["wz-capi-pico/message-catalog"]
+message-payload = ["wz-capi-pico/message-payload"]
+replay-cache = ["wz-capi-pico/replay-cache"]
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+wz-capi-pico = { path = "../../wz-capi-pico", default-features = false }
+wz-fuzz-ingress-common = { path = "../ingress-common" }
+
+[[bin]]
+name = "pico_transport"
+path = "fuzz_targets/pico_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pico_config"
+path = "fuzz_targets/pico_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pico_e2e"
+path = "fuzz_targets/pico_e2e.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pico_instance_key"
+path = "fuzz_targets/pico_instance_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pico_catalog"
+path = "fuzz_targets/pico_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pico_payload"
+path = "fuzz_targets/pico_payload.rs"
+test = false
+doc = false
+bench = false

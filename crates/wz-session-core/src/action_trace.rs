@@ -15,15 +15,15 @@
 //! anything (the staged close reason, for one, is the link's
 //! `close_reason`, read through `SessionLinkActions::close_reason`).
 //!
-//! Only the trace state moves: the live trace slot
-//! (`SessionLinkActions::trace: R::Mutex<ActionTrace>`) and the snapshot
-//! accessor (`trace_snapshot`, which reads the slot under the runtime's
-//! mutex) are runtime-bound and stay in `session_glue.rs`. That accessor
-//! calls [`ActionTrace::clone_via_copy`] across the crate boundary, so the
-//! helper is `pub` here (it was a private fn while co-located).
-//! `session_glue.rs` keeps a `pub use` re-export so the
-//! `crate::session_glue::ActionTrace` callsites resolve unchanged. A DP3
-//! leaf out of `session_glue.rs`.
+//! The live trace slot (`SessionCore::trace: R::Mutex<ActionTrace>`) and the
+//! snapshot accessor (`SessionLinkActions::trace_snapshot`, which reads the slot
+//! under the runtime's mutex and copies it out with
+//! [`ActionTrace::clone_via_copy`]) exist only with the `action-trace` feature,
+//! which the test builds and the runners that report the counters name. A build
+//! without it holds no slot, and an action that would count itself takes no lock
+//! to do so: the counters are an instrument, and a library that ships carries
+//! none of it. `wz-runtime-tokio`'s `session_glue.rs` keeps a `pub use`
+//! re-export of this type.
 
 /// Counters + last-wire-bytes snapshot the integration tests inspect
 /// to verify the script-action dispatch reached this side AND the

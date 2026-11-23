@@ -121,10 +121,12 @@ wz = { path = "../wz", default-features = false, features = [
 # SessionTimeouts / parse_inbound / InboundFrame / IterationEvent /
 # DriverLoopOutcome / link::BoxedLinkDriver). Feature set is the base
 # MCU profile; the codec-* gates arrive via the facade funnel above and
-# unify onto this same wz-session-core instance.
+# unify onto this same wz-session-core instance. `action-trace`: the run's
+# report reads which handshake actions the acceptor ran.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast",
     "no_std",
+    "action-trace",
 ] }
 # R2917 — the cooperative drive loop the e2e steps (`session_drive`) and the
 # MCU construction seam (`session_runtime`), both behind `session-unicast`,

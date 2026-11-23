@@ -10,7 +10,10 @@
 //!
 //! The answering side is upstream's own: `pico_local_delivery_upstream_tests_on_wz` opens
 //! both of its sessions this way and finds a zenohd.
-#![cfg(feature = "scout")]
+//!
+//! A build that scouts over one datagram socket of its stack (`scout-mcu`, the window a Zephyr
+//! image scouts with, here over the host's socket on the cooperative engine) opens the same way.
+#![cfg(any(feature = "scout", feature = "scout-mcu"))]
 
 use std::ffi::CString;
 use std::time::{Duration, Instant};
