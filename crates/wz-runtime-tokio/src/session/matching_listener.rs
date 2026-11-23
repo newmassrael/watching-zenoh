@@ -166,11 +166,11 @@ impl<R: SessionRuntime, T: TimeSource> MatchingListener<R, T> {
         match self.scope {
             #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
             MatchingScope::RemoteSubscribers => R::with_mutex_mut(self.session.observer(), |obs| {
-                obs.remote_subscribers.undeclare_matching_listener(self.id)
+                obs.with_app(|app| app.remote_subscribers.undeclare_matching_listener(self.id))
             }),
             #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
             MatchingScope::RemoteQueryables => R::with_mutex_mut(self.session.observer(), |obs| {
-                obs.remote_queryables.undeclare_matching_listener(self.id)
+                obs.with_app(|app| app.remote_queryables.undeclare_matching_listener(self.id))
             }),
         }
     }

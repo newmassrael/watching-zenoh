@@ -456,8 +456,7 @@ fn application(actions: &Handle) -> (OnEvent, Arc<Seen>) {
     let counted = seen.clone();
     observer
         .borrow_mut()
-        .subscribers
-        .register_sink(
+        .register_subscriber(
             KEY,
             Locality::Any,
             BoxedSink::new(move |sample| {

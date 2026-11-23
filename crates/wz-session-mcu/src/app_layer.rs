@@ -121,7 +121,7 @@ impl ReplySink for NoReplies {
 /// ```ignore
 /// static APP: SlotApp = SlotApp::new();
 /// let (observer, registered) = APP
-///     .install_with(|observer| observer.subscribers.register_sink(..))
+///     .install_with(|observer| observer.register_subscriber(..))
 ///     .ok()
 ///     .expect("installed once");
 /// ```
@@ -655,8 +655,7 @@ mod tests {
         // `bounded-heapless`, which compiles out the infallible wrappers.
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 "home/temp",
                 wz_session_core::locality::Locality::Any,
                 wz_session_core::sink::BoxedSink::new(|_| {
@@ -664,18 +663,18 @@ mod tests {
                 }),
             )
             .expect("a fresh observer takes the subscriber");
-        observer
-            .borrow_mut()
-            .queryables
-            .register_sink(
-                "svc/a",
-                wz_session_core::locality::Locality::Any,
-                false,
-                wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
-                    responder.reply(b"pong");
-                }),
-            )
-            .expect("a fresh observer takes the queryable");
+        observer.borrow_mut().with_app(|app| {
+            app.queryables
+                .register_sink(
+                    "svc/a",
+                    wz_session_core::locality::Locality::Any,
+                    false,
+                    wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
+                        responder.reply(b"pong");
+                    }),
+                )
+                .expect("a fresh observer takes the queryable")
+        });
 
         on_event(IterationEvent::Poll(&frame(vec![push(), query()])));
         std::assert_eq!(
@@ -729,7 +728,9 @@ mod tests {
             let mut on_event = dispatch_to(observer.clone(), actions);
             on_event(IterationEvent::Poll(&frame(Vec::new())));
             std::assert_eq!(
-                observer.borrow().queryables.answers_unresolved_queries(),
+                observer
+                    .borrow()
+                    .read_app(|app| app.queryables.answers_unresolved_queries()),
                 value == QueryUnanswerableFinal::EmptyFinal,
                 "{}",
                 value.id()

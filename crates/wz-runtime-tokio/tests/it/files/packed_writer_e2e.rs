@@ -117,8 +117,7 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
     for (lane, (keyexpr, _)) in LANES.iter().enumerate() {
         let (arrived, corrupt, total) = (arrived.clone(), corrupt.clone(), total.clone());
         observer
-            .subscribers
-            .register(keyexpr, move |sample| {
+            .subscribe(keyexpr, move |sample| {
                 let bytes = sample.payload();
                 let intact = bytes.len() >= 4 && {
                     let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
@@ -267,8 +266,7 @@ async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
     {
         let received = received.clone();
         observer
-            .subscribers
-            .register(ALIAS_KEY, move |_sample| {
+            .subscribe(ALIAS_KEY, move |_sample| {
                 received.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -410,8 +408,7 @@ async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
     {
         let received = received.clone();
         observer
-            .subscribers
-            .register(STREAM_KEY, move |_sample| {
+            .subscribe(STREAM_KEY, move |_sample| {
                 received.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");

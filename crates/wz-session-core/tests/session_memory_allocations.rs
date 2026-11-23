@@ -118,10 +118,10 @@ fn tables_filled_to_their_limits_hold_at_most_the_reported_total() {
     for index in 0..FILLED {
         let key = format!("memory/table/{index:04}/a-key-long-enough-to-be-a-block-of-its-own");
         observer
-            .subscribers
-            .register(&key, |_| {})
+            .subscribe(&key, |_| {})
             .expect("under the stated quota");
         observer
+            .face()
             .replies
             .register(
                 u32::try_from(index).expect("a small index"),
@@ -133,27 +133,37 @@ fn tables_filled_to_their_limits_hold_at_most_the_reported_total() {
             )
             .expect("under the stated quota");
         #[cfg(feature = "query-queryable")]
-        observer
-            .queryables
-            .register(&key, |_, _| {})
-            .expect("under the stated quota");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register(&key, |_, _| {})
+                .expect("under the stated quota")
+        });
         #[cfg(feature = "liveliness-token")]
-        observer
-            .local_tokens
-            .register(index as u64, &key)
-            .expect("under the stated quota");
+        observer.with_app(|app_half| {
+            app_half
+                .local_tokens
+                .register(index as u64, &key)
+                .expect("under the stated quota")
+        });
         #[cfg(feature = "liveliness-subscriber")]
-        observer
-            .liveliness_subscribers
-            .register(
-                index as u64,
-                &key,
-                false,
-                wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink::new(|_| {}),
-            )
-            .expect("under the stated quota");
+        observer.with_parts(|app_half, face_half| {
+            app_half
+                .liveliness_subscribers
+                .register(
+                    &mut *face_half.tokens,
+                    index as u64,
+                    &key,
+                    false,
+                    wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink::new(
+                        |_| {},
+                    ),
+                )
+                .expect("under the stated quota")
+        });
         #[cfg(feature = "liveliness-get")]
         observer
+            .face()
             .liveliness_gets
             .register_get(index as u64, None, |_| {}, |_| {})
             .expect("under the stated quota");
@@ -169,8 +179,5 @@ fn tables_filled_to_their_limits_hold_at_most_the_reported_total() {
         "the tables hold {held} bytes, past the {reported} the report bounds them to"
     );
     // The one more is refused: the table holds no more than the report counted.
-    assert!(observer
-        .subscribers
-        .register("memory/table/one-more", |_| {})
-        .is_err());
+    assert!(observer.subscribe("memory/table/one-more", |_| {}).is_err());
 }

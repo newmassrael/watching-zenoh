@@ -150,8 +150,7 @@ async fn wz_to_wz_over_udp_fragments_and_reassembles_oversize_put() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),

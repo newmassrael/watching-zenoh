@@ -127,8 +127,7 @@ fn publish_locality_any_fires_wire_and_loopback() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -155,8 +154,7 @@ fn publish_locality_remote_fires_wire_only() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -185,8 +183,7 @@ fn publish_locality_session_local_fires_loopback_only() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -225,8 +222,7 @@ fn publish_session_local_does_not_fire_loopback_when_allow_loop_off() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -259,8 +255,7 @@ fn publish_aliased_session_local_does_not_fire_loopback_when_allow_loop_off() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -291,8 +286,7 @@ fn publish_loopback_sample_carries_options_reliability_and_kind() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |sample| {
+        .subscribe("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
         })
         .expect("no quota is stated on this table");
@@ -323,8 +317,7 @@ fn publish_del_kind_routes_to_del_loopback_with_empty_payload() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |sample| {
+        .subscribe("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some((sample.kind(), sample.payload().to_vec()));
         })
         .expect("no quota is stated on this table");
@@ -382,8 +375,7 @@ fn publish_locality_remote_only_returns_zero_even_with_matching_subscriber() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -409,8 +401,7 @@ fn publish_returns_multi_subscriber_fired_count() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register("home/temp", move |_sample| {
+            .subscribe("home/temp", move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -421,8 +412,7 @@ fn publish_returns_multi_subscriber_fired_count() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register("home/*", move |_sample| {
+            .subscribe("home/*", move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -453,8 +443,7 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::Any, move |_sample| {
+            .subscribe_with_locality("home/temp", Locality::Any, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -465,8 +454,7 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+            .subscribe_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -477,8 +465,7 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::Remote, move |_sample| {
+            .subscribe_with_locality("home/temp", Locality::Remote, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -512,8 +499,7 @@ fn publish_aliased_locality_any_fires_wire_and_loopback() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -544,8 +530,7 @@ fn publish_aliased_locality_remote_fires_wire_only() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -569,8 +554,7 @@ fn publish_aliased_locality_session_local_fires_loopback_only() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -598,8 +582,7 @@ fn publish_aliased_del_kind_routes_to_del_aliased_with_empty_payload() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |sample| {
+        .subscribe("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some((
                 sample.kind(),
                 sample.payload().to_vec(),
@@ -630,8 +613,7 @@ fn publish_aliased_reliability_propagates_to_wire_and_sample() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |sample| {
+        .subscribe("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some(sample.reliability());
         })
         .expect("no quota is stated on this table");
@@ -669,8 +651,7 @@ fn publish_aliased_inline_suffix_passes_through_to_wire() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp/kitchen", move |sample| {
+        .subscribe("home/temp/kitchen", move |sample| {
             *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
         })
         .expect("no quota is stated on this table");
@@ -724,8 +705,7 @@ fn publish_aliased_loopback_independent_of_wire_keyexpr_form() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("intentionally_decoupled", move |_sample| {
+        .subscribe("intentionally_decoupled", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -763,8 +743,7 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::Any, move |_s| {
+            .subscribe_with_locality("home/temp", Locality::Any, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -775,8 +754,7 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::SessionLocal, move |_s| {
+            .subscribe_with_locality("home/temp", Locality::SessionLocal, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -787,8 +765,7 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .observer()
             .lock()
             .unwrap()
-            .subscribers
-            .register_with_locality("home/temp", Locality::Remote, move |_s| {
+            .subscribe_with_locality("home/temp", Locality::Remote, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -827,6 +804,7 @@ fn set_own_zid_forwards_to_subscriber_registry() {
             .observer()
             .lock()
             .unwrap()
+            .face_ref()
             .subscribers
             .own_zid()
             .is_none(),
@@ -836,7 +814,13 @@ fn set_own_zid_forwards_to_subscriber_registry() {
     let zid = vec![0x01, 0x02, 0x03, 0x04];
     assert!(session.set_own_zid(zid.clone()));
     assert_eq!(
-        session.observer().lock().unwrap().subscribers.own_zid(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .subscribers
+            .own_zid(),
         Some(&zid[..])
     );
 }
@@ -854,14 +838,26 @@ fn set_own_zid_rejects_invalid_length_without_mutating_registry() {
 
     assert!(!session.set_own_zid(vec![]));
     assert_eq!(
-        session.observer().lock().unwrap().subscribers.own_zid(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .subscribers
+            .own_zid(),
         Some(&initial[..]),
         "rejected length-0 install must not mutate previously-installed zid"
     );
 
     assert!(!session.set_own_zid(vec![0u8; 17]));
     assert_eq!(
-        session.observer().lock().unwrap().subscribers.own_zid(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .subscribers
+            .own_zid(),
         Some(&initial[..]),
         "rejected length-17 install must not mutate previously-installed zid"
     );
@@ -875,6 +871,7 @@ fn clear_own_zid_forwards_to_subscriber_registry() {
         .observer()
         .lock()
         .unwrap()
+        .face_ref()
         .subscribers
         .own_zid()
         .is_some());
@@ -885,6 +882,7 @@ fn clear_own_zid_forwards_to_subscriber_registry() {
             .observer()
             .lock()
             .unwrap()
+            .face_ref()
             .subscribers
             .own_zid()
             .is_none(),
@@ -1927,7 +1925,13 @@ fn session_new_auto_wires_set_own_zid_from_params() {
     // one auto-wired into the registry, not a specific byte pattern.
     let fixture_zid: Vec<u8> = vec![0x01; 4];
     assert_eq!(
-        session.observer().lock().unwrap().subscribers.own_zid(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .subscribers
+            .own_zid(),
         Some(&fixture_zid[..]),
         "Session::new auto-wires own_zid from SessionInitParams.zid"
     );
@@ -1950,7 +1954,13 @@ fn session_new_installs_a_zid_at_either_end_of_the_range() {
         let session = TokioSession::new(actions, observer, clock);
         assert_eq!(session.zid(), zid);
         assert_eq!(
-            session.observer().lock().unwrap().subscribers.own_zid(),
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .face_ref()
+                .subscribers
+                .own_zid(),
             Some(zid.as_slice()),
             "Session::new installs the session zid as the registry's own zid"
         );
@@ -1969,8 +1979,7 @@ fn record_loopback_samples(session: &TokioSession, pattern: &str) -> Arc<Mutex<V
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register(pattern, move |s| {
+        .subscribe(pattern, move |s| {
             captured_clone.lock().unwrap().push(Sample::from_view(s));
         })
         .expect("no quota is stated on this table");
@@ -3215,15 +3224,14 @@ fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_query, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_query, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3257,7 +3265,13 @@ fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
         "SessionLocal must NOT touch the wire"
     );
     assert!(
-        session.observer().lock().unwrap().replies.is_empty(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .replies
+            .is_empty(),
         "expected_finals=1 closes the pending entry on the loopback final"
     );
 }
@@ -3312,7 +3326,13 @@ fn query_session_local_with_no_queryable_finalises_inline_with_zero_replies() {
         "SessionLocal must NOT touch the wire"
     );
     assert!(
-        session.observer().lock().unwrap().replies.is_empty(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .replies
+            .is_empty(),
         "expected_finals=1 closes the pending entry on the loopback final"
     );
 }
@@ -3327,15 +3347,14 @@ fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
     // Local queryable that would fire on a loopback round must
     // stay dormant on Locality::Remote — verifies the loopback
     // branch is entirely skipped.
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"loopback-should-not-fire");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"loopback-should-not-fire");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3366,7 +3385,7 @@ fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
         "wire Request(Query) frame on the driver"
     );
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         1,
         "pending entry preserved waiting for the peer's Final"
     );
@@ -3383,15 +3402,14 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3424,7 +3442,7 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
         "wire branch dispatched one Request(Query)"
     );
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         1,
         "pending entry preserved waiting for the remaining wire Final"
     );
@@ -3439,7 +3457,10 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
     }
     .try_into_owned_in::<sce_forge_runtime::codec::Heap>()
     .unwrap();
-    observer.replies.dispatch_response_final(&response_final);
+    observer
+        .face()
+        .replies
+        .dispatch_response_final(&response_final);
     drop(observer);
     // R311lg — the deferred reply sink STAGES the on_final fire; a raw
     // registry dispatch (bypassing the Session dispatch SSOT) must
@@ -3452,7 +3473,13 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
         "second Final closes the chain"
     );
     assert!(
-        session.observer().lock().unwrap().replies.is_empty(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .replies
+            .is_empty(),
         "pending entry dropped after the closing Final"
     );
 }
@@ -3492,15 +3519,14 @@ fn query_loopback_propagates_del_body() {
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("clear/me", |_q, responder| {
-            responder.reply_del();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("clear/me", |_q, responder| {
+                responder.reply_del();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -3542,15 +3568,14 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("error/path", |_q, responder| {
+                responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -3590,15 +3615,14 @@ fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
     // Register a queryable on a different keyexpr; the query's
     // pattern won't match → zero replies, but the loopback's
     // synthetic Final still closes the SessionLocal pending entry.
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/humidity", |_q, responder| {
-            responder.reply(b"99");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/humidity", |_q, responder| {
+                responder.reply(b"99");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3621,7 +3645,13 @@ fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
         1,
         "loopback Final still fires even when no queryable matched"
     );
-    assert!(session.observer().lock().unwrap().replies.is_empty());
+    assert!(session
+        .observer()
+        .lock()
+        .unwrap()
+        .face_ref()
+        .replies
+        .is_empty());
 }
 
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
@@ -3634,15 +3664,14 @@ fn query_session_local_skips_remote_only_queryable() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
@@ -3683,16 +3712,15 @@ fn query_session_local_with_session_local_queryable_fires() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let r = reply_count.clone();
@@ -4069,32 +4097,30 @@ fn query_allcomplete_target_loopback_fires_only_complete_queryable() {
     let incomplete_hits = Arc::new(AtomicUsize::new(0));
 
     let c = complete_hits.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_sink(
-            "home/temp",
-            Locality::SessionLocal,
-            /*complete=*/ true,
-            wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
-                c.fetch_add(1, Ordering::SeqCst);
-                responder.reply(b"complete");
-            }),
-        )
-        .expect("register on the alloc backing never exceeds declared capacity");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_sink(
+                "home/temp",
+                Locality::SessionLocal,
+                /*complete=*/ true,
+                wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    responder.reply(b"complete");
+                }),
+            )
+            .expect("register on the alloc backing never exceeds declared capacity")
+    });
     let ic = incomplete_hits.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
-            ic.fetch_add(1, Ordering::SeqCst);
-            responder.reply(b"incomplete");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+                ic.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"incomplete");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     // AllComplete self-get: only the complete queryable fires.
     session
@@ -5398,16 +5424,15 @@ fn query_locality_remote_alone_skips_local_queryable() {
     let (session, driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", move |_q, responder| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", move |_q, responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let r = reply_count.clone();
@@ -6072,32 +6097,30 @@ fn loopback_target_pub_field_cannot_bypass_the_query_target_gate() {
     let incomplete_hits = Arc::new(AtomicUsize::new(0));
 
     let c = complete_hits.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_sink(
-            "home/temp",
-            Locality::SessionLocal,
-            /*complete=*/ true,
-            wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
-                c.fetch_add(1, Ordering::SeqCst);
-                responder.reply(b"complete");
-            }),
-        )
-        .expect("register on the alloc backing never exceeds declared capacity");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_sink(
+                "home/temp",
+                Locality::SessionLocal,
+                /*complete=*/ true,
+                wz_session_core::query_sink::BoxedQuerySink::new(move |_q, responder| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    responder.reply(b"complete");
+                }),
+            )
+            .expect("register on the alloc backing never exceeds declared capacity")
+    });
     let ic = incomplete_hits.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
-            ic.fetch_add(1, Ordering::SeqCst);
-            responder.reply(b"incomplete");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+                ic.fetch_add(1, Ordering::SeqCst);
+                responder.reply(b"incomplete");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let mut opts = QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
     // Pub-field bypass — with_target() is a no-op when query-target is OFF, so
@@ -6330,15 +6353,14 @@ fn query_aliased_locality_session_local_fires_loopback_only() {
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -6399,15 +6421,14 @@ fn query_aliased_locality_any_fires_both_branches() {
     let (session, driver) = build_session();
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -6445,15 +6466,14 @@ fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
 
     // Local queryable matches the COMPOSITE literal (the
     // loopback path uses loopback_keyexpr verbatim).
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp/kitchen", |_q, responder| {
-            responder.reply(b"21.0");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.reply(b"21.0");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query_aliased(
@@ -6497,15 +6517,14 @@ fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
 
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let handle = session
         .query_aliased_auto(
@@ -6536,22 +6555,27 @@ fn query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches() {
     let (session, driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", move |_q, _r| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let err = session.query_aliased_auto(99, None, QueryOptions::get(), |_| {}, |_| {});
     assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
     assert_eq!(fired.load(Ordering::SeqCst), 0, "loopback skipped on err");
     assert_eq!(driver.frame_count(), 0, "wire skipped on err");
     assert!(
-        session.observer().lock().unwrap().replies.is_empty(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .replies
+            .is_empty(),
         "no pending entry on err"
     );
 }
@@ -6572,15 +6596,14 @@ fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
 
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp/kitchen", |_q, responder| {
-            responder.reply(b"21.0");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.reply(b"21.0");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query_aliased_auto(
@@ -6918,15 +6941,14 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let querier = session.declare_querier(
         "home/temp",
@@ -6980,7 +7002,7 @@ fn querier_get_called_twice_allocates_independent_rids() {
         "successive querier.get() calls get monotonic rids"
     );
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         2,
         "both pending entries preserved (Locality::Remote awaits wire Final)"
     );
@@ -7127,8 +7149,13 @@ fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(42, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(42, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true },
@@ -7146,8 +7173,13 @@ fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(43, "home/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(43, "home/**"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true },
@@ -7165,8 +7197,13 @@ fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(44, "home/door"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(44, "home/door"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true },
@@ -7184,8 +7221,13 @@ fn querier_get_matching_status_false_after_peer_undeclare() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(45, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(45, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true }
@@ -7195,8 +7237,13 @@ fn querier_get_matching_status_false_after_peer_undeclare() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_undecl_queryable(45), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_undecl_queryable(45),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: false },
@@ -7214,8 +7261,13 @@ fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(46, "other/foo"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(46, "other/foo"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: false },
@@ -7230,13 +7282,28 @@ fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
     let (session, _driver) = build_session();
     let querier = session.declare_querier("home/temp", QueryOptions::get());
     let mut obs = session.observer().lock().unwrap();
-    obs.remote_queryables
-        .dispatch_declare(&make_decl_queryable(50, "other/foo"), &HashMap::new());
-    obs.remote_queryables
-        .dispatch_declare(&make_decl_queryable(51, "home/temp"), &HashMap::new());
-    obs.remote_queryables
-        .dispatch_declare(&make_decl_queryable(52, "a/b/c"), &HashMap::new());
-    assert_eq!(obs.remote_queryables.declared_count(), 3);
+    obs.with_parts(|app_half, face_half| {
+        app_half.remote_queryables.dispatch_declare(
+            &mut *face_half.remote_queryables,
+            &make_decl_queryable(50, "other/foo"),
+            &HashMap::new(),
+        )
+    });
+    obs.with_parts(|app_half, face_half| {
+        app_half.remote_queryables.dispatch_declare(
+            &mut *face_half.remote_queryables,
+            &make_decl_queryable(51, "home/temp"),
+            &HashMap::new(),
+        )
+    });
+    obs.with_parts(|app_half, face_half| {
+        app_half.remote_queryables.dispatch_declare(
+            &mut *face_half.remote_queryables,
+            &make_decl_queryable(52, "a/b/c"),
+            &HashMap::new(),
+        )
+    });
+    assert_eq!(obs.face_ref().remote_queryables.declared_count(), 3);
     drop(obs);
     assert_eq!(
         querier.get_matching_status(),
@@ -7264,8 +7331,13 @@ fn querier_clone_shares_matching_status_view() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(60, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(60, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     // Both clones observe the same registry membership change.
     assert_eq!(
         querier.get_matching_status(),
@@ -7316,15 +7388,14 @@ fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
 
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let qa = session.declare_querier_aliased(
         7,
@@ -7356,15 +7427,14 @@ fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
     let (session, driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", move |_q, _r| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let qa = session.declare_querier_aliased(99, None, QueryOptions::get());
     let err = qa.get(|_| {}, |_| {});
@@ -7389,15 +7459,14 @@ fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
 
     let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
     let cap_cb = captured.clone();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp/kitchen", |_q, responder| {
-            responder.reply(b"21.0");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.reply(b"21.0");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let qa = session.declare_querier_aliased(
         7,
@@ -7473,23 +7542,22 @@ fn reply_timestamps_seen_on(
     let (actions, _driver) = recording_actions_with_params(params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", move |_q, responder| {
-            for (payload, time) in versions {
-                let stamp = TimestampHint {
-                    time: *time,
-                    zid: vec![1, 2, 3],
-                };
-                responder
-                    .reply_keyed_stamped("home/temp", payload, None, &stamp)
-                    .unwrap();
-            }
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", move |_q, responder| {
+                for (payload, time) in versions {
+                    let stamp = TimestampHint {
+                        time: *time,
+                        zid: vec![1, 2, 3],
+                    };
+                    responder
+                        .reply_keyed_stamped("home/temp", payload, None, &stamp)
+                        .unwrap();
+                }
+            })
+            .expect("no quota is stated on this table")
+    });
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let writer = seen.clone();
     session
@@ -7814,6 +7882,7 @@ fn finish_query(session: &TokioSession, rid: wz_session_core::wire_id::RequestId
         .observer()
         .lock()
         .unwrap()
+        .face()
         .replies
         .dispatch_response_final(&response_final);
     session.drain_deferred_fires();
@@ -7836,7 +7905,7 @@ fn a_querier_at_its_pending_bound_refuses_the_next_query_and_registers_nothing()
         "the third query is refused with the bound it reached"
     );
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         2,
         "a refusal registers no pending entry"
     );
@@ -7873,6 +7942,7 @@ fn a_query_unregistered_before_its_final_gives_its_place_back() {
         .observer()
         .lock()
         .unwrap()
+        .face()
         .replies
         .unregister(first.rid()));
     assert_eq!(querier.slots.pending(), 0, "the dropped entry returned it");
@@ -8105,8 +8175,13 @@ fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal(
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(70, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(70, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         qa.get_matching_status(),
         Ok(MatchingStatus { matching: true }),
@@ -8136,8 +8211,13 @@ fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(71, "home/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(71, "home/**"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         qa.get_matching_status(),
         Ok(MatchingStatus { matching: true }),
@@ -8154,14 +8234,24 @@ fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_undecl_queryable(71), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_undecl_queryable(71),
+                &HashMap::new(),
+            )
+        });
     session
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(72, "home/door/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(72, "home/door/**"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         qa.get_matching_status(),
         Ok(MatchingStatus { matching: false }),
@@ -8188,8 +8278,13 @@ fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(73, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(73, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         qa.get_matching_status(),
         Ok(MatchingStatus { matching: true })
@@ -8551,8 +8646,7 @@ fn publisher_put_fires_loopback_subscriber() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -8576,8 +8670,7 @@ fn publisher_delete_routes_to_del_kind_and_drops_payload() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("clear/me", move |sample| {
+        .subscribe("clear/me", move |sample| {
             *kind_cb.lock().unwrap() = Some(sample.kind());
         })
         .expect("no quota is stated on this table");
@@ -8651,8 +8744,7 @@ fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_sample| {
+        .subscribe("home/temp", move |_sample| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -8681,8 +8773,7 @@ fn publisher_aliased_unknown_mapping_returns_err_and_skips_both_branches() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("home/temp", move |_| {
+        .subscribe("home/temp", move |_| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
         })
         .expect("no quota is stated on this table");
@@ -8713,8 +8804,7 @@ fn publisher_aliased_delete_routes_to_del_kind() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .register("clear/me", move |sample| {
+        .subscribe("clear/me", move |sample| {
             *kind_cb.lock().unwrap() = Some(sample.kind());
         })
         .expect("no quota is stated on this table");
@@ -8801,8 +8891,13 @@ fn peer_ends_initial_declarations(session: &TokioSession) {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_messages(&messages, &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_messages(
+                &mut *face_half.remote_subscribers,
+                &messages,
+                &HashMap::new(),
+            )
+        });
 }
 
 #[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
@@ -8812,8 +8907,13 @@ fn peer_declares(session: &TokioSession, id: u64, key: &str) {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(id, key), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(id, key),
+                &HashMap::new(),
+            )
+        });
 }
 
 #[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
@@ -8875,8 +8975,13 @@ fn a_subscription_declared_after_the_final_is_written_to_from_then_on() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_undecl_subscriber(7), &hashbrown::HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_undecl_subscriber(7),
+                &hashbrown::HashMap::new(),
+            )
+        });
     assert!(
         session.peer_wants_no_put_on("home/temp"),
         "and stops when it undeclares"
@@ -8917,8 +9022,11 @@ fn a_lost_link_returns_the_peer_to_being_written_to_until_it_ends_again() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .flush_declarations_on_link_loss(&|_| false);
+        .with_parts(|app_half, face_half| {
+            app_half
+                .remote_subscribers
+                .flush_declarations_on_link_loss(&mut *face_half.remote_subscribers, &|_| false)
+        });
     assert!(
         !session.peer_wants_no_put_on("home/temp"),
         "the reconnected peer has not yet declared again"
@@ -8948,8 +9056,13 @@ fn publisher_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(42, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(42, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         publisher.get_matching_status(),
         MatchingStatus { matching: true },
@@ -8967,8 +9080,13 @@ fn publisher_get_matching_status_true_when_peer_pattern_covers_publisher_literal
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(43, "home/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(43, "home/**"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         publisher.get_matching_status(),
         MatchingStatus { matching: true },
@@ -9075,8 +9193,13 @@ fn publisher_get_matching_status_false_after_peer_undeclare() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(45, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(45, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         publisher.get_matching_status(),
         MatchingStatus { matching: true }
@@ -9085,8 +9208,13 @@ fn publisher_get_matching_status_false_after_peer_undeclare() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_undecl_subscriber(45), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_undecl_subscriber(45),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         publisher.get_matching_status(),
         MatchingStatus { matching: false },
@@ -9104,8 +9232,13 @@ fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(46, "other/foo"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(46, "other/foo"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         publisher.get_matching_status(),
         MatchingStatus { matching: false }
@@ -9223,8 +9356,13 @@ fn querier_get_matching_status_ignores_a_peer_when_destination_is_session_local(
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(90, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(90, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         anywhere.get_matching_status(),
         MatchingStatus { matching: true },
@@ -9347,8 +9485,13 @@ fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(71, "home/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(71, "home/**"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         pa.get_matching_status(),
         Ok(MatchingStatus { matching: true }),
@@ -9375,8 +9518,13 @@ fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(73, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(73, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     assert_eq!(
         pa.get_matching_status(),
         Ok(MatchingStatus { matching: true })
@@ -9707,7 +9855,7 @@ fn a_routed_subscribers_wire_retract_leaves_after_its_retirement_with_the_observ
         .expect("remote declare against the test link succeeds");
     // Armed AFTER the declare so the population is the retract frame alone.
     driver.arm(session.observer().clone(), |obs| {
-        !obs.subscribers.is_empty()
+        !obs.read_app(|app_half| app_half.subscribers.is_empty())
     });
     drop(sub);
 
@@ -9741,7 +9889,7 @@ fn a_liveliness_tokens_wire_retract_leaves_after_its_retirement_with_the_observe
         .declare_token("group1/wz", LivelinessOptions::new())
         .expect("token declare against the test link succeeds");
     driver.arm(session.observer().clone(), |obs| {
-        !obs.local_tokens.is_empty()
+        !obs.read_app(|app_half| app_half.local_tokens.is_empty())
     });
     drop(token);
 
@@ -9780,7 +9928,7 @@ fn the_drive_loops_interest_reply_leaves_with_the_observer_free() {
         .expect("remote declare against the test link succeeds");
     // Armed AFTER the declare so the population is the reply the drive loop sends.
     driver.arm(session.observer().clone(), |obs| {
-        !obs.subscribers.is_empty()
+        !obs.read_app(|app_half| app_half.subscribers.is_empty())
     });
     drain_one_drive_iteration(&session);
 
@@ -9818,7 +9966,11 @@ fn declare_subscriber_invalid_keyexpr_rejects_and_rolls_back_local_registration(
         0,
         "a gate-rejected declare emits no wire frame (the reject is pre-send)"
     );
-    let registered = session.observer().lock().unwrap().subscribers.len();
+    let registered = session
+        .observer()
+        .lock()
+        .unwrap()
+        .read_app(|app_half| app_half.subscribers.len());
     assert_eq!(
         registered, 0,
         "pico-parity rollback: the rejected declare left no orphan local subscriber"
@@ -10730,7 +10882,11 @@ fn declare_subscriber_aliased_unknown_mapping_returns_err() {
     );
     // Registry stays empty.
     assert_eq!(
-        session.observer().lock().unwrap().subscribers.len(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.subscribers.len()),
         0,
         "no subscriber registered on declare failure"
     );
@@ -11116,7 +11272,11 @@ fn declare_queryable_invalid_keyexpr_rejects_and_rolls_back_local_registration()
         0,
         "a gate-rejected declare emits no wire frame (the reject is pre-send)"
     );
-    let registered = session.observer().lock().unwrap().queryables.len();
+    let registered = session
+        .observer()
+        .lock()
+        .unwrap()
+        .read_app(|app_half| app_half.queryables.len());
     assert_eq!(
         registered, 0,
         "pico-parity rollback: the rejected declare left no orphan local queryable"
@@ -11418,7 +11578,11 @@ fn declare_queryable_aliased_unknown_mapping_returns_err() {
     let err = session.declare_queryable_aliased(99, None, QueryableOptions::default(), |_q, _r| {});
     assert!(matches!(err, Err(QueryableAliasError::UnknownMapping(99))));
     assert_eq!(
-        session.observer().lock().unwrap().queryables.len(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.queryables.len()),
         0,
         "no queryable registered on declare failure"
     );
@@ -11961,8 +12125,11 @@ fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .keyexpr(sub.interest_id()),
+            .read_app(|app_half| app_half
+                .liveliness_subscribers
+                .keyexpr(sub.interest_id())
+                .map(str::to_owned))
+            .as_deref(),
         Some("liveliness/dev7"),
         "slot stores resolved literal for keyexpr-pattern matching",
     );
@@ -11995,8 +12162,11 @@ fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .keyexpr(sub.interest_id()),
+            .read_app(|app_half| app_half
+                .liveliness_subscribers
+                .keyexpr(sub.interest_id())
+                .map(str::to_owned))
+            .as_deref(),
         Some("liveliness/dev7/sensor"),
     );
 }
@@ -12025,8 +12195,7 @@ fn declare_liveliness_subscriber_aliased_unknown_mapping_returns_err_without_wir
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         0,
         "no slot registered on declare failure",
     );
@@ -12061,8 +12230,7 @@ fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         0,
         "a failed declare must leave NO orphan slot (Finding B rollback)",
     );
@@ -12122,8 +12290,7 @@ fn declare_liveliness_subscriber_is_refused_once_every_interest_id_is_spent() {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         1,
         "only the CONTROL's slot is held"
     );
@@ -12162,8 +12329,7 @@ fn declare_liveliness_subscriber_aliased_is_refused_once_every_interest_id_is_sp
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         0,
         "no slot is registered"
     );
@@ -12183,7 +12349,13 @@ fn liveliness_get_is_refused_once_every_interest_id_is_spent() {
         session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
     assert_eq!(refused, Err(LivelinessGetError::IdsExhausted));
     assert_eq!(
-        session.observer().lock().unwrap().liveliness_gets.len(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .liveliness_gets
+            .len(),
         0,
         "no pending entry is left"
     );
@@ -12223,13 +12395,15 @@ async fn a_liveliness_get_channel_carries_replies_then_closes_at_final() {
         let obs = session.observer();
         let mut obs = obs.lock().unwrap();
         assert_eq!(
-            obs.liveliness_gets
+            obs.face()
+                .liveliness_gets
                 .dispatch_reply_borrowed(interest_id, "live/token/a"),
             1,
             "the solicited reply must fan to exactly this pending get",
         );
         assert_eq!(
-            obs.liveliness_gets
+            obs.face()
+                .liveliness_gets
                 .dispatch_reply_borrowed(interest_id, "live/token/b"),
             1,
         );
@@ -12260,10 +12434,14 @@ async fn a_liveliness_get_channel_carries_replies_then_closes_at_final() {
         let obs = session.observer();
         let mut obs = obs.lock().unwrap();
         assert!(
-            obs.liveliness_gets.dispatch_final(interest_id),
+            obs.face().liveliness_gets.dispatch_final(interest_id),
             "the terminating final fires and removes the entry",
         );
-        assert_eq!(obs.liveliness_gets.len(), 0, "and leaves no pending entry");
+        assert_eq!(
+            obs.face_ref().liveliness_gets.len(),
+            0,
+            "and leaves no pending entry"
+        );
     }
     session.drain_deferred_fires();
 
@@ -12289,7 +12467,13 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
     let result = session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
-        session.observer().lock().unwrap().liveliness_gets.len(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .liveliness_gets
+            .len(),
         0,
         "a failed get must leave NO orphan pending entry (Finding B)",
     );
@@ -12315,7 +12499,7 @@ fn query_rolls_back_pending_on_wire_emit_failure() {
     let result = session.query("home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         0,
         "a failed query must leave NO orphan pending entry (Finding B rollback)",
     );
@@ -12335,7 +12519,7 @@ fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
     let result = session.query_aliased(1, None, "home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
-        session.observer().lock().unwrap().replies.len(),
+        session.observer().lock().unwrap().face_ref().replies.len(),
         0,
         "a failed aliased query must leave NO orphan pending entry (Finding B)",
     );
@@ -12434,8 +12618,11 @@ fn declare_liveliness_subscriber_aliased_survives_mapping_retract_after_declare(
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .keyexpr(interest_id),
+            .read_app(|app_half| app_half
+                .liveliness_subscribers
+                .keyexpr(interest_id)
+                .map(str::to_owned))
+            .as_deref(),
         Some("liveliness/dev7"),
         "slot survives mapping retract — resolution is one-shot at declare time",
     );
@@ -12485,8 +12672,7 @@ fn declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wir
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         0,
         "no slot registered when the Established gate refuses the declare",
     );
@@ -12622,8 +12808,13 @@ fn publisher_matching_listener_fires_on_transitions_only() {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .dispatch_declare(body, &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_subscribers.dispatch_declare(
+                    &mut *face_half.remote_subscribers,
+                    body,
+                    &HashMap::new(),
+                )
+            });
         // R311kz — observer lock dropped; run the staged fires.
         session.drain_deferred_fires();
     };
@@ -12690,8 +12881,13 @@ fn publisher_matching_listener_delivers_true_at_registration_when_already_matchi
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(7, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(7, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
 
     let pubr = session.declare_publisher("home/temp", PublishOptions::put());
@@ -12721,8 +12917,13 @@ fn publisher_matching_listener_delivers_true_at_registration_when_already_matchi
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_undecl_subscriber(7), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_undecl_subscriber(7),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true, false]);
     assert!(listener.undeclare());
@@ -12741,8 +12942,13 @@ fn querier_matching_listener_delivers_true_at_registration_when_already_matching
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(9, "home/**"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(9, "home/**"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
 
     let querier = session.declare_querier("home/temp", QueryOptions::get());
@@ -12784,8 +12990,13 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(7, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(7, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true]);
 
@@ -12793,8 +13004,13 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_undecl_queryable(7), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_undecl_queryable(7),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true, false]);
 
@@ -13044,8 +13260,13 @@ fn a_session_local_publishers_watch_agrees_with_its_poll_about_a_peer() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(97, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(97, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
 
     assert_eq!(
@@ -13082,8 +13303,13 @@ fn an_any_locality_publishers_watch_still_fires_on_the_same_peer() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(98, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(98, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
 
     assert_eq!(
@@ -13367,8 +13593,7 @@ fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .matching_listener_len()
+            .read_app(|app_half| app_half.remote_subscribers.matching_listener_len())
     };
     assert_eq!(watches(), 1);
     spend_interest_ids(&session);
@@ -13405,8 +13630,7 @@ fn a_querier_matching_listener_is_refused_once_every_interest_id_is_spent() {
             .observer()
             .lock()
             .unwrap()
-            .remote_queryables
-            .matching_listener_len(),
+            .read_app(|app_half| app_half.remote_queryables.matching_listener_len()),
         0,
         "the refused listener's watch is rolled back"
     );
@@ -13506,8 +13730,13 @@ fn matching_listener_callback_may_reenter_session_apis() {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .dispatch_declare(body, &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_subscribers.dispatch_declare(
+                    &mut *face_half.remote_subscribers,
+                    body,
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
     };
 
@@ -13581,8 +13810,8 @@ fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
     let baseline = {
         let obs = session.observer().lock().unwrap();
         (
-            obs.remote_subscribers.on_decl_len(),
-            obs.remote_subscribers.on_undecl_len(),
+            obs.read_app(|app_half| app_half.remote_subscribers.on_decl_len()),
+            obs.read_app(|app_half| app_half.remote_subscribers.on_undecl_len()),
         )
     };
     let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -13598,8 +13827,13 @@ fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .dispatch_declare(body, &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_subscribers.dispatch_declare(
+                    &mut *face_half.remote_subscribers,
+                    body,
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
     };
 
@@ -13623,8 +13857,8 @@ fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
         let obs = session.observer().lock().unwrap();
         assert_eq!(
             (
-                obs.remote_subscribers.on_decl_len(),
-                obs.remote_subscribers.on_undecl_len(),
+                obs.read_app(|app_half| app_half.remote_subscribers.on_decl_len()),
+                obs.read_app(|app_half| app_half.remote_subscribers.on_undecl_len()),
             ),
             baseline,
             "registry observer lists back to baseline (no leaked sinks)"
@@ -13652,14 +13886,24 @@ fn remote_queryable_listener_delivers_decl_and_undecl_events() {
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_decl_queryable(7, "home/temp"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_decl_queryable(7, "home/temp"),
+                &HashMap::new(),
+            )
+        });
     session
         .observer()
         .lock()
         .unwrap()
-        .remote_queryables
-        .dispatch_declare(&make_undecl_queryable(7), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &make_undecl_queryable(7),
+                &HashMap::new(),
+            )
+        });
     // One drain runs both staged fires in stage order.
     session.drain_deferred_fires();
     assert_eq!(
@@ -13693,8 +13937,13 @@ fn remote_queryable_listener_from_held_tells_what_the_peer_holds_first() {
             .observer()
             .lock()
             .unwrap()
-            .remote_queryables
-            .dispatch_declare(body, &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_queryables.dispatch_declare(
+                    &mut *face_half.remote_queryables,
+                    body,
+                    &HashMap::new(),
+                )
+            });
     };
     declare(&make_decl_queryable(3, "home/held"));
     let held: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -13747,8 +13996,13 @@ fn remote_subscriber_listener_from_held_tells_what_the_peer_holds_first() {
         .observer()
         .lock()
         .unwrap()
-        .remote_subscribers
-        .dispatch_declare(&make_decl_subscriber(8, "home/sub"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &make_decl_subscriber(8, "home/sub"),
+                &HashMap::new(),
+            )
+        });
     let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let listener = session
@@ -13820,18 +14074,16 @@ fn remote_token_listener_delivers_decl_and_undecl_events() {
         .declare_remote_token_listener(move |e| log_cb.lock().unwrap().push(e))
         .expect("liveliness-token is on in this lane");
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .liveliness
-        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .liveliness
-        .dispatch_declare(&make_undecl_token(9), &HashMap::new());
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .liveliness
+            .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new())
+    });
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .liveliness
+            .dispatch_declare(&make_undecl_token(9), &HashMap::new())
+    });
     session.drain_deferred_fires();
     assert_eq!(
         *log.lock().unwrap(),
@@ -13876,6 +14128,7 @@ fn decl_listener_callback_may_reenter_session_apis() {
                 .observer()
                 .lock()
                 .unwrap()
+                .face_ref()
                 .remote_subscribers
                 .declared_count();
             assert_eq!(declared, 1, "in-callback registry consult sees the decl");
@@ -13903,8 +14156,13 @@ fn decl_listener_callback_may_reenter_session_apis() {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .dispatch_declare(body, &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_subscribers.dispatch_declare(
+                    &mut *face_half.remote_subscribers,
+                    body,
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
     };
 
@@ -14654,6 +14912,7 @@ fn dispatch_iteration_event_fans_and_drains_in_one_call() {
             .observer()
             .lock()
             .unwrap()
+            .face_ref()
             .remote_subscribers
             .declared_count(),
         1,
@@ -14699,7 +14958,7 @@ fn dispatch_iteration_event_with_runs_hook_under_lock_then_drains() {
             // The hook observes post-dispatch registry state under the
             // SAME lock; the deferred listener has NOT fired yet (the
             // drain runs only after this scope ends).
-            hook_saw_membership = obs.remote_subscribers.declared_count();
+            hook_saw_membership = obs.face_ref().remote_subscribers.declared_count();
             assert!(
                 log.lock().unwrap().is_empty(),
                 "deferred fire still staged while the hook holds the lock"
@@ -14766,8 +15025,13 @@ fn liveliness_sample_callback_runs_deferred_and_may_reenter_session() {
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(9, "liveliness/x"),
+                &HashMap::new(),
+            )
+        });
     assert!(
         log.lock().unwrap().is_empty(),
         "the registry sink only STAGES — no fire under the dispatch"
@@ -14829,8 +15093,7 @@ fn a_background_liveliness_subscriber_keeps_delivering_after_its_handle_is_gone(
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         1,
         "the local slot must survive the handle",
     );
@@ -14839,8 +15102,13 @@ fn a_background_liveliness_subscriber_keeps_delivering_after_its_handle_is_gone(
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(11, "liveliness/bg"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(11, "liveliness/bg"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(
         *log.lock().unwrap(),
@@ -14879,8 +15147,13 @@ fn a_channel_liveliness_subscriber_delivers_an_owned_sample_to_its_receiver() {
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(21, "liveliness/chan"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(21, "liveliness/chan"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
 
     let got = rx
@@ -14897,8 +15170,7 @@ fn a_channel_liveliness_subscriber_delivers_an_owned_sample_to_its_receiver() {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .slot_count(),
+            .read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         0,
         "undeclaring the handle retracts the channel-form subscriber too",
     );
@@ -14966,8 +15238,13 @@ fn a_later_history_subscriber_is_replayed_a_token_the_session_already_knows() {
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(9, "liveliness/x"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(
         first.lock().unwrap().len(),
@@ -15033,8 +15310,13 @@ fn liveliness_sample_staged_before_undeclare_is_suppressed() {
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(3, "liveliness/x"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(3, "liveliness/x"),
+                &HashMap::new(),
+            )
+        });
     sub.undeclare();
     session.drain_deferred_fires();
     assert_eq!(
@@ -15073,8 +15355,13 @@ fn liveliness_sample_reentrant_same_cell_fire_is_backlogged_not_lost() {
                         .observer()
                         .lock()
                         .unwrap()
-                        .liveliness_subscribers
-                        .dispatch_declare(&make_decl_token(2, "liveliness/y"), &HashMap::new());
+                        .with_parts(|app_half, face_half| {
+                            app_half.liveliness_subscribers.dispatch_declare(
+                                &mut *face_half.tokens,
+                                &make_decl_token(2, "liveliness/y"),
+                                &HashMap::new(),
+                            )
+                        });
                     let _ = session_cb.drain_deferred_fires();
                     assert_eq!(
                         *log_cb.lock().unwrap(),
@@ -15090,8 +15377,13 @@ fn liveliness_sample_reentrant_same_cell_fire_is_backlogged_not_lost() {
         .observer()
         .lock()
         .unwrap()
-        .liveliness_subscribers
-        .dispatch_declare(&make_decl_token(1, "liveliness/x"), &HashMap::new());
+        .with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &make_decl_token(1, "liveliness/x"),
+                &HashMap::new(),
+            )
+        });
     session.drain_deferred_fires();
     assert_eq!(
         *log.lock().unwrap(),
@@ -15114,15 +15406,14 @@ fn query_reply_callbacks_run_deferred_lock_free_and_local_sync() {
     use std::sync::Arc;
 
     let (session, _driver) = build_session();
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("home/temp", |_q, responder| {
-            responder.reply(b"22.5");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.reply(b"22.5");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     let outer_replies = Arc::new(AtomicUsize::new(0));
     let outer_finals = Arc::new(AtomicUsize::new(0));
@@ -15259,7 +15550,7 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
     {
         let mut obs = session.observer().lock().unwrap();
         let sample = Sample::new_put("home/temp", b"x".to_vec());
-        obs.subscribers.local_publish(&sample);
+        obs.with_app(|app_half| app_half.subscribers.local_publish(&sample));
     }
     assert!(sub.undeclare(), "undeclare removes the registration");
     session.drain_deferred_fires();
@@ -15595,8 +15886,7 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
         .observer()
         .lock()
         .unwrap()
-        .subscribers
-        .local_publish(&sample);
+        .with_app(|app_half| app_half.subscribers.local_publish(&sample));
     assert_eq!(
         fired.load(Ordering::SeqCst),
         0,
@@ -15659,36 +15949,35 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
 
     // One queryable answering the SAME keyexpr twice with two versions — the
     // History::All storage shape consolidation exists for.
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("hist/key", |_q, responder| {
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"old",
-                    None,
-                    &TimestampHint {
-                        time: 10,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"new",
-                    None,
-                    &TimestampHint {
-                        time: 20,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("hist/key", |_q, responder| {
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"old",
+                        None,
+                        &TimestampHint {
+                            time: 10,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"new",
+                        None,
+                        &TimestampHint {
+                            time: 20,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -15738,36 +16027,35 @@ fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_cb = seen.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("hist/key", |_q, responder| {
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"old",
-                    None,
-                    &TimestampHint {
-                        time: 10,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"new",
-                    None,
-                    &TimestampHint {
-                        time: 20,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("hist/key", |_q, responder| {
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"old",
+                        None,
+                        &TimestampHint {
+                            time: 10,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"new",
+                        None,
+                        &TimestampHint {
+                            time: 20,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -15809,36 +16097,35 @@ fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() 
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_cb = seen.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("hist/key", |_q, responder| {
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"old",
-                    None,
-                    &TimestampHint {
-                        time: 10,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"new",
-                    None,
-                    &TimestampHint {
-                        time: 20,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("hist/key", |_q, responder| {
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"old",
+                        None,
+                        &TimestampHint {
+                            time: 10,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"new",
+                        None,
+                        &TimestampHint {
+                            time: 20,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -15882,36 +16169,35 @@ fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
     let finals = Arc::new(AtomicUsize::new(0));
     let finals_cb = finals.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("hist/key", |_q, responder| {
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"old",
-                    None,
-                    &TimestampHint {
-                        time: 10,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"new",
-                    None,
-                    &TimestampHint {
-                        time: 20,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("hist/key", |_q, responder| {
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"old",
+                        None,
+                        &TimestampHint {
+                            time: 10,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"new",
+                        None,
+                        &TimestampHint {
+                            time: 20,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -15965,36 +16251,35 @@ fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_cb = seen.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("hist/key", |_q, responder| {
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"old",
-                    None,
-                    &TimestampHint {
-                        time: 10,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-            responder
-                .reply_keyed_stamped(
-                    "hist/key",
-                    b"new",
-                    None,
-                    &TimestampHint {
-                        time: 20,
-                        zid: vec![0x01],
-                    },
-                )
-                .unwrap();
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("hist/key", |_q, responder| {
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"old",
+                        None,
+                        &TimestampHint {
+                            time: 10,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+                responder
+                    .reply_keyed_stamped(
+                        "hist/key",
+                        b"new",
+                        None,
+                        &TimestampHint {
+                            time: 20,
+                            zid: vec![0x01],
+                        },
+                    )
+                    .unwrap();
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -16046,20 +16331,19 @@ fn a_default_get_refuses_a_reply_keyed_outside_the_query() {
     let finals = Arc::new(AtomicUsize::new(0));
     let finals_cb = finals.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("demo/inside", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in").unwrap();
-            assert_eq!(
-                responder.reply_keyed("other/outside", b"out"),
-                Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
-                "the queryable is told its outside reply was refused"
-            );
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("demo/inside", |_q, responder| {
+                responder.reply_keyed("demo/inside", b"in").unwrap();
+                assert_eq!(
+                    responder.reply_keyed("other/outside", b"out"),
+                    Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
+                    "the queryable is told its outside reply was refused"
+                );
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -16100,20 +16384,19 @@ fn a_wildcard_get_refuses_a_reply_outside_the_pattern() {
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_cb = seen.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("demo/**", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in").unwrap();
-            assert_eq!(
-                responder.reply_keyed("other/outside", b"out"),
-                Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
-                "the queryable is told its outside reply was refused"
-            );
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("demo/**", |_q, responder| {
+                responder.reply_keyed("demo/inside", b"in").unwrap();
+                assert_eq!(
+                    responder.reply_keyed("other/outside", b"out"),
+                    Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
+                    "the queryable is told its outside reply was refused"
+                );
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -16146,18 +16429,17 @@ fn accept_replies_any_reinstates_a_reply_keyed_outside_the_query() {
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_cb = seen.clone();
 
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .queryables
-        .register("demo/inside", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in").unwrap();
-            responder
-                .reply_keyed("other/outside", b"out")
-                .expect("`_anyke` waives the responder gate too");
-        })
-        .expect("no quota is stated on this table");
+    session.observer().lock().unwrap().with_app(|app_half| {
+        app_half
+            .queryables
+            .register("demo/inside", |_q, responder| {
+                responder.reply_keyed("demo/inside", b"in").unwrap();
+                responder
+                    .reply_keyed("other/outside", b"out")
+                    .expect("`_anyke` waives the responder gate too");
+            })
+            .expect("no quota is stated on this table")
+    });
 
     session
         .query(
@@ -16905,7 +17187,13 @@ fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
     session.drain_deferred_fires();
     assert_eq!(driver.frame_count(), 0, "the refused interest left nothing");
     assert_eq!(
-        session.observer().lock().unwrap().liveliness_gets.len(),
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .face_ref()
+            .liveliness_gets
+            .len(),
         0,
         "and the get is no longer pending"
     );
@@ -17311,8 +17599,7 @@ fn each_listener_is_told_once_when_the_peers_initial_declarations_are_final() {
             .observer()
             .lock()
             .unwrap()
-            .declarations_final
-            .is_empty(),
+            .read_app(|app_half| app_half.declarations_final.is_empty()),
         "no observer is left behind"
     );
 }
@@ -17374,8 +17661,13 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
             .observer()
             .lock()
             .unwrap()
-            .remote_subscribers
-            .dispatch_declare(body, &hashbrown::HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.remote_subscribers.dispatch_declare(
+                    &mut *face_half.remote_subscribers,
+                    body,
+                    &hashbrown::HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
     };
     dispatch(&make_decl_subscriber(5, "home/temp"));

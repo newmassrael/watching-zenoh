@@ -513,6 +513,18 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
         &self.peer
     }
 
+    /// The two halves apart: the application's LivelinessSubscriberTable<C, P> and the peer's PeerTokens<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(&mut self) -> (&mut LivelinessSubscriberTable<C, P>, &mut PeerTokens<P>) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&LivelinessSubscriberTable<C, P>, &PeerTokens<P>) {
+        (&self.table, &self.peer)
+    }
+
     /// [`PeerTokens::limit_to`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {

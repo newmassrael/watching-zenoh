@@ -518,7 +518,7 @@ impl<R: SessionRuntime> Subscriber<R> {
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
         R::with_mutex_mut(observer, |observer| {
-            let removed = observer.subscribers.unregister(id);
+            let removed = observer.unregister_subscriber(id);
             // R311y788 — the undeclare twin of the declare-side
             // re-evaluation (pico `_z_write_filter_ctx_remove_local_match`,
             // `vendor/zenoh-pico/src/net/filtering.c:94-101`): dropping the
@@ -529,9 +529,12 @@ impl<R: SessionRuntime> Subscriber<R> {
             // skip it.
             #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
             {
-                let subscribers = &observer.subscribers;
-                observer.remote_subscribers.reevaluate_matching(&|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                observer.with_parts(|app, face| {
+                    let subscribers = &*app.subscribers;
+                    app.remote_subscribers
+                        .reevaluate_matching(&*face.remote_subscribers, &|c| {
+                            c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                        });
                 });
             }
             removed

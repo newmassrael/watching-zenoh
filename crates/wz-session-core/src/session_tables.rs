@@ -680,6 +680,8 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     next_entity: Option<EntityId>,
     next_expr: ExprId,
     next_request: RequestId,
+    /// Moves after every subscriber declared or undeclared ([`crate::pubsub::LocalSubscribers::epoch`]).
+    subscriber_epoch: u64,
     keyexprs: Keyexprs<P>,
     subscribers: Subscribers<F, P>,
     queryables: Queryables<F, P>,
@@ -898,6 +900,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             next_entity: Some(1),
             next_expr: 1,
             next_request: 0,
+            subscriber_epoch: 0,
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
             queryables: SlotMap::new(),
@@ -1067,7 +1070,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         form: KeyForm,
         callback: F::Subscriber,
     ) -> Result<Declared<kind::Subscriber>, Refused<F::Subscriber>> {
-        Declaring {
+        let declared = Declaring {
             keys: &self.keys,
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
@@ -1084,7 +1087,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 callback,
             },
             SubscriberRow::into_callback,
-        )
+        )?;
+        self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
+        Ok(declared)
     }
 
     /// Undeclare the subscriber `handle` names. The row leaves every lookup now. When a call of
@@ -1097,7 +1102,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: SubscriberHandle,
     ) -> Option<Undeclared<Subscriber<F, P>>> {
-        undeclare_entity(&mut self.subscribers, &mut self.keyexprs, handle)
+        let undeclared = undeclare_entity(&mut self.subscribers, &mut self.keyexprs, handle)?;
+        self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
+        Some(undeclared)
     }
 
     /// Declare a queryable on `key`, answering what `origin` admits, `complete` or not.
@@ -1721,6 +1728,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             next_entity: Some(1),
             next_expr: 1,
             next_request: 0,
+            subscriber_epoch: 0,
             keyexprs: SlotMap::lent(arena, rows.keyexprs)?,
             subscribers: SlotMap::lent(arena, rows.subscribers)?,
             queryables: SlotMap::lent(arena, rows.queryables)?,
@@ -1749,6 +1757,55 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
         parts
             .iter()
             .try_fold(0_usize, |sum, part| sum.checked_add((*part)?))
+    }
+}
+
+impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P>
+where
+    F::Subscriber: crate::sink::SampleSink,
+{
+    fn epoch(&self) -> u64 {
+        self.subscriber_epoch
+    }
+
+    fn next_subscription_id(&self) -> u64 {
+        self.next_entity
+            .map_or(u64::from(u32::MAX).saturating_add(1), u64::from)
+    }
+
+    fn for_each_subscription(&self, f: &mut dyn FnMut(u64, &str, Locality)) {
+        for (_, row) in self.subscribers.iter() {
+            f(u64::from(row.id), text(&row.key.key), row.origin);
+        }
+    }
+
+    fn pattern_of(&self, id: u64) -> Option<&str> {
+        self.subscribers
+            .iter()
+            .find(|(_, row)| u64::from(row.id) == id)
+            .map(|(_, row)| text(&row.key.key))
+    }
+
+    fn has_local_matching(&self, key: &str) -> bool {
+        self.subscribers.iter().any(|(_, row)| {
+            row.origin.allows_local() && keyexpr_intersects(text(&row.key.key), key)
+        })
+    }
+
+    fn for_each_matching(
+        &mut self,
+        key: &str,
+        local: bool,
+        f: &mut dyn FnMut(u64, &mut dyn crate::sink::SampleSink),
+    ) -> usize {
+        let mut reached = 0usize;
+        for (_, row) in self.subscribers.iter_mut() {
+            if admits(row.origin, local) && keyexpr_intersects(text(&row.key.key), key) {
+                f(u64::from(row.id), &mut row.callback);
+                reached = reached.saturating_add(1);
+            }
+        }
+        reached
     }
 }
 
