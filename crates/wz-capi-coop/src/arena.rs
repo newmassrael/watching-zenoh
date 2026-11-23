@@ -154,7 +154,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 32;
+pub const ARENA_ROWS: usize = 34;
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
@@ -330,6 +330,8 @@ pub struct ArenaPlan {
     /// The bytes of the cell each link's driver is placed in, none for a plan whose links place
     /// theirs on the heap ([`Self::holding_links`]).
     link_cell_bytes: usize,
+    /// The bytes of the cell each link's gates are placed in ([`Self::holding_gates`]).
+    gate_cell_bytes: usize,
 }
 
 impl ArenaPlan {
@@ -416,6 +418,7 @@ impl ArenaPlan {
             handle_bytes: 0,
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
             link_cell_bytes: 0,
+            gate_cell_bytes: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -763,6 +766,31 @@ impl ArenaPlan {
         )?;
         self.put(
             "link cells",
+            "MAX_FACES + MAX_ACCEPT_PENDING",
+            self.links,
+            bytes,
+        )?;
+        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(self)
+    }
+
+    /// The plan with a cell for each of its links' gates, `bytes` bytes each: the session's
+    /// gates over a link's pump, placed in the link's cell when the session makes the link and
+    /// given back when it goes, so a link the session makes takes no memory of the heap for them.
+    /// Laid out before the ABI's handle ([`Self::holding`]); `0` adds nothing.
+    pub fn holding_gates(mut self, bytes: usize) -> Result<Self, ArenaRefused> {
+        if bytes == 0 || self.gate_cell_bytes != 0 {
+            return Ok(self);
+        }
+        self.gate_cell_bytes = bytes;
+        self.put(
+            "link gate flags",
+            "MAX_FACES + MAX_ACCEPT_PENDING",
+            self.links,
+            LentByteCells::FLAG_BYTES,
+        )?;
+        self.put(
+            "link gates",
             "MAX_FACES + MAX_ACCEPT_PENDING",
             self.links,
             bytes,
@@ -1291,6 +1319,21 @@ impl SessionArena {
             .map_err(ArenaRefused::Lend)
     }
 
+    /// Lend the cells `plan` lays out for its links' gates ([`ArenaPlan::holding_gates`]), none
+    /// for a plan with none. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_gate_cells(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<Option<LentByteCells>, ArenaRefused> {
+        if plan.gate_cell_bytes == 0 {
+            return Ok(None);
+        }
+        self.arena
+            .lend_byte_cells(plan.gate_cell_bytes, plan.links)
+            .map(Some)
+            .map_err(ArenaRefused::Lend)
+    }
+
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
     /// in, for the session's life, each key at most `longest` bytes, the session's
     /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
@@ -1387,6 +1430,7 @@ mod tests {
             handle_bytes: 0,
             endpoint_rows: (0, 0),
             link_cell_bytes: 0,
+            gate_cell_bytes: 0,
         }
     }
 
