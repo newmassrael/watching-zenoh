@@ -451,7 +451,9 @@ pub const MAX_MULTICAST_REPLIES: usize = generated::MAX_MULTICAST_REPLIES;
 /// image's table is the pump per session it holds and room beside them, so it is
 /// smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
 /// a host test holds this number equal to the deploy file's, so a deploy file that
-/// raises the ceiling and an image that outgrows it are each a red build.
+/// raises the ceiling and an image that outgrows it are each a red build. It is also the
+/// ceiling on the task cells a session of the C ABI's cooperative engine reserves when it
+/// opens, one for each link and group its configuration admits.
 pub const MAX_TASKS: usize = generated::MAX_TASKS;
 
 /// The most timers a fixed-memory machine's runtime may hold (the deploy

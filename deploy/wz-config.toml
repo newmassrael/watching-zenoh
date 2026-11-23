@@ -3075,18 +3075,21 @@ driven = "local"
 default = 8
 storage = "capacity"
 scope = "runtime"
-binding_heap = "none"
+binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The most tasks the runtime of a fixed-memory image may hold: a ceiling on
-the task table the image declares, which the image is checked against when
-it compiles.
+The most tasks a runtime holds: a ceiling on the task table a fixed-memory
+image declares, which the image is checked against when it compiles, and on
+the task cells a session of the C ABI's cooperative engine reserves when it
+opens, one for each link and group its configuration admits. A link or a
+group past them is refused, at the open as out of memory and after it as a
+link past the faces the session admits.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a fixed-memory wz image."
+reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a wz runtime whose tables are fixed."
 
 [[limit]]
 id = "MAX_TIMERS"
