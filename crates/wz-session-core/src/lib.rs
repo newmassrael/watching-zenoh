@@ -765,8 +765,6 @@ pub mod handshake_stray;
 pub mod session_zid;
 /// The zid a node derives from its address and listener ports under the `zid-derivation`
 /// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
-// Totality debt TD-034 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod zid_derivation;
 
 /// The rule an identity's two files are provisioned by (make both, keep both, refuse half), and
