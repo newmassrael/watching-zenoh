@@ -712,8 +712,6 @@ pub mod accept_cookie;
 /// while this one writes through `SceSink` and reads through `SceCursor`, so
 /// it is expressible on the no-alloc Inline profile — the profile where the
 /// cookie's declared capacity is hard rather than advisory.
-// Totality debt TD-035 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod accept_state;
 
 /// The zid a credential's public key names, and whether a claimed zid is it
