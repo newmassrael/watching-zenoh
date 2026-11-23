@@ -153,6 +153,12 @@ pub trait Storage {
     /// scan, which is what a few dozen rows cost least in RAM and in code.
     type Ids<V, const N: usize>: crate::id_map::IdMap<V> + Default;
 
+    /// A table a peer writes that is a sequence, of at most `N` rows: the policy's own sequence
+    /// where it keeps its rows itself, and on the lent policy a list whose rows lie in a pool every
+    /// face of the session shares ([`PooledRows`](crate::row_pool::PooledRows)), handed to the
+    /// table with the session's other pools.
+    type Pooled<T, const N: usize>: crate::row_pool::RowList<T>;
+
     /// What a table of this policy moves after every change to it, for a reader that
     /// must not take the table's lock to ask "has anything changed since I looked": a
     /// shared counter where the policy can share one (the allocator, 64-bit atomics),
@@ -380,6 +386,7 @@ impl Storage for Heap {
     type Keys = InlineKeys;
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::GrowableIdMap<V>;
+    type Pooled<T, const N: usize> = BoundedVec<T, N, Heap>;
     #[cfg(target_has_atomic = "64")]
     type Epoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
     #[cfg(not(target_has_atomic = "64"))]
@@ -407,6 +414,7 @@ impl Storage for Static {
     type Keys = InlineKeys;
     type Offset = u16;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
 
     #[cfg(feature = "storage-profile")]
@@ -426,11 +434,12 @@ impl Storage for Static {
 /// ([`KeyRef`](crate::key_arena::KeyRef)), which the table is handed with its rows
 /// ([`LentKeys`](crate::key_arena::LentKeys)), and not a buffer of the longest key: a key takes
 /// the bytes it has, and gives them back when its row goes (`docs/c-abi-no-heap-pools.md`,
-/// section 9.4). A table keyed by a peer's ids is inline at its build capacity, each row a key's
-/// place, as the peer-written tables are held until their storage is lent too (section 4.5). A
-/// sequence a row holds of its own is lent from the arena by the row's maker: one made by
-/// `Default` under this policy has no rows and no key arena, as a table the arena lent nothing
-/// has none.
+/// section 9.4). A table a peer writes, keyed by the peer's ids or not, keeps its rows in a pool
+/// every face of the session shares ([`RowSpace`](crate::row_pool::RowSpace)), the table a list
+/// of the rows it holds, at most its build capacity: a face holds the rows its peer declared and
+/// not the most it could (section 4.5). A sequence a row holds of its own is lent from the arena
+/// by the row's maker: one made by `Default` under this policy has no rows, no pool and no key
+/// arena, as a table the arena lent nothing has none.
 pub struct Lent;
 
 impl Storage for Lent {
@@ -444,7 +453,8 @@ impl Storage for Lent {
     type Keys = crate::key_arena::LentKeys;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.
     type Offset = u32;
-    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    type Ids<V, const N: usize> = crate::id_map::PooledIdMap<V, N>;
+    type Pooled<T, const N: usize> = crate::row_pool::PooledRows<T, N>;
     type Epoch = ();
 
     #[cfg(feature = "storage-profile")]
@@ -1364,6 +1374,34 @@ impl Arena {
         };
         self.lent += span;
         Ok(keys)
+    }
+
+    /// Lend a pool of `rows` rows of `T`: the next span of the arena, its state first, whose rows
+    /// the tables of a session's faces share ([`RowSpace`](crate::row_pool::RowSpace)). Refused,
+    /// taking nothing, past what is left or past the most rows a pool names.
+    ///
+    /// The pool's memory is this arena's: whoever owns the arena gives it back only once every
+    /// table holding a row of the pool is gone, as it does for a lent table.
+    pub fn lend_pool<T>(
+        &mut self,
+        rows: usize,
+    ) -> Result<crate::row_pool::RowSpace<T>, LendRefused> {
+        let left = self.bytes - self.lent;
+        let span = match crate::row_pool::RowSpace::<T>::span_bytes(rows) {
+            Some(span) if span <= left => span,
+            asked => return Err(LendRefused::Exhausted { asked, left }),
+        };
+        // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
+        // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
+        // only grows; `span_bytes` answered, so `rows` is within what a pool names.
+        let pool = unsafe {
+            crate::row_pool::RowSpace::over(
+                NonNull::new_unchecked(self.base.as_ptr().add(self.lent)),
+                rows,
+            )
+        };
+        self.lent += span;
+        Ok(pool)
     }
 
     /// The bytes a table of `count` buffers of `size` bytes takes in an arena

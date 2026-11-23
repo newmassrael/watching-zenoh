@@ -41,7 +41,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::observer::ApplicationLayerObserver;
-use wz_session_core::peer_tables::{PeerRows, PeerTables};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerPools, PeerRows, PeerTables};
 use wz_session_core::push_build::build_push_aliased;
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
 use wz_session_core::reply_sink::BoxedReplySink;
@@ -390,19 +390,24 @@ fn for_one_session_the_slot_observer_does_what_the_application_observer_does() {
 struct Block([u8; ARENA_ALIGN]);
 
 /// A peer's tables lent `each` rows of every table, with room for each reply's key and payload
-/// of 64 bytes, and their rows' keys kept in a key arena of 1 KiB, from an arena the test process
-/// leaks, so it outlives them.
+/// of 64 bytes, what its peer writes kept in pools of `each` rows of every kind, and their rows'
+/// keys kept in a key arena of 1 KiB, from an arena the test process leaks, so it outlives them.
 fn lent_peers(each: usize) -> PeerTables<Lent> {
     use wz_session_core::key_arena::KeySpace;
 
     let rows = PeerRows {
-        sub_interests: each,
         pending_declares: each,
         replies: each,
         reply_bytes: ReplyStage::<Lent>::area_bytes(each, 64, 64).expect("a small area"),
         finals: each,
     };
+    let pool_rows = PeerPoolRows {
+        aliases: each,
+        remote_decls: each,
+        interests: each,
+    };
     let bytes = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space")
+        + PeerPools::arena_bytes(pool_rows).expect("small pools")
         + KeySpace::span_bytes(1024).expect("a small key arena");
     let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
     let region: &'static mut [Block] = vec![Block([0; ARENA_ALIGN]); blocks].leak();
@@ -412,7 +417,9 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
     let keys = arena
         .lend_keys(1024)
         .expect("the arena is laid out for the key arena");
-    PeerTables::<Lent>::lent(&mut arena, keys, rows, &SessionLimits::defaults())
+    let pools =
+        PeerPools::lent(&mut arena, pool_rows).expect("the arena is laid out for the pools");
+    PeerTables::<Lent>::lent(&mut arena, keys, rows, pools, &SessionLimits::defaults())
         .expect("the arena is laid out for the tables")
 }
 

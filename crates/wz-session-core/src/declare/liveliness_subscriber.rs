@@ -313,6 +313,19 @@ impl PeerTokens<Static> {
     }
 }
 
+#[cfg(feature = "storage-profile")]
+impl PeerTokens<crate::bounded::Lent> {
+    /// Keep the tokens the peer declares from here on in rows of `rows`, the session's pool, which
+    /// the token tables of every face share. What the table held in another pool is forgotten
+    /// first.
+    pub fn keep_rows_in(
+        &mut self,
+        rows: crate::row_pool::RowSpace<(u64, crate::key_arena::KeyRef)>,
+    ) {
+        self.table.keep_rows_in(rows);
+    }
+}
+
 impl PeerTokens<Profile> {
     /// A peer of this build's storage profile that has declared no token. `const`
     /// where the profile is the static policy, so a session slot that holds one can be

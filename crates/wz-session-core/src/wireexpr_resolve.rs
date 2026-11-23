@@ -57,7 +57,7 @@ use hashbrown::HashMap;
 
 use crate::bounded::{Static, Storage};
 use crate::caps;
-use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
+use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases, PooledIdMap};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use sce_forge_runtime::codec::Lent;
@@ -341,7 +341,7 @@ enum PeerSpaceRepr<'a> {
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
     /// The lent policy's bounded table, whose rows hold their keys in the session's key arena.
-    LentTable(&'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
+    LentTable(&'a PooledIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
 
 impl<'a> PeerSpace<'a> {
@@ -360,7 +360,7 @@ impl<'a> PeerSpace<'a> {
 
     /// The lent policy's table, as a peer space.
     pub(crate) fn of_lent_table(
-        table: &'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
+        table: &'a PooledIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
     ) -> Self {
         Self(PeerSpaceRepr::LentTable(table))
     }
