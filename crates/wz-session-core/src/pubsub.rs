@@ -8606,22 +8606,35 @@ mod entity_id_space_tests {
     }
 
     /// A table holding as many subscriptions as its limit admits is full, and refuses the next;
-    /// one taken out makes it not full again.
+    /// one taken out makes it not full again. The limit is the one its creator resolved: a table
+    /// that was given none holds the build's growable bound, which no count reaches.
     #[test]
     fn a_table_at_its_limit_is_full() {
+        const MOST: usize = 2;
+        let mut limits = crate::limits::SessionLimits::defaults();
+        limits
+            .select_max_subscriptions(crate::limit_binding::Quota::at_most(MOST))
+            .expect("inside the build's domain");
         let mut table = SubscriberTable::<Tagged>::with_sink_backing();
-        for at in 0..caps::MAX_SUBSCRIPTIONS {
-            assert!(!table.is_full(), "row {at} is free");
+        table.limit_to(limits.max_subscriptions_held());
+        let mut held = 0;
+        while !table.is_full() {
             table
-                .register_sink(&alloc::format!("topic/{at}"), Locality::Any, Tagged(0))
-                .expect("a row is left");
+                .register_sink(&alloc::format!("topic/{held}"), Locality::Any, Tagged(0))
+                .expect("a table that is not full takes one more");
+            held += 1;
+            assert!(held <= caps::MAX_SUBSCRIPTIONS, "the bound is reached");
         }
-        assert!(table.is_full());
+        assert!(
+            held >= MOST.min(caps::MAX_SUBSCRIPTIONS),
+            "full only at its bound"
+        );
         assert_eq!(
             table
                 .register_sink("topic/past", Locality::Any, Tagged(0))
                 .map(|_| ()),
-            Err(RegisterError::TableFull)
+            Err(RegisterError::TableFull),
+            "a full table refuses as it said"
         );
         assert!(table.take_at(0).is_some());
         assert!(!table.is_full());
