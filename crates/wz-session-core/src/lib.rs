@@ -1357,8 +1357,6 @@ pub mod transport_compose;
 /// feature so a profile without the Open body (the multicast-only MCU
 /// artifact the Layer Q footprint gate measures) links no Keccak.
 #[cfg(feature = "codec-open-body")]
-// Totality debt TD-091 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod initial_sn;
 
 /// Outbound pub/sub `Push` network-message builders (`build_push_*` +
