@@ -1955,8 +1955,6 @@ pub mod query;
 /// `Vec` on the growable backing and as tables of declared capacity on the fixed
 /// one, where a reply or a request that does not fit is refused and counted.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-064 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reply_stage;
 
 /// Fixed-memory step S9a — every table a PEER writes, or that is owed to one
