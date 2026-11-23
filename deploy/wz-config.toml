@@ -2669,7 +2669,7 @@ id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
 kind = "bound"
 driven = "local"
-default = 16
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2684,7 +2684,7 @@ the library reserves at its first object when the program reserved none
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_SUBSCRIPTIONS's default, one held sample for each subscriber of a session."
+reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; eighteen is the largest sample channel zenoh-pico's API tests open full (`vendor/zenoh-pico/tests/z_api_local_subscriber_test.c` @ `z_fifo_channel_sample_new(&subscriber_callback1, &subscriber_handler1, 16);`), the one handed to it while it is full and the one the program took."
 
 [limit.pico_preset]
 value = 5
@@ -2695,7 +2695,7 @@ id = "HELD_REPLIES"
 kconfig = "WZ_LIMIT_HELD_REPLIES"
 kind = "bound"
 driven = "local"
-default = 16
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2710,7 +2710,7 @@ its source untouched.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_PENDING_QUERIES's default, one held reply for each get a session holds pending."
+reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; eighteen is the reply channel zenoh-pico's querier example opens full (`vendor/zenoh-pico/examples/unix/c11/z_querier.c` @ `z_fifo_channel_reply_new(&closure, &handler, 16);`), the one handed to it while it is full and the one the program took."
 
 [limit.pico_preset]
 value = 3
@@ -2721,7 +2721,7 @@ id = "HELD_QUERIES"
 kconfig = "WZ_LIMIT_HELD_QUERIES"
 kind = "bound"
 driven = "local"
-default = 8
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2736,7 +2736,7 @@ One more is refused, its source untouched.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eight is MAX_PENDING_FINALS's default, the queries a session holds for its callbacks at once."
+reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eighteen is the query channel zenoh-pico's API tests open full (`vendor/zenoh-pico/tests/z_api_queryable_test.c` @ `z_fifo_channel_query_new(&cb1, &h1, 16);`), the one handed to it while it is full and the one the program took."
 
 [limit.pico_preset]
 value = 3

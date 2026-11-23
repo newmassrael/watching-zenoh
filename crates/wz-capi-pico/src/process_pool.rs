@@ -1506,6 +1506,40 @@ mod tests {
         );
     }
 
+    /// The build's default pools hold what a pico program holds when the largest channel zenoh-pico's
+    /// examples and API tests open for a kind is full: its sixteen elements
+    /// (`vendor/zenoh-pico/examples/unix/c11/z_querier.c` @
+    /// `z_fifo_channel_reply_new(&closure, &handler, 16);`), the one handed to it while it is full
+    /// and the one the program took. A build that states its own count is held to its own measure.
+    #[test]
+    fn the_default_pools_hold_a_full_channel_of_sixteen_and_two_more() {
+        const HELD_BY_A_FULL_CHANNEL: usize = 16 + 1 + 1;
+        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let mut pools = reserve_from_heap(&plan).expect("the test's heap has the memory");
+        let mut check = |kind: Kind, stated: Option<&str>| {
+            if stated.is_some() {
+                return;
+            }
+            let size = plan.sizes[kind as usize];
+            let taken: alloc::vec::Vec<Option<NonNull<u8>>> = (0..HELD_BY_A_FULL_CHANNEL)
+                .map(|_| pools.take(kind, size))
+                .collect();
+            let held = taken.iter().filter(|slot| slot.is_some()).count();
+            for slot in taken.into_iter().flatten() {
+                assert!(pools.give_back(slot), "{kind:?}: its slot goes back");
+            }
+            assert_eq!(
+                held, HELD_BY_A_FULL_CHANNEL,
+                "{kind:?}: a full channel of sixteen, one handed in and one taken"
+            );
+        };
+        check(Kind::Sample, option_env!("WZ_LIMIT_HELD_SAMPLES"));
+        #[cfg(feature = "query")]
+        check(Kind::Reply, option_env!("WZ_LIMIT_HELD_REPLIES"));
+        #[cfg(feature = "queryable")]
+        check(Kind::Query, option_env!("WZ_LIMIT_HELD_QUERIES"));
+    }
+
     /// The plan the library was compiled with is the one the build's counts make when worked out
     /// as a program runs: making the planning `const` changed where it is evaluated, not what.
     #[test]
