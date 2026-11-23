@@ -186,7 +186,13 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         None,
         "a subscriber is one row, the session core's"
     );
-    assert_eq!(count("key expressions"), Some(6));
+    assert_eq!(
+        count("key expressions"),
+        None,
+        "a key expression is one row, the session's table set's"
+    );
+    assert_eq!(count("session tables"), Some(1));
+    assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(count("write filters"), Some(7));
     assert_eq!(count("matching listeners"), Some(5));
     assert_eq!(count("interests"), Some(12));

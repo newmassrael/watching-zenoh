@@ -110,9 +110,10 @@ use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_RO
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
+use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{EntryBytes, LegSink, SubscriberRow};
+use crate::engine::{CoopTables, EntryBytes, LegSink, SubscriberRow};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -532,11 +533,12 @@ impl ArenaPlan {
                 EntryBytes::LIVELINESS_SUBSCRIBER,
             )?;
         }
+        // The session's one table set, holding the kinds moved onto it so far.
         self.put(
-            "key expressions",
+            "session tables",
             "MAX_DECLARED_KEYEXPRS",
-            rows.keyexprs,
-            EntryBytes::KEYEXPR,
+            1,
+            CoopTables::arena_bytes(&self.tables()).ok_or(ArenaRefused::TooLarge)?,
         )?;
         self.put(
             "write filters",
@@ -571,6 +573,15 @@ impl ArenaPlan {
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities
+    }
+
+    /// The rows of the session's one table set: those of the kinds moved onto it, none of the
+    /// others.
+    pub fn tables(&self) -> TableRows {
+        TableRows {
+            keyexprs: self.entities.keyexprs,
+            ..TableRows::default()
+        }
     }
 
     /// The bytes of blocks of the key arena every keyed row of the session keeps its key in

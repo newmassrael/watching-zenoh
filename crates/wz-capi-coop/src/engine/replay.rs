@@ -36,6 +36,7 @@ use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+use wz_session_core::session_tables::KeyexprHandle;
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -190,7 +191,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// How many declarations of `kind` the session holds.
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
-            Kind::Keyexpr => self.keyexprs.borrow().len(),
+            Kind::Keyexpr => self.tables.borrow().keyexprs().len(),
             Kind::Subscriber => self.registry.borrow().app.subscribers.len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
@@ -232,11 +233,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             return match kind {
                 Kind::Keyexpr => {
-                    let keyexprs = self.keyexprs.borrow();
-                    let entry = &keyexprs[left];
-                    actions
-                        .send_declare_keyexpr(entry.id, &entry.keyexpr)
-                        .is_ok()
+                    let tables = self.tables.borrow();
+                    match tables.keyexprs().iter().nth(left) {
+                        Some((_, row)) => actions.send_declare_keyexpr(row.id(), row.key()).is_ok(),
+                        None => true,
+                    }
                 }
                 Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
                     Some((keyexpr, row)) => row.declare(keyexpr, actions),
@@ -345,23 +346,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
     }
 
-    /// [`Self::announce_with`] for a declaration that is not made when a link refuses it: whether
-    /// it was made.
-    pub(super) fn announce_or_undo(
+    /// [`Self::announce_with`] for a declaration stored at `place` that is not made when a link
+    /// refuses it: whether it was made.
+    pub(super) fn announce_or_undo_at(
         &mut self,
-        kind: Kind,
+        place: usize,
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        let place = self.end_of(kind);
         self.announce_with(place, OnRefusal::Undo, send, undo)
     }
 
+    /// The place in the replay's order of the key expression `handle` names, the one past the last
+    /// for a handle that names none. The table's rows are walked in their slot order, which is the
+    /// order the replay tells them in.
+    pub(super) fn keyexpr_place(&self, handle: KeyexprHandle) -> usize {
+        let tables = self.tables.borrow();
+        let keyexprs = tables.keyexprs();
+        let rank = keyexprs
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(keyexprs.len());
+        self.start_of(Kind::Keyexpr) + rank
+    }
+
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
-    /// over, which are those of the faces that are up and whose peers were told of it. Call it
-    /// once, before the removal.
+    /// over ([`Self::retract_at`]). Call it once, before the removal.
     pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<Rc<McuActions<C>>> {
         let place = self.start_of(kind) + index;
+        self.retract_at(place)
+    }
+
+    /// The declaration at `place` in the replay's order is about to be removed: the links to
+    /// retract it over, which are those of the faces that are up and whose peers were told of it.
+    /// Call it once, before the removal.
+    pub(super) fn retract_at(&mut self, place: usize) -> Vec<Rc<McuActions<C>>> {
         let mut links = Vec::new();
         for face in &mut self.faces {
             let Link::Up(wire) = &face.link else {

@@ -51,6 +51,7 @@ use crate::round::{Round, RoundCounts, RoundGate};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
+use wz_session_core::session_tables::{RowCallbacks, SessionTables};
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -1016,8 +1017,21 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
-/// The key expressions the session declared, one table for all its links (`Core::keyexprs`).
-type KeyexprRows = Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>;
+/// What the rows of the session's one table set hold of a program: nothing yet. The engine's
+/// kinds move onto the tables one at a time (`docs/c-abi-l3-tables.md`, section 6), and a kind
+/// not moved yet is lent no rows of them.
+pub(crate) struct CoopRows;
+
+impl RowCallbacks for CoopRows {
+    type Subscriber = ();
+    type Queryable = ();
+    type LivelinessSubscriber = ();
+    type Matching = ();
+    type Reply = ();
+}
+
+/// The session's one table set, its rows lent from the session's arena (`Core::tables`).
+pub(crate) type CoopTables = SessionTables<CoopRows, Lent>;
 
 /// The session's own id space, read from its one table of declared key expressions: what a link
 /// sends names a key by the id the session gave it, and what a peer sends for the session may
@@ -1026,15 +1040,21 @@ type KeyexprRows = Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>;
 /// and none keeps a copy: a declaration grows nothing on a link. The table is held weakly: the
 /// session owns it and drops it before the arena its keys lie in, and a handle left after that
 /// reads nothing.
-struct SessionKeyexprs(alloc::rc::Weak<RefCell<KeyexprRows>>);
+struct SessionKeyexprs(alloc::rc::Weak<RefCell<CoopTables>>);
+
+impl SessionKeyexprs {
+    /// Hand `read` the key the session declared under `id`, while the session holds it.
+    fn with_key<R>(&self, id: ExprId, read: impl FnOnce(&str) -> R) -> Option<R> {
+        let tables = self.0.upgrade()?;
+        let tables = tables.borrow();
+        let handle = tables.keyexpr_by_id(id)?;
+        tables.keyexprs().get(handle).map(|row| read(row.key()))
+    }
+}
 
 impl OwnMappingSpace for SessionKeyexprs {
     fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
-        let table = self.0.upgrade()?;
-        let rows = table.borrow();
-        rows.iter()
-            .find(|row| row.id == id)
-            .map(|row| String::from(row.keyexpr.as_str()))
+        self.with_key(id, String::from)
     }
 
     // The literal goes from the session's row straight into the resolver's buffer: the provided
@@ -1045,11 +1065,7 @@ impl OwnMappingSpace for SessionKeyexprs {
         id: ExprId,
         out: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), wz_session_core::bounded::CapacityFull<()>>> {
-        let table = self.0.upgrade()?;
-        let rows = table.borrow();
-        rows.iter()
-            .find(|row| row.id == id)
-            .map(|row| out.push_str(row.keyexpr.as_str()))
+        self.with_key(id, |key| out.push_str(key))
     }
 }
 
@@ -1239,8 +1255,6 @@ impl EntryBytes {
     /// A liveliness subscriber's row.
     #[cfg(feature = "liveliness")]
     pub(crate) const LIVELINESS_SUBSCRIBER: usize = core::mem::size_of::<LiveSubEntry>();
-    /// A declared key expression's row.
-    pub(crate) const KEYEXPR: usize = core::mem::size_of::<KexprEntry>();
     /// A write filter's row.
     pub(crate) const FILTER: usize = core::mem::size_of::<FilterEntry>();
     /// A matching listener's row.
@@ -1318,11 +1332,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entities: EntityRows,
     /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
     keys: KeySpace,
-    /// The key expressions the session declared: shared only with the weak handles its links and
-    /// the tables of its faces read them through (`SessionKeyexprs`), so it is dropped here, before
-    /// the arena its keys lie in.
-    keyexprs: Rc<RefCell<KeyexprRows>>,
-    next_mapping: ExprId,
+    /// The session's one table set: the key expressions it declared and their ids, shared only
+    /// with the weak handles its links and the tables of its faces read them through
+    /// (`SessionKeyexprs`), so it is dropped here, before the arena its rows and keys lie in.
+    tables: Rc<RefCell<CoopTables>>,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
     /// a key goes on the wire as the session's key-wire form says (`shared-key-ids`).
@@ -1662,12 +1675,6 @@ impl QblEntry {
             None => actions.send_undeclare_queryable(u64::from(self.id)),
         }
     }
-}
-
-struct KexprEntry {
-    id: ExprId,
-    keyexpr: RowKey,
-    holds: usize,
 }
 
 struct FilterEntry {
@@ -2249,7 +2256,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The session's id space, read from its one table of declarations by the link (what it
         // sends names a key by its id) and by the tables of the face it serves (what the peer
         // sends may name one): installed whenever a link is made, a redialled face's included.
-        let keyexprs = SessionKeyexprs(Rc::downgrade(&self.keyexprs));
+        let keyexprs = SessionKeyexprs(Rc::downgrade(&self.tables));
         #[cfg(target_has_atomic = "ptr")]
         let own_space: SharedOwnMappingSpace = Arc::new(keyexprs);
         #[cfg(not(target_has_atomic = "ptr"))]
@@ -3657,7 +3664,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The tables of the session's own declarations, lent from the arena as the plan counts
         // them. Declared after the arena, so a refusal before `core` holds them drops them first.
         let entities = plan.entities();
-        let keyexprs = arena.lend(entities.keyexprs).map_err(OpenError::Arena)?;
         let filters = arena
             .lend(
                 entities
@@ -3686,6 +3692,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let keys = arena
             .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
             .map_err(OpenError::Arena)?;
+        // The session's one table set, lent the rows the plan counts for it.
+        let tables = CoopTables::lent(arena.arena_mut(), keys, &plan.tables())
+            .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
         // The application's tables, lent from the rows the plan counts for them.
         let registry = Registry::new(
             &resolve_limits(&config),
@@ -3755,8 +3764,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             wire_zid: wire,
             entities,
             keys,
-            keyexprs: Rc::new(RefCell::new(keyexprs)),
-            next_mapping: 1,
+            tables: Rc::new(RefCell::new(tables)),
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
             #[cfg(feature = "shared-key-ids")]
@@ -5721,46 +5729,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Declined> {
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
-        if let Some(entry) = core
-            .keyexprs
-            .borrow_mut()
-            .iter_mut()
-            .find(|e| e.keyexpr == keyexpr)
-        {
-            entry.holds += 1;
-            return Ok(entry.id);
-        }
-        // A key no declaration holds yet takes a row; a full table refuses it before an id is
-        // taken or anything is sent, and so does a key the session cannot hold.
-        if core.keyexprs.borrow().free_slots() == 0 {
-            return Err(Declined::TableFull);
-        }
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
+        // A key the session declared already is held once more; any other takes a row and an id.
+        // The table refuses it, before an id is taken or anything is sent, when it is full, when
+        // the key cannot be held, or when every id is taken. An id of the shared dictionary names
+        // its key in this session's space too, so no key expression is declared under one.
+        let declared = {
+            let mut tables = core.tables.borrow_mut();
+            #[cfg(feature = "shared-key-ids")]
+            let declared = match &core.key_ids {
+                Some(ids) => tables
+                    .declare_keyexpr_where(keyexpr, false, |id| ids.next_free_id(id) == Some(id)),
+                None => tables.declare_keyexpr(keyexpr),
+            };
+            #[cfg(not(feature = "shared-key-ids"))]
+            let declared = tables.declare_keyexpr(keyexpr);
+            declared?
         };
-        // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
-        // literal's id, and every further declaration is refused rather than re-issuing a live
-        // id.
-        let id = core.next_mapping;
-        // An id of the shared dictionary names its key in this session's space too, so no key
-        // expression is declared under one: the next id past them, or none when none is left.
-        #[cfg(feature = "shared-key-ids")]
-        let id = match &core.key_ids {
-            Some(ids) => ids.next_free_id(id).unwrap_or(0),
-            None => id,
-        };
-        if id == 0 {
-            return Err(Declined::NoEntityId);
+        let id = declared.id;
+        if !declared.new {
+            return Ok(id);
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
         // refuses one it cannot carry.
-        let taken = core.announce_or_undo(
-            Kind::Keyexpr,
+        let place = core.keyexpr_place(declared.handle);
+        let taken = core.announce_or_undo_at(
+            place,
             |actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             |actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
+            core.tables.borrow_mut().undeclare_keyexpr(declared.handle);
             return Err(Declined::ExceedsCapacity);
         }
         // And each group told the session's keyexprs, as a link is.
@@ -5768,15 +5767,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for group in &core.groups {
             group.announce_keyexpr(id, keyexpr);
         }
-        core.next_mapping = id.wrapping_add(1);
-        keep(
-            &mut *core.keyexprs.borrow_mut(),
-            KexprEntry {
-                id,
-                keyexpr: key,
-                holds: 1,
-            },
-        );
         Ok(id)
     }
 
@@ -5786,19 +5776,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         let core = &mut core.0;
-        let (at, held) = {
-            let mut keyexprs = core.keyexprs.borrow_mut();
-            let Some(at) = keyexprs.iter().position(|e| e.id == mapping_id) else {
+        let (handle, last) = {
+            let tables = core.tables.borrow();
+            let Some(handle) = tables.keyexpr_by_id(mapping_id) else {
                 return;
             };
-            keyexprs[at].holds -= 1;
-            (at, keyexprs[at].holds != 0)
+            let last = tables
+                .keyexprs()
+                .get(handle)
+                .is_some_and(|row| row.holds() <= 1);
+            (handle, last)
         };
-        if !held {
-            // The links are asked before the row goes, and the row goes before they are told: a
-            // send never finds the table borrowed.
-            let links = core.retract(Kind::Keyexpr, at);
-            core.keyexprs.borrow_mut().remove(at);
+        // The links are asked while the row stands, which is its place in the replay's order.
+        let place = core.keyexpr_place(handle);
+        let links = last.then(|| core.retract_at(place));
+        let retracted = core.tables.borrow_mut().undeclare_keyexpr(handle);
+        if let (Some(links), Some(_)) = (links, retracted) {
+            // The row went before the links are told: a send never finds the table borrowed.
             for actions in links {
                 actions.send_undeclare_kexpr(mapping_id);
             }
@@ -5816,10 +5810,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.live()
             .map(|core| {
-                let keyexprs = core.0.keyexprs.borrow();
-                keyexprs
+                let tables = core.0.tables.borrow();
+                tables
+                    .keyexprs()
                     .iter()
-                    .map(|e| (e.id, String::from(e.keyexpr.as_str())))
+                    .map(|(_, row)| (row.id(), String::from(row.key())))
                     .collect()
             })
             .unwrap_or_default()
