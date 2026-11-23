@@ -619,7 +619,6 @@ mod tests {
     #[test]
     fn each_wait_of_a_session_on_a_time_base_borrows_its_one_wait() {
         use std::time::{Duration, Instant};
-        use wz_capi_coop::LinkReadiness;
         let program = Program::default();
         let context = &program as *const Program as *mut c_void;
         // SAFETY: `program` outlives the clock and every hold of its time base.
