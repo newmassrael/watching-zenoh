@@ -2220,7 +2220,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 59
+#define WZ_DISSECT_ABI_REVISION 60
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2848,7 +2848,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":14},"ok":true,
+ *     {"document":{"name":"session_table","revision":15},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2881,6 +2881,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                             "zenoh":"yes","announced_version":"own",
  *                             "zenoh_evidence":{...},
  *                             "unit_readings":{...},
+ *                             "direction_basis":"endpoints",
  *                             "stream_anomalies":{
  *                               "low_to_high":{"retransmits":0,
  *                                 "out_of_order":0,"partial_overlaps":0},
@@ -2964,10 +2965,34 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                finding, its `decryption` and `key_source` (session_table
  *                revision 13; see WHAT THE PASS MADE OF A FLOW below), its
  *                own `bytes`, its own three zenoh keys, its own
- *                `unit_readings`, its `stream_anomalies` (session_table
- *                revision 11; see STREAM ANOMALIES below) and its own
- *                `unstated`, which names a null cell of the flow as the row's
- *                names one of the row.
+ *                `unit_readings`, its `direction_basis` (session_table
+ *                revision 15; see DIRECTION BASIS below), its
+ *                `stream_anomalies` (session_table revision 11; see STREAM
+ *                ANOMALIES below) and its own `unstated`, which names a null
+ *                cell of the flow as the row's names one of the row.
+ *
+ * DIRECTION BASIS (session_table revision 15). Every flow object carries
+ * `direction_basis`, how the flow's two halves `a` and `b` were told apart:
+ *
+ *   `endpoints`        the flow's two endpoints, as WHICH HALF IS `a` above
+ *                      says: every `tcp`, `udp`, `raweth` and `vsock` flow.
+ *   `handshake`        the serial line, whose capture held a wire per
+ *                      interface, and a serial handshake frame named the
+ *                      interface the initiator sent on: its frames are `a`.
+ *   `interface_order`  the serial line, a wire per interface, and no
+ *                      handshake frame settled which is which: the first
+ *                      interface the capture holds is `a`, a convention and not
+ *                      a measurement.
+ *   `unknown`          the serial line, both wires in one interface (a classic
+ *                      pcap, or a pcapng with one): nothing separates the
+ *                      directions, every message reads `a`, and the initiator
+ *                      and acceptor cells read as a session whose Inits went
+ *                      one way.
+ *
+ * A word this header does not list means the library is newer than your
+ * header; show the flow's direction as unattributed. See
+ * wz_dissect_live_open_with for how a serial line is declared and where else
+ * it appears.
  *
  * STREAM ANOMALIES. A TCP flow's `stream_anomalies` holds, for each direction
  * of its flow key, what that direction's reassembler counted:
@@ -3672,10 +3697,12 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values session_table strength
  * @values session_table q_basis
  * @values session_table eps_basis
+ * @values session_table direction_basis
  * @carries session_table announced_version passenger
  * @carries session_table cell passenger
  * @carries session_table check passenger
  * @carries session_table decryption passenger
+ * @carries session_table direction_basis passenger
  * @carries session_table encrypted passenger
  * @carries session_table eps_basis passenger
  * @carries session_table family passenger
@@ -6839,6 +6866,142 @@ int wz_dissect_live_open(int limits, wz_dissect_live **out);
  * wz_dissect_live_close. */
 int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total,
                                  wz_dissect_live **out);
+
+/* (ABI 60) -- OPEN A LIVE HANDLE UNDER OPTIONS: a limit preset, the ceilings
+ * you choose over it, and the link types to read as raw zenoh serial bytes.
+ *
+ * WHY A STRUCT WHEN THE PRESET IS AN INT. The preset is a closed enumeration
+ * so that this library's limits do not cross the boundary. The axes only you
+ * can choose had to cross anyway -- how many rows your list holds, which link
+ * type your capture tool wrote a serial line on -- and a door per combination
+ * of them is what this replaces: wz_dissect_live_open is this door with only
+ * `limits` set, and wz_dissect_live_open_bounded is it with the live-tap
+ * preset and the two frame ceilings. The struct is SIZED: a later revision
+ * appends a field for a later axis you choose, and a caller compiled before
+ * it is read as having left it zero. The preset still carries every axis no
+ * field names.
+ *
+ *     static const unsigned int serial[] = { 147 };   // LINKTYPE_USER0
+ *     wz_dissect_live_options o;
+ *     wz_dissect_live *h;
+ *     memset(&o, 0, sizeof o);
+ *     o.size = sizeof o;
+ *     o.limits = WZ_DISSECT_LIMITS_NONE;
+ *     o.serial_link_types = serial;
+ *     o.serial_link_type_count = 1;
+ *     if (wz_dissect_live_open_with(&o, &h)) { ... }
+ *     wz_dissect_live_follow_lent(h, file, file_len);  // the whole file
+ *     wz_dissect_live_end(h);                          // it has ended
+ *
+ * A CAPTURE FILE is read through the handle, with wz_dissect_live_follow or
+ * wz_dissect_live_follow_lent over the whole file, wz_dissect_live_followed to
+ * tell a cut file from a whole one, and wz_dissect_live_end once it is read.
+ * That is the walk wz_dissect_pcap_replay makes -- the replay door IS a
+ * follow and an end -- so every document a replayed handle answers, this one
+ * answers for the same bytes, with the options applied. There is no replay
+ * twin per option.
+ *
+ * `size` IS THE SIZE YOU COMPILED AGAINST. Write `sizeof` the struct and zero
+ * every field you do not set (the memset above). A size below the first
+ * published struct (the six fields below, 40 bytes on a 64-bit target) is
+ * WZ_DISSECT_ERR_INVALID_ARG. A size above this library's struct is read only
+ * when every byte past it is zero: a nonzero byte there is a field your newer
+ * header set and this library cannot honour, and that is
+ * WZ_DISSECT_ERR_INVALID_ARG rather than a handle that ignores what you asked.
+ * Nothing the options point at is read after the call: the link types are
+ * copied.
+ *
+ *   limits                  a WZ_DISSECT_LIMITS_* preset, which the fields below
+ *                           adjust. An unknown value is
+ *                           WZ_DISSECT_ERR_INVALID_ARG.
+ *   frames_per_flow,
+ *   frames_total            as wz_dissect_live_open_bounded's arguments, over
+ *                           whichever preset `limits` names. `0` keeps that
+ *                           preset's figure: none under
+ *                           WZ_DISSECT_LIMITS_NONE, 10,000 and 100,000 under
+ *                           WZ_DISSECT_LIMITS_LIVE_TAP. A value too large for
+ *                           size_t is WZ_DISSECT_ERR_INVALID_ARG.
+ *   serial_link_types,
+ *   serial_link_type_count  the pcap link types whose packets are raw zenoh
+ *                           serial bytes: a COBS envelope, a CRC32 and the
+ *                           handshake flags around each transport message, the
+ *                           framing zenoh-pico's serial link writes. NULL and 0
+ *                           declare none. A nonzero count with a NULL pointer is
+ *                           WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * WHICH LINK TYPES MAY BE DECLARED: any number. The ones a serial capture
+ * commonly carries are LINKTYPE_USER0 to LINKTYPE_USER15 (147 to 162), which a
+ * capture tool leaves to its user's meaning, and LINKTYPE_RTAC_SERIAL (250).
+ * This build decodes none of them otherwise, so declaring one takes nothing
+ * away. A declared link type WINS over decapsulation: declaring one this build
+ * reads (1, Ethernet) reads its packets as serial bytes and none of them as
+ * Ethernet. The packet must hold the line's bytes and nothing else: no
+ * pseudo-header is read, because the layout of LINKTYPE_RTAC_SERIAL's cannot
+ * be verified here, and a header's bytes reach the COBS reader, where the
+ * frame they land in fails its CRC. A link type NOT declared is what it always
+ * was: its packets are skipped and counted, per interface, under the health
+ * document's `skips.link_type_interfaces`.
+ *
+ * WHAT A SERIAL LINE IS IN EACH DOCUMENT. A handle holds at most one line,
+ * point to point and without addresses. Its flow object is
+ * `{"low":{"addr":"","port":0,"family":null},"high":{...},"link":"serial"}`.
+ * A pcapng holds one interface per wire, and the interfaces are the line's two
+ * halves: the one whose frames are `a` is the initiator's when a serial
+ * handshake frame named it, and otherwise the first interface the capture
+ * holds. A classic pcap, or a pcapng with one interface, holds both wires in
+ * one byte stream, and nothing separates them: every message reads `a`.
+ *
+ *   records            origin WZ_DISSECT_ORIGIN_SERIAL, on the line's own
+ *                      flow_id and list_id; anchor_space
+ *                      WZ_DISSECT_ANCHOR_PACKET, the anchor being the packet
+ *                      that completed the message's frame; `direction` as
+ *                      above. wz_dissect_live_message_bytes hands back the
+ *                      message out of its frame's payload, which the handle
+ *                      keeps while it keeps the message.
+ *   session table      a row like any flow's, after the datagram flows: link
+ *                      `serial`, `bytes` the line's bytes as captured,
+ *                      `stream_anomalies` null for `no_sequence`, and
+ *                      `direction_basis` saying how its halves were told apart
+ *                      (`handshake`, `interface_order`, or `unknown` when one
+ *                      interface carried both wires; see the session table).
+ *   census             the line's messages are folded into every plane like a
+ *                      flow's, under its flow object, their anchors in
+ *                      `offset_space` `packet`.
+ *   field documents    no row: the field, row-facts and selection documents
+ *                      render the stream and datagram flow tables, and the
+ *                      line stands in neither. Its messages are the records
+ *                      and the census.
+ *   retention          `held.serial_frames` counts what the line holds.
+ *                      Neither frame ceiling bounds it, so on a handle that
+ *                      reads a line for a long time the line's list grows
+ *                      with it.
+ *
+ * Frames that arrive before a serial handshake has settled which interface is
+ * which are held undecoded, and decoded once it has (the live-tap preset stops
+ * waiting after 256 frames and keeps the first-interface convention), so a
+ * message never changes direction after a record has carried it.
+ *
+ * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once with
+ * wz_dissect_live_close. WZ_DISSECT_ERR_INVALID_ARG for a NULL `options` or
+ * `out`, and for each refusal above. */
+typedef struct wz_dissect_live_options {
+    /* sizeof the struct as you compiled it. */
+    size_t size;
+    /* A WZ_DISSECT_LIMITS_* preset. */
+    int limits;
+    /* How many link types serial_link_types points at. */
+    unsigned int serial_link_type_count;
+    /* The pcap link types read as raw zenoh serial bytes, or NULL. */
+    const unsigned int *serial_link_types;
+    /* The most decoded messages one flow keeps; 0 keeps the preset's. */
+    uint64_t frames_per_flow;
+    /* The most decoded messages the handle keeps in all; 0 keeps the
+     * preset's. */
+    uint64_t frames_total;
+} wz_dissect_live_options;
+
+int wz_dissect_live_open_with(const wz_dissect_live_options *options,
+                              wz_dissect_live **out);
 
 /* Feed one captured packet. `link_type` is its pcap link type -- the same
  * numbering wz_dissect_readable_surfaces reports.

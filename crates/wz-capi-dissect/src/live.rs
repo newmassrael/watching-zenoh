@@ -516,6 +516,15 @@ impl LiveDissection {
         Self::over(Dissection::with_limits(limits))
     }
 
+    /// A handle reading under `limits` that takes the packets of
+    /// `serial_linktypes` for raw zenoh serial bytes, from its first packet
+    /// ([`wz_capture::Dissection::declare_serial_linktypes`]).
+    pub fn new_declaring(limits: DissectionLimits, serial_linktypes: &[u32]) -> Self {
+        let mut dissection = Dissection::with_limits(limits);
+        dissection.declare_serial_linktypes(serial_linktypes);
+        Self::over(dissection)
+    }
+
     /// R2171 (open-debt item 547) — a handle over a capture FILE already read.
     ///
     /// # Why this reads the file through `Dissection` rather than per packet

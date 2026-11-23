@@ -67,7 +67,7 @@
 //! Freezing the shape would reintroduce exactly the coupling this design
 //! exists to avoid.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_uint};
 use std::ffi::CString;
 
 use wz_capture::Dissection;
@@ -479,6 +479,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 59, for `wz_dissect_live_field_values_since_window`: the values document
     // for the records of at most `max_rows` sequence numbers, so the document
     // and its string are as large as a window. The document does not move.
+    // 60, for `wz_dissect_live_open_with` and its `wz_dissect_live_options`: a
+    // live handle opened under a preset, the frame ceilings the caller chooses
+    // and the link types read as raw zenoh serial bytes, through a sized struct
+    // the caller owns. The session table moved to revision 15 on the same step
+    // (a flow's `direction_basis`), which moves no symbol.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -496,7 +501,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 59;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 60;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3689,6 +3694,187 @@ pub unsafe extern "C" fn wz_dissect_live_open_bounded(
     WZ_DISSECT_OK
 }
 
+/// (ABI 60) — what [`wz_dissect_live_open_with`] opens a handle under: a
+/// preset, the ceilings a caller chooses over it, and the link types read as
+/// raw zenoh serial bytes.
+///
+/// Laid out as `wz_dissect_live_options` in `wz_dissect.h`. A SIZED struct:
+/// the caller writes `size` as the size of the struct it was compiled
+/// against, so a later revision appends fields and a caller compiled before
+/// them is read as having left them zero. That is what lets the caller-chosen
+/// axes cross as fields without freezing `DissectionLimits` into the ABI: a
+/// field is added only for an axis a caller is the one to choose, and the
+/// preset still carries every other.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WzDissectLiveOptions {
+    /// The size of the struct the caller was compiled against, in bytes.
+    pub size: usize,
+    /// A `WZ_DISSECT_LIMITS_*` preset, which the fields below adjust.
+    pub limits: c_int,
+    /// How many link types [`Self::serial_link_types`] points at.
+    pub serial_link_type_count: c_uint,
+    /// The pcap link types whose packets are raw zenoh serial bytes, or null
+    /// when [`Self::serial_link_type_count`] is zero.
+    pub serial_link_types: *const c_uint,
+    /// As [`wz_dissect_live_open_bounded`]'s argument: `0` keeps the preset's.
+    pub frames_per_flow: u64,
+    /// As [`wz_dissect_live_open_bounded`]'s argument: `0` keeps the preset's.
+    pub frames_total: u64,
+}
+
+impl WzDissectLiveOptions {
+    /// Every field zero: what a field past the size a caller wrote reads as.
+    const ZERO: Self = Self {
+        size: 0,
+        limits: 0,
+        serial_link_type_count: 0,
+        serial_link_types: core::ptr::null(),
+        frames_per_flow: 0,
+        frames_total: 0,
+    };
+}
+
+/// The smallest [`WzDissectLiveOptions::size`] a caller can have been compiled
+/// with: the struct as ABI 60 published it, which ends at `frames_total`.
+const LIVE_OPTIONS_FIRST_SIZE: usize =
+    core::mem::offset_of!(WzDissectLiveOptions, frames_total) + core::mem::size_of::<u64>();
+
+/// The options a caller handed [`wz_dissect_live_open_with`], read under the
+/// size it wrote, or `None` for options that cannot be read.
+///
+/// A size below the first published one is refused. A size above this
+/// library's struct is accepted only when every byte past it is zero: a
+/// nonzero byte there is a field a newer header set and this library cannot
+/// honour, and reading on without it would hand back a handle that ignores
+/// what the caller asked for. Fields past a smaller size read as zero.
+///
+/// # Safety
+/// `options` must be null, or point to a `size_t` followed by at least as many
+/// readable bytes as that `size_t` says the struct holds.
+unsafe fn read_live_options(options: *const WzDissectLiveOptions) -> Option<WzDissectLiveOptions> {
+    if options.is_null() {
+        return None;
+    }
+    // SAFETY: the first field is readable whatever size the caller wrote, by
+    // the contract above; no reference to the whole struct is made.
+    let size = unsafe { core::ptr::addr_of!((*options).size).read() };
+    if size < LIVE_OPTIONS_FIRST_SIZE {
+        return None;
+    }
+    let known = core::mem::size_of::<WzDissectLiveOptions>();
+    let base = options.cast::<u8>();
+    if size > known {
+        // SAFETY: `size` bytes from `base` are readable by the contract above,
+        // and `known` is below `size` here.
+        let tail = unsafe { core::slice::from_raw_parts(base.add(known), size - known) };
+        if tail.iter().any(|&b| b != 0) {
+            return None;
+        }
+    }
+    let mut read = WzDissectLiveOptions::ZERO;
+    // SAFETY: `size.min(known)` bytes are readable from `base` and writable in
+    // `read`, which is `known` bytes long, and the two do not overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            base,
+            core::ptr::addr_of_mut!(read).cast::<u8>(),
+            size.min(known),
+        );
+    }
+    Some(read)
+}
+
+/// A ceiling a caller chose, over the preset's `preset`: `0` keeps the
+/// preset's figure, and a value too large for this platform's `size_t` is
+/// `None`, never a quiet clamp.
+fn caller_ceiling(value: u64, preset: Option<usize>) -> Option<Option<usize>> {
+    if value == 0 {
+        return Some(preset);
+    }
+    usize::try_from(value).ok().map(Some)
+}
+
+/// (ABI 60) — open a live handle under a preset, the ceilings the caller
+/// chooses over it, and the link types it reads as raw zenoh serial bytes.
+///
+/// # Why a struct, when the preset is an integer
+///
+/// The preset is a closed enumeration so that `DissectionLimits` does not cross
+/// the boundary. The axes a caller is the one to choose (how many rows its list
+/// holds, which link types its capture tool wrote a serial line on) had to
+/// cross anyway, and a door per combination of them is what this replaces:
+/// [`wz_dissect_live_open`] takes the preset alone and
+/// [`wz_dissect_live_open_bounded`] two ceilings, and both are this door with
+/// the other fields zero. The struct is sized, so a later axis is a field a
+/// caller compiled before it reads as zero, not another door.
+///
+/// # A capture file
+///
+/// A capture read with these options is read through this handle:
+/// [`wz_dissect_live_follow`] or [`wz_dissect_live_follow_lent`] with the
+/// whole file, [`wz_dissect_live_followed`] to tell a cut file from a whole
+/// one, then [`wz_dissect_live_end`]. That is the walk
+/// [`wz_dissect_pcap_replay`] makes (`LiveDissection::from_capture` is
+/// `follow` and then `end`), so a declaration and a ceiling reach a file
+/// without a second replay door per option.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `options` or `out`, a `size`
+/// below the first published struct, a nonzero byte past this library's
+/// struct, an unknown preset, a ceiling too large for `size_t`, and a nonzero
+/// `serial_link_type_count` with a null `serial_link_types`.
+///
+/// # Safety
+/// `options` must point to a `wz_dissect_live_options` of at least the size
+/// its `size` field says, `serial_link_types` within it must point to
+/// `serial_link_type_count` readable values when that count is not zero, and
+/// `out` must be a writable pointer to a `*mut wz_dissect_live`. On success
+/// `*out` is a handle to be released exactly once with
+/// [`wz_dissect_live_close`]. The link types are copied; nothing the options
+/// point at is read after the call.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_open_with(
+    options: *const WzDissectLiveOptions,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let Some(options) = (unsafe { read_live_options(options) }) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let Some(mut limits) = preset_limits(options.limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let (Some(per_flow), Some(total)) = (
+        caller_ceiling(options.frames_per_flow, limits.frames_per_flow),
+        caller_ceiling(options.frames_total, limits.frames_total),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.frames_per_flow = per_flow;
+    limits.frames_total = total;
+    let Ok(count) = usize::try_from(options.serial_link_type_count) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let serial: &[c_uint] = if count == 0 {
+        &[]
+    } else if options.serial_link_types.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    } else {
+        // SAFETY: caller contract above; the slice is copied by the handle
+        // before this call returns.
+        unsafe { core::slice::from_raw_parts(options.serial_link_types, count) }
+    };
+    let handle = Box::new(live::LiveDissection::new_declaring(limits, serial));
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
+}
+
 /// R2102 — feed one captured packet to a live handle.
 ///
 /// `link_type` is the pcap link type of `bytes`, the same numbering
@@ -6683,6 +6869,10 @@ mod tests {
     /// key byte in anything a door writes. The pass itself is held in
     /// `wz-tls-record` and `wz-capture`.
     mod decryption;
+
+    /// `wz_dissect_live_open_with`: the sized options a live handle is opened
+    /// under, their refusals, and a serial line declared through them.
+    mod live_options;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -10442,7 +10632,10 @@ mod tests {
         // 59, for `wz_dissect_live_field_values_since_window`: one symbol, the
         // values door with one more integer in, a `char*` released by
         // `wz_dissect_string_free` out; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 59);
+        // 60, for `wz_dissect_live_open_with`: one symbol, a sized struct the
+        // caller owns in (read under the size it writes, nothing kept of it)
+        // and the handle out, released by `wz_dissect_live_close`.
+        assert_eq!(wz_dissect_abi_version(), 60);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

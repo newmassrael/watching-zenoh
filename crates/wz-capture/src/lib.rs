@@ -6903,6 +6903,20 @@ impl Dissection {
         }
     }
 
+    /// Declare the link types whose packets are raw zenoh serial bytes, for
+    /// every packet pushed or followed from now on.
+    ///
+    /// The declaration the `from_*_declaring` readers take, for a dissection
+    /// that is fed rather than handed a whole file. It has to arrive before the
+    /// line's first packet does: a packet on a link type nobody declared is
+    /// skipped as one this build does not read, and nothing reads it again. A
+    /// declared link type wins over decapsulation, so declaring a readable one
+    /// takes its decoding away. See [`serial`] for why the link type is
+    /// declared and never sniffed.
+    pub fn declare_serial_linktypes(&mut self, serial_linktypes: &[u32]) {
+        self.declared_serial_linktypes = serial_linktypes.to_vec();
+    }
+
     /// What staying inside [`DissectionLimits`] has cost.
     pub fn drops(&self) -> DissectionDrops {
         // R311y713 (§B1) — `flows` is composed from the retirement count rather

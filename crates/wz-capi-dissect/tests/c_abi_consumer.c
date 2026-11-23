@@ -1167,6 +1167,82 @@ static int check_open_bounded_door(void) {
     return 0;
 }
 
+/* (ABI 60) -- THE OPTIONS DOOR, driven from C: a sized struct the caller owns,
+ * zeroed and given its own size. It refuses a NULL struct, a size below the
+ * first published one and a link-type count with no list; and a declared link
+ * type is read as a serial line where the same packet on an undeclared handle
+ * is skipped. The packet is not a valid serial frame, which the declaration
+ * does not need: what moves is whether the link type is read at all. */
+static int check_open_with_door(void) {
+    static const unsigned char not_a_frame[] = {0x11, 0x22, 0x33};
+    static const unsigned int serial[] = {147};
+    wz_dissect_live_options o;
+    wz_dissect_live *h = NULL;
+    char *doc = NULL;
+    int rc;
+
+    if (sizeof(void *) == 8) {
+        CHECK(sizeof(wz_dissect_live_options) >= 40,
+              "the options are %zu bytes", sizeof(wz_dissect_live_options));
+        CHECK(offsetof(wz_dissect_live_options, limits) == 8, "limits offset");
+        CHECK(offsetof(wz_dissect_live_options, serial_link_type_count) == 12,
+              "serial_link_type_count offset");
+        CHECK(offsetof(wz_dissect_live_options, serial_link_types) == 16,
+              "serial_link_types offset");
+        CHECK(offsetof(wz_dissect_live_options, frames_per_flow) == 24,
+              "frames_per_flow offset");
+        CHECK(offsetof(wz_dissect_live_options, frames_total) == 32,
+              "frames_total offset");
+    }
+
+    rc = wz_dissect_live_open_with(NULL, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null options rc=%d", rc);
+
+    memset(&o, 0, sizeof o);
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a size of zero rc=%d", rc);
+
+    o.size = sizeof o;
+    o.limits = WZ_DISSECT_LIMITS_NONE;
+    o.serial_link_type_count = 1;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a count with no list rc=%d", rc);
+
+    o.serial_link_types = serial;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "open_with rc=%d", rc);
+    rc = wz_dissect_live_push(h, 147, 1000000u, not_a_frame, sizeof not_a_frame);
+    CHECK(rc == WZ_DISSECT_OK, "declared push rc=%d", rc);
+    rc = wz_dissect_live_health(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "declared health rc=%d", rc);
+    CHECK(strstr(doc, "\"link_type\":147") == NULL,
+          "a declared link type is read, not skipped: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_live_session_table(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "declared table rc=%d", rc);
+    CHECK(strstr(doc, "\"link\":\"serial\"") != NULL,
+          "the declared line is a flow of the table: %s", doc);
+    CHECK(strstr(doc, "\"direction_basis\":\"unknown\"") != NULL,
+          "one interface cannot separate the wires: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    wz_dissect_live_close(h);
+    h = NULL;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "undeclared open rc=%d", rc);
+    rc = wz_dissect_live_push(h, 147, 1000000u, not_a_frame, sizeof not_a_frame);
+    CHECK(rc == WZ_DISSECT_OK, "undeclared push rc=%d", rc);
+    rc = wz_dissect_live_health(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "undeclared health rc=%d", rc);
+    CHECK(strstr(doc, "\"interface\":0,\"link_type\":147,\"packets\":1") != NULL,
+          "an undeclared link type is skipped and counted: %s", doc);
+    wz_dissect_string_free(doc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* R2205 (open-debt item 560) -- THE BYTES UNDER THE DESCRIPTION, driven from C.
  *
  * Its own function and not another arm of check_live_door for the reason that
@@ -3026,7 +3102,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":14},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":15},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -3081,6 +3157,11 @@ static int check_session_table_doors(void) {
     CHECK(strstr(from_file, "\"encrypted\":\"clear\",\"decryption\":null,"
                             "\"key_source\":null,\"bytes\":") != NULL,
           "a clear flow states no decryption: %s", from_file);
+    /* A flow read off addresses has its halves by its endpoints (session_table
+     * revision 15); only the serial line says anything else. */
+    CHECK(strstr(from_file, "\"direction_basis\":\"endpoints\","
+                            "\"stream_anomalies\":") != NULL,
+          "a udp flow's halves are its endpoints: %s", from_file);
     CHECK(strstr(from_file, "\"stream_anomalies\":null,\"unstated\":"
                             "[{\"cell\":\"decryption\","
                             "\"reason\":\"not_encrypted\"},"
@@ -5308,6 +5389,11 @@ int main(void) {
 
     /* (ABI 43) -- and the open that takes the two message ceilings. */
     if (check_open_bounded_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 60) -- and the open that takes its options as a sized struct. */
+    if (check_open_with_door() != 0) {
         return 1;
     }
 

@@ -100,6 +100,14 @@ CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
 #
 # BOTH surfaces reach these.
 BOTH = {
+    # ABI 60 — the serial declaration, which the command line took first. The
+    # ABI takes it as a field of the options a handle is opened under, so a file
+    # read through that handle and a link pushed to it read the same line.
+    "declaring a link type to be raw serial": (
+        "--serial",
+        "wz_dissect_live_open_with",
+        (),
+    ),
     "keyexpr plane": ("--throughput", "wz_dissect_pcap_census", (8, 16, 17)),
     "query plane": ("--exchanges", "wz_dissect_pcap_census", (19,)),
     "node plane": ("--nodes", "wz_dissect_pcap_census", (12,)),
@@ -301,18 +309,15 @@ ONLY_CLI = {
         "--quic",
         "DELIBERATE for now: a declaration is a human judgement about a capture "
         "that begins mid-connection, and the report says which flows were declared "
-        "rather than recognised. A C consumer wanting it would want a whole "
-        "declaration struct, which this ABI's design refuses (see its module doc).",
+        "rather than recognised. Since ABI 60 a declaration crosses as a field of "
+        "the sized options a live handle is opened under, and a port list would be "
+        "one more field there; no linking consumer has read a capture that needs "
+        "it, so the command line is the one surface that takes it.",
         (),
     ),
     "the short-header connection id length": (
         "--quic-cid-len",
         "Rides the row above; it is meaningless without a QUIC declaration.",
-        (),
-    ),
-    "declaring a link type to be raw serial": (
-        "--serial",
-        "DELIBERATE, on the same argument as the QUIC declaration above.",
         (),
     ),
     "OPENING a live tap": (

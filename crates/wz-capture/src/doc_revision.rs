@@ -4075,6 +4075,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R13_CARRIES,
     },
+    // Revision 15 ADDS `direction_basis` to every flow of a row and retires
+    // nothing: how the flow's two halves `a` and `b` were told apart. A flow
+    // read off addresses says `endpoints`; the serial line says `handshake`
+    // when a serial handshake frame named the initiator's interface,
+    // `interface_order` when the first interface seen holds `a` by convention,
+    // and `unknown` when one interface carried both wires. A passenger: the
+    // flow object's keys do not move with the word. A cached revision 14
+    // document lacks the key and should be read again by a consumer that wants
+    // it.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 15,
+        keys: SESSION_TABLE_R15_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R15_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R15_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -41517,6 +41535,272 @@ pub const SESSION_TABLE_R13_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "decryption",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "encrypted",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "key_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "refusal",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "why",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The keys the `session_table` document carries at revision 15: revision 13's
+/// PLUS a flow's `direction_basis`.
+pub const SESSION_TABLE_R15_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "announced_version",
+    "bytes",
+    "caps",
+    "cell",
+    "check",
+    "checks",
+    "confirmed",
+    "count",
+    "crossed_at_packet",
+    "decryption",
+    "direction_basis",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "eps_basis",
+    "evicted_stream_anomalies",
+    "excluded",
+    "explained",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "high_to_low",
+    "initiator",
+    "key_source",
+    "last_seen_ts_ns",
+    "link",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "low_to_high",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "millibits",
+    "model",
+    "name",
+    "no_at_millibits",
+    "no_millibits",
+    "ok",
+    "out_of_order",
+    "partial_overlaps",
+    "phase",
+    "port",
+    "q_basis",
+    "reason",
+    "refusal",
+    "residual",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_anomalies",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "strength",
+    "undecoded",
+    "unit_readings",
+    "units",
+    "unstated",
+    "violated",
+    "why",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+];
+
+/// The value families the `session_table` document declares at revision 15:
+/// revision 13's, with the `direction_basis` family a flow carries.
+pub const SESSION_TABLE_R15_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "decryption",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "key_source",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+            "stream_anomalies",
+        ],
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "decryption",
+        values: &[
+            "handshake_not_seen",
+            "key_for_one_direction",
+            "keys_refused",
+            "no_keys",
+            "no_matching_key",
+            "not_supported",
+            "opened",
+            "record_not_held",
+        ],
+    },
+    ValueFamily {
+        key: "direction_basis",
+        values: &["endpoints", "handshake", "interface_order", "unknown"],
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "key_source",
+        values: &["both", "capture", "key_log"],
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &[
+            "encrypted",
+            "mixed",
+            "no_clock",
+            "no_matching_key",
+            "no_sequence",
+            "not_encrypted",
+            "not_in_capture",
+            "not_opened",
+            "not_yet_known",
+        ],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// Revision 13's carries with `direction_basis`, a PASSENGER: a flow object
+/// carries the same keys whichever word it says.
+pub const SESSION_TABLE_R15_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "cell",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "decryption",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction_basis",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {

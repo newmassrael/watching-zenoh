@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 59
+EXPECTED_VERSION = 60
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -531,6 +531,13 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # leaves the live-tap preset's figure. The `caps` group of every document that
     # carries `dropped_by_limits` gained `frames_total` on the same step.
     "wz_dissect_live_open_bounded": 43,
+    # (ABI 60) -- a live handle opened under options: a preset, the frame
+    # ceilings the caller chooses over it, and the pcap link types read as raw
+    # zenoh serial bytes. One symbol: a sized struct the CALLER owns in, read
+    # under the `size` it writes and kept no part of (the link types are copied),
+    # and the handle through a pointer the caller owns, released by
+    # `wz_dissect_live_close`. The memory rule does not move.
+    "wz_dissect_live_open_with": 60,
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census": 3,

@@ -12255,7 +12255,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 113] = [
+        let live: [(&str, &str, Vec<&'static str>); 114] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -12782,6 +12782,12 @@ mod tests {
                 rev::SESSION_TABLE,
                 "key_source",
                 crate::tls::KeySource::names(),
+            ),
+            // How a flow's halves were told apart: the enum that writes it.
+            (
+                rev::SESSION_TABLE,
+                "direction_basis",
+                crate::session_table::DirectionBasis::names(),
             ),
             (
                 rev::SESSION_TABLE,
