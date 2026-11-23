@@ -10,7 +10,7 @@
 //! each further fragment of a chain, which a lane that stays full cuts with the drop marker. The
 //! pump that writes the lanes advertises in its JOIN the sequence numbers it has written, not the
 //! ones minted. [`GroupTxStage`] is that pipeline for a group whose pump is a task of a
-//! cooperative host: a producer calls the same `multicast_tx_push` against the stage, and the
+//! cooperative host: a producer calls the same walk (`multicast_tx_push_encoded`) against the stage, and the
 //! pump, given the stage ([`MulticastPump::attach_tx_stage`](super::MulticastPump::attach_tx_stage)),
 //! writes the datagrams it holds and advertises what it wrote.
 //!
@@ -55,9 +55,8 @@ use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 use wz_session_core::multicast_tx::{
-    multicast_tx_bytes, multicast_tx_conduit, multicast_tx_encode_into,
-    multicast_tx_encoded_conduit, multicast_tx_item_body, multicast_tx_push,
-    multicast_tx_push_batched, multicast_tx_push_encoded, multicast_tx_push_meta,
+    multicast_tx_bytes, multicast_tx_encode_into, multicast_tx_encoded_conduit,
+    multicast_tx_item_body, multicast_tx_push_encoded, multicast_tx_push_meta,
     multicast_tx_push_staged, MulticastBatch, MulticastTxDatagram, MulticastTxEncoded,
     MulticastTxItem, MulticastTxLanes, MulticastTxMeta, MulticastTxQueue,
 };
@@ -595,23 +594,15 @@ impl GroupTxStage {
         }
     }
 
-    /// Push `item`, a message of the session, as the tokio engine's producer pushes it: its lane
-    /// is asked for room before its sequence number is minted and again before each further
-    /// fragment, within the message's deadline, and while the lane is full `pace` runs the host
-    /// and waits on the socket. A message that finds no room is a congestion drop, counted on its
-    /// lane whether it may block or not, as a multicast transport closes nothing on one; a chain
-    /// that runs out of room between two fragments is stopped by the drop marker.
-    pub fn push(&self, item: MulticastTxItem, pace: &dyn GroupTxPace) -> PushOutcome {
-        let outcome = self.push_held(item, Some(pace), false);
-        self.push_deferred();
-        outcome
-    }
-
     /// Push `message`, a message of the session lent for the call (its body written by its encoder
-    /// where the frame is built), as [`Self::push`] pushes an owned one. Pushed while another push
-    /// holds the conduits (from inside that push's wait for room), its body is kept encoded and it
-    /// is framed when they are let go, as an owned one is; one the kept storage has no room for is
-    /// a congestion drop of its lane, counted.
+    /// where the frame is built), as the tokio engine's producer pushes one: its lane is asked for
+    /// room before its sequence number is minted and again before each further fragment, within the
+    /// message's deadline, and while the lane is full `pace` runs the host and waits on the socket.
+    /// A message that finds no room is a congestion drop, counted on its lane whether it may block
+    /// or not, as a multicast transport closes nothing on one; a chain that runs out of room between
+    /// two fragments is stopped by the drop marker. Pushed while another push holds the conduits
+    /// (from inside that push's wait for room), its body is kept encoded and it is framed when they
+    /// are let go; one the kept storage has no room for is a congestion drop of its lane, counted.
     pub fn push_encoded(
         &self,
         message: &MulticastTxEncoded<'_>,
@@ -722,37 +713,6 @@ impl GroupTxStage {
             inner.lanes.borrow_mut().bound.dropped(meta.conduit());
         }
         PushOutcome::Congested
-    }
-
-    /// Push `item` holding the conduits, or keep it encoded for the holder's release when another
-    /// push holds them (it then counts as pushed, or is refused when it cannot be kept). `pace` is `None` for a push that does not wait;
-    /// `reply` is a reply whose slot is taken already, which its first datagram holds.
-    fn push_held(
-        &self,
-        item: MulticastTxItem,
-        pace: Option<&dyn GroupTxPace>,
-        reply: bool,
-    ) -> PushOutcome {
-        let inner = &*self.inner;
-        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            let meta = MulticastTxMeta::of_item(&item, &inner.params);
-            let size = multicast_tx_bytes(&item);
-            return multicast_tx_item_body(&item, |body| self.stage(meta, size, body, reply));
-        };
-        let conduit = multicast_tx_conduit(&item, &inner.params);
-        let params = &inner.params;
-        self.push_on(
-            &mut conduits,
-            conduit,
-            pace,
-            reply,
-            |minted, queue, window| match window {
-                Some(window) => {
-                    multicast_tx_push_batched(item, minted, params, &params.tx_queue, queue, window)
-                }
-                None => multicast_tx_push(item, minted, params, &params.tx_queue, queue),
-            },
-        )
     }
 
     /// One push onto `conduit`, whose conduits the caller holds: what `push` frames, owned or lent,
@@ -1512,12 +1472,56 @@ mod tests {
         }
     }
 
-    /// Push `item` onto `stage` as a message of the session whose lane has room: it is queued
+    /// A put of the session on the group's test key, written from its parts when it is pushed
+    /// ([`push_put`]), reliable unless it is made best effort.
+    struct Put {
+        payload: String,
+        reliable: bool,
+    }
+
+    impl Put {
+        fn of(payload: &str) -> Self {
+            Self {
+                payload: String::from(payload),
+                reliable: true,
+            }
+        }
+
+        /// A put whose frame takes more than half of a [`one_batch_lanes`] lane and fits its batch.
+        fn fill() -> Self {
+            Self::of(&"y".repeat(150))
+        }
+
+        fn best_effort(self) -> Self {
+            Self {
+                reliable: false,
+                ..self
+            }
+        }
+    }
+
+    /// Push `put` onto `stage` as the group's publish pushes it, written from its parts, waiting
+    /// with `pace`.
+    fn push_put(stage: &GroupTxStage, put: Put, pace: &dyn GroupTxPace) -> PushOutcome {
+        wz_session_core::multicast_tx::multicast_tx_publication(
+            0,
+            Some("demo/stage"),
+            wz_session_core::sample::SampleKind::Put,
+            put.payload.as_bytes(),
+            &wz_session_core::metadata::PushMetadata::default(),
+            put.reliable,
+            Priority::DEFAULT,
+            |message| stage.push_encoded(message, pace),
+        )
+        .expect("a put")
+    }
+
+    /// Push `put` onto `stage` as a message of the session whose lane has room: it is queued
     /// with no pass of the host.
-    fn push_at_once(stage: &GroupTxStage, item: MulticastTxItem) {
+    fn push_at_once(stage: &GroupTxStage, put: Put) {
         let nothing = || {};
         let host = FullHost::new(&nothing);
-        assert_eq!(stage.push(item, &host), PushOutcome::Pushed);
+        assert_eq!(push_put(stage, put, &host), PushOutcome::Pushed);
         assert_eq!(
             host.passes.get(),
             0,
@@ -1713,7 +1717,7 @@ mod tests {
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         for payload in PAYLOADS {
-            push_at_once(&stage, put(payload));
+            push_at_once(&stage, Put::of(payload));
         }
         let mut quiet = |_event: IterationEvent<'_, '_>| {};
         let mut nothing = || None;
@@ -1759,27 +1763,22 @@ mod tests {
         let stage = GroupTxStage::new(&params);
         let nothing = || {};
         let host = FullHost::new(&nothing);
-        let best_effort = |item: MulticastTxItem| match item {
-            MulticastTxItem::Push { push, priority, .. } => MulticastTxItem::Push {
-                push,
-                reliable: false,
-                priority,
-            },
-            other => other,
-        };
 
         assert!(stage.is_empty());
-        assert_eq!(stage.push(best_effort(fill()), &host), PushOutcome::Pushed);
+        assert_eq!(
+            push_put(&stage, Put::fill().best_effort(), &host),
+            PushOutcome::Pushed
+        );
         assert!(!stage.is_empty(), "a datagram queued for the pump");
         assert_eq!(
-            stage.push(best_effort(fill()), &host),
+            push_put(&stage, Put::fill().best_effort(), &host),
             PushOutcome::Pushed,
             "a lane that holds less than its bound takes a datagram that carries it past it"
         );
         assert_eq!(host.passes.get(), 0, "neither waited");
 
         assert_eq!(
-            stage.push(best_effort(put("second")), &host),
+            push_put(&stage, Put::of("second").best_effort(), &host),
             PushOutcome::Congested
         );
         assert_eq!(host.passes.get(), 1, "the full lane had the host run");
@@ -1791,7 +1790,7 @@ mod tests {
         assert_eq!(stage.drops(Priority::DEFAULT), 1);
 
         assert_eq!(
-            stage.push(best_effort(put("second")), &host),
+            push_put(&stage, Put::of("second").best_effort(), &host),
             PushOutcome::Congested
         );
         assert_eq!(host.passes.get(), 1, "the lane's mark answers at once");
@@ -1799,7 +1798,7 @@ mod tests {
 
         assert!(stage.take().is_some());
         assert_eq!(
-            stage.push(best_effort(put("second")), &host),
+            push_put(&stage, Put::of("second").best_effort(), &host),
             PushOutcome::Pushed,
             "what the pump took is room again, and lowers the mark"
         );
@@ -1814,10 +1813,13 @@ mod tests {
         let stage = GroupTxStage::new(&one_batch_lanes());
         let nothing = || {};
         let mut host = FullHost::new(&nothing);
-        push_at_once(&stage, fill());
-        push_at_once(&stage, fill());
+        push_at_once(&stage, Put::fill());
+        push_at_once(&stage, Put::fill());
         host.ended = true;
-        assert_eq!(stage.push(put("second"), &host), PushOutcome::Pushed);
+        assert_eq!(
+            push_put(&stage, Put::of("second"), &host),
+            PushOutcome::Pushed
+        );
         assert_eq!(host.passes.get(), 0, "nothing was waited for");
         assert_eq!(stage.drops(Priority::DEFAULT), 0);
     }
@@ -1828,8 +1830,8 @@ mod tests {
     #[test]
     fn a_reply_staged_while_a_push_waits_is_pushed_behind_it() {
         let stage = GroupTxStage::new(&one_batch_lanes());
-        push_at_once(&stage, fill());
-        push_at_once(&stage, fill());
+        push_at_once(&stage, Put::fill());
+        push_at_once(&stage, Put::fill());
         // The pass is the host's tasks: the group's dispatch stages a reply, and its pump takes
         // the oldest datagram of the full lane.
         let in_pass = stage.clone();
@@ -1838,7 +1840,10 @@ mod tests {
             let _ = in_pass.take();
         };
         let host = FullHost::new(&on_pass);
-        assert_eq!(stage.push(put("second"), &host), PushOutcome::Pushed);
+        assert_eq!(
+            push_put(&stage, Put::of("second"), &host),
+            PushOutcome::Pushed
+        );
         assert_eq!(host.passes.get(), 1);
         let mut order: Vec<(u64, String)> = Vec::new();
         while let Some(datagram) = stage.take() {
@@ -1862,14 +1867,17 @@ mod tests {
     #[test]
     fn a_push_made_while_the_conduits_are_held_is_framed_as_it_would_have_been_at_once() {
         let at_once = GroupTxStage::new(&one_batch_lanes());
-        push_at_once(&at_once, put("first"));
+        push_at_once(&at_once, Put::of("first"));
         let expected = at_once.take().expect("the put").bytes;
         let stage = GroupTxStage::new(&one_batch_lanes());
         let nothing = || {};
         let host = FullHost::new(&nothing);
         {
             let _held = stage.inner.conduits.borrow_mut();
-            assert_eq!(stage.push(put("first"), &host), PushOutcome::Pushed);
+            assert_eq!(
+                push_put(&stage, Put::of("first"), &host),
+                PushOutcome::Pushed
+            );
             assert!(
                 stage.take().is_none(),
                 "nothing is framed while they are held"
@@ -1902,9 +1910,15 @@ mod tests {
         {
             let _held = stage.inner.conduits.borrow_mut();
             for _ in 0..MAX_MULTICAST_REPLIES {
-                assert_eq!(stage.push(put("first"), &host), PushOutcome::Pushed);
+                assert_eq!(
+                    push_put(&stage, Put::of("first"), &host),
+                    PushOutcome::Pushed
+                );
             }
-            assert_eq!(stage.push(put("second"), &host), PushOutcome::Congested);
+            assert_eq!(
+                push_put(&stage, Put::of("second"), &host),
+                PushOutcome::Congested
+            );
         }
         assert_eq!(stage.drops(Priority::DEFAULT), 1);
         assert_eq!(stage.dropped(), 0, "no reply was refused");
@@ -1959,9 +1973,12 @@ mod tests {
         let stage = GroupTxStage::new(&params);
         let nothing = || {};
         let host = FullHost::new(&nothing);
-        push_at_once(&stage, fill());
-        push_at_once(&stage, fill());
-        assert_eq!(stage.push(put("second"), &host), PushOutcome::Congested);
+        push_at_once(&stage, Put::fill());
+        push_at_once(&stage, Put::fill());
+        assert_eq!(
+            push_put(&stage, Put::of("second"), &host),
+            PushOutcome::Congested
+        );
         assert_eq!(host.passes.get(), 0, "a wait of zero asks without waiting");
         assert_eq!(stage.drops(Priority::DEFAULT), 1);
     }
@@ -2060,11 +2077,14 @@ mod tests {
 
         // A message of the session on a full lane is the lanes' drop, not the limit's.
         let full = GroupTxStage::new(&one_batch_lanes());
-        push_at_once(&full, fill());
-        push_at_once(&full, fill());
+        push_at_once(&full, Put::fill());
+        push_at_once(&full, Put::fill());
         let nothing = || {};
         let host = FullHost::new(&nothing);
-        assert_eq!(full.push(put("second"), &host), PushOutcome::Congested);
+        assert_eq!(
+            push_put(&full, Put::of("second"), &host),
+            PushOutcome::Congested
+        );
         assert_eq!((full.drops(Priority::DEFAULT), full.dropped()), (1, 0));
     }
 
@@ -2189,24 +2209,16 @@ mod tests {
     #[test]
     fn a_mark_is_read_after_the_pump_had_a_pass_on_a_socket_that_takes_again() {
         let stage = GroupTxStage::new(&one_batch_lanes());
-        let best_effort = |item: MulticastTxItem| match item {
-            MulticastTxItem::Push { push, priority, .. } => MulticastTxItem::Push {
-                push,
-                reliable: false,
-                priority,
-            },
-            other => other,
-        };
-        push_at_once(&stage, fill());
-        push_at_once(&stage, fill());
+        push_at_once(&stage, Put::fill());
+        push_at_once(&stage, Put::fill());
         let nothing = || {};
         let full = FullHost::new(&nothing);
         assert_eq!(
-            stage.push(best_effort(put("second")), &full),
+            push_put(&stage, Put::of("second").best_effort(), &full),
             PushOutcome::Congested
         );
         assert_eq!(
-            stage.push(best_effort(put("second")), &full),
+            push_put(&stage, Put::of("second").best_effort(), &full),
             PushOutcome::Congested,
             "a socket still full leaves the mark standing"
         );
@@ -2219,7 +2231,7 @@ mod tests {
         let mut taking = FullHost::new(&writes);
         taking.writable = true;
         assert_eq!(
-            stage.push(best_effort(put("third")), &taking),
+            push_put(&stage, Put::of("third").best_effort(), &taking),
             PushOutcome::Pushed
         );
         assert_eq!(taking.passes.get(), 1, "the pump had its pass first");
@@ -2240,7 +2252,7 @@ mod tests {
         }));
         let link = GroupLink::new(Socket(Rc::clone(&wire)));
         let stage = GroupTxStage::new(&params());
-        push_at_once(&stage, put("first"));
+        push_at_once(&stage, Put::of("first"));
         link.write_staged(&stage);
         assert!(
             taken(&wire).is_empty(),
@@ -2264,7 +2276,7 @@ mod tests {
         assert!(stage.is_empty());
 
         session_side.close();
-        push_at_once(&stage, put("second"));
+        push_at_once(&stage, Put::of("second"));
         link.write_staged(&stage);
         assert_eq!(taken(&wire), ["first"], "a link let go of is not written");
     }
@@ -2302,8 +2314,8 @@ mod tests {
         assert_eq!(taken(&wire), ["join"]);
 
         wire.borrow_mut().room = 1;
-        push_at_once(&stage, put("first"));
-        push_at_once(&stage, put("second"));
+        push_at_once(&stage, Put::of("first"));
+        push_at_once(&stage, Put::of("second"));
         link.write_staged(&stage);
         assert_eq!(taken(&wire), ["join", "first"], "what the socket took");
         assert!(stage.holds(), "and what it refused, held");
@@ -2338,8 +2350,8 @@ mod tests {
         };
         let stage = GroupTxStage::new(&params());
         stage.batch_start();
-        push_at_once(&stage, put("first"));
-        push_at_once(&stage, put("second"));
+        push_at_once(&stage, Put::of("first"));
+        push_at_once(&stage, Put::of("second"));
         assert!(stage.is_empty(), "the window holds both, on no lane");
 
         stage.batch_flush();
@@ -2347,14 +2359,14 @@ mod tests {
         assert!(stage.take().is_none(), "one datagram for both");
         assert!(carries(&both.bytes, "first") && both.bytes.ends_with(b"second"));
 
-        push_at_once(&stage, put("third"));
+        push_at_once(&stage, Put::of("third"));
         assert!(stage.is_empty(), "the window is still open");
         stage.batch_stop();
         let third = stage.take().expect("the stop's frame");
         assert!(third.bytes.ends_with(b"third"));
         assert!(stage.take().is_none());
 
-        push_at_once(&stage, put("first"));
+        push_at_once(&stage, Put::of("first"));
         let alone = stage.take().expect("a closed window holds nothing back");
         assert!(alone.bytes.ends_with(b"first"));
         assert_eq!([both.sn, third.sn, alone.sn], [0, 1, 2]);
@@ -2374,7 +2386,7 @@ mod tests {
             let stage = GroupTxStage::new(&params);
             stage.batch_start();
             for at in 0..count {
-                push_at_once(&stage, put(&payload(at)));
+                push_at_once(&stage, Put::of(&payload(at)));
             }
             stage.batch_stop();
             stage.take().expect("the window's frame").bytes.len()
@@ -2393,7 +2405,7 @@ mod tests {
         let puts = 2 * fits + 3;
         let mut frames = Vec::new();
         for at in 0..puts {
-            push_at_once(&stage, put(&payload(at)));
+            push_at_once(&stage, Put::of(&payload(at)));
             frames.extend(core::iter::from_fn(|| stage.take()));
             assert_eq!(frames.len(), at / fits, "after put {at}");
         }
@@ -2443,8 +2455,8 @@ mod tests {
         pump.attach_tx_stage(stage.clone());
 
         stage.batch_start();
-        push_at_once(&stage, put("first"));
-        push_at_once(&stage, put("second"));
+        push_at_once(&stage, Put::of("first"));
+        push_at_once(&stage, Put::of("second"));
         assert!(stage.is_empty(), "the window holds both");
 
         assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
@@ -2458,7 +2470,7 @@ mod tests {
             .any(|window| window == b"first"));
         assert_eq!(advertised(&wire), [0], "the frame's number, as the next");
 
-        push_at_once(&stage, put("third"));
+        push_at_once(&stage, Put::of("third"));
         assert!(stage.is_empty(), "the window is still open");
         assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
         assert_eq!(taken(&wire), ["join", "second", "join", "third"]);
@@ -2499,7 +2511,7 @@ mod tests {
         assert_eq!(taken(&wire), ["join"]);
 
         stage.batch_start();
-        push_at_once(&stage, put("first"));
+        push_at_once(&stage, Put::of("first"));
         assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
         assert_eq!(
             taken(&wire),
