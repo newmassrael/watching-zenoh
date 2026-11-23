@@ -136,7 +136,7 @@ impl Round {
         Round::SubscriberDeclare,
         Round::QueryableDeclare,
         Round::MatchingListener,
-        Round::LivelinessSub,
+        Round::LivelinessSubscriber,
         Round::QuerierDeclare,
         Round::QuerierGet,
         Round::ConfigClone,
@@ -153,7 +153,7 @@ impl Round {
             Round::Replay => cfg!(feature = "replay-cache"),
             Round::ConfigDocument => cfg!(feature = "config-document"),
             Round::QueryableDeclare => cfg!(feature = "queryable"),
-            Round::LivelinessSub => cfg!(feature = "liveliness"),
+            Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::Idle
             | Round::PublisherDeclare
@@ -200,7 +200,11 @@ const FAMILIES: [(&str, Round, Part); 23] = [
     ("subscriber-declare", Round::SubscriberDeclare, Part::All),
     ("queryable-declare", Round::QueryableDeclare, Part::All),
     ("matching-listener", Round::MatchingListener, Part::All),
-    ("liveliness-subscriber", Round::LivelinessSub, Part::All),
+    (
+        "liveliness-subscriber",
+        Round::LivelinessSubscriber,
+        Part::All,
+    ),
     ("querier-declare", Round::QuerierDeclare, Part::All),
     ("querier-get", Round::QuerierGet, Part::Calling),
     ("config-clone", Round::ConfigClone, Part::All),
@@ -602,7 +606,7 @@ impl Bench {
                 self.queryable_declare();
             }
             Round::MatchingListener => self.matching_listener(),
-            Round::LivelinessSub => {
+            Round::LivelinessSubscriber => {
                 #[cfg(feature = "liveliness")]
                 self.liveliness_subscriber();
             }
