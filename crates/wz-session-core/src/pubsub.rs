@@ -3878,6 +3878,56 @@ impl<P: Storage> SubscriberPeer<P> {
 /// The application-facing registry of ONE session: the table and that session's
 /// peer side. Everything that does not need the peer is the table's, reached
 /// through `Deref`; what does is here, with the signature it has always had.
+impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+    /// [`Self::register_sink`], and then what the registration owes `peer`.
+    ///
+    /// R311y530 — pub-before-sub: a remote publisher that already registered
+    /// a FUTURE subscriber interest is told about THIS subscription now.
+    /// Placed here, on the single table-insert path, rather than in the
+    /// callers: every declare route funnels through this method, so none
+    /// can skip the push. A table shared by several peers stages it for the
+    /// peer of the caller; every other peer finds it by its id when it next
+    /// reconciles ([`SubscriberPeer::reconcile`]).
+    pub fn register_sink_for(
+        &mut self,
+        peer: &mut SubscriberPeer<P>,
+        keyexpr_pattern: &str,
+        allowed_origin: crate::locality::Locality,
+        sink: C,
+    ) -> Result<SubscriptionId, RegisterError> {
+        let id = self.register_sink(keyexpr_pattern, allowed_origin, sink)?;
+        #[cfg(feature = "declare-subscriber")]
+        {
+            self.stage_future_subscriber_pushes(&mut peer.interests, id);
+            peer.interests.reconciled_epoch = self.epoch;
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        let _ = peer;
+        Ok(id)
+    }
+
+    /// [`Self::unregister`], and then what the retirement owes `peer`.
+    ///
+    /// R2292 (open-debt item 627) — an aggregate declaration this session
+    /// announced stands for "some local subscription matches your
+    /// interest", so the retirement that makes that false has to retract
+    /// it. Placed HERE, on the single removal path, for the same reason
+    /// [`Self::register_sink_for`] sits on the single insert path: no
+    /// retirement route can skip the retraction.
+    pub fn unregister_for(&mut self, peer: &mut SubscriberPeer<P>, id: SubscriptionId) -> bool {
+        let removed = self.unregister(id);
+        #[cfg(feature = "declare-subscriber")]
+        if removed {
+            #[cfg(feature = "declare-undeclare")]
+            self.stage_emptied_aggregate_retracts(&mut peer.interests);
+            peer.interests.reconciled_epoch = self.epoch;
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        let _ = peer;
+        removed
+    }
+}
+
 impl<C: SampleSink> SubscriberRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`, of this build's storage
     /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
@@ -3927,51 +3977,22 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
         self.peer.limit_keys_to(quota);
     }
 
-    /// [`SubscriberTable::register_sink`], and then what the registration owes
-    /// this registry's peer.
-    ///
-    /// R311y530 — pub-before-sub: a remote publisher that already registered
-    /// a FUTURE subscriber interest is told about THIS subscription now.
-    /// Placed here, on the single table-insert path, rather than in the
-    /// callers: `register` / `register_with_locality` both funnel through
-    /// this method, so no declare route can skip the push.
+    /// [`SubscriberTable::register_sink_for`] for this registry's peer: the
+    /// registration, and what it owes the peer.
     pub fn register_sink(
         &mut self,
         keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         sink: C,
     ) -> Result<SubscriptionId, RegisterError> {
-        let id = self
-            .table
-            .register_sink(keyexpr_pattern, allowed_origin, sink)?;
-        #[cfg(feature = "declare-subscriber")]
-        {
-            self.table
-                .stage_future_subscriber_pushes(&mut self.peer.interests, id);
-            self.peer.interests.reconciled_epoch = self.table.epoch;
-        }
-        Ok(id)
+        self.table
+            .register_sink_for(&mut self.peer, keyexpr_pattern, allowed_origin, sink)
     }
 
     /// [`SubscriberTable::unregister`], and then what the retirement owes this
-    /// registry's peer.
-    ///
-    /// R2292 (open-debt item 627) — an aggregate declaration this session
-    /// announced stands for "some local subscription matches your
-    /// interest", so the retirement that makes that false has to retract
-    /// it. Placed HERE, on the single removal path, for the same reason
-    /// `register_sink` sits on the single insert path: no retirement route can
-    /// skip the retraction.
+    /// registry's peer ([`SubscriberTable::unregister_for`]).
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
-        let removed = self.table.unregister(id);
-        #[cfg(feature = "declare-subscriber")]
-        if removed {
-            #[cfg(feature = "declare-undeclare")]
-            self.table
-                .stage_emptied_aggregate_retracts(&mut self.peer.interests);
-            self.peer.interests.reconciled_epoch = self.table.epoch;
-        }
-        removed
+        self.table.unregister_for(&mut self.peer, id)
     }
 
     /// [`SubscriberPeer::set_own_mapping_space`] for this registry's peer.
