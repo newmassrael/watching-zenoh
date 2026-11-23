@@ -88,7 +88,7 @@ use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle, SessionParts};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -2496,8 +2496,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let spawned = spawn_session_with_router(
             &self.local,
             link.clone(),
-            actions.clone(),
-            self.entropy.clone(),
+            SessionParts {
+                actions: actions.clone(),
+                entropy: self.entropy.clone(),
+            },
             self.session_time.clone(),
             SessionDriveConfig {
                 timeouts: self.config.timeouts,
