@@ -7121,9 +7121,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 /// ([`HeldPlaces::with_entity`]), one for each row the session keeps of a kind, lent and given
 /// back under the session's lock, as every table of its arena is.
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for CoopEngine<L, C> {
+    /// Closed or not: a place is the session's memory and not its state, and the declaration the
+    /// place is taken for answers a closed session itself, as it would with a place to spare.
     fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
-        let core = self.live()?;
-        core.0.places.claim(kind)
+        self.core.lock().0.places.claim(kind)
     }
 
     /// Closed or not: the arena the place lies in is the session's until the engine is let go,

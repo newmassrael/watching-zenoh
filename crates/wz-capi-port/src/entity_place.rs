@@ -82,8 +82,9 @@ impl EntityPlace {
 /// An engine that lends an ABI places for its objects of the session's entities, from memory the
 /// session reserved at its open ([`crate::SessionEngine::place_lender`]).
 pub trait PlaceLender {
-    /// A place for one of the session's entities of `kind`: `None` when every one is lent, when
-    /// the open laid out none of the kind, or when the session is closed, which takes no entity.
+    /// A place for one of the session's entities of `kind`, closed or not: `None` when every one
+    /// is lent, or when the open laid out none of the kind. A closed session's declaration is
+    /// refused by the declaration itself, which answers it as it would with a place to spare.
     fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace>;
 
     /// Give back `place`, closed or not, or hand it back untouched when it is no place this
