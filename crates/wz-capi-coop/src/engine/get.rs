@@ -44,12 +44,14 @@ use crate::round::Round;
 use super::queued::{Pending, Queued};
 use super::registry::{FaceId, Registry};
 
-/// The end of one leg: the leg, and the request id of the timeout that ended it, which its
-/// callback is handed after every reply held before it. A leg that did not time out holds none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The end of one leg: the leg, the request id of the timeout that ended it, which its callback is
+/// handed after every reply held before it (none for a leg that did not time out), and the
+/// callback, which the end holds past the entry that owned it and is let go of where the end is
+/// taken out, with no lock held.
 pub(crate) struct Ended {
     pub(super) leg: u64,
     pub(super) timed_out: Option<RequestId>,
+    pub(super) callback: Arc<ReplyCallback>,
 }
 
 /// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
@@ -78,14 +80,11 @@ impl EndedLegs {
         self.legs.pop()
     }
 
-    /// Leg `leg`'s callback was dropped where its end was decided: nothing is left to do for it.
-    pub(super) fn forget(&mut self, leg: u64) {
-        self.legs.retain(|ended| ended.leg != leg);
-    }
-
-    /// Drop every end still waiting: the session is closed, and its legs' callbacks with it.
-    pub(super) fn clear(&mut self) {
-        self.legs.clear();
+    /// Leg `leg`'s end was decided where it ended: its end, taken out for that caller to let go
+    /// of with no lock held, and nothing left to do for it here.
+    pub(super) fn forget(&mut self, leg: u64) -> Option<Ended> {
+        let at = self.legs.iter().position(|ended| ended.leg == leg)?;
+        Some(self.legs.remove(at))
     }
 }
 
@@ -218,6 +217,7 @@ impl PendingGet {
 struct LegEnd {
     leg: u64,
     timed_out: Option<RequestId>,
+    callback: Arc<ReplyCallback>,
     plane: Arc<GetPlane>,
 }
 
@@ -226,6 +226,7 @@ impl Drop for LegEnd {
         self.plane.ended.lock().note(Ended {
             leg: self.leg,
             timed_out: self.timed_out,
+            callback: Arc::clone(&self.callback),
         });
     }
 }
@@ -245,12 +246,11 @@ enum Capture {
 /// callback in the session's round of deliveries (`Round::offer_reply`). What the entry's
 /// consolidation held to its end waits in the plane's held table ([`GetPlane::take_held`]), and the
 /// timeout of a leg that timed out in the leg's end ([`Ended`]). The sink's drop is the leg's end:
-/// the Final says nothing more, as the registry drops the entry once its Finals are in. The table
-/// of callbacks holds the callback past the entry, so the entry's drop, under the session's lock,
+/// the Final says nothing more, as the registry drops the entry once its Finals are in. The end
+/// holds the callback past the entry ([`Ended`]), so the entry's drop, under the session's lock,
 /// is never its last.
 pub(crate) struct LegSink {
     leg: u64,
-    callback: Arc<ReplyCallback>,
     round: Arc<Round>,
     end: LegEnd,
 }
@@ -265,11 +265,11 @@ impl LegSink {
     ) -> Self {
         Self {
             leg,
-            callback: Arc::clone(callback),
             round: Arc::clone(round),
             end: LegEnd {
                 leg,
                 timed_out: None,
+                callback: Arc::clone(callback),
                 plane: Arc::clone(plane),
             },
         }
@@ -279,11 +279,11 @@ impl LegSink {
 impl ReplySink for LegSink {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         #[cfg(feature = "local-queryable")]
-        if self.end.plane.captures(&self.callback) {
+        if self.end.plane.captures(&self.end.callback) {
             return;
         }
         // SAFETY: the registry hands its sinks a reply under the session's lock.
-        unsafe { self.round.offer_reply(&self.callback, reply) };
+        unsafe { self.round.offer_reply(&self.end.callback, reply) };
     }
 
     fn on_final(&mut self, _rid: RequestId) {}
@@ -323,14 +323,25 @@ mod tests {
 
     /// The end of leg `leg`, which no timeout ended.
     fn end(leg: u64) -> Ended {
+        ended_by(leg, None)
+    }
+
+    /// The end of leg `leg`, which the timeout of `rid` ended when there is one.
+    fn ended_by(leg: u64, timed_out: Option<RequestId>) -> Ended {
         Ended {
             leg,
-            timed_out: None,
+            timed_out,
+            callback: Arc::new(ReplyCallback::shared(|_: &dyn ReplyView| {})),
         }
     }
 
-    /// Each end noted is taken once, an end its leg's maker handled itself is not taken, and a
-    /// closed session's ends are all let go.
+    /// What an end says: its leg and the timeout that ended it.
+    fn said(ended: Option<Ended>) -> Option<(u64, Option<RequestId>)> {
+        ended.map(|ended| (ended.leg, ended.timed_out))
+    }
+
+    /// Each end noted is taken once, and an end its leg's maker handled itself is taken out by
+    /// that maker, once, and not by the deliveries.
     #[test]
     fn each_end_is_taken_once_and_a_forgotten_one_never() {
         let mut held = ended(3);
@@ -338,13 +349,15 @@ mod tests {
         ends.note(end(1));
         ends.note(end(2));
         ends.note(end(3));
-        ends.forget(2);
+        assert_eq!(
+            said(ends.forget(2)),
+            Some((2, None)),
+            "taken out by its maker"
+        );
+        assert!(ends.forget(2).is_none(), "and only once");
         let mut taken = [ends.take(), ends.take(), ends.take()].map(|e| e.map(|e| e.leg));
         taken.sort();
         assert_eq!(taken, [None, Some(1), Some(3)]);
-        ends.note(end(4));
-        ends.clear();
-        assert_eq!(ends.take(), None, "a closed session hands out no end");
     }
 
     /// The end of a leg a timeout ended keeps the timeout's request id to its delivery, and one
@@ -353,19 +366,14 @@ mod tests {
     fn an_end_keeps_the_timeout_that_ended_its_leg() {
         let mut held = ended(2);
         let ends = &mut held.ends;
-        ends.note(Ended {
-            leg: 5,
-            timed_out: Some(9),
-        });
-        assert_eq!(
-            ends.take(),
-            Some(Ended {
-                leg: 5,
-                timed_out: Some(9)
-            })
-        );
+        ends.note(ended_by(5, Some(9)));
+        assert_eq!(said(ends.take()), Some((5, Some(9))));
         ends.note(end(6));
-        assert_eq!(ends.take(), Some(end(6)), "CONTROL: a final ends with none");
+        assert_eq!(
+            said(ends.take()),
+            Some((6, None)),
+            "CONTROL: a final ends with none"
+        );
     }
 
     /// A table lent no rows is the defect the plan rules out: the end is not kept, and a debug
@@ -379,6 +387,6 @@ mod tests {
         let mut held = ended(0);
         let ends = &mut held.ends;
         ends.note(end(1));
-        assert_eq!(ends.take(), None);
+        assert!(ends.take().is_none());
     }
 }

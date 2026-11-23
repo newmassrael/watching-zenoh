@@ -698,10 +698,6 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// not take a record's room.
     samples: Arc<Round>,
     matching: Arc<Queued<MatchFlips>>,
-    /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
-    /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
-    /// entity finds its target gone rather than the lock held.
-    targets: Mutex<Vec<(TargetKey, Target)>>,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -725,8 +721,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     next_entity: AtomicU64,
     /// The ids of what the session holds for the program and never names to a peer: the legs
     /// of its gets and its periodic jobs. A space of their own, so they are not refused when the
-    /// entity ids are spent; the table of callbacks tells a leg from an entity by its kind
-    /// ([`TargetKey`]).
+    /// entity ids are spent.
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
@@ -1207,24 +1202,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
     }
 }
 
-/// Where a delivery goes. Each kind is a shared handle, cloned out of the table so a delivery runs
-/// it with the table's lock let go (`CoopEngine::target`).
-#[derive(Clone)]
-enum Target {
-    /// One leg of a get, locked while it runs.
-    #[cfg(feature = "query")]
-    Reply(Arc<ReplyCallback>),
-}
-
-/// Whose callback a [`Target`] is: the kind of what owns it, and that owner's id. The kinds are
-/// numbered from spaces of their own (the entity ids, the matching listeners', the legs of the
-/// gets), so an id alone would find a callback of another kind that holds the same number.
+/// Whose callback runs on a thread now (`Deliveries::run`): a queryable's, by its id, which a get of
+/// the session's own made from inside it reads so as not to call it inside itself.
+#[cfg(feature = "local-queryable")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetKey {
-    #[cfg(feature = "queryable")]
     Queryable(QblId),
-    #[cfg(feature = "query")]
-    Reply(u64),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -3831,7 +3814,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             unsent_drops: AtomicU64::new(0),
             samples,
             matching: Arc::new(Queued::new(MatchFlips::new())),
-            targets: Mutex::new(Vec::new()),
             #[cfg(feature = "queryable")]
             plane,
             #[cfg(feature = "query")]
@@ -4323,8 +4305,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .pending_gets
                     .retain(|pending| pending.leg != ended.leg);
             }
+            // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
-            drop(self.take_target(TargetKey::Reply(ended.leg)));
         }
     }
 
@@ -4334,16 +4316,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(feature = "query")]
     fn hand_held(&self, ended: Ended) {
         let leg = ended.leg;
-        let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) else {
-            // A leg whose callback is gone hands nothing; what it held goes with it.
-            while self.gets.take_held(leg).is_some() {}
-            return;
-        };
         while let Some(reply) = self.gets.take_held(leg) {
-            callback.call(&reply);
+            ended.callback.call(&reply);
         }
         if let Some(rid) = ended.timed_out {
-            callback.call(&timeout_reply(rid));
+            ended.callback.call(&timeout_reply(rid));
         }
     }
 
@@ -4784,15 +4761,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// sent), and leave no end of it waiting for a delivery.
     #[cfg(feature = "query")]
     fn end_leg_now(&self, leg: u64) {
-        self.gets.ended.lock().forget(leg);
+        let ended = self.gets.ended.lock().forget(leg);
         while self.gets.take_held(leg).is_some() {}
-        drop(self.take_target(TargetKey::Reply(leg)));
-    }
-
-    /// Hold `callback` as what the replies of leg `leg` are handed to, until the leg ends.
-    #[cfg(feature = "query")]
-    fn hold_leg(&self, leg: u64, callback: Arc<ReplyCallback>) {
-        lock(&self.targets).push((TargetKey::Reply(leg), Target::Reply(callback)));
+        drop(ended);
     }
 
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto
@@ -4925,27 +4896,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 token_id,
             });
         }
-    }
-
-    /// The callback `key` names, while its owner holds it: the one look in the table every
-    /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
-    #[cfg(feature = "query")]
-    fn target(&self, key: TargetKey) -> Option<Target> {
-        lock(&self.targets)
-            .iter()
-            .find(|(t, _)| *t == key)
-            .map(|(_, target)| target.clone())
-    }
-
-    /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
-    #[cfg(feature = "query")]
-    fn take_target(&self, key: TargetKey) -> Option<Target> {
-        let taken = {
-            let mut targets = lock(&self.targets);
-            let at = targets.iter().position(|(t, _)| *t == key)?;
-            targets.remove(at).1
-        };
-        Some(taken)
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
@@ -6331,10 +6281,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
                 // A leg no table holds is let go of with no lock held.
                 drop(guard);
+                self.end_leg_now(leg_id);
                 drop(callback);
                 continue;
             }
-            self.hold_leg(leg_id, callback);
             // The link names the key as its own key-wire form says.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
@@ -6435,10 +6385,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if !matches!(registered, Some(Ok(_))) {
                 unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
                 drop(guard);
+                self.end_leg_now(leg_id);
                 drop(callback);
                 continue;
             }
-            self.hold_leg(leg_id, callback);
             if !group.ask(rid, keyexpr, wire, &opts.query_metadata()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
@@ -6489,9 +6439,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 if registered.is_err() {
                     // A leg no table holds is let go of with no lock held.
                     drop(guard);
+                    self.end_leg_now(leg_id);
                     drop(callback);
                 } else {
-                    self.hold_leg(leg_id, callback);
                     core.pending_gets.push(PendingGet {
                         face: LOCAL_FACE,
                         leg: leg_id,
@@ -6576,10 +6526,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .is_some_and(|registered| matches!(registered, Ok(true)));
             if !registered {
                 drop(guard);
+                self.end_leg_now(leg_id);
                 drop(callback);
                 continue;
             }
-            self.hold_leg(leg_id, callback);
             // The Interest names the key as the link's own key-wire form says, as a query does.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
@@ -6936,7 +6886,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         drop(handed);
         #[cfg(feature = "query")]
         {
-            self.gets.ended.lock().clear();
+            // Each end, and the leg's callback it holds, is let go of with no lock held.
+            loop {
+                let next = self.gets.ended.lock().take();
+                let Some(ended) = next else {
+                    break;
+                };
+                drop(ended);
+            }
             drop(self.gets.take_all_held());
         }
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
@@ -6953,7 +6910,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         drop((subscribers_gone, listeners_gone));
         #[cfg(feature = "liveliness")]
         drop(live_gone);
-        drop(core::mem::take(&mut *lock(&self.targets)));
     }
 
     fn is_closed(&self) -> bool {
