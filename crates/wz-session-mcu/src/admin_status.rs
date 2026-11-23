@@ -385,8 +385,10 @@ pub fn host_admin_queryable(
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`, the value
     // the closure-taking `register` this replaced passed.
     observer
-        .queryables
-        .register_sink(&pattern, Locality::Any, false, answer)
+        .with_app(|app| {
+            app.queryables
+                .register_sink(&pattern, Locality::Any, false, answer)
+        })
         .map(|_id| ())
 }
 
