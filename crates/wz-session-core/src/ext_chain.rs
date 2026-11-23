@@ -254,7 +254,7 @@ const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
         feature = "codec-keep-alive"
     )
 ))]
-const fn reads_received_ext(id: u8) -> bool {
+pub(crate) const fn reads_received_ext(id: u8) -> bool {
     use crate::ext_header::establishment_ext_id as known;
     // `extbound`'s remote bound is the patch level's id (0x7), on the OPEN messages.
     id == known::PATCH

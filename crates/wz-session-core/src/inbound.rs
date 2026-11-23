@@ -827,10 +827,23 @@ impl<'f> Iterator for ExtChainEntries<'f> {
     fn next(&mut self) -> Option<ExtEntryRef<'f>> {
         match self {
             Self::Held(entries) => entries.next().map(ExtEntryRef::Held),
+            // The slot profile keeps only the entries of an extension it reads
+            // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it
+            // keeps it, so the two reads of one message agree.
             #[cfg(all(
                 feature = "alloc",
                 feature = "codec-frame",
-                feature = "session-unicast"
+                feature = "session-unicast",
+                feature = "session-slot"
+            ))]
+            Self::Read(entries) => entries
+                .find(|entry| crate::ext_chain::reads_received_ext(entry.ext_id()))
+                .map(ExtEntryRef::Read),
+            #[cfg(all(
+                feature = "alloc",
+                feature = "codec-frame",
+                feature = "session-unicast",
+                not(feature = "session-slot")
             ))]
             Self::Read(entries) => entries.next().map(ExtEntryRef::Read),
         }
