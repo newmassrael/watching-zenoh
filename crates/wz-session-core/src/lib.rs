@@ -771,8 +771,6 @@ pub mod signing_key;
 /// Gated with [`signing_key`] and for its reason: the cookie is a `Vec<u8>`
 /// authenticated by that module's `SigningKey`, so the two share a footing.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-025 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod accept_cookie;
 
 /// R2762 — the per-extension ACCEPT STATE seam the cookie is meant to carry.
