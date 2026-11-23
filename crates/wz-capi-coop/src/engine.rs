@@ -6404,7 +6404,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    #[inline(never)]
     fn put_plain_filtered(
         &self,
         filter: FilterId,
@@ -6413,17 +6412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        // One take of the session for the whole put, its filter's answer and its sends:
-        // zenoh-pico's put reads its filter's state and takes only its transmit lock
-        // (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
-        if Self::holds_back_in(core, filter) {
-            return FilteredPut::Suppressed;
-        }
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, params)
+        self.put_through_filter(filter, keyexpr, payload, Some((mapping_id, *params)))
     }
 
     fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
@@ -6450,8 +6439,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
         }
-        // A write that brings nothing of its own: the filter's answer and the plain form its row
-        // keeps, read under one take of the session.
+        // A write that brings nothing of its own goes in the plain form its filter's row keeps.
+        self.put_through_filter(filter, keyexpr, payload, None)
+    }
+
+    /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
+    /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
+    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
+    /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    #[inline(never)]
+    fn put_through_filter(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(ExprId, PlainPutParams)>,
+    ) -> FilteredPut {
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
@@ -6459,20 +6462,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if Self::holds_back_in(core, filter) {
             return FilteredPut::Suppressed;
         }
-        let Some((params, mapping_id)) = core
-            .filters
-            .iter()
-            .find(|entry| entry.id == filter)
-            .and_then(|entry| entry.plain.get())
-        else {
-            return FilteredPut::NotPlain;
+        let (mapping_id, params) = match given {
+            Some(given) => given,
+            None => {
+                let Some((params, mapping_id)) = core
+                    .filters
+                    .iter()
+                    .find(|entry| entry.id == filter)
+                    .and_then(|entry| entry.plain.get())
+                else {
+                    return FilteredPut::NotPlain;
+                };
+                // A link that names keys its own way is sent the general way, which names the key
+                // as its form says: no declared id goes to every link at once.
+                #[cfg(feature = "shared-key-ids")]
+                if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+                    return FilteredPut::NotPlain;
+                }
+                (mapping_id, params)
+            }
         };
-        // A link that names keys its own way is sent the general way, which names the key as
-        // its form says: no declared id goes to every link at once.
-        #[cfg(feature = "shared-key-ids")]
-        if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
-            return FilteredPut::NotPlain;
-        }
         Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
