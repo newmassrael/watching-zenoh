@@ -1353,6 +1353,8 @@ impl AppLinkTable {
         let Some(link) = self.link_mut(handle) else {
             return Effects::default();
         };
+        // The close is done, whoever called it: one still due names a close that happened.
+        link.close_due = false;
         let effects = link.drive(AppLinkEvent::CloseDone);
         self.free_if_done(handle);
         effects

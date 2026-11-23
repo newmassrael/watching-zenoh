@@ -3524,9 +3524,15 @@ mod control_read_tests {
             (Ok((message, used)), Ok((frame, decoded_used))) => {
                 let facts = message.facts();
                 let frame_facts = frame.control_facts();
+                // Fact by fact and chain by chain: the two reads' facts are of two types.
                 assert_eq!(
-                    format!("{facts:?}"),
-                    format!("{frame_facts:?}"),
+                    format!("{:?}", facts.unchained()),
+                    format!("{:?}", frame_facts.unchained()),
+                    "{wire:02x?}"
+                );
+                assert_eq!(
+                    format!("{:?}", facts.chain()),
+                    format!("{:?}", frame_facts.chain()),
                     "{wire:02x?}"
                 );
                 assert_eq!(used, decoded_used, "{wire:02x?}");
