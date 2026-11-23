@@ -32,6 +32,7 @@ use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
+use core::alloc::Layout;
 use core::any::Any;
 use core::cell::{Cell, RefCell};
 use core::ops::{Deref, DerefMut};
@@ -44,7 +45,7 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, SessionArena,
 };
 use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SharedLane};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -729,6 +730,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     deliveries: Deliveries,
     /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
     arena_bytes: usize,
+    /// The place the arena lent the ABI's handle of the session, when the open was asked for one
+    /// ([`CoopDrive::handle_place`]).
+    handle_place: Option<HandlePlace>,
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
@@ -3247,7 +3251,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Arc<Self>, OpenError> {
-        Self::open_made_in(links, clock, entropy, || config, policy, key_ids, memory)
+        Self::open_made_in(
+            links,
+            clock,
+            entropy,
+            || config,
+            policy,
+            key_ids,
+            memory,
+            None,
+        )
     }
 
     /// [`Self::open_in`], its config made by `make_config` inside the open, once, before anything
@@ -3261,6 +3274,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// config, is under the session's first steps. An open that fails once the engine is built
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
+    ///
+    /// With `handle`, the arena also holds a place of that layout for the ABI's own handle of the
+    /// session, lent after every table ([`ArenaPlan::holding`], [`CoopDrive::handle_place`]): the
+    /// handle is then reserved with the session, and an open whose arena cannot hold it opens
+    /// nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
         links: L,
         clock: C,
@@ -3269,8 +3288,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
+        handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, make_config, policy, key_ids, memory)?;
+        let engine = Self::assemble(
+            links,
+            clock,
+            entropy,
+            make_config,
+            policy,
+            key_ids,
+            memory,
+            handle,
+        )?;
         engine.open_links()?;
         Ok(engine)
     }
@@ -3281,6 +3310,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// this frame and moved into the engine's allocation, and the frame has returned before the
     /// first link is opened.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn assemble(
         mut links: L,
         clock: C,
@@ -3289,6 +3319,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
+        handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
         let config = make_config();
         #[cfg(feature = "shared-key-ids")]
@@ -3296,6 +3327,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
+        let plan = match handle {
+            Some(handle) => plan.holding(handle).map_err(OpenError::Arena)?,
+            None => plan,
+        };
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
@@ -3369,6 +3404,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 )
                 .map_err(OpenError::Arena)?,
         );
+        // The ABI's handle's place, the plan's last row.
+        let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
@@ -3499,6 +3536,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             reader: Mutex::new(None),
             deliveries: Deliveries::new(),
             arena_bytes,
+            handle_place,
             #[cfg(test)]
             takes: Takes::default(),
             this: this.clone(),
@@ -6619,7 +6657,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds
     /// as one of its `Arc`s, so the open makes nothing more for it.
     pub fn into_drive(self: Arc<Self>) -> CoopDrive {
-        CoopDrive(self)
+        let handle_place = self.handle_place;
+        CoopDrive {
+            engine: self,
+            handle_place,
+        }
     }
 }
 
@@ -6631,7 +6673,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 /// compose (the host's sockets, with a secure channel or groups as the build adds them, or the
 /// program's transport), and an ABI that opens over two kinds of links keeps sessions of both in
 /// one handle.
-pub struct CoopDrive(Arc<dyn SessionDrive>);
+pub struct CoopDrive {
+    engine: Arc<dyn SessionDrive>,
+    handle_place: Option<HandlePlace>,
+}
+
+impl CoopDrive {
+    /// The place the session's arena lent the ABI's handle (`open_made_in`'s `handle`), `None`
+    /// for a session opened without one. It stands while the engine does.
+    pub fn handle_place(&self) -> Option<HandlePlace> {
+        self.handle_place
+    }
+}
 
 impl Deref for CoopDrive {
     type Target = dyn SessionDrive;
@@ -6639,7 +6692,7 @@ impl Deref for CoopDrive {
     fn deref(&self) -> &Self::Target {
         // Named, not coerced: a coercion of `&Arc<dyn SessionDrive>` to `&dyn SessionDrive` is
         // read as an unsizing of the `Arc`, which is no drive.
-        Arc::as_ref(&self.0)
+        Arc::as_ref(&self.engine)
     }
 }
 
@@ -6648,7 +6701,7 @@ impl Drop for CoopDrive {
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
     fn drop(&mut self) {
-        self.0.close();
+        self.engine.close();
     }
 }
 

@@ -1668,6 +1668,76 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     SessionDrive::close(&*engine);
 }
 
+/// An open asked for a place for the ABI's handle lends it from the session's arena, its last row:
+/// the place is aligned as a span starts, holds the layout, takes the arena two spans more than the
+/// same open without it, and is the program's to write; a handle aligned past a span is refused.
+#[test]
+fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
+    use crate::arena::{AllocatorMemory, ArenaPlan, ArenaRefused};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+    use wz_session_core::byte_cells::LentByteCells;
+    use wz_session_core::policy::SessionPolicy;
+
+    #[repr(C, align(8))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Handle([u8; 40]);
+    let layout = Layout::new::<Handle>();
+    let router = Router::start(CatchAll::None);
+    let holding = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        &AllocatorMemory,
+        Some(layout),
+    )
+    .expect("the session opens");
+    let other = Router::start(CatchAll::None);
+    let without = open(&other);
+    let place_rows = Arena::span(LentByteCells::FLAG_BYTES)
+        .and_then(|flag| Arena::span(layout.size()).map(|bytes| flag + bytes));
+    assert_eq!(
+        Some(holding.arena_bytes()),
+        place_rows.map(|rows| without.arena_bytes() + rows),
+        "the place is two spans of the arena"
+    );
+
+    let drive = holding.clone().into_drive();
+    let place = drive
+        .handle_place()
+        .expect("the open was asked for a place");
+    assert!(place.bytes() >= layout.size());
+    assert_eq!(place.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
+    // SAFETY: the place holds a `Handle`'s layout, nothing else uses it, and the engine stands.
+    unsafe {
+        place
+            .as_ptr()
+            .cast::<Handle>()
+            .as_ptr()
+            .write(Handle([7; 40]));
+        assert_eq!(
+            place.as_ptr().cast::<Handle>().as_ptr().read(),
+            Handle([7; 40])
+        );
+    }
+    drop(drive);
+    assert!(
+        without.clone().into_drive().handle_place().is_none(),
+        "an open asked for none lends none"
+    );
+
+    let plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
+    assert_eq!(
+        plan.holding(Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")),
+        Err(ArenaRefused::TooLarge),
+        "a handle aligned past a span has no place"
+    );
+}
+
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
 /// the one it holds, and letting go of it closes the session while the engine itself lives on in
 /// the other holders, as an entity declared on a session that is dropped finds it closed.
@@ -2028,6 +2098,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
+        None,
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2069,6 +2140,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
+        None,
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());

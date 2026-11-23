@@ -467,8 +467,9 @@ pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
 
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
-/// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries our
-/// `Box<PicoSessionHandle>`; `_cnt` is unused.
+/// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries the place of our
+/// [`PicoSessionHandle`]: on the tokio engine an object of its own, on the cooperative engine a
+/// place in the session's arena (`crate::session_place`); `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
     pub(crate) _val: *mut c_void,
@@ -605,7 +606,56 @@ pub(crate) unsafe fn session_handle<'a>(
     if val.is_null() {
         return None;
     }
+    held_at(val)
+}
+
+/// The place a cooperative session's handle lies in, a span of the session's arena.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle>;
+
+#[cfg(not(feature = "engine-tokio"))]
+const _: () = assert!(
+    SessionPlace::LAYOUT.align() <= wz_session_core::bounded::ARENA_ALIGN,
+    "the handle's place starts where a span of the arena does"
+);
+
+/// The handle at `val`, a place [`z_open`] filled.
+///
+/// # Safety
+/// `val` is the `_val` of an owned session [`z_open`] made, whose memory still stands.
+#[cfg(feature = "engine-tokio")]
+unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
     Some(&*(val as *const PicoSessionHandle))
+}
+
+/// The handle at `val`, while its place still holds it: a copy of the owned session kept past
+/// `z_session_drop` finds the place vacant.
+///
+/// # Safety
+/// As the tokio engine's twin.
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
+    (*(val as *const SessionPlace)).held()
+}
+
+/// Let go of the handle at `val`, which closes its session.
+///
+/// # Safety
+/// `val` is the `_val` of an owned session [`z_open`] made, given up by its owner.
+#[cfg(feature = "engine-tokio")]
+unsafe fn release_handle(val: *mut c_void) {
+    crate::object_slot::release(val as *mut PicoSessionHandle);
+}
+
+/// Let go of the handle at `val`, which closes its session. The handle is moved out of its place
+/// before it is dropped: its drive may hold the session's last hold, whose drop gives back the
+/// arena the place lies in. A place already vacant (a copy dropped twice) lets go of nothing.
+///
+/// # Safety
+/// As the tokio engine's twin, and the session's memory still stands.
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn release_handle(val: *mut c_void) {
+    drop(SessionPlace::take(val as *mut SessionPlace));
 }
 
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
@@ -810,12 +860,15 @@ unsafe fn open_request(
     // The core runs it (a listener bound before the dial, an accept loop beside the dial
     // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
     // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
-    // The handle's place is taken before anything opens, so a full pool refuses the open and
-    // the open leaves nothing behind.
+    // On the tokio engine the handle's place is taken before anything opens, so a full pool
+    // refuses the open and the open leaves nothing behind. The cooperative engine's arena holds
+    // it, reserved with the rest of the session before anything is bound or dialled.
+    #[cfg(feature = "engine-tokio")]
     let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Session) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     Ok(OpenRequest {
+        #[cfg(feature = "engine-tokio")]
         slot,
         connect,
         listen,
@@ -1051,6 +1104,7 @@ mod open_config_tests {
 /// What `z_open` read off the C config and its options, for the engine that opens it.
 struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
+    #[cfg(feature = "engine-tokio")]
     slot: crate::object_slot::Slot<PicoSessionHandle>,
     connect: Vec<String>,
     listen: Option<String>,
@@ -1570,6 +1624,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             policy,
             request.key_ids,
             &wz_capi_coop::arena::AllocatorMemory,
+            Some(SessionPlace::LAYOUT),
         )
         .map(wz_capi_coop::CoopEngine::into_drive),
         None => wz_capi_coop::CoopEngine::open_made_in(
@@ -1580,6 +1635,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             policy,
             request.key_ids,
             &wz_capi_coop::arena::AllocatorMemory,
+            Some(SessionPlace::LAYOUT),
         )
         .map(wz_capi_coop::CoopEngine::into_drive),
     };
@@ -1592,11 +1648,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         request.key_ids,
         &wz_capi_coop::arena::AllocatorMemory,
+        Some(SessionPlace::LAYOUT),
     )
     .map(wz_capi_coop::CoopEngine::into_drive);
     let drive = match opened {
         Ok(drive) => drive,
         Err(refused) => return coop_open_refusal(&refused),
+    };
+    // The open was asked for the handle's place, so it lent one; an engine that lent none is
+    // answered as an arena with no room for it, the session closed as the drive drops.
+    let Some(place) = drive.handle_place() else {
+        return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
     };
     let zid = drive.zid();
     #[cfg(feature = "connectivity")]
@@ -1622,8 +1684,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let handle = PicoSessionHandle::new(drive, ext);
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
+    debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
     *zs = z_owned_session_t {
-        _val: request.slot.fill(handle) as *mut c_void,
+        // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
+        // to this handle alone, and it stands while the engine the handle holds does.
+        _val: SessionPlace::fill(place.as_ptr(), handle) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     // The multi-threaded arm's read task starts with the open unless the options say not to. A
@@ -1653,8 +1718,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
 
 /// The code a refused open of the cooperative engine answers, as pico answers the same refusal.
 /// An arena the memory cannot give is pico's out of memory, and a limit over the build's value is a
-/// value the build refuses; either way the engine bound and dialled nothing, and the handle's slot
-/// goes back with the request.
+/// value the build refuses; either way the engine bound and dialled nothing, and reserved no place
+/// for the handle, which its arena holds.
 #[cfg(not(feature = "engine-tokio"))]
 fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
     use wz_capi_coop::arena::ArenaRefused;
@@ -1734,7 +1799,10 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         if zs.is_null() || (*zs)._val.is_null() {
             return Z_ERR_NULL;
         }
-        let handle = &*((*zs)._val as *const PicoSessionHandle);
+        // A copy of a session kept past its drop finds its place vacant.
+        let Some(handle) = session_handle(zs) else {
+            return Z_ERR_SESSION_CLOSED;
+        };
         handle.drive.close();
         handle.ext.close_listeners();
         // The close let go of every closure the session held; a callback still running on a
@@ -1805,7 +1873,7 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         let val = (*obj)._this._val;
         if !val.is_null() {
             // The engine's session closes as its drive drops (idempotent).
-            crate::object_slot::release(val as *mut PicoSessionHandle);
+            release_handle(val);
             (*obj)._this = z_owned_session_t::null_value();
         }
         Z_OK
@@ -3151,5 +3219,62 @@ mod read_task_start_codes {
             read_task_start_code(Err(ReadTaskStartRefused::NoThread)),
             -80
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+mod session_place_tests {
+    use super::*;
+    use crate::abi::z_owned_config_t;
+    use crate::config::{
+        z_config_default, z_config_loan_mut, z_config_move, zp_config_insert, Z_CONFIG_LISTEN_KEY,
+    };
+
+    /// A copy of an owned session kept past `z_session_drop`, while the session's memory still
+    /// stands (here a hold on the engine the test keeps, as a declared entity keeps one), finds the
+    /// handle's place vacant: it is refused by `z_close` and by every door that reads the handle,
+    /// and dropping it again lets go of nothing.
+    #[test]
+    fn a_session_kept_past_its_drop_is_refused_not_read() {
+        // SAFETY: every pointer is to a live owned value of this frame, and the copy is read only
+        // while the engine the test holds keeps the session's arena standing.
+        unsafe {
+            let mut config: z_owned_config_t = core::mem::zeroed();
+            assert_eq!(z_config_default(&mut config), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut config),
+                    Z_CONFIG_LISTEN_KEY,
+                    c"tcp/127.0.0.1:0".as_ptr()
+                ),
+                Z_OK
+            );
+            let mut session = z_owned_session_t::null_value();
+            assert_eq!(
+                z_open(&mut session, z_config_move(&mut config), core::ptr::null()),
+                Z_OK
+            );
+            let engine = engine_of(
+                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
+            );
+            let mut copy = z_owned_session_t {
+                _val: session._val,
+                _cnt: session._cnt,
+            };
+            z_session_drop(z_session_move(&mut session));
+            assert!(session._val.is_null(), "the owned session is emptied");
+            assert!(engine.is_closed(), "the drop closed the session");
+            assert!(
+                session_handle(z_session_loan(&copy)).is_none(),
+                "the copy finds the handle's place vacant"
+            );
+            assert_eq!(
+                z_close(z_session_loan_mut(&mut copy), core::ptr::null()),
+                Z_ERR_SESSION_CLOSED
+            );
+            z_session_drop(z_session_move(&mut copy));
+            assert!(copy._val.is_null(), "dropping the copy lets go of nothing");
+            drop(engine);
+        }
     }
 }

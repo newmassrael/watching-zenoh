@@ -466,12 +466,17 @@ suites (C1co, Layer Z) unchanged.
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
     `z_bytes_copy_from_buf` past HELD_PAYLOAD_BYTES answers the code and leaves the source; every
     pool's count after a drop.
-    The session's own place is not a process pool's in a build without the pool doors: a table of
-    HELD_SESSIONS places would be a count the program states nowhere for such a library, and every
-    session of the cooperative engine already has its reservation, its arena. The form is the
-    arena lending the handle's place (a row of the handle's layout in `ArenaPlan`), the handle
-    written there by `z_open` and dropped in place by `z_session_drop`, the memory going back
-    with the arena; a generation beside the place answers a handle kept past its drop.
+    Taken for the session: on the cooperative engine its handle lies in its own arena, not in a
+    process pool (a table of HELD_SESSIONS places would be a count the program states nowhere for
+    a library without the pool doors). `ArenaPlan::holding` adds the handle's place as the plan's
+    last two rows, `CoopEngine::open_made_in` is handed its layout and lends it
+    (`CoopDrive::handle_place`), `z_open` writes the handle there (`crate::session_place`) and
+    `z_session_drop` moves it out before letting it go, the memory going back with the arena. A
+    word beside the handle says whether the place holds it, so a copy of the owned session kept
+    past its drop is refused, not read, for as long as the session's memory stands (a declared
+    entity keeps it standing; past the last holder the copy names freed memory, as a copy of
+    zenoh-pico's does). The tokio engine keeps `Slot::take`, and a build with the pool doors
+    still reserves its session pool, which the cooperative engine does not use.
 11. **U10. The port without heap types.** `wz-capi-port` `engine.rs`, `drive.rs`, `lib.rs`:
     methods returning `Vec` write into a caller's buffer, `Arc<dyn SessionEngine>` becomes the
     session's slot and generation, `Box<dyn SessionDrive>` the session object itself. Families:
@@ -531,7 +536,7 @@ unit that takes each away:
 | the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
 | the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
 | a payload's place (`box_bytes`: a `Box<ByteBuf>` for each `z_bytes_clone` and each copy, as a build with no thread-local cache keeps none) and its bytes (`Backing::Owned`, an `Arc` over a `Vec`) | `wz-capi-pico` `bytes.rs` | U9: the pools and a block pool of HELD_PAYLOAD_BYTES. `object-pool` implies `unstable-api`, whose layouts a program built without `Z_FEATURE_UNSTABLE_API` (the speed matrix's) does not compile against, so such a build needs the pools apart from their doors |
-| the place of each handle object of a build without the pools (`Slot::take`, a `Box`), the session's included; its drive is no longer boxed (U10) | `wz-capi-pico` `object_slot.rs` | U9, as above; the session's place from its arena (section 6, U9) |
+| the place of each handle object of a build without the pools (`Slot::take`, a `Box`) but the session's, which lies in its arena (U9) and whose drive is not boxed (U10) | `wz-capi-pico` `object_slot.rs` | U9, as above |
 | an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, an Interest form's suffix, a subscriber's wire anchor (the port's arguments are `&str` since U10, so no call makes a copy for the engine) | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs` | U6 |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
@@ -564,7 +569,7 @@ heap's own header of each block, not a measurement.
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
-| the session's handle (`Slot::take`, a `Box` without the pools); its drive is the engine's own `Arc`, kept in the handle (U10) | open | some hundreds | U9 |
+| the session's handle, in a place of the session's arena, and its drive, the engine's own `Arc` kept in the handle | open | none beyond the arena | done (U9, U10) |
 | the config (`ConfigState`, a `BTreeMap<u8, String>` of the mode and the locator) | before the open, dropped by it | about 200, alive while the arena is reserved | U14 |
 | a link's setup: the entropy source's `Arc` (`SharedEntropy`; the box inside holds a source of no size, which allocates nothing), the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
 | the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
