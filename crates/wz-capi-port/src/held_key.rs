@@ -241,7 +241,6 @@ mod tests {
         // hands the copy to the arena.
         let copy = unsafe { held.uncounted() };
         assert_eq!(copy.as_str(), "demo/uncounted");
-        drop(copy);
         // SAFETY: the test is the session's one thread, and the arena is leaked.
         unsafe { held.release(&keys) };
         assert_eq!(keys.counts().used, 0, "the copy held nothing");
