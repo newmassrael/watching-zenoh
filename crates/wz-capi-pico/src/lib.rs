@@ -638,8 +638,6 @@ pub mod object_pool;
 // pools where the build has them, the heap's otherwise.
 mod object_slot;
 mod option_fields;
-// Totality debt TD-155 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod os;
 pub mod platform;
 // The places of the objects a program holds that no session holds for it, reserved once for the
