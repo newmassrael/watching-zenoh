@@ -401,6 +401,12 @@ fn open_link(
     }
 }
 
+/// The most bytes of a link's remainder a flush offers the program in one call: the window it is
+/// copied into, on the stack, under the transport's lock and out of it again before the program is
+/// called. A remainder longer than it is offered over several calls, as a program that takes part
+/// of an offer is.
+const FLUSH_WINDOW: usize = 512;
+
 /// One link of the program's transport as this engine's seams hold it: released when it drops.
 struct Held {
     transport: Arc<AppTransport>,
@@ -450,21 +456,25 @@ impl Held {
         }
     }
 
-    /// Offer the program what is held for it, until it would block or has taken all of it.
+    /// Offer the program what is held for it, until it would block or has taken all of it. The
+    /// program is called with no lock of the transport held, so what is held is offered a window
+    /// at a time, copied out of the table into storage on the stack: nothing is allocated.
     fn flush(&self) -> Result<(), AppLinkError> {
+        let mut window = [0u8; FLUSH_WINDOW];
         loop {
-            let held: Vec<u8> = self
+            let held = self
                 .transport
-                .with(|table| table.remainder(self.handle).to_vec());
-            if held.is_empty() {
+                .with(|table| table.copy_remainder(self.handle, &mut window));
+            let offered = window.get(..held).unwrap_or_default();
+            if offered.is_empty() {
                 return Ok(());
             }
-            let taken = self.send_once(&held)?;
+            let taken = self.send_once(offered)?;
             let effects = self
                 .transport
                 .with(|table| table.drop_remainder(self.handle, taken));
             self.transport.perform(effects);
-            if taken < held.len() {
+            if taken < held {
                 return Ok(());
             }
         }
