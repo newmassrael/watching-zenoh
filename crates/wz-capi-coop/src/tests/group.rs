@@ -328,6 +328,34 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
+/// A session told to join a group past its task cells is refused for want of a task cell, as its
+/// spawn would be, whether a face set is left for the group or not: `max_faces` of none leaves
+/// none past the groups the cells hold, one leaves a set and the spawn refuses. The CONTROL is the
+/// session told to join as many groups as the cells hold, which opens.
+#[test]
+fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
+    use wz_runtime_coop::executor::SpawnRefusal;
+    use wz_session_core::caps::MAX_TASKS;
+
+    let network = Arc::new(Network::default());
+    let told = |groups: usize, max_faces: usize| {
+        let mut config = member_config(1, GROUP);
+        let join = config.groups[0].clone();
+        config.groups = vec![join; groups];
+        config.max_faces = max_faces;
+        config
+    };
+    let held = open_member(&network, 1, told(MAX_TASKS, 0)).expect("CONTROL: the cells hold them");
+    SessionDrive::close(&*held);
+    for max_faces in [0, 1] {
+        assert_eq!(
+            open_member(&network, 2, told(MAX_TASKS + 1, max_faces)).err(),
+            Some(OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+            "max_faces {max_faces}"
+        );
+    }
+}
+
 /// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
 fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
