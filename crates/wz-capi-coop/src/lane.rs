@@ -3213,10 +3213,17 @@ impl MatchFlips {
         }
     }
 
-    /// The status of `listener` changed to `matching`.
+    /// The status of `listener` changed to `matching`. A change back takes the waiting row away;
+    /// the same change again finds it already waiting and is that change, not a second one.
     pub(crate) fn flip(&mut self, listener: MatchId, matching: bool) {
         if let Some(at) = self.flips.iter().position(|(id, _)| *id == listener) {
-            self.flips.remove(at);
+            if self
+                .flips
+                .get(at)
+                .is_some_and(|&(_, waiting)| waiting != matching)
+            {
+                self.flips.remove(at);
+            }
             return;
         }
         let held = self.flips.push((listener, matching));

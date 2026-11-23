@@ -286,6 +286,17 @@ fn a_change_and_its_change_back_are_handed_as_nothing() {
     assert_eq!(flips.next(), Some((1, true)));
 }
 
+/// The same change found twice before it was handed is that one change, handed once: a second
+/// report of a status already owed neither cancels it nor queues it again.
+#[test]
+fn the_same_change_found_twice_is_handed_once() {
+    let mut flips = MatchFlips::new();
+    flips.flip(1, true);
+    flips.flip(1, true);
+    assert_eq!(flips.next(), Some((1, true)));
+    assert_eq!(flips.next(), None);
+}
+
 /// A listener that is gone is handed nothing it was owed, and the others keep their order.
 #[test]
 fn a_listener_that_is_gone_is_handed_nothing() {

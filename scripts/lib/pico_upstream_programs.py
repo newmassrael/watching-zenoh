@@ -239,8 +239,8 @@ C11_EXAMPLES = ("z_advanced_pub", "z_advanced_sub", "z_bytes", "z_get", "z_get_a
                 "z_pub_attachment", "z_pub_thr", "z_pull", "z_put", "z_querier", "z_queryable",
                 "z_queryable_attachment", "z_queryable_channel", "z_queryable_lat", "z_scout", "z_sub",
                 "z_sub_attachment", "z_sub_channel", "z_sub_liveliness", "z_sub_thr")
-C99_EXAMPLES = ("z_get", "z_info", "z_ping", "z_pong", "z_pub", "z_pull", "z_put", "z_queryable", "z_scout", "z_sub")
-WINDOWS_EXAMPLES = ("z_get", "z_info", "z_ping", "z_pong", "z_pub", "z_pull", "z_put", "z_queryable", "z_scout",
+C99_EXAMPLES = ("z_get", "z_info", "z_pong", "z_pub", "z_pull", "z_put", "z_queryable", "z_scout", "z_sub")
+WINDOWS_EXAMPLES = ("z_get", "z_info", "z_pong", "z_pub", "z_pull", "z_put", "z_queryable", "z_scout",
                     "z_sub")
 # What a body imports where it is not `z_open`: the scout opens no session, and the bytes program
 # has no stub arm at all.
@@ -268,7 +268,17 @@ _PRIVATE = ("reaches zenoh-pico's private layer, which a drop-in whose handles a
             "integration lane pins the symbols it lacks")
 _LOCAL = ("session-local delivery (`Z_FEATURE_LOCAL_SUBSCRIBER`, `Z_FEATURE_LOCAL_QUERYABLE`) is off in the "
           "release profile, as in zenoh-pico's default build; the integration lane runs it on its local arm")
+# A ping that puts the moment it declares its publisher, then waits for the echo with no bound. zenoh-pico's
+# write filter opens only when the router answers the publisher's interest (src/net/filtering.c: a filter
+# is made active), and a put through an active filter sends nothing and returns success, so the first put
+# is lost and the program waits for ever: on zenoh-pico itself, every start, on this host. No option of
+# the program changes that, so it measures nothing of the library under it. Its pong is measured against
+# the C11 ping, which waits 50 ms before it puts (examples/unix/c11/z_ping.c).
+_RACES_ITS_FILTER = ("puts the moment it declares and waits with no bound, so it loses its own write filter's "
+                     "race on zenoh-pico itself; its pong is measured against the C11 ping")
 NOT_RUN = {
+    "examples/unix/c99/z_ping.c": _RACES_ITS_FILTER,
+    "examples/windows/z_ping.c": _RACES_ITS_FILTER,
     "examples/unix/c11/z_pub_st.c": _SINGLE_THREAD,
     "examples/unix/c11/z_sub_st.c": _SINGLE_THREAD,
     "examples/unix/c99/z_pub_st.c": _SINGLE_THREAD,
@@ -362,7 +372,6 @@ ROUTER_ID = r"Routers IDs:\n [0-9a-f]{2,}"
 HELLO_ROUTER = r"Hello \{ zid: Some\([0-9A-F]+\), whatami: \"Router\"[^\n]*:" + PORT + "\""
 NUMBERS = r"(?m)^[0-9]+$"
 RATES = r"(?m)^[0-9]+\.[0-9]{3}$"
-RTTS = r"[0-9]+ bytes: seq=[0-9]+ rtt=[0-9]+"
 ALIVE = r"New alive token \('group1/zenoh-pico'\)"
 DROPPED = r"Dropped token \('group1/zenoh-pico'\)"
 ADVANCED_GOT = r">> \[Advanced Subscriber\] Received PUT \('demo/example/zenoh-pico-pub'"
@@ -383,7 +392,6 @@ def scenarios_of(dialect, routed_by_argument: bool) -> list[Scenario]:
     pub_n = e + ("-n", "10") if dialect in (c11, c99) else e
     pub_ends = dialect in (c11, c99)
     ping_args = (e + PING_ROUNDS) if dialect is c11 else PING_ROUNDS
-    ping_witness = NUMBERS if dialect is c11 else RTTS
     pong_ready = PONG_UP if dialect is c11 else None
     # The C11 pong takes the router as `-e`; the C99 and Windows pongs take no argument and scout.
     pong_args = E if dialect is c11 else ()
@@ -393,16 +401,14 @@ def scenarios_of(dialect, routed_by_argument: bool) -> list[Scenario]:
     # pong, which take none either.
     scouting = not routed_by_argument
     ping_scouts = dialect is not c11
-    # A ping puts and then waits, for ever, on the echo it counts. A publisher whose write filter has
-    # not yet heard of a subscriber sends nothing and reports success (zenoh-pico src/net/filtering.c:
-    # a filter is made active and opens when the router's answer to its interest arrives), so a ping
-    # that puts at once loses that race by construction, on zenoh-pico itself too. The C11 ping waits
-    # 50 ms before it puts and wins it; the C99 and Windows pings put at once, take no option that
-    # could change that, and are started again, briefly and many times, until a start wins.
-    ping_attempt_s = 10.0 if dialect is c11 else 3.0
-    ping_attempts = 3 if dialect is c11 else 30
-    ping_bound_s = 90.0 if dialect is c11 else 120.0
-    return [
+    # Only the C11 ping is a scenario: the C99 and Windows pings lose their own write filter's race
+    # on zenoh-pico itself (`_RACES_ITS_FILTER`, in `NOT_RUN`).
+    pings = [
+        Scenario(p(dialect, "z_ping", ping_args), p(dialect, "z_pong", pong_args, ends=False, ready=pong_ready),
+                 witnesses=(("subject", NUMBERS),), attempts=3, attempt_s=10.0, bound_s=90.0,
+                 scouts=ping_scouts),
+    ] if dialect is c11 else []
+    return pings + [
         Scenario(p(dialect, "z_sub", sub_once, ends=sub_ends, ready=UP), p(dialect, "z_pub", e, ends=False),
                  first="subject", witnesses=(("subject", SUB_GOT_PUB),), scouts=scouting),
         Scenario(p(dialect, "z_pub", pub_n, ends=pub_ends), p(dialect, "z_sub", e, ends=False, ready=UP),
@@ -418,9 +424,6 @@ def scenarios_of(dialect, routed_by_argument: bool) -> list[Scenario]:
                  first="subject", witnesses=(("subject", PULLED),), scouts=scouting),
         Scenario(p(dialect, "z_info", e, ends=dialect is win), witnesses=(("subject", ROUTER_ID),), scouts=scouting),
         Scenario(p(dialect, "z_scout"), witnesses=(("subject", HELLO_ROUTER),), scouts=True),
-        Scenario(p(dialect, "z_ping", ping_args), p(dialect, "z_pong", pong_args, ends=False, ready=pong_ready),
-                 witnesses=(("subject", ping_witness),), attempts=ping_attempts, attempt_s=ping_attempt_s,
-                 bound_s=ping_bound_s, scouts=ping_scouts),
         # The pong of a set whose ping races its own write filter is answered by the C11 ping, which
         # waits 50 ms for its declarations before it puts (`z_ping.c` of examples/unix/c11).
         Scenario(p(dialect, "z_pong", pong_args, ends=False, ready=pong_ready), p(c11, "z_ping", E + PING_ROUNDS),
@@ -1517,7 +1520,7 @@ def selftest() -> int:
     expect("every program that takes no locator scouts for the router",
            all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "windows")
            and all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].name == "z_scout")
-           and all(sc.scouts for sc in SCENARIOS if sc.id in ("c99/z_ping", "c99/z_pong"))
+           and all(sc.scouts for sc in SCENARIOS if sc.id == "c99/z_pong")
            and not any(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "tests"))
     expect("a Hello is read as zenoh-pico renders a router, \"Router\"",
            missing_witnesses(scout, {"subject": hello.replace('"Router"', '"Peer"')}, 7447) != [])
@@ -1540,7 +1543,7 @@ def selftest() -> int:
            pong.peer is not None and PROGRAMS[pong.peer.program].set == "c11" and scenario_findings(pong) == [])
     expect("a peer of neither the subject's set nor the C11 one is a finding",
            any("of neither its subject's set" in f for f in scenario_findings(
-               Scenario(pong.subject, Proc("examples/windows/z_ping.c"), first="subject",
+               Scenario(pong.subject, Proc("examples/windows/z_pub.c"), first="subject",
                         witnesses=pong.witnesses, scouts=True))))
     round_trip = PlayResult.from_json(json.loads(json.dumps(PlayResult("", good, 7447, "log").to_json())), sc)
     expect("a play read back from the sandbox's file is the play written",
