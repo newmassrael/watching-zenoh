@@ -613,7 +613,8 @@ impl Registry {
         if let Some(place) = self.held.iter().position(|held| held.id == id) {
             self.writing();
             let gone = self.held.remove(place);
-            #[cfg(feature = "liveliness")]
+            // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
+            #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             self.owe_tokens_of(gone.at);
             self.sets[gone.at].give_back();
         }
@@ -950,7 +951,7 @@ impl Registry {
     /// the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after those
     /// owed before them. The set is given back all the same, its token table left empty and taking
     /// rows of the session's pool.
-    #[cfg(feature = "liveliness")]
+    #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
     fn owe_tokens_of(&mut self, at: usize) {
         let Some(set) = self.sets.get_mut(at) else {
             return;
@@ -958,7 +959,6 @@ impl Registry {
         if !core::mem::take(&mut set.retracting) {
             return;
         }
-        #[cfg(any(feature = "listen", feature = "group"))]
         if let Some(tokens) = set.peer.tokens.split_off() {
             if tokens.count() > 0 {
                 // A table owed holds a row of the session's token pool at least, and the open lent
