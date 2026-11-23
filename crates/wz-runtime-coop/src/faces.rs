@@ -214,14 +214,35 @@ impl<S, D> Link<S, D> {
 /// opens into a row of the memory it reserved then (`docs/c-abi-architecture.md`, P1 and P3):
 /// a dial or a port names its endpoint by its row, and nothing copies the text after the open.
 /// The dial rows are at most the build's `MAX_STATIC_CONNECT`, and the listen rows at most its
-/// `MAX_ADMIN_LOCATORS`, the listening locators a node holds; each row at most
-/// `MAX_LOCATOR_LEN` bytes.
+/// `MAX_ADMIN_LOCATORS`, the listening locators a node holds, which the session's plan holds each
+/// count to before it lends the rows; each row at most `MAX_LOCATOR_LEN` bytes.
 pub struct EndpointTexts {
-    dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
-    listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
+    dial: EndpointRows,
+    listen: EndpointRows,
 }
 
-/// Why an endpoint's text has no row ([`EndpointTexts::write_dial`]).
+/// The rows of one role's endpoint texts ([`EndpointTexts`]). The two roles' tables are one type,
+/// bounded by the larger of their two limits, so one body writes and reads either.
+pub type EndpointRows = BoundedVec<LocatorText, ENDPOINT_TEXT_ROWS, Lent>;
+
+/// The most rows of either role's endpoint texts a build lends: the larger of
+/// `MAX_STATIC_CONNECT` and `MAX_ADMIN_LOCATORS`.
+pub const ENDPOINT_TEXT_ROWS: usize = if caps::MAX_STATIC_CONNECT > caps::MAX_ADMIN_LOCATORS {
+    caps::MAX_STATIC_CONNECT
+} else {
+    caps::MAX_ADMIN_LOCATORS
+};
+
+/// Which of a session's endpoints a text is: one it dials, or one it listens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRole {
+    /// An endpoint the session dials.
+    Dial,
+    /// An endpoint the session listens on.
+    Listen,
+}
+
+/// Why an endpoint's text has no row ([`EndpointTexts::write`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointTextRefused {
     /// The text is longer than a row, `MAX_LOCATOR_LEN` bytes; `len` is its length.
@@ -236,32 +257,58 @@ pub enum EndpointTextRefused {
 impl EndpointTexts {
     /// The texts of a session whose open lent `dial` for its endpoints to dial and `listen` for
     /// those to listen on, none written yet.
-    pub fn over(
-        dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
-        listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
-    ) -> Self {
+    pub fn over(dial: EndpointRows, listen: EndpointRows) -> Self {
         Self { dial, listen }
     }
 
-    /// Write the text of the next endpoint to dial, in the order the session dials them: its
-    /// place, which its dial names it by ([`DialEndpoint::Listed`]).
-    pub fn write_dial(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
-        write_row(&mut self.dial, text)
+    /// Write the text of the next endpoint of `role`, in the order the session dials them or
+    /// listens on them: its place, which a dial names it by ([`DialEndpoint::Listed`]) or a port
+    /// by ([`DialEndpoint::Port`]).
+    #[inline(never)]
+    pub fn write(&mut self, role: EndpointRole, text: &str) -> Result<usize, EndpointTextRefused> {
+        let rows = match role {
+            EndpointRole::Dial => &mut self.dial,
+            EndpointRole::Listen => &mut self.listen,
+        };
+        let row = LocatorText::try_from(text)
+            .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
+        let at = rows.len();
+        rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
+        Ok(at)
     }
 
-    /// Write the text of the next endpoint to listen on: its place, which its port names it by.
+    /// [`Self::write`] of an endpoint to dial.
+    #[inline]
+    pub fn write_dial(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
+        self.write(EndpointRole::Dial, text)
+    }
+
+    /// [`Self::write`] of an endpoint to listen on.
+    #[inline]
     pub fn write_listen(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
-        write_row(&mut self.listen, text)
+        self.write(EndpointRole::Listen, text)
+    }
+
+    /// The text of the endpoint of `role` at `at`; empty past the last.
+    #[inline(never)]
+    pub fn text(&self, role: EndpointRole, at: usize) -> &str {
+        let rows = match role {
+            EndpointRole::Dial => &self.dial,
+            EndpointRole::Listen => &self.listen,
+        };
+        rows.get(at).map_or("", LocatorText::as_str)
     }
 
     /// The text of the endpoint to dial at `at`; empty past the last.
+    #[inline]
     pub fn dial_text(&self, at: usize) -> &str {
-        self.dial.get(at).map_or("", LocatorText::as_str)
+        self.text(EndpointRole::Dial, at)
     }
 
     /// The text of the endpoint to listen on at `at`; empty past the last.
+    #[inline]
     pub fn listen_text(&self, at: usize) -> &str {
-        self.listen.get(at).map_or("", LocatorText::as_str)
+        self.text(EndpointRole::Listen, at)
     }
 
     /// How many endpoints the session dials.
@@ -273,18 +320,6 @@ impl EndpointTexts {
     pub fn listens(&self) -> usize {
         self.listen.len()
     }
-}
-
-/// Write `text` in the next row of `rows`: its place.
-fn write_row<const N: usize>(
-    rows: &mut BoundedVec<LocatorText, N, Lent>,
-    text: &str,
-) -> Result<usize, EndpointTextRefused> {
-    let row = LocatorText::try_from(text)
-        .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
-    let at = rows.len();
-    rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
-    Ok(at)
 }
 
 /// Which endpoint a dial reaches: one of the session's own to dial, by its row; one of those it
