@@ -5,6 +5,8 @@
 //! link the config admits, in the bytes a link's session task takes, held with the groups' cells to
 //! the build's `MAX_TASKS`; and the build's `MAX_TIMERS` deadlines.
 
+use wz_runtime_coop::executor::SpawnRefusal;
+use wz_runtime_coop::CoopLocalSet;
 use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
@@ -50,4 +52,29 @@ fn the_cells_reserved_are_never_more_than_max_tasks() {
     });
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS);
     assert_eq!(tables.rows.tasks + tables.groups, caps::MAX_TASKS);
+}
+
+/// The runtime the tables are for holds a cell of a link's session task's bytes for each link: a
+/// task that fits is placed, and one a byte larger is refused as too large, counted, whatever the
+/// build, as no cell of the runtime takes the bytes a task asks for once it is made.
+#[test]
+fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger_one() {
+    const LARGER: usize = link_task_bytes::<PosixClock>() + 1;
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    });
+    let runtime = tables.runtime(PosixClock);
+    let local = CoopLocalSet::new(&runtime);
+    let large = [7u8; LARGER];
+    let refused = local
+        .try_spawn_local(async move { large[0] })
+        .map(|_| ())
+        .map_err(|refused| refused.why);
+    assert_eq!(refused, Err(SpawnRefusal::TooLarge));
+    assert_eq!(runtime.task_refusals().too_large, 1);
+    let small = local
+        .try_spawn_local(async { 3u8 })
+        .expect("a link's cell takes a small task");
+    assert_eq!(local.block_on_local(small).expect("ran"), 3);
 }
