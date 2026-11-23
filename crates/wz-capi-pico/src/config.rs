@@ -14,14 +14,15 @@
 //! (`vendor/zenoh-pico/include/zenoh-pico/utils/config.h` @ `typedef _z_str_intmap_t _z_config_t;`),
 //! one allocation for each value. Here a config is one object of a size the build fixes: a table of
 //! `CONFIG_ENTRIES` keys and a text of `CONFIG_TEXT_BYTES` their values lie in, so an insert
-//! allocates nothing and a config made before an open is all the memory it will ever take.
+//! allocates nothing and a config made before an open is all the memory it will ever take. The
+//! object is a slot of the process pool of configs (`HELD_CONFIGS`, `crate::object_slot`), so
+//! making one allocates nothing either once the pools are reserved; a full pool refuses it with
+//! `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
 
 use core::ffi::{c_char, c_void, CStr};
 use core::ptr::addr_of_mut;
 
 use wz_session_core::caps;
-
-use crate::prelude::*;
 
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_config_t, z_moved_config_t, z_owned_config_t,
@@ -277,18 +278,12 @@ impl ConfigState {
         self.entries.insert(key, value)
     }
 
-    /// A config of its own allocation, empty or a copy of `from`, written in place; `None` when the
-    /// allocation is refused. Released by [`free_config`], as a `Box` of one is.
+    /// A config in a slot of its own, empty or a copy of `from`, written in place; `None` when the
+    /// pool of configs has no free slot. Released by [`free_config`].
     fn place(from: Option<&ConfigState>) -> Option<*mut ConfigState> {
-        // SAFETY: a `ConfigState` is never zero-sized: its table counts its rows.
-        let at = unsafe { alloc::alloc::alloc(core::alloc::Layout::new::<ConfigState>()) }
-            .cast::<ConfigState>();
-        if at.is_null() {
-            return None;
-        }
-        // SAFETY: `at` is a fresh allocation sized and aligned for a `ConfigState`.
-        unsafe { Self::write_at(at, from) };
-        Some(at)
+        let slot = crate::object_slot::Slot::<ConfigState>::take(crate::object_slot::Kind::Config)?;
+        // SAFETY: `write_at` writes every field of a config at the place it is handed.
+        Some(unsafe { slot.fill_in_place(|at| Self::write_at(at, from)) })
     }
 
     /// Writes a config at `at` field by field.
@@ -330,12 +325,12 @@ impl ConfigState {
     }
 }
 
-/// Free-fn for the ownership macro.
+/// Free-fn for the ownership macro: the config is dropped and its slot given back.
 ///
 /// # Safety
 /// `h` must be a live config [`ConfigState::place`] made, or a `Box::into_raw::<ConfigState>`.
 unsafe fn free_config(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut ConfigState));
+    crate::object_slot::release(h as *mut ConfigState);
 }
 
 impl_value_ownership!(
@@ -360,6 +355,7 @@ pub unsafe extern "C" fn z_config_default(config: *mut z_owned_config_t) -> ZRes
         if config.is_null() {
             return Z_ERR_NULL;
         }
+        *config = z_owned_config_t::null_value();
         let Some(state) = ConfigState::place(None) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
@@ -442,6 +438,7 @@ pub unsafe extern "C" fn z_config_clone(
             return Z_ERR_NULL;
         };
         let Some(cloned) = ConfigState::place(Some(state)) else {
+            *dst = z_owned_config_t::null_value();
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         *dst = z_owned_config_t {
@@ -455,6 +452,7 @@ pub unsafe extern "C" fn z_config_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use alloc::ffi::CString;
 
     /// A config the C doors made, dropped through them.
@@ -657,5 +655,25 @@ mod tests {
         };
         assert_eq!(code, Z_ERR_INVALID);
         assert!(config.get(0).is_null());
+    }
+
+    /// With the process pools, a config and its clone are each a slot of them, not the heap's.
+    #[cfg(wz_process_pools)]
+    #[test]
+    fn a_config_and_its_clone_lie_in_the_process_pools() {
+        let config = Config::new();
+        let mut clone = Config(z_owned_config_t::null_value());
+        // SAFETY: a live destination and a live source.
+        assert_eq!(
+            unsafe { z_config_clone(&mut clone.0, z_config_loan(&config.0)) },
+            Z_OK
+        );
+        for held in [&config, &clone] {
+            let place = core::ptr::NonNull::new(held.0.handle.cast::<u8>()).expect("a live config");
+            assert!(
+                crate::process_pool::lies_in_pools(place),
+                "a config is a slot of the pools"
+            );
+        }
     }
 }

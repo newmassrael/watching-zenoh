@@ -695,7 +695,7 @@ pub unsafe extern "C" fn z_hello_drop(hello: *mut z_moved_hello_t) {
         let handle = moved._this.handle;
         moved._this = z_owned_hello_t::null_value();
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut HelloState));
+            drop_kept(handle);
         }
     }
 }
@@ -723,7 +723,9 @@ pub unsafe extern "C" fn z_hello_take(dst: *mut z_owned_hello_t, src: *mut z_mov
     (*src)._this = z_owned_hello_t::null_value();
 }
 
-/// Clone a loaned hello into owned storage (pico `z_hello_clone`).
+/// Clone a loaned hello into owned storage (pico `z_hello_clone`). `_Z_ERR_SYSTEM_OUT_OF_MEMORY`,
+/// `dst` null, when the pool of kept hellos has no free slot, or the hello has more locators, or
+/// longer ones together, than a kept hello holds (`KeptHello`).
 ///
 /// # Safety
 /// `hello` must be a live loaned hello; `dst` must point to writable storage.
@@ -735,16 +737,126 @@ pub unsafe extern "C" fn z_hello_clone(
     if dst.is_null() {
         return crate::result::Z_ERR_INVALID;
     }
+    *dst = z_owned_hello_t::null_value();
     let Some(state) = hello_state(hello) else {
-        *dst = z_owned_hello_t::null_value();
         return crate::result::Z_ERR_INVALID;
     };
-    let cloned = HelloState::new(state.zid, state.whatami, state.locators().to_strings());
+    let Some(kept) = keep(state) else {
+        return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    };
     *dst = z_owned_hello_t {
-        handle: Box::into_raw(cloned) as *mut c_void,
+        handle: kept,
         _pad: [core::ptr::null_mut(); 6],
     };
     crate::result::Z_OK
+}
+
+/// A hello a program keeps (`z_hello_clone`): the hello, the array it lends its locators in, and
+/// the locators' views and text, in one object of the build's size, in a slot of the process pool
+/// of kept hellos (`HELD_HELLOS`). The slot never moves, so the hello's loan of the array and the
+/// array's views of the text stay where they point. It holds as many locators as a scouting
+/// window keeps of one Hello, `SCOUT_HELLO_LOCATORS`, of at most `MAX_LOCATOR_LEN` bytes each
+/// taken together, as the window keeps them.
+///
+/// `repr(C)` with the hello first, so the handle is the hello's address as well as this object's.
+#[cfg(wz_process_pools)]
+#[repr(C)]
+pub(crate) struct KeptHello {
+    hello: HelloState,
+    array: StringArrayState,
+    views: [z_loaned_string_t; caps::SCOUT_HELLO_LOCATORS],
+    text: [u8; KEPT_HELLO_TEXT],
+}
+
+/// The bytes of locator text a kept hello holds.
+#[cfg(wz_process_pools)]
+const KEPT_HELLO_TEXT: usize = caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN;
+
+#[cfg(wz_process_pools)]
+impl KeptHello {
+    /// Write a kept copy of `hello`, whose `count` locators fit, at `at`.
+    ///
+    /// # Safety
+    /// `at` is a place for a `KeptHello` that holds none and never moves while it lives, and
+    /// `count` locators of `hello`'s array, their bytes together, fit what one holds.
+    unsafe fn write_at(at: *mut KeptHello, hello: &HelloState, count: usize) {
+        let source = hello.locators();
+        let text = core::ptr::addr_of_mut!((*at).text).cast::<u8>();
+        let views = core::ptr::addr_of_mut!((*at).views).cast::<z_loaned_string_t>();
+        let mut used = 0;
+        for k in 0..caps::SCOUT_HELLO_LOCATORS {
+            let bytes: &[u8] = match source.view(k) {
+                Some(view) if k < count => {
+                    crate::abi::view_bytes(view._start, view._len).unwrap_or(&[])
+                }
+                _ => &[],
+            };
+            let start = text.add(used);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), start, bytes.len());
+            views.add(k).write(z_loaned_string_t {
+                _start: start,
+                _len: bytes.len(),
+            });
+            used += bytes.len();
+        }
+        text.add(used).write_bytes(0, KEPT_HELLO_TEXT - used);
+        let array = core::ptr::addr_of_mut!((*at).array);
+        array.write(StringArrayState::lent(core::slice::from_raw_parts(
+            views, count,
+        )));
+        core::ptr::addr_of_mut!((*at).hello).write(HelloState {
+            zid: hello.zid,
+            whatami: hello.whatami,
+            _owned: None,
+            locators_loan: loan_of(&*array),
+        });
+    }
+}
+
+/// A kept copy of `hello` in a slot of the pool of kept hellos, as the handle an owned hello
+/// holds; `None` when the pool has no free slot or the hello's locators do not fit one.
+#[cfg(wz_process_pools)]
+fn keep(hello: &HelloState) -> Option<*mut c_void> {
+    let source = hello.locators();
+    let count = source.len();
+    let text: usize = (0..count)
+        .filter_map(|k| source.view(k))
+        .map(|view| view._len)
+        .sum();
+    if count > caps::SCOUT_HELLO_LOCATORS || text > KEPT_HELLO_TEXT {
+        return None;
+    }
+    let slot = crate::object_slot::Slot::<KeptHello>::take(crate::object_slot::Kind::Hello)?;
+    // SAFETY: `write_at` writes every field at the slot's place, which never moves, and the
+    // locators fit, as checked above.
+    let kept = unsafe { slot.fill_in_place(|at| KeptHello::write_at(at, hello, count)) };
+    Some(kept.cast::<c_void>())
+}
+
+/// Let go of a kept hello made by [`keep`].
+///
+/// # Safety
+/// `handle` is a live handle [`keep`] made, not used again.
+#[cfg(wz_process_pools)]
+unsafe fn drop_kept(handle: *mut c_void) {
+    crate::object_slot::release(handle.cast::<KeptHello>());
+}
+
+/// A kept copy of `hello` on the heap, as the handle an owned hello holds: a build without the
+/// process pools keeps every locator, as its engine's sessions keep theirs.
+#[cfg(not(wz_process_pools))]
+fn keep(hello: &HelloState) -> Option<*mut c_void> {
+    let kept = HelloState::new(hello.zid, hello.whatami, hello.locators().to_strings());
+    Some(Box::into_raw(kept).cast::<c_void>())
+}
+
+/// Let go of a kept hello made by [`keep`].
+///
+/// # Safety
+/// `handle` is a live handle [`keep`] made, not used again.
+#[cfg(not(wz_process_pools))]
+unsafe fn drop_kept(handle: *mut c_void) {
+    drop(Box::from_raw(handle.cast::<HelloState>()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,11 +1173,7 @@ pub unsafe extern "C" fn z_scout(
     // before the scout runs so an early return cannot leak it.
     let config_handle = (*config)._this.handle;
     (*config)._this = crate::abi::z_owned_config_t::null_value();
-    let cfg: Option<Box<ConfigState>> = if config_handle.is_null() {
-        None
-    } else {
-        Some(Box::from_raw(config_handle as *mut ConfigState))
-    };
+    let cfg = crate::object_slot::Placed::from_raw(config_handle as *mut ConfigState);
     let read = ScoutConfig::read(cfg.as_deref());
     // The scout's two snapshots, resolved as `z_open` resolves them from its config: a scout
     // handed no config reads pico's defaults, the empty config, and one whose policies or limits
@@ -1604,6 +1712,80 @@ mod tests {
                 (crate::result::Z_OK, 1),
                 "the scout completed and its drop ran once"
             );
+        }
+    }
+
+    /// The loaned form of the hello `state`.
+    #[cfg(wz_process_pools)]
+    fn loaned_of(state: &HelloState) -> z_loaned_hello_t {
+        z_loaned_hello_t {
+            handle: (state as *const HelloState).cast_mut().cast::<c_void>(),
+            _pad: [core::ptr::null_mut(); 6],
+        }
+    }
+
+    /// A kept hello is a slot of the process pools, reads as the hello it was cloned from, and its
+    /// locators are views of its own text, so it outlives the hello it copied.
+    #[cfg(wz_process_pools)]
+    #[test]
+    fn a_kept_hello_lies_in_the_pools_and_owns_its_locators() {
+        let count = caps::SCOUT_HELLO_LOCATORS.min(2);
+        let locators: Vec<String> = (0..count).map(|k| format!("udp/10.0.0.{k}:7447")).collect();
+        let source = HelloState::new(z_id_t::from_wire(&[0x5A; 16]), 2, locators.clone());
+        let mut kept = z_owned_hello_t::null_value();
+        // SAFETY: a live hello and a writable destination; the clone is dropped once.
+        unsafe {
+            assert_eq!(
+                z_hello_clone(&mut kept, &loaned_of(&source)),
+                crate::result::Z_OK
+            );
+            drop(source);
+            let place = core::ptr::NonNull::new(kept.handle.cast::<u8>()).expect("a kept hello");
+            assert!(
+                crate::process_pool::lies_in_pools(place),
+                "a kept hello is a slot of the pools"
+            );
+            let span = kept.handle.cast::<u8>().cast_const()
+                ..kept
+                    .handle
+                    .cast::<u8>()
+                    .cast_const()
+                    .wrapping_add(core::mem::size_of::<KeptHello>());
+            let loaned = z_hello_loan(&kept);
+            assert_eq!(z_hello_zid(loaned).id[0], 0x5A);
+            assert_eq!(z_hello_whatami(loaned), 2);
+            let array = zp_hello_locators(loaned);
+            assert_eq!(z_string_array_len(array), count);
+            for (k, locator) in locators.iter().enumerate() {
+                let view = &*z_string_array_get(array, k);
+                assert!(
+                    span.contains(&view._start),
+                    "locator {k} is the kept hello's"
+                );
+                let bytes = core::slice::from_raw_parts(view._start, view._len);
+                assert_eq!(bytes, locator.as_bytes());
+            }
+            z_hello_drop(z_hello_move(&mut kept));
+        }
+        assert!(kept.handle.is_null());
+    }
+
+    /// A hello with more locators than a kept hello holds, or longer ones together, is refused
+    /// as no memory, and the destination is left null.
+    #[cfg(wz_process_pools)]
+    #[test]
+    fn a_hello_a_kept_hello_cannot_hold_is_refused() {
+        let many: Vec<String> = (0..=caps::SCOUT_HELLO_LOCATORS)
+            .map(|k| format!("tcp/10.0.0.{k}:7447"))
+            .collect();
+        let long = vec![String::from_utf8(vec![b'x'; KEPT_HELLO_TEXT + 1]).expect("ASCII")];
+        for locators in [many, long] {
+            let source = HelloState::new(z_id_t::from_wire(&[1; 16]), 1, locators);
+            let mut kept = z_owned_hello_t::null_value();
+            // SAFETY: a live hello and a writable destination.
+            let code = unsafe { z_hello_clone(&mut kept, &loaned_of(&source)) };
+            assert_eq!(code, crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+            assert!(kept.handle.is_null(), "the destination is left null");
         }
     }
 }

@@ -52,7 +52,10 @@
 #                                             deploy/pico_perf_ceiling.json. With WZ_PERF_EXTERNAL_LIB and
 #                                             WZ_PERF_EXTERNAL_INCLUDE set, a third arm: the same program
 #                                             against that external library of the pico API, judged against
-#                                             the table WZ_PERF_EXTERNAL_TABLE names outside the repository
+#                                             the table WZ_PERF_EXTERNAL_TABLE names outside the repository.
+#                                             wz-capi-pico is built in the form the release ships, without
+#                                             `std` unless PICO_CMP_STDLIB=std names the other, as the size
+#                                             gate builds that form (perf_matrix.py wz-arm)
 #   scripts/pico-compare.sh batch [sizes] [count]
 #                                             the unicast batch size on the wire: zenoh-pico built once per size
 #                                             (BATCH_UNICAST_SIZE, default sizes 512,2048,8192) against one
@@ -82,7 +85,9 @@
 # (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
 # host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
 # `tids`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
-# builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each.
+# builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each. PICO_CMP_STDLIB
+# (`std` or `nostd`, `perf` only): the standard library the wz library is built with, to compare the two;
+# unset, the one form the release ships (perf_matrix.py bench-stdlib).
 # `parity` pins the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS and the
 # server side to PICO_CMP_SERVER_CPUS (defaults 4-7 and 8-11: two physical cores a side on the 22-thread
 # hybrid bench host, because zenoh-c and zenoh run several threads a process and one SMT pair would bind
@@ -622,11 +627,13 @@ parity() {
 # ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
 #
 # One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
-# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine resolved above (the
-# capability cost gate's reference, which perf_matrix.py reference builds or finds), perf_probe_W against that
-# wz-capi-pico build and perf_probe_Wapp against it with the `app-transport` capability, the one arm that
-# carries the program transport cell. Each arm's library is copied beside it (lib-<arm>), so a later build of
-# the same crate does not change what a run measured. PICO_CMP_NO_BUILD=1 runs the programs already there.
+# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine and with the standard
+# library resolved above (the capability cost gate's reference, which perf_matrix.py reference builds or finds,
+# by the gate's rule for that form), perf_probe_W against that wz-capi-pico build and perf_probe_Wapp against it
+# with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
+# made as the size gate makes the case of their form (perf_matrix.py wz-arm). Each arm's library is copied
+# beside it (lib-<arm>), so a later build of the same crate does not change what a run measured.
+# PICO_CMP_NO_BUILD=1 runs the programs already there.
 
 perf_fail() {
     echo "pico-compare: NOT-MEASURED, $*"
@@ -707,6 +714,40 @@ recorded_engine() {
         "$1" 2>/dev/null || echo unknown
 }
 
+# recorded_stdlib <reference.json>: the standard library arm W was built with, as the record of its build states it.
+recorded_stdlib() {
+    python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("wz_stdlib", "unknown"))' \
+        "$1" 2>/dev/null || echo unknown
+}
+
+# The standard library the perf matrix builds the wz library with, as the engine above: PICO_CMP_STDLIB when it names
+# one, else the form the release ships. With PICO_CMP_NO_BUILD=1 it is the one the build found records, and a
+# PICO_CMP_STDLIB that names another is refused.
+wz_stdlib=""
+resolve_wz_stdlib() {
+    wz_stdlib="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" bench-stdlib ${PICO_CMP_STDLIB:+"$PICO_CMP_STDLIB"})" \
+        || perf_fail "the standard library of the wz library did not resolve"
+}
+
+stamped_stdlib() {
+    wz_stdlib="${1:-unknown}"
+    if [ -n "${PICO_CMP_STDLIB:-}" ] && [ "$PICO_CMP_STDLIB" != "$wz_stdlib" ]; then
+        echo "pico-compare: PICO_CMP_STDLIB=$PICO_CMP_STDLIB, and the library PICO_CMP_NO_BUILD=1 finds is built $wz_stdlib" >&2
+        exit 2
+    fi
+}
+
+# perf_matrix_wz_arm <dir> <arm> <features>: arm <arm> of the perf matrix, wz-capi-pico on $wz_engine with $wz_stdlib
+# and <features> (a comma list, empty for none) over its default capabilities, built as the size gate builds the case
+# of that form, its library in <dir>/lib-<arm> and its headers in <dir>/include-<arm> (perf_matrix.py wz-arm, which
+# prints why when it builds nothing).
+perf_matrix_wz_arm() {
+    local dir="$1" arm="$2" features="$3"
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" wz-arm --out "$dir" --arm "$arm" --engine "$wz_engine" \
+        --stdlib "$wz_stdlib" ${features:+--features "$features"} \
+        || perf_fail "arm $arm was not built (perf_matrix.py wz-arm said why above)"
+}
+
 # perf_probe_build <dir> <arm> <library name> [compiler words...]
 perf_probe_build() {
     local dir="$1" arm="$2" name="$3"
@@ -732,20 +773,22 @@ perf_matrix() {
         bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
             || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
         resolve_wz_engine
+        resolve_wz_stdlib
         python3 -I "$root/scripts/host-bench/perf_matrix.py" reference --out "$dir" --engine "$wz_engine" \
-            >"$dir/build-reference.log" 2>&1 \
+            --stdlib "$wz_stdlib" >"$dir/build-reference.log" 2>&1 \
             || perf_fail "the zenoh-pico reference did not build (see $dir/build-reference.log)"
         cat "$dir/build-reference.log"
-        perf_wz_arm "$dir" W ""
-        perf_wz_arm "$dir" Wapp app-transport
+        perf_matrix_wz_arm "$dir" W ""
+        perf_matrix_wz_arm "$dir" Wapp app-transport
         perf_probe_build "$dir" P zenohpico
         perf_probe_build "$dir" W wz_capi_pico
         perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_PROGRAM_TRANSPORT -I"$root/crates/wz-capi-core/include"
         perf_external_arm "$dir"
     else
         stamped_engine "$(recorded_engine "$dir/reference.json")"
+        stamped_stdlib "$(recorded_stdlib "$dir/reference.json")"
     fi
-    echo "pico-compare: arm W on the $(recorded_engine "$dir/reference.json") engine"
+    echo "pico-compare: arm W on the $(recorded_engine "$dir/reference.json") engine, $(recorded_stdlib "$dir/reference.json")"
     if [ -f "$dir/external.json" ]; then
         external_args=(--external-record "$dir/external.json")
     fi

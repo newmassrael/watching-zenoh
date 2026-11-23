@@ -1891,20 +1891,34 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
 
 /* ================================================ fixed pools for the library's objects
  *
- * The object behind each owned handle of a session, a publisher, a
- * subscriber, a queryable, a liveliness token or subscriber, and behind an
- * owned sample, reply, reply error, query or payload, taken from fixed pools
- * reserved once, in place of the heap, so that the program makes no
- * allocation for them while it runs. Part of the unstable surface, and
- * present only in a build with the object-pool capability;
- * wz_ext_object_pool_place also needs object-pool-region.
+ * The objects a program holds that no session holds for it: the object behind
+ * each owned handle of a session, a publisher, a subscriber, a queryable, a
+ * liveliness token or subscriber, behind an owned sample, reply, reply error,
+ * query or payload, and the configs and kept hellos (z_hello_clone) a
+ * program makes before any session. They are taken from fixed pools reserved
+ * once, in place of the heap, so that the program makes no allocation for
+ * them while it runs. A library without the tokio engine has the pools in
+ * every build, reserved by its first object from the build's limits; these
+ * doors, which let a program reserve them with counts of its own and read
+ * what they hold, are part of the unstable surface and present only in a
+ * build with the object-pool capability; wz_ext_object_pool_place also needs
+ * object-pool-region.
  *
  * THE POOLS. One per kind of object, of as many slots as its count, each
  * slot the smallest of WZ_EXT_OBJECT_POOL_CLASSES sizes that holds the
- * object (16 bytes, then each twice the one before). The pool of one kind
- * never lends a slot to another, so each kind holds what was stated for it
- * and no more. wz_ext_object_pool_class reports the pools by slot size, the
- * kinds of one size together.
+ * object (16 bytes, then each twice the one before), or for an object larger
+ * than the largest (a config of the build's text) the object's own size. The
+ * pool of one kind never lends a slot to another, so each kind holds what was
+ * stated for it and no more. wz_ext_object_pool_class reports the pools by
+ * slot size, the kinds of one size together; a pool of slots larger than the
+ * largest size is reported by none.
+ *
+ * THE PAYLOADS' AREA. The bytes the owned payloads, strings and slices carry
+ * lie beside the pools, in one area of payload_bytes bytes: blocks of
+ * power-of-two sizes from 32 bytes, a payload taking the smallest that holds
+ * its bytes and a 16-byte head, a larger block split in halves for it and
+ * joined again when both halves are free. A payload larger than the area's
+ * largest block, or one no free block holds, is refused.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers) are per session
@@ -1914,26 +1928,28 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * MAX_QUERYABLES, MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS): a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
- * other counts are as stated, 0 being none. A count of an object the build
- * has none of is not read.
+ * other counts are as stated, 0 being none, so a program that reserves its
+ * own pools states the configs it opens from and the bytes its payloads
+ * carry. A count of an object the build has none of is not read.
  *
  * RESERVING. With nothing reserved, the first object the program makes
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
- * its limits admit, and HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
- * HELD_PAYLOADS of the owned values. A program that states counts of its own
- * reserves them before its first object instead.
+ * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
+ * HELD_PAYLOADS of the owned values, HELD_CONFIGS configs, HELD_HELLOS kept
+ * hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
+ * counts of its own reserves them before its first object instead.
  *
  * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
  * build's reservation the heap cannot give, refuses the object: the call that
- * wanted it answers _Z_ERR_SYSTEM_OUT_OF_MEMORY having opened, declared or
- * held nothing (z_open,
+ * wanted it answers _Z_ERR_SYSTEM_OUT_OF_MEMORY having made, opened, declared
+ * or held nothing (z_config_default, z_config_clone, z_hello_clone, z_open,
  * z_declare_publisher, z_declare_subscriber, z_declare_queryable,
  * z_liveliness_declare_token, z_liveliness_declare_subscriber, the clone and
  * take_from_loaned of a sample, reply, reply error or query, and the
- * constructors of a payload, which leave it null). An object let go frees
- * its slot. The bytes a payload carries, configs, key expressions, strings,
- * encodings, closures and the handles of the other wz_ext doors are the
- * heap's in either build. */
+ * constructors and copies of a payload, a string or a slice, which leave it
+ * null). An object let go frees its slot. Key expressions, the handles of
+ * strings, slices, string arrays and encodings, closures and the handles of
+ * the other wz_ext doors are the heap's in either build. */
 #define WZ_EXT_OBJECT_POOL_CLASSES 11
 
 typedef struct wz_ext_object_pool_counts_t {
@@ -1947,6 +1963,9 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t replies;
   size_t queries;
   size_t bytes;
+  size_t configs;
+  size_t hellos;
+  size_t payload_bytes;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

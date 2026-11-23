@@ -1520,7 +1520,6 @@ mod tests {
         use super::super::ApplicationLayerObserver;
         use super::fixtures::make_outcome;
         use super::push_fixtures::push_literal;
-        use crate::driver_loop::IterationEvent;
         use crate::network_message::NetworkMessage;
         use alloc::{boxed::Box, vec};
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1542,7 +1541,7 @@ mod tests {
                 "home/temp",
                 b"21.0",
             )))]);
-            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| observer.dispatch_event(event));
             assert_eq!(fired.load(Ordering::SeqCst), 1);
         }
     }
@@ -1555,7 +1554,6 @@ mod tests {
         use super::super::ApplicationLayerObserver;
         use super::decl_fixtures::declare_decl_subscriber;
         use super::fixtures::make_outcome;
-        use crate::driver_loop::IterationEvent;
         use crate::network_message::NetworkMessage;
         use alloc::{boxed::Box, vec};
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1578,7 +1576,7 @@ mod tests {
             let outcome = make_outcome(vec![NetworkMessage::Declare(Box::new(
                 declare_decl_subscriber(7, "peer/sensor"),
             ))]);
-            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| observer.dispatch_event(event));
             assert_eq!(fired.load(Ordering::SeqCst), 1);
         }
     }
@@ -1598,7 +1596,6 @@ mod tests {
         use super::decl_fixtures::declare_decl_subscriber;
         use super::fixtures::make_outcome;
         use super::push_fixtures::push_literal;
-        use crate::driver_loop::IterationEvent;
         use crate::network_message::NetworkMessage;
         use alloc::{boxed::Box, vec};
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1693,7 +1690,7 @@ mod tests {
                     .unwrap()
                 })),
             ]);
-            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| observer.dispatch_event(event));
 
             assert_eq!(sub_fired.load(Ordering::SeqCst), 1);
             assert_eq!(r_sub_fired.load(Ordering::SeqCst), 1);
@@ -1735,11 +1732,12 @@ mod tests {
 
             // THE PEER's space: the same id 7, a different literal. Absorbed
             // through the ordinary inbound DeclKexpr path, not injected.
-            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                NetworkMessage::Declare(Box::new(declare_envelope_decl_kexpr(decl_kexpr(
-                    7, "theirs/x",
-                )))),
-            ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_kexpr(decl_kexpr(7, "theirs/x")),
+                ))]),
+                |event| observer.dispatch_event(event),
+            );
 
             let ours_fired = Arc::new(AtomicUsize::new(0));
             let theirs_fired = Arc::new(AtomicUsize::new(0));
@@ -1776,12 +1774,15 @@ mod tests {
                 .on_token_declared(move |d| s3.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
 
-            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                NetworkMessage::Push(Box::new(push_own_alias(7))),
-                NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
-                NetworkMessage::Declare(Box::new(decl_queryable_own_alias(2, 7))),
-                NetworkMessage::Declare(Box::new(decl_token_own_alias(3, 7))),
-            ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![
+                    NetworkMessage::Push(Box::new(push_own_alias(7))),
+                    NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
+                    NetworkMessage::Declare(Box::new(decl_queryable_own_alias(2, 7))),
+                    NetworkMessage::Declare(Box::new(decl_token_own_alias(3, 7))),
+                ]),
+                |event| observer.dispatch_event(event),
+            );
 
             assert_eq!(
                 ours_fired.load(Ordering::SeqCst),
@@ -1816,11 +1817,12 @@ mod tests {
             use wz_session_core_test_support::{decl_kexpr, declare_envelope_decl_kexpr};
 
             let mut observer = ApplicationLayerObserver::new();
-            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                NetworkMessage::Declare(Box::new(declare_envelope_decl_kexpr(decl_kexpr(
-                    7, "theirs/x",
-                )))),
-            ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_kexpr(decl_kexpr(7, "theirs/x")),
+                ))]),
+                |event| observer.dispatch_event(event),
+            );
 
             let fired = Arc::new(AtomicUsize::new(0));
             let f = fired.clone();
@@ -1838,10 +1840,13 @@ mod tests {
                 .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
 
-            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                NetworkMessage::Push(Box::new(push_own_alias(7))),
-                NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
-            ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![
+                    NetworkMessage::Push(Box::new(push_own_alias(7))),
+                    NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
+                ]),
+                |event| observer.dispatch_event(event),
+            );
 
             assert_eq!(
                 fired.load(Ordering::SeqCst),
@@ -1903,7 +1908,6 @@ mod tests {
     mod query_queryable {
         use super::super::ApplicationLayerObserver;
         use super::fixtures::make_outcome;
-        use crate::driver_loop::IterationEvent;
         use crate::network_message::NetworkMessage;
         use alloc::{boxed::Box, vec};
         use wz_codecs::lent::{Wireexpr, WireexprNonlocal, WireexprVariant};
@@ -1945,7 +1949,7 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
             let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
-            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| observer.dispatch_event(event));
 
             assert_eq!(
                 observer.pending_reply_count(),
@@ -2084,13 +2088,12 @@ mod tests {
         #[test]
         fn a_get_reply_is_the_requesters_alone() {
             let mut f = fixture();
-            f.observer
-                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
-                        token(5, "k/a"),
-                        GET_INTEREST,
-                    ))),
-                ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_token_with_interest(token(5, "k/a"), GET_INTEREST),
+                ))]),
+                |event| f.observer.dispatch_event(event),
+            );
 
             assert_eq!(
                 f.get_fired.load(Ordering::SeqCst),
@@ -2111,13 +2114,12 @@ mod tests {
         #[test]
         fn a_subscribers_own_solicited_replay_still_arrives() {
             let mut f = fixture();
-            f.observer
-                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
-                        token(6, "k/b"),
-                        SUB_INTEREST,
-                    ))),
-                ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_token_with_interest(token(6, "k/b"), SUB_INTEREST),
+                ))]),
+                |event| f.observer.dispatch_event(event),
+            );
 
             assert_eq!(
                 f.sub_fired.load(Ordering::SeqCst),
@@ -2154,8 +2156,8 @@ mod tests {
                 })
                 .expect("no quota is stated on this table");
 
-            f.observer
-                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![
                     // Claimed by the GET.
                     NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
                         token(5, "k/a"),
@@ -2164,7 +2166,9 @@ mod tests {
                     // Unsolicited — the control, in the SAME batch, so a fan
                     // that stopped dispatching altogether cannot pass.
                     NetworkMessage::Declare(Box::new(declare_envelope_decl_token(token(7, "k/c")))),
-                ])));
+                ]),
+                |event| f.observer.dispatch_event(event),
+            );
 
             use alloc::string::ToString;
             assert_eq!(
@@ -2189,13 +2193,12 @@ mod tests {
         #[test]
         fn a_solicited_replay_does_not_reach_a_future_only_subscriber() {
             let mut f = fixture_with_history(false);
-            f.observer
-                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
-                        token(6, "k/b"),
-                        SUB_INTEREST,
-                    ))),
-                ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_token_with_interest(token(6, "k/b"), SUB_INTEREST),
+                ))]),
+                |event| f.observer.dispatch_event(event),
+            );
 
             assert_eq!(
                 f.sub_fired.load(Ordering::SeqCst),
@@ -2211,10 +2214,12 @@ mod tests {
         #[test]
         fn an_unsolicited_token_still_reaches_the_subscriber() {
             let mut f = fixture();
-            f.observer
-                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
-                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token(token(7, "k/c")))),
-                ])));
+            crate::driver_loop::deliver_frame(
+                &make_outcome(vec![NetworkMessage::Declare(Box::new(
+                    declare_envelope_decl_token(token(7, "k/c")),
+                ))]),
+                |event| f.observer.dispatch_event(event),
+            );
 
             assert_eq!(f.sub_fired.load(Ordering::SeqCst), 1);
             assert_eq!(f.get_fired.load(Ordering::SeqCst), 0);
@@ -2341,12 +2346,16 @@ mod sub_interest_reply_tests {
             has_ext: false,
             extensions: Vec::new(),
         };
-        observer.dispatch_event(IterationEvent::Poll(&frame(
-            crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(kexpr)),
-        )));
-        observer.dispatch_event(IterationEvent::Poll(&frame(
-            crate::network_message::NetworkMessage::Interest(interest),
-        )));
+        crate::driver_loop::deliver_frame(
+            &frame(crate::network_message::NetworkMessage::Declare(
+                alloc::boxed::Box::new(kexpr),
+            )),
+            |event| observer.dispatch_event(event),
+        );
+        crate::driver_loop::deliver_frame(
+            &frame(crate::network_message::NetworkMessage::Interest(interest)),
+            |event| observer.dispatch_event(event),
+        );
         let sink = RecordingSink::default();
         observer.flush_declare_replies(&sink);
         assert_eq!(
@@ -2974,7 +2983,9 @@ mod queryable_interest_reply_tests {
     }
 
     fn answer(observer: &mut ApplicationLayerObserver, interest: NetworkMessage) -> Vec<String> {
-        observer.dispatch_event(IterationEvent::Poll(&outcome(alloc::vec![interest])));
+        crate::driver_loop::deliver_frame(&outcome(alloc::vec![interest]), |event| {
+            observer.dispatch_event(event)
+        });
         let sink = RecordingSink::default();
         observer.flush_declare_replies(&sink);
         sink.wire.into_inner().unwrap()

@@ -1508,18 +1508,20 @@ help = "A time base the program supplies in place of the system's clock: the tim
 [[capability]]
 id = "object-pool"
 kconfig = "WZ_CAP_OBJECT_POOL"
-# Off by default: zenoh-pico allocates the objects behind its owned handles from the heap as it
-# makes them, and so does a build made as it is. A program that must make no allocation while it
-# runs turns it on: the first object reserves the pools from the build's limits (HELD_* and the
-# session limits), or the program reserves its own before it, each count it states held to the
-# bound of the session limit that bounds the object. The pico ABI's doors are wz_ext_* and part of
-# its unstable surface.
+# Off by default, as zenoh-pico has no such doors. The pools themselves are not this capability's:
+# a pico library without the tokio engine takes every object a program holds outside a session
+# from fixed pools its first object reserves from the build's limits (HELD_* and the session
+# limits), whether or not it has the doors, so a build without the unstable surface makes no
+# allocation for them either. A program that states its own counts turns it on and reserves the
+# pools before its first object, each count held to the bound of the session limit that bounds the
+# object; on the tokio engine, which otherwise keeps those objects on the heap, it also puts them
+# in the pools. The pico ABI's doors are wz_ext_* and part of its unstable surface.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap, reserved by the first object from the build's limits or by the program before it; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+help = "The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (wz_ext_object_pool_*, wz-own doors)."
 
 [[capability]]
 id = "object-pool-region"
@@ -2745,6 +2747,78 @@ answers out of memory and leaves its payload null.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+
+[[limit]]
+id = "HELD_CONFIGS"
+kconfig = "WZ_LIMIT_HELD_CONFIGS"
+kind = "bound"
+driven = "local"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The configs (z_owned_config_t) a program of the pico C ABI holds at once,
+each from z_config_default or z_config_clone to its move into an open or a
+scout, or its drop: the slots of the pool of configs the library reserves at
+its first object, each the size of one config of the build. One more is
+refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the configs a program holds, and zenoh-pico allocates each on the heap with no constant; eight is two for each of HELD_SESSIONS's four sessions, the config an open consumes and a clone of it."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its configs by no count; each of its examples holds the one config it opens its session or runs its scout from, and two let a program keep a clone of it."
+
+[[limit]]
+id = "HELD_HELLOS"
+kconfig = "WZ_LIMIT_HELD_HELLOS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
+with as many locators as a scouting window keeps of one Hello: the slots of
+the pool of kept hellos the library reserves at its first object. One more
+is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the hellos a program keeps, and zenoh-pico allocates each clone on the heap with no constant; sixteen is MAX_SCOUT_HELLOS's default, a kept hello for each Hello one scouting window records."
+
+[[limit]]
+id = "HELD_PAYLOAD_BYTES"
+kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
+kind = "bound"
+driven = "local"
+default = 131072
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes the owned payloads, strings and slices a program of the pico C ABI
+holds carry at once: the payloads' area the library reserves at its first
+object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
+smallest that holds its bytes and a 16-byte head. A payload no free block
+holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
 
 [[limit]]
 id = "CONFIG_ENTRIES"
