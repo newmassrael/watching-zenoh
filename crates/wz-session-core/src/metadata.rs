@@ -31,11 +31,11 @@ use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 pub struct PushMetadata<'a> {
     /// Body-level timestamp (zenoh-pico `_z_m_push_commons_t._timestamp`,
     /// gated by `_Z_FLAG_Z_P_T` for Put / `_Z_FLAG_Z_D_T` for Del).
-    pub timestamp: Option<TimestampHint>,
+    pub timestamp: Option<&'a TimestampHint>,
     /// Body-level encoding (Put kind only; zenoh-pico `_z_msg_del_t`
     /// has no encoding slot so a `Del` build_push call ignores this
     /// field even when set).
-    pub encoding: Option<EncodingHint>,
+    pub encoding: Option<&'a EncodingHint>,
     /// Body-level source identification (ext_id=0x01 ENC_ZBUF).
     pub source_info: Option<SourceInfo>,
     /// Body-level attachment blob (ext_id=0x03 ENC_ZBUF), borrowed from what the publish was

@@ -374,11 +374,11 @@ impl<'m> BodyParts<'m> {
     fn of(put: bool, meta: &'m crate::metadata::PushMetadata) -> Self {
         Self {
             #[cfg(feature = "pubsub-timestamp")]
-            timestamp: meta.timestamp.as_ref(),
+            timestamp: meta.timestamp,
             #[cfg(not(feature = "pubsub-timestamp"))]
             timestamp: None,
             #[cfg(feature = "pubsub-encoding")]
-            encoding: meta.encoding.as_ref().filter(|_| put),
+            encoding: meta.encoding.filter(|_| put),
             #[cfg(not(feature = "pubsub-encoding"))]
             encoding: None,
             #[cfg(feature = "pubsub-source-info")]
@@ -887,15 +887,17 @@ mod tests {
         let mut compared = 0usize;
         let (mut shortest, mut longest) = (usize::MAX, 0usize);
         for fields in 0u8..64 {
+            let stamp = TimestampHint {
+                time: 0x1234_5678_9abc,
+                zid: alloc::vec![7; 16],
+            };
+            let encoded = EncodingHint {
+                packed_id: 42 << 1,
+                schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
+            };
             let meta = PushMetadata {
-                timestamp: (fields & 1 != 0).then(|| TimestampHint {
-                    time: 0x1234_5678_9abc,
-                    zid: alloc::vec![7; 16],
-                }),
-                encoding: (fields & 2 != 0).then(|| EncodingHint {
-                    packed_id: 42 << 1,
-                    schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
-                }),
+                timestamp: (fields & 1 != 0).then_some(&stamp),
+                encoding: (fields & 2 != 0).then_some(&encoded),
                 source_info: (fields & 8 != 0)
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
                 attachment: (fields & 16 != 0).then_some(&[3u8; 200] as &[u8]),
@@ -977,26 +979,38 @@ mod tests {
         use crate::sample::{EncodingHint, SampleKind, TimestampHint};
 
         let past = "k".repeat(usize::from(u16::MAX) + 1);
-        let stamped = |len: usize| PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: 1,
-                zid: alloc::vec![1; len],
-            }),
+        let stamp = |len: usize| TimestampHint {
+            time: 1,
+            zid: alloc::vec![1; len],
+        };
+        let encoding = |len: usize| EncodingHint {
+            packed_id: 2,
+            schema: Some(alloc::vec![b's'; len]),
+        };
+        let (stamp_past, stamp_at) = (stamp(17), stamp(16));
+        let (encoding_past, encoding_at) = (encoding(256), encoding(255));
+        let stamped = |hint| PushMetadata {
+            timestamp: Some(hint),
             ..PushMetadata::default()
         };
-        let encoded = |len: usize| PushMetadata {
-            encoding: Some(EncodingHint {
-                packed_id: 2,
-                schema: Some(alloc::vec![b's'; len]),
-            }),
+        let encoded = |hint| PushMetadata {
+            encoding: Some(hint),
             ..PushMetadata::default()
         };
         let cases: [(Option<&str>, PushMetadata, bool); 5] = [
             (Some(past.as_str()), PushMetadata::default(), true),
-            (Some("k"), stamped(17), cfg!(feature = "pubsub-timestamp")),
-            (Some("k"), stamped(16), false),
-            (Some("k"), encoded(256), cfg!(feature = "pubsub-encoding")),
-            (Some("k"), encoded(255), false),
+            (
+                Some("k"),
+                stamped(&stamp_past),
+                cfg!(feature = "pubsub-timestamp"),
+            ),
+            (Some("k"), stamped(&stamp_at), false),
+            (
+                Some("k"),
+                encoded(&encoding_past),
+                cfg!(feature = "pubsub-encoding"),
+            ),
+            (Some("k"), encoded(&encoding_at), false),
         ];
         for (suffix, meta, refused) in cases {
             let owned = build_push_aliased_with_meta(3, suffix, b"x", &meta);

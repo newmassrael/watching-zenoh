@@ -981,7 +981,8 @@ fn publish_shm_aliased_puts_the_descriptor_on_the_wire_under_the_declared_id() {
     let mut payload = crate::shm_provider::ShmBackedPayload::alloc(11).expect("alloc");
     payload.write(b"zero-copy!!");
     let opts = || PublishOptions::put().with_locality(Locality::Remote);
-    let meta = opts().push_metadata();
+    let meta_opts = opts();
+    let meta = meta_opts.push_metadata();
 
     session
         .publish_shm_aliased(7, Some("/kitchen"), "home/temp/kitchen", &payload, opts())
@@ -1309,7 +1310,7 @@ fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared
     let meta = opts.push_metadata();
 
     session
-        .publish_shm_aliased(7, None, "home/temp", &payload, opts)
+        .publish_shm_aliased(7, None, "home/temp", &payload, opts.clone())
         .expect("publish");
 
     let frame = driver.frame_bytes(0);
@@ -2868,7 +2869,7 @@ fn auto_stamp_reaches_both_legs_as_one_value() {
     // LOOPBACK leg reported. If the two legs minted separately, these bytes
     // are not in the frame.
     let meta = wz_session_core::metadata::PushMetadata {
-        timestamp: Some(ts),
+        timestamp: Some(&ts),
         ..Default::default()
     };
     let expected =
@@ -18028,15 +18029,17 @@ fn a_subscription_takes_the_overload_answer_of_the_session_unless_it_says_its_ow
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
     use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+    let stamp = TimestampHint {
+        time: 0x1234_5678_9abc_def0,
+        zid: vec![1, 2, 3, 4],
+    };
+    let encoded = EncodingHint {
+        packed_id: 0x2d,
+        schema: Some(b"text/plain".to_vec()),
+    };
     let meta = wz_session_core::metadata::PushMetadata {
-        timestamp: Some(TimestampHint {
-            time: 0x1234_5678_9abc_def0,
-            zid: vec![1, 2, 3, 4],
-        }),
-        encoding: Some(EncodingHint {
-            packed_id: 0x2d,
-            schema: Some(b"text/plain".to_vec()),
-        }),
+        timestamp: Some(&stamp),
+        encoding: Some(&encoded),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached"),
         qos: Some(QosLevel::from_raw(0x05)),

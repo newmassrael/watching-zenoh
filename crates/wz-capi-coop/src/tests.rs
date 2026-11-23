@@ -558,8 +558,9 @@ fn run_router(
                 let _ = actions.send_push_literal(key, value, true);
             }
             Ok(Command::PushStamped(key, value)) => {
+                let stamp = router_stamp(zid);
                 let meta = wz_session_core::metadata::PushMetadata {
-                    timestamp: Some(router_stamp(zid)),
+                    timestamp: Some(&stamp),
                     ..Default::default()
                 };
                 let _ = actions.send_push_with_meta_literal(key, value, true, &meta);

@@ -479,10 +479,10 @@ impl<'a> PublishOptions<'a> {
     /// `priority_band` deliberately still reads `self.qos` ungated — that is the independent
     /// `transport-qos` conduit axis (R311y307), whose real gate is the runtime-negotiated
     /// `is_qos()`, not a compile feature.
-    pub fn push_metadata(&self) -> PushMetadata<'a> {
+    pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
-            timestamp: gated_timestamp(self.timestamp.clone()),
-            encoding: gated_encoding(self.encoding.clone()),
+            timestamp: gated_timestamp(self.timestamp.as_ref()),
+            encoding: gated_encoding(self.encoding.as_ref()),
             source_info: gated_source_info(self.source_info.clone()),
             attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
@@ -511,11 +511,11 @@ impl<'a> PublishOptions<'a> {
         sample = sample.with_reliability(self.reliability);
         let meta = self.push_metadata();
         if let Some(timestamp) = meta.timestamp {
-            sample = sample.with_timestamp(timestamp);
+            sample = sample.with_timestamp(timestamp.clone());
         }
         if self.kind == SampleKind::Put {
             if let Some(encoding) = meta.encoding {
-                sample = sample.with_encoding(encoding);
+                sample = sample.with_encoding(encoding.clone());
             }
         }
         if let Some(source_info) = meta.source_info {
@@ -792,8 +792,8 @@ macro_rules! metadata_gated {
     };
 }
 
-metadata_gated!(gated_timestamp, "pubsub-timestamp", TimestampHint);
-metadata_gated!(gated_encoding, "pubsub-encoding", EncodingHint);
+metadata_gated!(gated_timestamp, "pubsub-timestamp", &TimestampHint);
+metadata_gated!(gated_encoding, "pubsub-encoding", &EncodingHint);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
 metadata_gated!(gated_attachment, "pubsub-attachment", &[u8]);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
