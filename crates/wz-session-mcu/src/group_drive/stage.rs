@@ -176,35 +176,56 @@ struct Record {
 }
 
 impl Record {
-    /// The bytes a record takes ahead of its datagram's.
-    const BYTES: usize = 8 + 1 + 1 + 8 + 1 + 4;
+    /// The bytes a record takes ahead of its datagram's: its order (8), priority (1), channel (1),
+    /// sequence number (8), reply mark (1) and length (4).
+    const BYTES: usize = 23;
 
-    fn write(&self, at: &mut [u8]) {
-        at[..8].copy_from_slice(&self.order.to_le_bytes());
-        at[8] = self.priority.wire_byte();
-        at[9] = u8::from(self.reliable);
-        at[10..18].copy_from_slice(&self.sn.to_le_bytes());
-        at[18] = u8::from(self.reply);
-        // A datagram is at most a lane's storage, which is held far below 4 GiB.
-        at[19..23].copy_from_slice(&(self.len as u32).to_le_bytes());
+    /// The record as the storage holds it.
+    fn bytes(&self) -> [u8; Self::BYTES] {
+        let [o0, o1, o2, o3, o4, o5, o6, o7] = self.order.to_le_bytes();
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = self.sn.to_le_bytes();
+        // A datagram is at most its lane's storage, which is held far below 4 GiB.
+        let [l0, l1, l2, l3] = u32::try_from(self.len).unwrap_or(u32::MAX).to_le_bytes();
+        [
+            o0,
+            o1,
+            o2,
+            o3,
+            o4,
+            o5,
+            o6,
+            o7,
+            self.priority.wire_byte(),
+            u8::from(self.reliable),
+            s0,
+            s1,
+            s2,
+            s3,
+            s4,
+            s5,
+            s6,
+            s7,
+            u8::from(self.reply),
+            l0,
+            l1,
+            l2,
+            l3,
+        ]
     }
 
-    fn read(at: &[u8]) -> Self {
-        let word = |from: usize| {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&at[from..from + 8]);
-            u64::from_le_bytes(bytes)
-        };
-        let mut len = [0u8; 4];
-        len.copy_from_slice(&at[19..23]);
-        Self {
-            order: word(0),
-            priority: Priority::from_wire(at[8]),
-            reliable: at[9] != 0,
-            sn: word(10),
-            reply: at[18] != 0,
-            len: u32::from_le_bytes(len) as usize,
-        }
+    /// The record at the front of `at`, `None` where `at` holds less than one.
+    fn read(at: &[u8]) -> Option<Self> {
+        let head: [u8; Self::BYTES] = at.get(..Self::BYTES)?.try_into().ok()?;
+        let [o0, o1, o2, o3, o4, o5, o6, o7, priority, reliable, s0, s1, s2, s3, s4, s5, s6, s7, reply, l0, l1, l2, l3] =
+            head;
+        Some(Self {
+            order: u64::from_le_bytes([o0, o1, o2, o3, o4, o5, o6, o7]),
+            priority: Priority::from_wire(priority),
+            reliable: reliable != 0,
+            sn: u64::from_le_bytes([s0, s1, s2, s3, s4, s5, s6, s7]),
+            reply: reply != 0,
+            len: usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).unwrap_or(usize::MAX),
+        })
     }
 }
 
@@ -222,14 +243,19 @@ impl Lanes {
     /// its lane whatever the lane holds, a batch for each reply `quota` lets the stage hold.
     fn of_group(params: &MulticastParams, quota: MaxMulticastRepliesHeld) -> Self {
         let bound = MulticastTxLanes::of_group(params);
-        let reserve = 2 * Record::BYTES + usize::from(params.batch_size) + MARKER_BYTES;
+        let reserve = Record::BYTES
+            .saturating_mul(2)
+            .saturating_add(usize::from(params.batch_size))
+            .saturating_add(MARKER_BYTES);
         let replies = match super::quota_count(quota.get()) {
             usize::MAX => 0,
             count => count,
         };
         let rings = core::array::from_fn(|at| {
             let lane = bound.own_lane_bytes(Priority::from_wire(at as u8));
-            LaneRing::new(lane.map_or(0, |bytes| bytes + reserve * (1 + replies)))
+            LaneRing::new(lane.map_or(0, |bytes| {
+                bytes.saturating_add(reserve.saturating_mul(replies.saturating_add(1)))
+            }))
         });
         Self {
             bound,
@@ -249,18 +275,28 @@ impl Lanes {
         fill: &mut dyn FnMut(&mut [u8]) -> Option<usize>,
     ) -> bool {
         let lane = self.bound.lane_index(record.priority);
-        let ring = &mut self.rings[lane];
-        let Some((at, wraps)) = ring.room(Record::BYTES + want) else {
+        let Some(ring) = self.rings.get_mut(lane) else {
             return false;
         };
-        let body = at + Record::BYTES;
-        let Some(len) = fill(&mut ring.buf[body..body + want]) else {
+        let Some((at, wraps)) = ring.room(Record::BYTES.saturating_add(want)) else {
+            return false;
+        };
+        let body = at.saturating_add(Record::BYTES);
+        let Some(len) = ring
+            .buf
+            .get_mut(body..body.saturating_add(want))
+            .and_then(&mut *fill)
+        else {
             return false;
         };
         record.order = self.order;
         record.len = len;
-        record.write(&mut ring.buf[at..body]);
-        ring.commit(at, Record::BYTES + len, wraps);
+        if let Some(head) = ring.buf.get_mut(at..body) {
+            for (to, from) in head.iter_mut().zip(record.bytes()) {
+                *to = from;
+            }
+        }
+        ring.commit(at, Record::BYTES.saturating_add(len), wraps);
         self.order = self.order.wrapping_add(1);
         self.bound.taken(record.priority, len);
         true
@@ -268,32 +304,37 @@ impl Lanes {
 
     /// The record at the front of each lane.
     fn front(&self, lane: usize) -> Option<Record> {
-        self.rings[lane].front().map(Record::read)
+        self.rings.get(lane)?.front().and_then(Record::read)
     }
 
     /// The bytes of the datagram at the front of `lane`.
     fn front_bytes(&self, lane: usize, len: usize) -> &[u8] {
-        self.rings[lane].front_run(Record::BYTES, len)
+        self.rings
+            .get(lane)
+            .map_or(&[][..], |ring| ring.front_run(Record::BYTES, len))
     }
 
     /// Let go of the datagram at the front of `lane`, written or lost.
     fn pop(&mut self, lane: usize, len: usize) {
-        self.rings[lane].pop(Record::BYTES + len);
+        if let Some(ring) = self.rings.get_mut(lane) {
+            ring.pop(Record::BYTES.saturating_add(len));
+        }
     }
 
     /// Whether `priority`'s lane has storage for one more push: one run of its `reserve`.
     fn ring_room(&self, priority: Priority) -> bool {
-        self.rings[self.bound.lane_index(priority)]
-            .cursor
-            .fits(1, self.reserve)
+        self.rings
+            .get(self.bound.lane_index(priority))
+            .is_some_and(|ring| ring.cursor.fits(1, self.reserve))
     }
 
     /// Whether `priority`'s lane has storage for a reply of `bytes`, one push's run for each
     /// datagram it is cut into.
     fn reply_room(&self, priority: Priority, bytes: usize, batch: usize) -> bool {
-        self.rings[self.bound.lane_index(priority)]
-            .cursor
-            .fits(bytes.div_ceil(batch.max(1)).max(1), self.reserve)
+        let runs = bytes.div_ceil(batch.max(1)).max(1);
+        self.rings
+            .get(self.bound.lane_index(priority))
+            .is_some_and(|ring| ring.cursor.fits(runs, self.reserve))
     }
 
     /// Whether no lane holds a datagram.
@@ -333,9 +374,9 @@ impl Cursor {
             return (want <= self.len).then_some((0, false));
         }
         match self.wrap_end {
-            None if self.len - self.tail >= want => Some((self.tail, false)),
+            None if self.len.saturating_sub(self.tail) >= want => Some((self.tail, false)),
             None => (self.head >= want).then_some((0, true)),
-            Some(_) => (self.head - self.tail >= want).then_some((self.tail, false)),
+            Some(_) => (self.head.saturating_sub(self.tail) >= want).then_some((self.tail, false)),
         }
     }
 
@@ -347,8 +388,9 @@ impl Cursor {
         } else if wraps {
             self.wrap_end = Some(self.tail);
         }
-        self.tail = at + len;
-        self.runs += 1;
+        // A run lies within the storage, so its end is at most the storage's length.
+        self.tail = at.saturating_add(len);
+        self.runs = self.runs.saturating_add(1);
     }
 
     /// Whether `runs` more runs of `each` bytes fit, one after the other.
@@ -366,8 +408,8 @@ impl Cursor {
     /// The oldest run, of `len` bytes, has left.
     fn pop(&mut self, len: usize) {
         debug_assert!(self.runs > 0, "a run is held");
-        self.runs -= 1;
-        self.head += len;
+        self.runs = self.runs.saturating_sub(1);
+        self.head = self.head.saturating_add(len);
         if self.wrap_end == Some(self.head) {
             self.head = 0;
             self.wrap_end = None;
@@ -408,13 +450,18 @@ impl LaneRing {
 
     /// The oldest run's bytes from its start, as far as they reach.
     fn front(&self) -> Option<&[u8]> {
-        (self.cursor.runs > 0).then(|| &self.buf[self.cursor.head..])
+        match self.cursor.runs {
+            0 => None,
+            _ => self.buf.get(self.cursor.head..),
+        }
     }
 
     /// `len` bytes of the oldest run, `skip` bytes in.
     fn front_run(&self, skip: usize, len: usize) -> &[u8] {
-        let from = self.cursor.head + skip;
-        &self.buf[from..from + len]
+        let from = self.cursor.head.saturating_add(skip);
+        self.buf
+            .get(from..from.saturating_add(len))
+            .unwrap_or_default()
     }
 
     /// The oldest run, of `len` bytes, has left.
@@ -526,13 +573,18 @@ impl GroupTxStage {
                 .borrow()
                 .reply_room(priority, bytes, usize::from(inner.params.batch_size))
         };
-        if !room || !self.quota.get().admits(inner.replies.get() + 1) {
+        if !room
+            || !self
+                .quota
+                .get()
+                .admits(inner.replies.get().saturating_add(1))
+        {
             inner.dropped.set(inner.dropped.get().saturating_add(1));
             // Freed here, with nothing of the stage borrowed.
             drop(item);
             return;
         }
-        inner.replies.set(inner.replies.get() + 1);
+        inner.replies.set(inner.replies.get().saturating_add(1));
         let _ = self.push_held(item, None, true);
         self.push_deferred();
     }
@@ -586,7 +638,10 @@ impl GroupTxStage {
     ) -> PushOutcome {
         let inner = &*self.inner;
         let Conduits { minted, windows } = conduits;
-        let window = &mut windows[conduit as usize];
+        // A priority's wire byte is below `Priority::NUM`, so its conduit's window is there.
+        let Some(window) = windows.get_mut(usize::from(conduit.wire_byte())) else {
+            return PushOutcome::Congested;
+        };
         let windowed = inner.window_open.get();
         if !windowed {
             // A frame the window left open leaves ahead of the message, which keeps its order; it
@@ -609,7 +664,7 @@ impl GroupTxStage {
         let outcome = push(minted, &mut queue, windowed.then_some(window));
         // A reply that put no datagram on a lane (one its codec could not frame) holds no slot.
         if queue.reply {
-            inner.replies.set(inner.replies.get() - 1);
+            inner.replies.set(inner.replies.get().saturating_sub(1));
         }
         if outcome == PushOutcome::Congested {
             inner.lanes.borrow_mut().bound.dropped(conduit);
@@ -642,7 +697,9 @@ impl GroupTxStage {
         let record = lanes.front(lane)?;
         lanes.bound.written(record.priority, record.len);
         if record.reply {
-            self.inner.replies.set(self.inner.replies.get() - 1);
+            self.inner
+                .replies
+                .set(self.inner.replies.get().saturating_sub(1));
         }
         Some(Taken { lane, record })
     }
@@ -677,7 +734,9 @@ impl GroupTxStage {
 
     /// Whether a reply slot is free.
     pub(super) fn has_reply_slot(&self) -> bool {
-        self.quota.get().admits(self.inner.replies.get() + 1)
+        self.quota
+            .get()
+            .admits(self.inner.replies.get().saturating_add(1))
     }
 
     /// How many replies the stage holds at most: its `MAX_MULTICAST_REPLIES`, `usize::MAX` where
@@ -1312,15 +1371,15 @@ mod tests {
         let lane = lanes.bound.lane_index(Priority::DEFAULT);
         let ring = &mut lanes.rings[lane];
         let len = ring.buf.len() - left;
-        Record {
+        let record = Record {
             order: 0,
             priority: Priority::DEFAULT,
             reliable: true,
             sn: 0,
             reply: false,
             len: len - Record::BYTES,
-        }
-        .write(&mut ring.buf[..Record::BYTES]);
+        };
+        ring.buf[..Record::BYTES].copy_from_slice(&record.bytes());
         ring.commit(0, len, false);
     }
 
@@ -1390,6 +1449,22 @@ mod tests {
             "the datagram that filled the storage"
         );
         assert!(stage.take().is_none(), "and nothing of the reply");
+    }
+
+    /// A record reads back as it was written, and a run shorter than a record reads as none.
+    #[test]
+    fn a_record_reads_back_as_written_and_a_short_run_as_none() {
+        let record = Record {
+            order: 7,
+            priority: Priority::Control,
+            reliable: false,
+            sn: 0x0102_0304_0506,
+            reply: true,
+            len: 513,
+        };
+        let bytes = record.bytes();
+        assert_eq!(Record::read(&bytes), Some(record));
+        assert_eq!(Record::read(&bytes[..Record::BYTES - 1]), None);
     }
 
     /// A lane's storage gives each datagram one contiguous run, takes a run that does not fit
