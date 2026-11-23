@@ -1198,8 +1198,6 @@ pub mod wire;
 /// `poll_and_dispatch_one` + `drive_session_until_terminal` loop
 /// machinery that constructs these values.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-135 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod driver_loop;
 
 /// R311y784 / R311y787 — the multicast departure observer surface
