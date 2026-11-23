@@ -114,12 +114,14 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
     let engine = open(&router);
     let (subscriber, count) = subscribe(&engine, "demo/l/same", Locality::SessionLocal);
     let same = loop {
-        let listener = engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/l/other",
-            Arc::new(|_: bool| {}),
-            false,
-        );
+        let listener = engine
+            .declare_matching_listener(
+                FilterPlane::Subscribers,
+                "demo/l/other",
+                Arc::new(|_: bool| {}),
+                false,
+            )
+            .expect("a session with rows left declares");
         assert!(
             listener <= u64::from(subscriber),
             "the listeners count up from 1"
@@ -150,12 +152,14 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     let listen = |count_local: bool| {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
-        let id = engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/l/x",
-            Arc::new(move |matching| into.lock().unwrap().push(matching)),
-            count_local,
-        );
+        let id = engine
+            .declare_matching_listener(
+                FilterPlane::Subscribers,
+                "demo/l/x",
+                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                count_local,
+            )
+            .expect("a session with rows left declares");
         (id, log)
     };
     let (_, counting) = listen(true);

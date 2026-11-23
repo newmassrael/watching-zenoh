@@ -1235,13 +1235,10 @@ pub(crate) fn declare_queryable_on(
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key
             // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-            key.retraction_naming(session),
+            key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
             sink,
         )
-        // The session holds no more queryables: its table is at the limit it opened
-        // under, or its ids are spent. Every engine this build opens a session on
-        // answers queries when the build has queryables.
-        .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
     Ok((id, key))
 }
 

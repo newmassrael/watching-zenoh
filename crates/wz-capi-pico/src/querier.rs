@@ -429,6 +429,7 @@ pub unsafe extern "C" fn z_declare_querier(
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
             &key,
+            &key.wire(Arc::as_ref(&engine)),
             qos.destination.allows_local(),
         ) {
             Ok(filter) => filter,

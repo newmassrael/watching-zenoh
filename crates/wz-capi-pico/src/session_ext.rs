@@ -54,9 +54,10 @@ pub(crate) struct PicoSessionExt {
     #[cfg(feature = "connectivity")]
     pub(crate) connectivity: Arc<Connectivity>,
     /// The engine whose faces this session's connectivity hub watches, and the id it
-    /// watches under, so the watch can be dropped with the session.
+    /// watches under, so the watch can be dropped with the session; the engine's refusal when it
+    /// would not watch, which the open answers by refusing the session.
     #[cfg(feature = "connectivity")]
-    watch: (Arc<Engine>, u64),
+    watch: (Arc<Engine>, Result<u64, wz_capi_port::Refusal>),
     /// Whether the admin space runs, and what it reports as the transport's link.
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
@@ -184,6 +185,14 @@ impl PicoSessionExt {
         }
     }
 
+    /// Why the engine would not tell the connectivity plane its faces: `None` when it watches
+    /// them. The open refuses a session for which this is `Some`, whose plane would list no
+    /// transport and tell no listener anything.
+    #[cfg(feature = "connectivity")]
+    pub(crate) fn face_watch_refused(&self) -> Option<wz_capi_port::Refusal> {
+        self.watch.1.err()
+    }
+
     /// Why the session's clock was refused (`NodeHlc::clock_refused`): the bound
     /// `UHLC_MAX_DELTA_MS` states is one the clock does not honour. `None` for a clock that was
     /// built. The open refuses a session for which this is `Some`.
@@ -216,7 +225,9 @@ impl Drop for PicoSessionExt {
     /// session's listener maps.
     fn drop(&mut self) {
         let (engine, id) = &self.watch;
-        SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
+        if let Ok(id) = id {
+            SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
+        }
         self.connectivity.shutdown();
     }
 }
@@ -236,6 +247,33 @@ mod tests {
     use wz_session_core::policy::ClockQualityStamping;
 
     const ZID: [u8; 16] = [0x2d; 16];
+
+    /// An engine that will not watch its faces, its session closed before the watch is asked,
+    /// leaves the state with that refusal, which the open answers by refusing the session. The
+    /// CONTROL is the state of an open session, which watches.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_face_watch_the_engine_refuses_is_kept_for_the_open_to_answer() {
+        let policy = SessionPolicy::defaults();
+        assert_eq!(ext_under(policy).face_watch_refused(), None, "CONTROL");
+        let shared = Arc::new(
+            SharedSession::new(TokioTime::new(), ZID.into(), policy).expect("test host entropy"),
+        );
+        shared
+            .closed_latch()
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let ext = PicoSessionExt::new(
+            WhatAmI::Peer,
+            &ZID,
+            policy,
+            SessionLimits::defaults(),
+            &shared.as_engine(),
+        );
+        assert_eq!(
+            ext.face_watch_refused(),
+            Some(wz_capi_port::Refusal::Closed)
+        );
+    }
 
     /// The session's pico state under `policy`, as its open makes it.
     fn ext_under(policy: SessionPolicy) -> PicoSessionExt {

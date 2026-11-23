@@ -29,7 +29,6 @@ use crate::result::{
     Z_ERR_NULL, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
-use crate::write_filter::PicoSession;
 
 /// Whether `key` is no longer than the longest key a row of a session's tables stores: the
 /// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
@@ -392,19 +391,14 @@ impl DeclaredKeyexpr {
     }
 
     /// What an entity held on this key names when it retracts itself, or `None`
-    /// when it retracts by id alone.
+    /// when it retracts by id alone, on a session whose role is `mode` and whose
+    /// registry is `shared`: the two facts it reads, which a door has in the
+    /// session's handle and a composite that holds the registry WEAKLY has apart.
     ///
     /// pico names the entity's OWN key in every mode but client (`vendor/zenoh-pico/src/net/primitives.c`
     /// @ `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`),
     /// and that key is the one this is called on: for a subscriber it is not
     /// the key the subscription was announced on, which is the caller's.
-    pub(crate) fn retraction_naming(&self, session: &PicoSession) -> Option<RetractionKey> {
-        self.retraction_naming_in(session.mode, Arc::as_ref(&session.engine))
-    }
-
-    /// [`Self::retraction_naming`] for a caller that holds the two facts it
-    /// reads — the role and the registry — without a whole [`PicoSession`]: one
-    /// that has to hold the registry WEAKLY, because the registry holds it.
     pub(crate) fn retraction_naming_in(
         &self,
         mode: WhatAmI,
@@ -492,12 +486,11 @@ impl DeclaredKeyexpr {
                 declaration: None,
             });
         }
-        // A session that holds no more declarations, its table at the limit it opened under or
-        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing; the key
-        // goes back with `text`.
-        let Some(id) = shared.acquire_keyexpr(prefix) else {
-            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
+        // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
+        // back with `text`.
+        let id = shared.acquire_keyexpr(prefix).map_err(|refused| {
+            crate::result::refusal_code(refused, crate::result::Door::Keyexpr)
+        })?;
         Ok(Self {
             literal: text,
             declaration: Some(Arc::new(WireDeclaration {

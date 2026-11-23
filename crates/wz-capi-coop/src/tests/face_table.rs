@@ -63,7 +63,7 @@ fn a_declaration_and_a_put_reach_every_face() {
             SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
     };
-    subscribe("demo/early/**");
+    subscribe("demo/early/**").expect("a session with ids left declares");
     until(&engine, "the first router to see it", || {
         first.seen(|s| s.declares) >= 1
     });
@@ -81,7 +81,7 @@ fn a_declaration_and_a_put_reach_every_face() {
     });
 
     let (before_first, before_second) = (first.seen(|s| s.declares), second.seen(|s| s.declares));
-    subscribe("demo/late/**");
+    subscribe("demo/late/**").expect("a session with ids left declares");
     until(&engine, "both routers to see the later one", || {
         first.seen(|s| s.declares) > before_first && second.seen(|s| s.declares) > before_second
     });
@@ -146,7 +146,7 @@ fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
             })
         },
     );
-    assert_eq!(issued, Some(2), "one leg for each face");
+    assert_eq!(issued, Ok(2), "one leg for each face");
     assert!(
         legs.lock().unwrap().ended.is_empty(),
         "CONTROL: both legs are open until their routers' Finals come"
@@ -180,12 +180,14 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
     };
     let told = Arc::new(Mutex::new(Vec::new()));
     let into = told.clone();
-    engine.declare_matching_listener(
-        plane,
-        "demo/m/x",
-        Arc::new(move |matching| into.lock().unwrap().push(matching)),
-        false,
-    );
+    engine
+        .declare_matching_listener(
+            plane,
+            "demo/m/x",
+            Arc::new(move |matching| into.lock().unwrap().push(matching)),
+            false,
+        )
+        .expect("a session with rows left declares");
     let filter = engine
         .declare_write_filter(
             plane,

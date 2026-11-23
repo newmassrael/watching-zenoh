@@ -36,41 +36,57 @@ use wz_session_core::{
 /// values, the spec §4 table, and the deploy.yaml block no longer drift
 /// because there is now one SCE-owned, build-validated source.
 ///
-/// The emit types the slot dims as `usize`, so they bind directly as the
-/// dispatcher const generics (no cast). The AP machine's dims are larger
-/// than the MCU's (32 / 1 MiB vs 4 / 4096) — the tokio host IS the AP
-/// node, so it correctly uses the AP machine's pool. The AP slot size is
-/// the per-chain reassembly CAP, and it must exceed the link's batch
-/// budget by a real margin or fragmentation is unusable end-to-end: a
-/// chain only forms above the batch, so a cap equal to it leaves no
-/// window (see `sources/network/reassembly_pool_ap.scxml`).
+/// The slot COUNT is how many chains the Router stages at once. The slot SIZE
+/// is not a bound on a chain here: see [`REASSEMBLY_CHAIN_CAP`].
 const REASSEMBLY_SLOTS: usize = crate::reassembly_pool_ap::SLOT_COUNT;
-/// `pub(crate)` because the TX side reads the SAME constant: the sender
+
+/// The per-chain bound the AP Router type is built with: none of its own.
+///
+/// What bounds an AP chain is the session's configured
+/// `transport/link/rx/max_message_size`, upstream's 1 GiB unless a deploy says
+/// otherwise (`commons/zenoh-config/src/defaults.rs` @
+/// `max_message_size: 2_usize.pow(30),`), which the drive loops push into the
+/// Router (`ReassemblyDispatcher::set_max_message_bytes`) and which the
+/// Router reads as the smaller of it and this constant. Upstream bounds a chain
+/// by that value and by nothing else: its defragmentation buffer is made with
+/// it as its capacity and grows as fragments arrive
+/// (`io/zenoh-transport/src/manager.rs` @
+/// `defrag_buff_size: *link_rx.max_message_size(),`).
+///
+/// Until the fan-in lane measured it, this was the AP pool's slot size,
+/// 1 MiB: a configured value above it was read as 1 MiB, so every message
+/// larger than that was dropped by an AP receiver and refused by an AP sender
+/// (4,000,000-byte samples arrived 0% wherever wz was on either end). The slot
+/// size is the reserved arena's unit, not a message size: the default arena
+/// stages each chain in a heap buffer that grows with it
+/// (`wz_session_core::chain_staging::HeapStaging`), and the reserved one
+/// stages a chain in its slot until the chain outgrows it
+/// (`crate::zero_copy::PooledStaging`). Neither has a reason to refuse a
+/// chain the configuration admits.
+///
+/// Public, and read by the TX side, because the sender's bound is the SAME constant: the sender
 /// refuses a chain this profile could not rejoin
 /// (`SessionLinkActions::set_max_reassembly_bytes`, wired in
-/// [`crate::session_glue::new_session_actions`]), and that refusal is only
-/// exact while the bound it tests and the bound [`TokioReassembly`] enforces
-/// are one value rather than two that agree today.
+/// [`crate::session_glue::new_session_actions`], and the node's own publish,
+/// `RouterForwarder::publish_with`), and that refusal is only exact while the
+/// bound it tests and the bound [`TokioReassembly`] enforces are one value
+/// rather than two that agree today. With no bound of the build's, neither
+/// refuses, as upstream's sender does not.
 ///
-/// That bound is the BUILD's, not a session's configured
+/// The sender's bound is the BUILD's, not a session's configured
 /// `transport/link/rx/max_message_size`: the configured value says what this
 /// node accepts, and a sender refusing by it would refuse a message to a peer
 /// configured to take more. Upstream's key is receive-only.
-pub(crate) const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
-
-/// The largest `transport/link/rx/max_message_size` this build applies: its
-/// reassembly slot. A configured value above it is read as it, because a chain
-/// cannot outgrow the slot it stages in; one at or below it holds as written
-/// ([`wz_session_core::reassembly_dispatch::ReassemblyDispatcher::max_message_bytes`]).
-pub const RX_MAX_MESSAGE_SIZE_CEILING: usize = REASSEMBLY_SLOT_SIZE;
+pub const REASSEMBLY_CHAIN_CAP: usize = usize::MAX;
 
 /// The AP tokio host's reassembly Router type. The std `alloc` backing
-/// keeps each chain's staging buffer on the heap; `REASSEMBLY_SLOT_SIZE`
-/// is the per-chain cap the dispatcher enforces explicitly (so reassembly
-/// is bounded on the AP profile too). Shared by the unicast drive loop and
+/// keeps each chain's staging buffer on the heap, so an idle chain costs
+/// nothing and a live one what it staged; the session's configured
+/// `transport/link/rx/max_message_size` is the per-chain bound the dispatcher
+/// enforces ([`REASSEMBLY_CHAIN_CAP`]). Shared by the unicast drive loop and
 /// the multicast drive loop — both construct a `TokioReassembly::new(...)`.
 #[cfg(not(feature = "runtime-zero-copy"))]
-pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>;
+pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_CHAIN_CAP>;
 
 /// R311y589 — the same Router over the RESERVED arena. `runtime-zero-copy`
 /// swaps only the staging: the chain FSM, the SN arithmetic, the per-peer quota
@@ -78,16 +94,17 @@ pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLO
 /// `the_two_arenas_reassemble_the_same_bytes` a meaningful comparison rather
 /// than two implementations that happen to agree.
 ///
-/// The dims are the SAME constants the arena checks itself against
-/// (`crate::reassembly_pool_ap::SLOT_COUNT` / `SLOT_SIZE`), reached through the
-/// Router's aliases above — so a Router and a pool that disagree cannot be
-/// built, and the assertion in `PooledStaging::new` is the backstop for a
-/// deploy that writes its own dims.
+/// The slot count is the SAME constant the arena checks itself against
+/// (`crate::reassembly_pool_ap::SLOT_COUNT`), so a Router and a pool that
+/// disagree cannot be built, and the assertion in `PooledStaging::new` is the
+/// backstop for a deploy that writes its own dims. The chain bound is the
+/// default arm's: a chain longer than a slot leaves its slot for a heap buffer
+/// (`crate::zero_copy::PooledStaging`).
 #[cfg(feature = "runtime-zero-copy")]
 pub type TokioReassembly = ReassemblyDispatcher<
     REASSEMBLY_SLOTS,
-    REASSEMBLY_SLOT_SIZE,
-    crate::zero_copy::PooledStaging<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>,
+    REASSEMBLY_CHAIN_CAP,
+    crate::zero_copy::PooledStaging<REASSEMBLY_SLOTS, REASSEMBLY_CHAIN_CAP>,
 >;
 
 /// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) sourced

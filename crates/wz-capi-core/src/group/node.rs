@@ -184,7 +184,7 @@ impl NodeGroup {
         });
         let subscriber = engine
             .declare_subscriber_on_wire(&event_key, WireKey::literal(), Locality::Any, None, sink)
-            .ok_or(NodeGroupError::Refused("the event subscriber was refused"))?;
+            .map_err(|_| NodeGroupError::Refused("the event subscriber was refused"))?;
 
         // The member's own record, served from its own key to whoever asks.
         let record = encode_member(&member);
@@ -198,7 +198,7 @@ impl NodeGroup {
                 let _ = out.reply_keyed(&served, &record);
             }) as QueryCallback
         });
-        let Some(queryable) = engine.declare_queryable_on_wire(
+        let Ok(queryable) = engine.declare_queryable_on_wire(
             &record_key,
             WireKey::literal(),
             true,
@@ -242,6 +242,7 @@ impl NodeGroup {
                         true
                     }),
                 )
+                .ok()
             })
             .flatten();
         held.watchdog = Some(
@@ -253,7 +254,7 @@ impl NodeGroup {
                     true
                 }),
             )
-            .ok_or(NodeGroupError::Refused("the watchdog could not be started"))?,
+            .map_err(|_| NodeGroupError::Refused("the watchdog could not be started"))?,
         );
 
         Ok(Self {

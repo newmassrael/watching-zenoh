@@ -34,6 +34,10 @@ use core::task::Waker;
 use alloc::boxed::Box;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use core::alloc::Layout;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use core::ptr;
 use critical_section::{CriticalSection, Mutex};
 
 /// The due wakers [`TimerQueue::pop_expired`] takes out in one section: a few, because they are
@@ -121,7 +125,16 @@ pub struct TimerQueue {
     slots: Slots,
     next_seq: Mutex<Cell<u64>>,
     refused: Mutex<Cell<u32>>,
+    /// Places a deadline no entry holds in an entry of its own: a table that grows has it
+    /// (`grow_by_one`), and only that table names it, so a runtime whose table is reserved links
+    /// none of the growth.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    grow: Option<GrowFn>,
 }
+
+/// Place a deadline in a new entry of the table, or hand it back.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+type GrowFn = fn(&Slots, CriticalSection<'_>, TimerEntry) -> Option<TimerEntry>;
 
 impl TimerQueue {
     fn over(slots: Slots) -> Self {
@@ -129,22 +142,26 @@ impl TimerQueue {
             slots,
             next_seq: Mutex::new(Cell::new(0)),
             refused: Mutex::new(Cell::new(0)),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            grow: None,
         }
     }
 
     /// A table that grows by an entry when every entry is taken.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn growing() -> Self {
-        Self::over(Slots::Growing(Mutex::new(RefCell::new(Vec::new()))))
+        let mut queue = Self::over(Slots::Growing(Mutex::new(RefCell::new(Vec::new()))));
+        queue.grow = Some(grow_by_one);
+        queue
     }
 
     /// `timers` entries, reserved now: a deadline past them is refused, counted, and none
     /// allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(timers: usize) -> Self {
-        Self::over(Slots::Reserved(Mutex::new(RefCell::new(
-            (0..timers).map(|_| TimerSlot::new()).collect(),
-        ))))
+        Self::over(Slots::Reserved(Mutex::new(RefCell::new(empty_slots(
+            timers,
+        )))))
     }
 
     /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
@@ -190,10 +207,13 @@ impl TimerQueue {
                 return true;
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            if let Slots::Growing(grown) = &self.slots {
-                grown.borrow(cs).borrow_mut().push(TimerSlot(Some(entry)));
-                return true;
-            }
+            let entry = match self.grow {
+                Some(grow) => match grow(&self.slots, cs, entry) {
+                    Some(back) => back,
+                    None => return true,
+                },
+                None => entry,
+            };
             // The entry was not placed: its waker goes with it.
             drop(entry);
             let refused = self.refused.borrow(cs);
@@ -269,6 +289,42 @@ impl TimerQueue {
     }
 }
 
+/// Place `entry` in a new entry of a table that grows; hand it back from a reserved one.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn grow_by_one(slots: &Slots, cs: CriticalSection<'_>, entry: TimerEntry) -> Option<TimerEntry> {
+    match slots {
+        Slots::Growing(grown) => {
+            grown.borrow(cs).borrow_mut().push(TimerSlot(Some(entry)));
+            None
+        }
+        Slots::Reserved(_) => Some(entry),
+    }
+}
+
+/// `count` empty entries in one allocation of their size; none for a count past the address
+/// space, whose table then refuses every sleep an entry, counted.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn empty_slots(count: usize) -> Box<[TimerSlot]> {
+    let layout = match Layout::array::<TimerSlot>(count) {
+        Ok(layout) if layout.size() > 0 => layout,
+        _ => return Box::default(),
+    };
+    // SAFETY: the layout's size is not zero.
+    let block = unsafe { alloc::alloc::alloc(layout) };
+    if block.is_null() {
+        alloc::alloc::handle_alloc_error(layout);
+    }
+    let first = block.cast::<TimerSlot>();
+    for at in 0..count {
+        // SAFETY: `at` is below `count`, so the place is one of the allocation's entries, aligned
+        // for one, written once here.
+        unsafe { first.add(at).write(TimerSlot::new()) };
+    }
+    // SAFETY: the global allocator made the allocation with the layout a boxed slice of `count`
+    // entries has (`Layout::array`), and every entry is written above.
+    unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(first, count)) }
+}
+
 /// The entry of `slots` due first at `until_us` or before, ties in registration order: its index
 /// and its deadline. One body for the pass that wakes what is due and for the look at what is next.
 #[inline(never)]
@@ -286,4 +342,55 @@ fn earliest(slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
         }
     }
     best.map(|(index, deadline_us, _)| (index, deadline_us))
+}
+
+#[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
+mod tests {
+    use super::*;
+    use core::task::{RawWaker, RawWakerVTable};
+
+    /// A waker that does nothing.
+    fn noop_waker() -> Waker {
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(core::ptr::null(), &VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+        // SAFETY: every function of the vtable ignores its data pointer.
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
+    }
+
+    /// A reserved table has the entries it was told, all empty; a count past the address space
+    /// makes none, and a sleep then finds no entry and is refused, counted.
+    #[test]
+    fn a_reserved_table_has_its_entries_and_one_past_the_address_space_has_none() {
+        let slots = empty_slots(3);
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|slot| slot.0.is_none()));
+        assert_eq!(empty_slots(0).len(), 0);
+        assert_eq!(empty_slots(usize::MAX).len(), 0);
+        let queue = TimerQueue::reserved(usize::MAX);
+        assert_eq!(queue.capacity(), 0);
+        assert!(!queue.register(5, noop_waker()));
+        assert_eq!(queue.refusals(), 1);
+    }
+
+    /// Only a table that grows places a deadline no entry holds; a reserved one refuses it,
+    /// counted, and keeps the entries it was made with.
+    #[test]
+    fn only_a_growing_table_places_a_deadline_no_entry_holds() {
+        let reserved = TimerQueue::reserved(1);
+        assert!(reserved.register(1, noop_waker()));
+        assert!(
+            !reserved.register(2, noop_waker()),
+            "the one entry is taken"
+        );
+        assert_eq!((reserved.capacity(), reserved.refusals()), (1, 1));
+        let growing = TimerQueue::growing();
+        assert!(growing.register(1, noop_waker()));
+        assert!(growing.register(2, noop_waker()));
+        assert_eq!((growing.capacity(), growing.refusals()), (2, 0));
+        assert_eq!(growing.pending_count(), 2);
+    }
 }

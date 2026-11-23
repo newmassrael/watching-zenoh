@@ -79,6 +79,32 @@ P9. **Measured budgets per area.** The size ledger of section 1 is a gate: each 
 ratchet against zenoh-pico's same area, so a change that grows an area is refused where it grows,
 not only in the total.
 
+P10. **Typed outcomes, no sentinels.** Every operation that can be refused returns
+`Result<Handle, Refusal>` at every layer boundary (L3 to the port, the port to L4). A handle is a
+generation-checked slot index whose index part is `NonZero`, so `Option<Handle>` costs nothing
+and no value of the handle type means "refused". `Refusal` names the cause the caller can act on
+(`TableFull`, `KeyTooLong`, `NoEntityId`, `Closed`, `NotBuilt`); each preset ABI maps it to its
+own codes in ONE table owned by its façade (zenoh-pico: `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for the
+first three, `_Z_ERR_SESSION_CLOSED` for `Closed`). Measured why: a matching listener the
+cooperative engine refused came back as id 0, which the AP engine hands out as a live id, so the
+door could not tell a refusal from a listener and answered `Z_OK` for one that would never be
+called.
+
+P11. **A callback's lifetime is a property of its row.** A row holds its callback in an
+`Fn`-shaped form (a C `(call, context, drop)` triple, or a shared Rust `Fn`), so a call is a
+shared borrow and reentrance is sound, as zenoh-pico's is. Undeclaring a row returns after the
+last running call of it has returned and its `drop` has run (zenoh-pico holds the entity's lock
+across the call and clears the closure under it). The row, not each entity's door, carries that
+protocol, so no entity can lack it. Measured why: the matching listener was the one entity whose
+door did not wait, and zenoh-pico's own test of drop-on-undeclare found it.
+
+P12. **zenoh-pico's programs are the behavioural specification.** Its API tests and examples run
+on the release library in the environment its own CI gives them (a network namespace per
+program, `lo` with multicast on). A program is judged only where it passes on zenoh-pico in that
+same run (the control). A wz failure where the control passes is a defect of wz whatever its
+cause. A program that fails on zenoh-pico itself by its construction is listed with that reason
+and its feature is measured by a sibling program; it is never retried until it passes.
+
 ## 3. The layers
 
 ```

@@ -1,7 +1,7 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 2555fda7c976a03343cc52e659ae915a6be0f1960e1787fa32b64966a89aa263
+// source-hash: 56cdd99a7e80c40b7541b0458889e9339d6d8a31836bb7ed3a682e30ca2482a3
 // source: reassembly_pool_ap.scxml
-// SCE-MAP: reassembly_pool_ap.scxml:59 :: _forge_body
+// SCE-MAP: reassembly_pool_ap.scxml:67 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="buffer-pool")
 // Runtime: self-contained on (rust, std) — no SCE-side helper crate.

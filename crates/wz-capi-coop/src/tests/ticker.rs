@@ -248,8 +248,9 @@ fn a_closed_session_starts_no_job() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     SessionDrive::close(&*engine);
-    assert!(
-        engine.start_ticker(10, Arc::new(|| true)).is_none(),
+    assert_eq!(
+        engine.start_ticker(10, Arc::new(|| true)),
+        Err(wz_capi_port::Refusal::Closed),
         "there is no session to step a job from"
     );
 }

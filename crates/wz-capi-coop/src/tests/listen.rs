@@ -114,12 +114,14 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
-    listener.declare_subscriber_on_wire("demo/l/**", WireKey::literal(), Locality::Any, None, {
-        let into = into.clone();
-        SubscriberSink::shared(move |sample: &dyn SampleView| {
-            into.lock().unwrap().push(sample.payload().to_vec());
+    listener
+        .declare_subscriber_on_wire("demo/l/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
         })
-    });
+        .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -183,7 +185,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
             })
         },
     );
-    assert_eq!(issued, Some(2), "one leg for each face the listener holds");
+    assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
     eventually("both legs to end", || *ended.lock().unwrap() == 2);
     let mut answers = replies.lock().unwrap().clone();
     answers.sort();
@@ -322,12 +324,14 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
-    listener.declare_subscriber_on_wire("demo/u/**", WireKey::literal(), Locality::Any, None, {
-        let into = into.clone();
-        SubscriberSink::shared(move |sample: &dyn SampleView| {
-            into.lock().unwrap().push(sample.payload().to_vec());
+    listener
+        .declare_subscriber_on_wire("demo/u/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
         })
-    });
+        .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -415,12 +419,14 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let endpoint = engine.listening().pop().expect("one port is bound");
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
-        let count = count.clone();
-        SubscriberSink::shared(move |_sample: &dyn SampleView| {
-            count.fetch_add(1, Ordering::SeqCst);
+    engine
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
         })
-    });
+        .expect("the session declares the subscriber");
     // The client's open waits for the listener's answer, and this thread is what steps the
     // listener: the client opens on a thread of its own meanwhile.
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
@@ -488,12 +494,14 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let endpoint = engine.listening().pop().expect("one port is bound");
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
-        let count = count.clone();
-        SubscriberSink::shared(move |_sample: &dyn SampleView| {
-            count.fetch_add(1, Ordering::SeqCst);
+    engine
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
         })
-    });
+        .expect("the session declares the subscriber");
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
     let peer = dialing.join().expect("the client opens");
@@ -559,7 +567,8 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
         SubscriberSink::shared(move |_sample: &dyn SampleView| {
             count.fetch_add(1, Ordering::SeqCst);
         })
-    });
+    })
+    .expect("the session declares the subscriber");
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1
     });

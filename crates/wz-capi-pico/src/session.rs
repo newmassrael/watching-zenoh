@@ -1547,6 +1547,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 drive.close();
                 return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
             }
+            // The engine would not tell the connectivity plane its faces.
+            #[cfg(feature = "connectivity")]
+            if let Some(refused) = ext.face_watch_refused() {
+                drop(ext);
+                drive.close();
+                return crate::result::refusal_code(refused, crate::result::Door::Session);
+            }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
@@ -1666,7 +1673,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // pico's config carries ONE listen locator, so the set is that one or none, unless it names
     // the group the session joins.
     #[cfg(feature = "multicast-transport")]
-    let (listen, connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen {
+    let (mut listen, mut connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen
+    {
         Some(endpoint) if joins_a_group => (
             Vec::new(),
             Vec::new(),
@@ -1686,7 +1694,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         listen => (listen.into_iter().collect(), request.connect, Vec::new()),
     };
     #[cfg(not(feature = "multicast-transport"))]
-    let (listen, connect, groups): (
+    let (mut listen, mut connect, groups): (
         Vec<String>,
         Vec<String>,
         Vec<wz_capi_port::group::GroupJoin>,
@@ -1695,6 +1703,15 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         request.connect,
         Vec::new(),
     );
+    // The unicast endpoints as pico's links read them, each read over its own text: the engine is
+    // handed what pico's link of the scheme reads, so a key that link does not know (`#iface=` on
+    // `tcp/`) is left out as pico leaves it, and what it reads stays for the engine to carry out
+    // or refuse.
+    for endpoint in listen.iter_mut().chain(connect.iter_mut()) {
+        if let Err(code) = crate::endpoint::engine_endpoint(endpoint) {
+            return code;
+        }
+    }
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
@@ -1867,6 +1884,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         drop(ext);
         drive.close();
         return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+    }
+    // The engine would not tell the connectivity plane its faces.
+    #[cfg(feature = "connectivity")]
+    if let Some(refused) = ext.face_watch_refused() {
+        drop(ext);
+        drive.close();
+        return crate::result::refusal_code(refused, crate::result::Door::Session);
     }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2343,11 +2367,14 @@ pub unsafe extern "C" fn zp_send_join(
 ) -> ZResult {
     guarded(|| {
         let live = live_session_result(zs);
-        // Either engine's groups, through the port.
+        // Either engine's groups, through the port; a session closed meanwhile answers as one
+        // closed before the call.
         #[cfg(feature = "multicast-transport")]
         if live == Z_OK {
             if let Some(handle) = session_handle(zs) {
-                engine_ref(handle).send_join_on_groups();
+                if let Err(refused) = engine_ref(handle).send_join_on_groups() {
+                    return crate::result::refusal_code(refused, crate::result::Door::Session);
+                }
             }
         }
         live

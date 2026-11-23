@@ -197,10 +197,16 @@ fn multicast_message_len(msg: &[u8]) -> Option<usize> {
         // transport-message parse (it owns nothing a JOIN carries) cannot answer.
         Some(wire_const::T_MID_JOIN) => crate::join_decode::join_message_len(msg)
             .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
-        _ => crate::inbound::parse_inbound_consuming(msg)
-            .ok()
-            .map(|(_, consumed)| consumed)
-            .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
+        // A KeepAlive, a Close and an OAM are stepped over by their view: the message was
+        // dispatched already, and an owned decode of it here would copy an OAM's body to learn
+        // its length.
+        _ => match crate::inbound::control_extent(msg) {
+            Some(read) => read.ok(),
+            None => crate::inbound::parse_inbound_consuming(msg)
+                .ok()
+                .map(|(_, consumed)| consumed),
+        }
+        .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
     }
 }
 
@@ -2492,5 +2498,63 @@ mod batch_walk_tests {
 
         let again = arrivals_of(&mut d, &local, &unit, 3_000);
         assert_eq!(again.len(), 1, "a readmission is an arrival, not a refresh");
+    }
+}
+
+/// The walk of a group datagram steps over a Close, a KeepAlive and a transport OAM by the view of
+/// each, as far as the owned decode reads it, and stops where that decode refuses.
+#[cfg(test)]
+mod control_extent_tests {
+    use super::multicast_message_len;
+    use crate::inbound::{control_extent, parse_inbound_consuming};
+    #[cfg(any(feature = "codec-keep-alive", feature = "alloc"))]
+    use crate::wire_const::FLAG_T_Z;
+    #[cfg(feature = "codec-keep-alive")]
+    use crate::wire_const::T_MID_KEEP_ALIVE;
+    #[cfg(feature = "alloc")]
+    use crate::wire_const::T_MID_OAM;
+    use crate::wire_const::{FLAG_T_CLOSE_S, T_MID_CLOSE, T_MID_FRAME};
+
+    /// A byte behind the message, so that a known extent is short of the unit.
+    const NEXT: u8 = 0x1E;
+
+    /// `unit` is stepped over by its view to where its owned decode ends.
+    fn steps_as_decoded(unit: &[u8]) {
+        let owned = parse_inbound_consuming(unit).ok().map(|(_, used)| used);
+        assert!(owned.is_some(), "{unit:02x?}: the fixture decodes");
+        let viewed = control_extent(unit).expect("a control message").ok();
+        assert_eq!(viewed, owned, "{unit:02x?}");
+        assert_eq!(multicast_message_len(unit), owned, "{unit:02x?}");
+    }
+
+    #[test]
+    fn a_close_and_a_keep_alive_are_stepped_over_as_far_as_their_decode_reads() {
+        steps_as_decoded(&[T_MID_CLOSE, 0x00, NEXT]);
+        steps_as_decoded(&[T_MID_CLOSE | FLAG_T_CLOSE_S, 0x07, NEXT]);
+        #[cfg(feature = "codec-keep-alive")]
+        {
+            steps_as_decoded(&[T_MID_KEEP_ALIVE, NEXT]);
+            steps_as_decoded(&[T_MID_KEEP_ALIVE | FLAG_T_Z, 0x1F, NEXT]);
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_oam_is_stepped_over_by_its_view_and_a_reserved_one_ends_the_walk() {
+        steps_as_decoded(&[T_MID_OAM, 0x01, NEXT]);
+        steps_as_decoded(&[T_MID_OAM | 0x20, 0x01, 0x05, NEXT]);
+        steps_as_decoded(&[T_MID_OAM | 0x40, 0x01, 0x02, 0xAB, 0xCD, NEXT]);
+        steps_as_decoded(&[T_MID_OAM | FLAG_T_Z, 0x01, 0x42, 0x02, 0xAB, 0xCD, NEXT]);
+        let reserved = [T_MID_OAM | 0x60, 0x01, NEXT];
+        assert!(parse_inbound_consuming(&reserved).is_err());
+        assert!(matches!(control_extent(&reserved), Some(Err(_))));
+        assert_eq!(multicast_message_len(&reserved), None);
+    }
+
+    #[test]
+    fn a_frame_is_left_to_the_walk_and_ends_it() {
+        let unit = [T_MID_FRAME, 0x01, NEXT];
+        assert!(control_extent(&unit).is_none());
+        assert_eq!(multicast_message_len(&unit), None);
     }
 }

@@ -53,16 +53,19 @@ fn a_subscriber_sees_the_timestamp_as_the_sessions_policy_says() {
         };
         let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
         let into = seen.clone();
-        engine.declare_subscriber_on_wire("demo/ts/**", WireKey::literal(), Locality::Any, None, {
-            let into = into.clone();
-            SubscriberSink::shared(move |sample: &dyn SampleView| {
-                // Read as the pico ABI reads it (`wz-capi-pico`'s `with_metadata`): where the
-                // view holds it first, since a sample of the delivery lane carries its
-                // timestamp as parts and no hint.
-                let stamped = sample.timestamp_parts().is_some() || sample.timestamp().is_some();
-                into.lock().unwrap().push(stamped);
+        engine
+            .declare_subscriber_on_wire("demo/ts/**", WireKey::literal(), Locality::Any, None, {
+                let into = into.clone();
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    // Read as the pico ABI reads it (`wz-capi-pico`'s `with_metadata`): where the
+                    // view holds it first, since a sample of the delivery lane carries its
+                    // timestamp as parts and no hint.
+                    let stamped =
+                        sample.timestamp_parts().is_some() || sample.timestamp().is_some();
+                    into.lock().unwrap().push(stamped);
+                })
             })
-        });
+            .expect("the session declares the subscriber");
         until(&engine, "the router to see the subscriber", || {
             router.seen(|s| s.declares) >= 1
         });
@@ -112,7 +115,7 @@ fn a_get_sees_the_reply_timestamp_as_the_policy_says_unless_it_chooses() {
                         into.lock().unwrap().push(stamped);
                     })
                 });
-            assert_eq!(issued, Some(1), "one leg, to the router");
+            assert_eq!(issued, Ok(1), "one leg, to the router");
             until(&engine, "the stamped reply", || {
                 !seen.lock().unwrap().is_empty()
             });

@@ -851,16 +851,26 @@ impl Engine {
         }
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
+    /// Hold a declaration of `keyexpr`: its id, or `None` once the engine's id space, the wire's
+    /// `ExprId`, is spent, when the key is used whole as one not worth a declaration is. Any
+    /// other refusal of the engine is an error.
+    fn acquire_keyexpr(&self, keyexpr: &str) -> ZResult<Option<ExprId>> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr),
+            Engine::Tokio(state) => match state.shared.as_engine().acquire_keyexpr(keyexpr) {
+                Ok(id) => Ok(Some(id)),
+                Err(wz_capi_port::Refusal::NoEntityId) => Ok(None),
+                Err(refused) => Err(zerror!(
+                    "the engine refused a key expression declaration: {refused}"
+                )
+                .into()),
+            },
             // A node declares no key expression to its peers and names none by an id on the wire,
             // but it holds the declaration, so that the key is undeclared as it was declared.
-            Engine::Router(router) => router
+            Engine::Router(router) => Ok(router
                 .keys
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .acquire(keyexpr),
+                .acquire(keyexpr)),
         }
     }
 
@@ -1090,16 +1100,17 @@ impl Engine {
     /// Tell `sink` each time a face comes up or goes down, from now on, until
     /// [`Engine::unwatch_faces`] is called with the id returned.
     #[cfg(feature = "unstable")]
-    fn watch_faces(&self, sink: FaceSink) -> u64 {
+    fn watch_faces(&self, sink: FaceSink) -> ZResult<u64> {
         match self {
-            Engine::Router(router) => router
+            Engine::Router(router) => Ok(router
                 .node
                 .forwarder()
-                .watch_faces(tokio_engine::face_sink(sink)),
+                .watch_faces(tokio_engine::face_sink(sink))),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
-                .watch_faces(tokio_engine::face_sink(sink)),
+                .watch_faces(tokio_engine::face_sink(sink))
+                .map_err(|refused| zerror!("the engine refused a face watch: {refused}").into()),
         }
     }
 
@@ -1295,7 +1306,7 @@ impl Engine {
                         ask,
                         destination != Locality::Remote,
                     )
-                    .ok_or_else(|| zerror!("the engine has no entity id left for a publisher"))?;
+                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a publisher {id}, which is more than an id holds")
                         .into()
@@ -1502,7 +1513,7 @@ impl Engine {
                         ask,
                         destination != Locality::Remote,
                     )
-                    .ok_or_else(|| zerror!("the engine has no entity id left for a querier"))?;
+                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a querier {id}, which is more than an id holds")
                         .into()
@@ -1562,7 +1573,9 @@ impl Engine {
                         tokio_engine::matching_sink(callback, notifier),
                         tokio_engine::engine_locality(destination),
                     )
-                    .ok_or_else(|| zerror!("this engine has no matching listener"))?;
+                    .map_err(|refused| {
+                        zerror!("the engine refused a matching listener: {refused}")
+                    })?;
                 Id::try_from(id).map_err(|_| {
                     zerror!(
                         "the engine numbered a matching listener {id}, which is more than an id \
@@ -1722,7 +1735,7 @@ impl Engine {
                     request,
                     Box::new(move |key, _wire, timeout_ms, fan, leg| {
                         let mut leg = || wz_capi_core::faces::face_reply(leg());
-                        Some(shared.liveliness_get_on_links(key, timeout_ms, links, fan, &mut leg))
+                        Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, &mut leg))
                     }),
                 )
             }
@@ -1782,7 +1795,7 @@ impl Engine {
         match *self {}
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> ZResult<Option<ExprId>> {
         match *self {}
     }
 
@@ -1833,7 +1846,7 @@ impl Engine {
     }
 
     #[cfg(feature = "unstable")]
-    fn watch_faces(&self, _sink: FaceSink) -> u64 {
+    fn watch_faces(&self, _sink: FaceSink) -> ZResult<u64> {
         match *self {}
     }
 
@@ -2709,10 +2722,13 @@ mod tokio_engine {
                     });
             }
         }
+        // The node's refusal, made before any face is sent the publication (a codec that cannot
+        // build it, or a message longer than the node may send), is the put's answer, as the
+        // registry's refused leg is (`FanoutError::ExceedsCapacity`).
         let published = forwarder.publish_with(publication.key, &payload, &options);
         published.map_err(|error| {
             zerror!(
-                "the router could not publish on {}: {error:?}",
+                "the router could not publish on {}: {error}",
                 publication.key
             )
             .into()
@@ -3230,10 +3246,9 @@ mod tokio_engine {
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
         drop(leg);
-        match issued {
-            Some(_) => Ok(()),
-            None => Err(zerror!("this engine asks no queries").into()),
-        }
+        issued
+            .map(|_| ())
+            .map_err(|refused| zerror!("the engine refused the query: {refused}").into())
     }
 
     /// Ask the query `request` says as the node's own face of a router node: the router routes
@@ -3468,7 +3483,7 @@ mod tokio_engine {
             u32,
             Option<&CancellableFan>,
             &mut dyn FnMut() -> ReplyCallback,
-        ) -> Option<usize>
+        ) -> Result<usize, wz_capi_port::Refusal>
         + 'a;
 
     /// Ask the liveliness query `request` says through `issue`, handing each token that is alive
@@ -3504,10 +3519,9 @@ mod tokio_engine {
         let mut leg = leg_minter(callback, fan.clone(), ConsolidationMode::None);
         let issued = issue(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
-        match issued {
-            Some(_) => Ok(()),
-            None => Err(zerror!("this engine asks no liveliness queries").into()),
-        }
+        issued
+            .map(|_| ())
+            .map_err(|refused| zerror!("the engine refused the liveliness query: {refused}").into())
     }
 
     /// What mints the callback of each leg of a query: they share what the query holds, and the
@@ -4613,7 +4627,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        let watch = self.engine.watch_faces(sink);
+        let watch = self.engine.watch_faces(sink)?;
         let Ok(id) = Id::try_from(watch) else {
             self.engine.unwatch_faces(watch);
             return Err(zerror!(
@@ -6929,7 +6943,7 @@ impl WireAnchor for SessionInner {
         // declared is held again and a forced declaration is the same call.
         // `None` once the engine's id space, the wire's `ExprId`, is spent: the key is then used
         // whole, as one that is not worth a declaration is.
-        Ok(self.engine.acquire_keyexpr(prefix))
+        self.engine.acquire_keyexpr(prefix)
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
@@ -9300,6 +9314,36 @@ mod tests {
         );
     }
 
+    /// A put the node refuses is the put's own error, and is published nowhere: a node used to
+    /// answer `Ok` whatever it did not send (the fan-in lane, Round 4617). The node refuses a
+    /// publication longer than it may send before any face is sent it; the build's bound is none,
+    /// so the test declares one.
+    #[test]
+    fn a_put_the_node_refuses_is_the_puts_error() {
+        let session = with_the_node(|| open(peer("a1b2fe40")).wait().expect("opens"));
+        let Engine::Router(router) = &*session.0.engine else {
+            panic!("a peer that listens and does not scout is a node");
+        };
+        router.node.forwarder().set_max_reassembly_bytes(100);
+        let error = session
+            .put("demo/refused", vec![0x5Au8; 200])
+            .wait()
+            .expect_err("a put past the node's bound");
+        assert!(error.to_string().contains("demo/refused"), "{error}");
+        session
+            .put("demo/refused", vec![0x5Au8; 20])
+            .wait()
+            .expect("a put within the bound");
+        let publisher = session
+            .declare_publisher("demo/refused")
+            .wait()
+            .expect("declares");
+        assert!(
+            publisher.put(vec![0x5Au8; 200]).wait().is_err(),
+            "a declared publisher's put is refused the same"
+        );
+    }
+
     #[test]
     fn the_router_engine_refuses_a_set_of_links_it_does_not_read() {
         assert!(RouterEngine::refuse_links(Links::Any).is_ok());
@@ -10570,7 +10614,7 @@ mod tests {
                     })
                 },
             );
-            assert!(issued.is_some(), "the engine asks queries");
+            assert!(issued.is_ok(), "the engine asks queries");
             drop(ended);
             // Every callback of a leg drops with its leg, which closes the channel.
             assert_eq!(

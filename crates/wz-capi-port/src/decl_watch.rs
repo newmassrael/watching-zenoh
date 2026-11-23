@@ -22,9 +22,10 @@
 //! The members of a multicast group are not watched: a group carries no declaration of a peer
 //! that the session's links hold.
 //!
-//! The port holds the vocabulary both sides name: the event an engine hands a watch, the sink
-//! an ABI hands the engine, and why an engine refuses. Whether an engine watches at all is the
-//! engine's ([`crate::SessionEngine::declare_decl_watch`]); one that does not refuses by name.
+//! The port holds the vocabulary both sides name: the event an engine hands a watch and the sink
+//! an ABI hands the engine. Whether an engine watches at all is the engine's
+//! ([`crate::SessionEngine::declare_decl_watch`]); one that does not refuses as every declaration
+//! of the port does ([`crate::Refusal`]).
 
 use alloc::sync::Arc;
 
@@ -119,37 +120,6 @@ pub type DeclWatchSink = Arc<dyn Fn(DeclWatchEvent<'_>) + Send + Sync>;
 /// The id of one declaration watch on one session, which undeclares it.
 pub type DeclWatchId = u64;
 
-/// Why an engine did not start a declaration watch. Nothing was installed, and the sink it was
-/// handed is dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclWatchRefused {
-    /// The engine does not watch what a peer declares.
-    NotProvided,
-    /// The engine watches, but was built without the plane of the kind asked for (a build with
-    /// no queryable or no liveliness plane hears no peer's queryable or token).
-    PlaneNotBuilt,
-    /// The session is closed.
-    SessionClosed,
-    /// The session's table of observers of what a peer declares, which a watch is told through,
-    /// is at the bound the session was opened with (`MAX_DECL_OBSERVERS`).
-    Full,
-}
-
-impl core::fmt::Display for DeclWatchRefused {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::NotProvided => "this engine does not watch what the peers of a session declare",
-            Self::PlaneNotBuilt => {
-                "this build does not hear the peers' declarations of that kind of entity"
-            }
-            Self::SessionClosed => "the session is closed",
-            Self::Full => "the session holds as many declaration observers as its bound allows",
-        })
-    }
-}
-
-impl core::error::Error for DeclWatchRefused {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,18 +170,6 @@ mod tests {
                 None,
                 "{bytes:?} is no zid"
             );
-        }
-    }
-
-    #[test]
-    fn every_refusal_says_why() {
-        for refusal in [
-            DeclWatchRefused::NotProvided,
-            DeclWatchRefused::PlaneNotBuilt,
-            DeclWatchRefused::SessionClosed,
-            DeclWatchRefused::Full,
-        ] {
-            assert!(!alloc::format!("{refusal}").is_empty());
         }
     }
 }

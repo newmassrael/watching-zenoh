@@ -8,9 +8,9 @@
 use std::any::Any;
 
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
-    MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
-    SubId, SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
+    PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive, SessionEngine, SubId,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
@@ -202,8 +202,11 @@ impl SessionEngine for SharedSession {
     }
 
     #[cfg(feature = "multicast-transport")]
-    fn send_join_on_groups(&self) -> usize {
-        SharedSession::send_join_on_groups(self)
+    fn send_join_on_groups(&self) -> Result<usize, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(SharedSession::send_join_on_groups(self))
     }
 
     fn listen_locators(&self) -> Vec<String> {
@@ -238,8 +241,11 @@ impl SessionEngine for SharedSession {
         all
     }
 
-    fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> u64 {
-        SharedSession::watch_faces(self, sink)
+    fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> Result<u64, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(SharedSession::watch_faces(self, sink))
     }
 
     fn unwatch_faces(&self, id: u64) -> bool {
@@ -256,7 +262,7 @@ impl SessionEngine for SharedSession {
         &self,
         plane: wz_capi_port::DeclPlane,
         sink: wz_capi_port::DeclWatchSink,
-    ) -> Result<wz_capi_port::DeclWatchId, wz_capi_port::DeclWatchRefused> {
+    ) -> Result<wz_capi_port::DeclWatchId, Refusal> {
         SharedSession::declare_decl_watch(self, plane, sink)
     }
 
@@ -305,23 +311,25 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
-        SharedSession::declare_subscriber_on_wire(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            allowed_origin,
-            retraction,
-            crate::faces::face_sink(sink),
-        )
+    ) -> Result<SubId, Refusal> {
+        self.declared(|| {
+            SharedSession::declare_subscriber_on_wire(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                allowed_origin,
+                retraction,
+                crate::faces::face_sink(sink),
+            )
+        })
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
         SharedSession::undeclare_subscriber(self, id)
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
-        SharedSession::acquire_keyexpr(self, keyexpr.to_owned())
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+        self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
 
     fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
@@ -338,14 +346,14 @@ impl SessionEngine for SharedSession {
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId {
-        SharedSession::declare_plane_matching_listener(
+    ) -> Result<MatchId, Refusal> {
+        Ok(SharedSession::declare_plane_matching_listener(
             self,
             plane,
             keyexpr.to_owned(),
             sink,
             count_local,
-        )
+        ))
     }
 
     fn declare_matching_listener_in(
@@ -354,8 +362,8 @@ impl SessionEngine for SharedSession {
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
-        Some(SharedSession::declare_matching_listener_in(
+    ) -> Result<MatchId, Refusal> {
+        Ok(SharedSession::declare_matching_listener_in(
             self,
             plane,
             keyexpr.to_owned(),
@@ -386,8 +394,14 @@ impl SessionEngine for SharedSession {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, Refusal> {
+        // A closed session declares nothing: a filter on it would hold every write back for good.
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        // The registry refuses a filter for want of an entity id alone.
         SharedSession::declare_write_filter(self, plane, keyexpr.to_owned(), wire, ask, count_local)
+            .ok_or(Refusal::NoEntityId)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {
@@ -438,16 +452,18 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Option<wz_capi_port::QblId> {
-        self.declare_port_queryable_on_links(
-            keyexpr.to_owned(),
-            wire,
-            complete,
-            allowed_origin,
-            LinkRestriction::Any,
-            retraction,
-            sink,
-        )
+    ) -> Result<wz_capi_port::QblId, Refusal> {
+        self.declared(|| {
+            self.declare_port_queryable_on_links(
+                keyexpr.to_owned(),
+                wire,
+                complete,
+                allowed_origin,
+                LinkRestriction::Any,
+                retraction,
+                sink,
+            )
+        })
     }
 
     #[cfg(feature = "queryable")]
@@ -465,10 +481,8 @@ impl SessionEngine for SharedSession {
         timeout_ms: u32,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
-        // The walk is the registry's own, for a get that states no links.
-        let mut leg = || crate::faces::face_reply(leg());
-        Some(self.liveliness_get_on_links(keyexpr, timeout_ms, LinkRestriction::Any, fan, &mut leg))
+    ) -> Result<usize, Refusal> {
+        self.liveliness_get_on_port(keyexpr, timeout_ms, LinkRestriction::Any, fan, leg)
     }
 
     // The runtime's token names in its retraction the key it was declared on, which is the key
@@ -479,14 +493,16 @@ impl SessionEngine for SharedSession {
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Option<wz_capi_port::TokenId> {
-        SharedSession::declare_liveliness_token_on_wire(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            crate::runtime::session::LivelinessOptions::new()
-                .with_retraction_naming_the_key(retraction.is_some()),
-        )
+    ) -> Result<wz_capi_port::TokenId, Refusal> {
+        self.declared(|| {
+            SharedSession::declare_liveliness_token_on_wire(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                crate::runtime::session::LivelinessOptions::new()
+                    .with_retraction_naming_the_key(retraction.is_some()),
+            )
+        })
     }
 
     #[cfg(feature = "advanced")]
@@ -494,8 +510,8 @@ impl SessionEngine for SharedSession {
         &self,
         period_ms: u64,
         tick: wz_capi_port::Tick,
-    ) -> Option<wz_capi_port::TickerId> {
-        Some(SharedSession::start_ticker(self, period_ms, tick))
+    ) -> Result<wz_capi_port::TickerId, Refusal> {
+        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
     }
 
     #[cfg(feature = "advanced")]
@@ -515,17 +531,19 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         history: bool,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        SharedSession::declare_liveliness_subscriber_on_wire(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            options,
-            crate::faces::face_liveliness_sink(sink),
-        )
+        self.declared(|| {
+            SharedSession::declare_liveliness_subscriber_on_wire(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                options,
+                crate::faces::face_liveliness_sink(sink),
+            )
+        })
     }
 
     #[cfg(feature = "query")]
@@ -536,7 +554,11 @@ impl SessionEngine for SharedSession {
         opts: &wz_session_core::query_options::QueryOptions,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
+        // A closed session asks nothing; one that is open but reaches nobody issues no leg.
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
         // The registry's fan: one leg per face (and group), and the local plane where the
         // options admit it. A leg whose issue fails (a face mid-teardown, an alias the face was
         // never told) drops its callback with its rolled-back pending entry, so it cannot hold
@@ -555,7 +577,7 @@ impl SessionEngine for SharedSession {
                 rid
             },
         );
-        Some(issued)
+        Ok(issued)
     }
 
     #[cfg(all(feature = "transport-shm", feature = "query"))]
@@ -567,7 +589,10 @@ impl SessionEngine for SharedSession {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
         // `get_on_wire`'s fan, each leg asking with the chunk (`QueryLeg::query_shm`): a face that
         // negotiated shared memory is sent its descriptor and every other leg the bytes. A query
         // whose value is a chunk names its key literally, as the registry's own getter does, so
@@ -591,7 +616,7 @@ impl SessionEngine for SharedSession {
                 rid
             },
         );
-        Some(issued)
+        Ok(issued)
     }
 
     // The registry numbers its links (`faces::link_slot_of_face`) and honours a set on every
@@ -605,16 +630,18 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Option<SubId>, LinksNotHonoured> {
-        Ok(SharedSession::declare_subscriber_on_links(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            allowed_origin,
-            links,
-            retraction,
-            crate::faces::face_sink(sink),
-        ))
+    ) -> Result<SubId, Refusal> {
+        self.declared(|| {
+            SharedSession::declare_subscriber_on_links(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                allowed_origin,
+                links,
+                retraction,
+                crate::faces::face_sink(sink),
+            )
+        })
     }
 
     #[cfg(feature = "queryable")]
@@ -628,16 +655,18 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<Option<wz_capi_port::QblId>, LinksNotHonoured> {
-        Ok(self.declare_port_queryable_on_links(
-            keyexpr.to_owned(),
-            wire,
-            complete,
-            allowed_origin,
-            links,
-            retraction,
-            sink,
-        ))
+    ) -> Result<wz_capi_port::QblId, Refusal> {
+        self.declared(|| {
+            self.declare_port_queryable_on_links(
+                keyexpr.to_owned(),
+                wire,
+                complete,
+                allowed_origin,
+                links,
+                retraction,
+                sink,
+            )
+        })
     }
 
     #[cfg(feature = "liveliness")]
@@ -647,15 +676,17 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
-    ) -> Result<Option<wz_capi_port::TokenId>, LinksNotHonoured> {
-        Ok(SharedSession::declare_liveliness_token_on_links(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            crate::runtime::session::LivelinessOptions::new()
-                .with_retraction_naming_the_key(retraction.is_some()),
-            links,
-        ))
+    ) -> Result<wz_capi_port::TokenId, Refusal> {
+        self.declared(|| {
+            SharedSession::declare_liveliness_token_on_links(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                crate::runtime::session::LivelinessOptions::new()
+                    .with_retraction_naming_the_key(retraction.is_some()),
+                links,
+            )
+        })
     }
 
     #[cfg(feature = "liveliness")]
@@ -666,18 +697,20 @@ impl SessionEngine for SharedSession {
         history: bool,
         links: LinkRestriction,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Result<Option<SubId>, LinksNotHonoured> {
+    ) -> Result<SubId, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        Ok(SharedSession::declare_liveliness_subscriber_on_links(
-            self,
-            keyexpr.to_owned(),
-            wire,
-            options,
-            links,
-            crate::faces::face_liveliness_sink(sink),
-        ))
+        self.declared(|| {
+            SharedSession::declare_liveliness_subscriber_on_links(
+                self,
+                keyexpr.to_owned(),
+                wire,
+                options,
+                links,
+                crate::faces::face_liveliness_sink(sink),
+            )
+        })
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -689,27 +722,39 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
-        let mut leg = || crate::faces::face_reply(leg());
-        Ok(Some(self.liveliness_get_on_links(
-            keyexpr, timeout_ms, links, fan, &mut leg,
-        )))
+    ) -> Result<usize, Refusal> {
+        self.liveliness_get_on_port(keyexpr, timeout_ms, links, fan, leg)
+    }
+}
+
+impl SharedSession {
+    /// A declaration the registry makes, as the port answers it: refused on a closed session,
+    /// which declares nothing (`made` is not run, so the sink it holds is let go of), and
+    /// refused for want of an id when the registry made none, which on a registry whose tables
+    /// grow is the one way it refuses.
+    fn declared<T>(&self, made: impl FnOnce() -> Option<T>) -> Result<T, Refusal> {
+        if self.is_closed() {
+            return Err(Refusal::Closed);
+        }
+        made().ok_or(Refusal::NoEntityId)
     }
 
-    // `get_on_wire`'s fan reads `opts.links` and `opts.target_peer` (`QueryReach::of`), so the get
-    // is the same call.
-    #[cfg(feature = "query")]
-    fn get_stated(
+    /// The registry's walk of a liveliness get, as the port answers it: refused on a closed session,
+    /// which asks nothing, and the number of legs issued on an open one.
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_port(
         &self,
         keyexpr: &str,
-        wire: &WireKey,
-        opts: &wz_session_core::query_options::QueryOptions,
+        timeout_ms: u32,
+        links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Result<Option<usize>, wz_capi_port::StatementNotHonoured> {
-        Ok(SessionEngine::get_on_wire(
-            self, keyexpr, wire, opts, fan, leg,
-        ))
+    ) -> Result<usize, Refusal> {
+        if self.is_closed() {
+            return Err(Refusal::Closed);
+        }
+        let mut leg = || crate::faces::face_reply(leg());
+        Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, &mut leg))
     }
 }
 

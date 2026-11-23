@@ -98,6 +98,7 @@
   <sce:feature name="resource-snapshot"/>
   <sce:feature name="routing-namespace" requires="alloc keyexpr-prefix"/>
   <sce:feature name="rx-control"/>
+  <sce:feature name="rx-in-place" requires="codec-frame"/>
   <sce:feature name="rx-lent-control"/>
   <sce:feature name="rx-lent-only"/>
   <sce:feature name="rx-push"/>

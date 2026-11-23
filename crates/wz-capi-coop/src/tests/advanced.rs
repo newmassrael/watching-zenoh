@@ -88,7 +88,7 @@ fn a_get_answered_with_several_replies_hands_the_leg_all_of_them() {
         "the options ask for every reply"
     );
     let (issued, leg) = super::get::ask(&engine, "demo/data/@adv/**", &options, None, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     until(&engine, "the leg to end", || leg.lock().unwrap().ended);
     let payloads: Vec<Vec<u8>> = leg
         .lock()

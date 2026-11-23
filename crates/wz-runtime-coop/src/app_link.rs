@@ -618,6 +618,11 @@ pub struct AppStreamSocket {
 impl StreamSocket for AppStreamSocket {
     type Error = AppLinkError;
 
+    type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        = crate::stream_link::StreamDriver<Self, B, X>
+    where
+        Self: 'static;
+
     fn local(&self) -> SocketAddr {
         self.local
     }

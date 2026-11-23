@@ -59,14 +59,18 @@ use crate::session_drive::{LinkOpenError, LinkProto, Locator};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{LinkReadiness, LinkWritability};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
+use crate::stream_link::link_over;
+#[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::StreamDial;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::stream_link::StreamLink;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::StreamListen;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::stream_link::STREAM_RX_CAPACITY;
-use crate::stream_link::{NoStream, StreamDriver, StreamSocket};
+use crate::stream_link::{NoStream, StreamSocket};
 #[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -77,10 +81,16 @@ use crate::udp_link::{PortPeer, UdpPort};
 
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
-/// `L` is [`NoStream`] on a stack that carries no secure channel. `B` holds its receive buffer and
-/// `X` the memory it encodes its frames into: the image's byte tables on the slot profile (the
-/// defaults), an `RxBuffer` and a `TxBuffer` on the heap profile (`HeapIpDriver`, which a slot
-/// build has not).
+/// A stream link is the one its stream names ([`StreamSocket::Link`]), so on a stack that carries
+/// no secure channel, whose `L` is [`NoStream`], the `tls/` case holds nothing. `B` holds its
+/// receive buffer and `X` the memory it encodes its frames into: the image's byte tables on the
+/// slot profile (the defaults), an `RxBuffer` and a `TxBuffer` on the heap profile
+/// (`HeapIpDriver`, which a slot build has not).
+// On a stack with no stream the `tcp/` and `tls/` cases are values of no size that cannot be
+// made, so the enum is its `udp/` case alone; clippy weighs the variants by size and calls that a
+// large difference. Boxing the datagram case would put the one live link on a heap the slot
+// profile does not have.
+#[allow(clippy::large_enum_variant)]
 pub enum IpDriver<
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
@@ -91,9 +101,9 @@ pub enum IpDriver<
     /// A `udp/` link.
     Udp(UdpDriver<U, B, X>),
     /// A `tcp/` link.
-    Tcp(StreamDriver<T, B, X>),
+    Tcp(T::Link<B, X>),
     /// A `tls/` link: the stream link over a secure channel.
-    Tls(StreamDriver<L, B, X>),
+    Tls(L::Link<B, X>),
     /// A `udp/` link a listener took: its peer's share of the listener's one socket.
     #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     UdpListened(UdpDriver<PortPeer<U>, B, X>),
@@ -359,11 +369,15 @@ impl LinkShape {
         heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
     }
 
-    /// A stream link as the stack opens it: waited on by its owner when the shape says so.
-    fn stream<S: StreamSocket>(
+    /// The stream link over the connected `socket`, over the buffers `rx` and `tx`, as the stack
+    /// opens it: waited on by its owner when the shape says so.
+    fn stream<S: StreamSocket + 'static>(
         &self,
-        link: StreamDriver<S, RxBuffer, TxBuffer>,
-    ) -> StreamDriver<S, RxBuffer, TxBuffer> {
+        socket: S,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> S::Link<RxBuffer, TxBuffer> {
+        let link = link_over(socket, rx, tx);
         if self.owner_waits {
             link.waited_by_owner()
         } else {
@@ -502,17 +516,13 @@ where
             LinkProto::Tcp => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let socket = self.dial.dial(to.at)?;
-                Ok(IpDriver::Tcp(
-                    self.shape.stream(StreamDriver::over(socket, rx, tx)),
-                ))
+                Ok(IpDriver::Tcp(self.shape.stream(socket, rx, tx)))
             }
             LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let channel = self.tls.dial(to.at)?;
-                Ok(IpDriver::Tls(
-                    self.shape.stream(StreamDriver::over(channel, rx, tx)),
-                ))
+                Ok(IpDriver::Tls(self.shape.stream(channel, rx, tx)))
             }
         }
     }
@@ -671,7 +681,8 @@ where
 
 /// How a stream once made becomes one of a stack's links: `IpDriver::Tcp` or `IpDriver::Tls`.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-type MakeLink<U, S, T, P> = fn(StreamDriver<P, RxBuffer, TxBuffer>) -> HeapIpDriver<U, S, T>;
+type MakeLink<U, S, T, P> =
+    fn(<P as StreamSocket>::Link<RxBuffer, TxBuffer>) -> HeapIpDriver<U, S, T>;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<U, S, T, P> PendingDial<Rc<HeapIpDriver<U, S, T>>> for PendingStream<U, S, T, P>
@@ -694,9 +705,7 @@ where
             Ok(true) => {
                 let socket = self.socket.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                let driver = Rc::new((self.made)(
-                    self.shape.stream(StreamDriver::over(socket, rx, tx)),
-                ));
+                let driver = Rc::new((self.made)(self.shape.stream(socket, rx, tx)));
                 Some(Ok(OpenedLink {
                     sink: driver.clone(),
                     pump: driver,
@@ -788,9 +797,7 @@ where
         // As the `tcp/` listener's: the connection is off the port before the buffers are claimed,
         // so one the session's tables have none left for is closed, not left queued.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        let driver = Rc::new(IpDriver::Tls(
-            self.shape.stream(StreamDriver::over(channel, rx, tx)),
-        ));
+        let driver = Rc::new(IpDriver::Tls(self.shape.stream(channel, rx, tx)));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -830,9 +837,7 @@ where
         // The connection is off the port before the buffers are claimed, so one the session's
         // tables have none left for is closed, not left queued, as `IpAcceptor` closes it.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        let driver = Rc::new(IpDriver::Tcp(
-            self.shape.stream(StreamDriver::over(stream, rx, tx)),
-        ));
+        let driver = Rc::new(IpDriver::Tcp(self.shape.stream(stream, rx, tx)));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -953,13 +958,13 @@ where
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
                 let socket = self.dial.dial(to.at)?;
-                out.write(IpDriver::Tcp(StreamDriver::over(socket, rx, tx)));
+                out.write(IpDriver::Tcp(link_over(socket, rx, tx)));
             }
             LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
                 let channel = self.tls.dial(to.at)?;
-                out.write(IpDriver::Tls(StreamDriver::over(channel, rx, tx)));
+                out.write(IpDriver::Tls(link_over(channel, rx, tx)));
             }
         }
         Ok(())
@@ -1045,7 +1050,7 @@ where
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
         };
-        Ok(Some(IpDriver::Tcp(StreamDriver::over(stream, rx, tx))))
+        Ok(Some(IpDriver::Tcp(link_over(stream, rx, tx))))
     }
 }
 
@@ -1098,7 +1103,7 @@ where
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
         };
-        Ok(Some(IpDriver::Tls(StreamDriver::over(stream, rx, tx))))
+        Ok(Some(IpDriver::Tls(link_over(stream, rx, tx))))
     }
 }
 
@@ -1242,6 +1247,12 @@ mod tests {
 
     impl StreamSocket for Stream {
         type Error = ();
+
+        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+            = crate::stream_link::StreamDriver<Self, B, X>
+        where
+            Self: 'static;
+
         /// The node's own end, of the peer's family.
         fn local(&self) -> SocketAddr {
             match self.0 {
@@ -1279,6 +1290,12 @@ mod tests {
 
     impl StreamSocket for Channel {
         type Error = ();
+
+        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+            = crate::stream_link::StreamDriver<Self, B, X>
+        where
+            Self: 'static;
+
         const PROTO: LinkProto = LinkProto::Tls;
         fn local(&self) -> SocketAddr {
             self.0.local()
@@ -1928,6 +1945,12 @@ mod tests {
 
         impl StreamSocket for Handshaking {
             type Error = ();
+
+            type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+                = crate::stream_link::StreamDriver<Self, B, X>
+            where
+                Self: 'static;
+
             const PROTO: LinkProto = LinkProto::Tls;
             fn local(&self) -> SocketAddr {
                 self.channel.local()
@@ -2421,5 +2444,27 @@ mod tests {
                 Err(LinkOpenError::Unsupported)
             ));
         }
+    }
+
+    /// A stream names the link a stack holds over it, and the stream there is none of names
+    /// itself: the `tls/` case of a stack that carries no secure channel holds a value of no size
+    /// that cannot be made, so no stream link is made for it.
+    #[test]
+    fn a_stream_names_its_link_and_the_stream_there_is_none_of_names_none() {
+        // Each binding compiles only while the stream names that link.
+        let none: fn(<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>) -> NoStream =
+            core::convert::identity;
+        type StreamLinkOf = <Stream as StreamSocket>::Link<ByteBuf, ByteBuf>;
+        type StreamDriverOf = crate::stream_link::StreamDriver<Stream, ByteBuf, ByteBuf>;
+        let some: fn(StreamLinkOf) -> StreamDriverOf = core::convert::identity;
+        let _ = (none, some);
+        assert_eq!(
+            core::mem::size_of::<<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>>(),
+            0
+        );
+        assert!(
+            core::mem::size_of::<IpDriver<Datagrams, Stream, NoStream>>()
+                <= core::mem::size_of::<IpDriver<Datagrams, Stream, Stream>>()
+        );
     }
 }

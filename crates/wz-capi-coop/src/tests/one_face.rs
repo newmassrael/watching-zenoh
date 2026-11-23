@@ -23,12 +23,14 @@ use super::listen::{client, eventually, listening, Stepped};
 fn hearing(session: &Stepped) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
-    session.declare_subscriber_on_wire("demo/one/**", WireKey::literal(), Locality::Any, None, {
-        let into = into.clone();
-        SubscriberSink::shared(move |sample: &dyn SampleView| {
-            into.lock().unwrap().push(sample.payload().to_vec());
+    session
+        .declare_subscriber_on_wire("demo/one/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
         })
-    });
+        .expect("the session declares the subscriber");
     heard
 }
 
@@ -53,13 +55,15 @@ fn puts_and_is_heard(
 fn counting_faces(session: &Stepped) -> Arc<Mutex<(usize, usize)>> {
     let counts = Arc::new(Mutex::new((0usize, 0usize)));
     let into = counts.clone();
-    session.watch_faces(Arc::new(move |kind, _| {
-        let mut counts = into.lock().unwrap();
-        match kind {
-            FaceEventKind::Up => counts.0 += 1,
-            FaceEventKind::Down => counts.1 += 1,
-        }
-    }));
+    session
+        .watch_faces(Arc::new(move |kind, _| {
+            let mut counts = into.lock().unwrap();
+            match kind {
+                FaceEventKind::Up => counts.0 += 1,
+                FaceEventKind::Down => counts.1 += 1,
+            }
+        }))
+        .expect("an open session watches its faces");
     counts
 }
 

@@ -14,7 +14,7 @@ use std::time::Duration;
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -155,17 +155,17 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         if self.ids_spent.load(Ordering::SeqCst) {
-            return None;
+            return Err(Refusal::NoEntityId);
         }
-        let id = self.next_entity_id()?;
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
             .unwrap()
             .push((id, keyexpr.to_owned(), wire, Arc::new(sink)));
-        Some(id)
+        Ok(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -185,8 +185,8 @@ impl SessionEngine for Script {
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
     }
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
-        None
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+        Err(Refusal::NotBuilt)
     }
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
@@ -198,8 +198,8 @@ impl SessionEngine for Script {
         _keyexpr: &str,
         _sink: MatchingSink,
         _count_local: bool,
-    ) -> MatchId {
-        0
+    ) -> Result<MatchId, Refusal> {
+        Ok(0)
     }
     fn undeclare_matching_listener(&self, _id: MatchId) {}
     fn declare_write_filter(
@@ -209,8 +209,8 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> Option<FilterId> {
-        Some(0)
+    ) -> Result<FilterId, Refusal> {
+        Ok(0)
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false
@@ -243,10 +243,10 @@ impl SessionEngine for Script {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
-        let id = self.next_entity_id()?;
+    ) -> Result<TokenId, Refusal> {
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare token {keyexpr}"));
-        Some(id)
+        Ok(id)
     }
     fn undeclare_liveliness_token(&self, _id: TokenId) {
         self.event("retract token");
@@ -257,14 +257,14 @@ impl SessionEngine for Script {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
-        let id = self.next_entity_id()?;
+    ) -> Result<SubId, Refusal> {
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare liveliness {keyexpr}"));
         self.liveliness
             .lock()
             .unwrap()
             .push((id, keyexpr.to_owned(), history, Arc::new(sink)));
-        Some(id)
+        Ok(id)
     }
     fn get_on_wire(
         &self,
@@ -273,7 +273,7 @@ impl SessionEngine for Script {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let mut legs = Vec::new();
         for _ in 0..*self.legs.lock().unwrap() {
             let slot = Arc::new(Mutex::new(Some(leg())));
@@ -296,16 +296,16 @@ impl SessionEngine for Script {
             destination: opts.allowed_destination,
             legs,
         });
-        Some(count)
+        Ok(count)
     }
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
         if self.no_tickers.load(Ordering::SeqCst) {
-            return None;
+            return Err(Refusal::NotBuilt);
         }
         let id = self.take_id();
         self.event(format!("start ticker {period_ms}"));
         self.tickers.lock().unwrap().push((id, period_ms, tick));
-        Some(id)
+        Ok(id)
     }
     fn stop_ticker(&self, _id: TickerId) {
         self.event("stop ticker");
@@ -318,8 +318,8 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         _sink: wz_capi_port::QueryableSink,
-    ) -> Option<QblId> {
-        None
+    ) -> Result<QblId, Refusal> {
+        Err(Refusal::NotBuilt)
     }
 }
 

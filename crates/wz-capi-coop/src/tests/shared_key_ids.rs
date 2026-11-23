@@ -305,7 +305,7 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
             })
         },
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
     eventually("the leg to end", || *ended.lock().unwrap() == 1);
     assert_eq!(
         *asked.lock().unwrap(),
@@ -497,12 +497,12 @@ fn a_reply_under_the_declared_form_names_its_key_whole() {
 fn the_session_declares_no_key_expression_under_an_id_of_the_dictionary() {
     let held = Arc::new(KeyIds::new([(1, "lab/one"), (2, "lab/two")]).expect("valid"));
     let (with, _) = listener(Some(held), KeyWireForm::Shared);
-    assert_eq!(with.acquire_keyexpr("lab/x"), Some(3));
-    assert_eq!(with.acquire_keyexpr("lab/y"), Some(4));
+    assert_eq!(with.acquire_keyexpr("lab/x"), Ok(3));
+    assert_eq!(with.acquire_keyexpr("lab/y"), Ok(4));
     let (without, _) = listener(None, KeyWireForm::Declared);
     assert_eq!(
         without.acquire_keyexpr("lab/x"),
-        Some(1),
+        Ok(1),
         "CONTROL: without a dictionary the first id is 1"
     );
 }
@@ -651,7 +651,7 @@ fn alive_by(engine: &Engine, declared: ExprId) {
         None,
         &mut || ReplyCallback::shared(|_: &dyn ReplyView| {}),
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
 }
 
 #[cfg(feature = "liveliness-get")]
