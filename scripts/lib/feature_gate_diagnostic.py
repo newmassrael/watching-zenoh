@@ -810,11 +810,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # arms that call it), and `driver_loop::RX_LENT_ONLY` exists in every build.
                 "rx-lent-only",
                 "session-matching",
-                # `session-slot` MOVED HERE when its simple-cfg public items (`SigningKey`'s
-                # `SIGNING_KEY_MAX`, the fixed `SessionBytes`) went to `session-fixed-storage`,
-                # which it turns on: what it still gates publicly is `pub mod session_slot`,
-                # behind `all(session-unicast, session-slot)` (`lib.rs`), a compound site.
-                "session-slot",
                 # `session-unicast-accept` and `session-unicast-open` MOVED HERE from
                 # `NO_PUBLIC_PATH` (see the note there). The handshake-stray-message policy
                 # holds the establishment answer a link sent, to send it again on a repeated
@@ -912,6 +907,18 @@ DEFERRED: dict[str, dict[str, str]] = {
             "@defer cfg-not-twin -- the only path it gates has a `cfg(not(...))` "
             "twin, so the feature swaps an implementation rather than removing "
             "a path; there is no resolution error for rustc to annotate"
+        ),
+        # Its simple-cfg public items with no twin (`SIGNING_KEY_MAX`, the fixed `SessionBytes`)
+        # went to `session-fixed-storage`, which it turns on. What it gates under a simple cfg
+        # now is a storage form with a `cfg(not(..))` twin of the same name (`ExtChainOwned`,
+        # `HandshakeStorage`, `CookieEntropy`, `LocatorText`, the bundle's `core` and `link`
+        # fields), and what disappears without it, `pub mod session_slot`, is behind
+        # `all(session-unicast, session-slot)` (`lib.rs`), for which rustc's note names no
+        # feature.
+        "session-slot": (
+            "@defer cfg-not-twin -- every public path it gates under a simple cfg has a "
+            "`cfg(not(...))` twin, so the feature swaps a storage form rather than removing a "
+            "path, and the module that does disappear (`session_slot`) is behind an `all(..)`"
         ),
     },
     # Moved here from the core's list with `StorageState::collect_garbage`, the method
