@@ -12,13 +12,13 @@
 //! What the observer hands the entry's sink happens under the session's lock, and a C callback
 //! never runs there (decision D8), so the sink ([`LegSink`]) hands each reply on to be called
 //! after the lock: to the thread that made it, for an answer of the session's own queryables; to
-//! the lane's pending table, for a reply that lies in a datagram a link lends; to the session's
-//! delivery lane otherwise. What the entry's consolidation held to its end, and a timeout, wait in
-//! the plane's held table, given up whole, and the leg's END is said when the entry is dropped (its
-//! Final, its deadline, its cancellation, the loss of its link) by a guard the sink owns, with the
-//! request id of the timeout that ended it when one did. The deliveries hand them out with no lock
-//! held, the end once the lane has handed every reply queued before it and the held table every
-//! reply held, as the drop of the leg's callback, which is how a C program learns its get is over.
+//! the session's round of deliveries otherwise (`crate::round`), read where it lies in a datagram a
+//! link lends. What the entry's consolidation held to its end waits in the plane's held table,
+//! given up whole, and the leg's END is said when the entry is dropped (its Final, its deadline,
+//! its cancellation, the loss of its link) by a guard the sink owns, with the request id of the
+//! timeout that ended it when one did. The deliveries hand them out with no lock held, the end once
+//! the round has handed every reply held before it and the held table every reply held, as the
+//! drop of the leg's callback, which is how a C program learns its get is over.
 //!
 //! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
 //! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
@@ -39,7 +39,7 @@ use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
 use wz_session_core::wire_id::RequestId;
 
-use crate::lane::SharedLane;
+use crate::round::Round;
 
 use super::queued::{Pending, Queued};
 use super::registry::{FaceId, Registry};
@@ -241,17 +241,17 @@ enum Capture {
 
 /// The sink of leg `leg`'s pending entry, holding the leg's `callback`. A reply the session's own
 /// queryables made while the plane captures is the thread's that made it, which hands it to the
-/// callback once it lets go of the session ([`GetPlane::capture`]); a reply of a datagram a link
-/// lends is held for the callback in the lane's pending table, and any other is queued in the
-/// session's delivery `lane` (`SharedLane::offer_reply_to`). What the entry's consolidation held
-/// to its end waits in the plane's held table ([`GetPlane::take_held`]), and the timeout of a leg
-/// that timed out in the leg's end ([`Ended`]). The sink's drop is the leg's end: the Final says
-/// nothing more, as the registry drops the entry once its Finals are in. The table of callbacks holds the callback
-/// past the entry, so the entry's drop, under the session's lock, is never its last.
+/// callback once it lets go of the session ([`GetPlane::capture`]); any other is held for the
+/// callback in the session's round of deliveries (`Round::offer_reply`). What the entry's
+/// consolidation held to its end waits in the plane's held table ([`GetPlane::take_held`]), and the
+/// timeout of a leg that timed out in the leg's end ([`Ended`]). The sink's drop is the leg's end:
+/// the Final says nothing more, as the registry drops the entry once its Finals are in. The table
+/// of callbacks holds the callback past the entry, so the entry's drop, under the session's lock,
+/// is never its last.
 pub(crate) struct LegSink {
     leg: u64,
     callback: Arc<ReplyCallback>,
-    lane: Arc<SharedLane>,
+    round: Arc<Round>,
     end: LegEnd,
 }
 
@@ -261,12 +261,12 @@ impl LegSink {
         leg: u64,
         callback: &Arc<ReplyCallback>,
         plane: &Arc<GetPlane>,
-        lane: &Arc<SharedLane>,
+        round: &Arc<Round>,
     ) -> Self {
         Self {
             leg,
             callback: Arc::clone(callback),
-            lane: Arc::clone(lane),
+            round: Arc::clone(round),
             end: LegEnd {
                 leg,
                 timed_out: None,
@@ -283,7 +283,7 @@ impl ReplySink for LegSink {
             return;
         }
         // SAFETY: the registry hands its sinks a reply under the session's lock.
-        unsafe { self.lane.offer_reply_to(self.leg, &self.callback, reply) };
+        unsafe { self.round.offer_reply(&self.callback, reply) };
     }
 
     fn on_final(&mut self, _rid: RequestId) {}

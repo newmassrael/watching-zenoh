@@ -42,7 +42,7 @@
 //!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
 //!   first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
-//!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
+//!   it hands its subscribers' callbacks after its lock (`crate::round`), lent next;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`, one for each
 //!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
@@ -275,7 +275,7 @@ pub struct ArenaPlan {
     links: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
-    /// The bytes of the session's delivery lane (`crate::lane`).
+    /// The bytes of the session's round of deliveries (`crate::round`).
     lane_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,

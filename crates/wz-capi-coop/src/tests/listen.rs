@@ -459,17 +459,17 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         "the window is written as it closes"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let (handed, lent) = (engine.lane_handed(), engine.lane_lent());
+    let (handed, lent) = (engine.rounds_handed(), engine.samples_lent());
     let reads = reads_until(&engine, "the puts", || {
         received.load(Ordering::SeqCst) == PUTS
     });
     assert_eq!(
-        engine.lane_lent() - lent,
+        engine.samples_lent() - lent,
         PUTS,
         "each put handed where it lies in the stream link's buffer, none copied into the lane"
     );
     assert_eq!(
-        engine.lane_handed() - handed,
+        engine.rounds_handed() - handed,
         1,
         "one record of the lane for the batch's puts"
     );

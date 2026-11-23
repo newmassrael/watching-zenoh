@@ -1283,7 +1283,7 @@ fn the_pico_presets_lane_holds_one_record() {
     };
     assert_eq!(
         lane,
-        crate::lane::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
+        crate::round::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
         "the preset's lane is one record's room"
     );
     let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");

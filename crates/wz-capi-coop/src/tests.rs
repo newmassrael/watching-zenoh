@@ -1013,15 +1013,15 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         engine.declarations_synced()
     });
     let (handed, lent, list) = (
-        engine.lane_handed(),
-        engine.lane_lent(),
+        engine.rounds_handed(),
+        engine.samples_lent(),
         engine.delivery_list_takes(),
     );
     for _ in 0..4 {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        (engine.lane_handed(), engine.lane_lent()),
+        (engine.rounds_handed(), engine.samples_lent()),
         (handed, lent),
         "a read with nothing to read handed something out"
     );
@@ -1034,11 +1034,11 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     assert_eq!(
-        engine.lane_lent() - lent,
+        engine.samples_lent() - lent,
         SAMPLES,
         "each sample handed where its datagram lies, none copied into the lane"
     );
-    let records = engine.lane_handed() - handed;
+    let records = engine.rounds_handed() - handed;
     assert!(
         (1..=SAMPLES).contains(&records),
         "{records} records handed on: one for each datagram the samples came in"
@@ -2291,7 +2291,6 @@ mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;
-mod lane;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;
@@ -2309,6 +2308,7 @@ mod program_clock;
 mod queryable;
 mod redial_wait;
 mod replay;
+mod round;
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",
