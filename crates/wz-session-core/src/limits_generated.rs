@@ -17,7 +17,7 @@
 
 use crate::caps;
 use crate::limit_binding::{
-    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, Limited,
+    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue, Limited,
     OutsideLimitDomain, Quota,
 };
 use crate::policy_binding::Driven;
@@ -1799,6 +1799,92 @@ impl SessionLimits {
     pub const fn defaults() -> Self {
         Self::BUILD
     }
+
+    /// The pico preset: each limit `[limit.pico_preset]` states at the preset's value, where the
+    /// build's domain holds it, and the rest at the build's. What an ABI that follows
+    /// zenoh-pico opens a session under before its config states otherwise; laid out when the
+    /// build is compiled, from the declaration and not from the build's environment.
+    pub const PICO_PRESET: Self = Self {
+        max_keyexpr_bytes: Limited::build_default(),
+        key_arena_bytes: Limited::preset_or_build(4096, LimitValue::Integer(4096)),
+        max_subscriptions: Limited::preset_or_build(Quota::at_most(3), LimitValue::Integer(3)),
+        match_memo_slots: Limited::build_default(),
+        delivery_lane_events: Limited::build_default(),
+        delivery_lane_bytes: Limited::preset_or_build(4380, LimitValue::Integer(4380)),
+        delivery_lane_callbacks: Limited::build_default(),
+        max_queryables: Limited::preset_or_build(Quota::at_most(4), LimitValue::Integer(4)),
+        max_pending_queries: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        link_noted_requests: Limited::build_default(),
+        max_decl_observers: Limited::build_default(),
+        max_liveliness_subscriptions: Limited::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ),
+        max_local_tokens: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        max_publishers: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        max_queriers: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        max_matching_listeners: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
+        max_declared_keyexprs: Limited::preset_or_build(
+            Quota::at_most(14),
+            LimitValue::Integer(14),
+        ),
+        max_pending_liveliness_gets: Limited::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ),
+        max_pending_declares: Limited::preset_or_build(Quota::at_most(4), LimitValue::Integer(4)),
+        max_inbound_sub_interests: Limited::build_default(),
+        max_peer_keyexpr_aliases: Limited::build_default(),
+        max_shared_key_ids: Limited::build_default(),
+        max_remote_decls: Limited::build_default(),
+        max_pending_replies: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        max_pending_finals: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
+        max_reply_payload_bytes: Limited::build_default(),
+        max_multicast_replies: Limited::build_default(),
+        max_faces: Limited::preset_or_build(Quota::at_most(10), LimitValue::Integer(10)),
+        max_accept_pending: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
+        rx_pool_buffers: Limited::preset_or_build(2, LimitValue::Integer(2)),
+        tx_pool_slots: Limited::preset_or_build(2, LimitValue::Integer(2)),
+        session_max_peer_keyexpr_aliases: Limited::preset_or_build(
+            Quota::at_most(32),
+            LimitValue::Integer(32),
+        ),
+        session_max_remote_decls: Limited::preset_or_build(
+            Quota::at_most(32),
+            LimitValue::Integer(32),
+        ),
+        session_max_inbound_sub_interests: Limited::preset_or_build(
+            Quota::at_most(16),
+            LimitValue::Integer(16),
+        ),
+        querier_max_pending_queries: Limited::build_default(),
+        tx_no_progress_window_us: Limited::build_default(),
+        tx_expiry_close_after: Limited::build_default(),
+        datagram_fragment_burst: Limited::build_default(),
+        datagram_fragment_gap_us: Limited::build_default(),
+        query_parameters_max_bytes: Limited::build_default(),
+        query_attachment_max_bytes: Limited::build_default(),
+        pico_tx_queue_size: Limited::build_default(),
+        app_link_queue_bytes: Limited::build_default(),
+        e2e_sender_slots: Limited::build_default(),
+        replay_depth_max: Limited::build_default(),
+        instance_key_fields: Limited::build_default(),
+        instances_per_message: Limited::build_default(),
+        declaration_sync_burst_messages: Limited::build_default(),
+        declaration_sync_final_timeout_ms: Limited::build_default(),
+        declaration_sync_interval_ms: Limited::build_default(),
+        declaration_sync_rx_no_progress_ms: Limited::build_default(),
+        declaration_sync_retry_interval_ms: Limited::build_default(),
+        declaration_sync_tx_no_progress_ms: Limited::build_default(),
+        pico_unicast_batch_bytes: Limited::build_default(),
+        pico_multicast_batch_bytes: Limited::build_default(),
+        pico_lease_ms: Limited::build_default(),
+        pico_socket_timeout_ms: Limited::build_default(),
+        pico_connect_timeout_ms: Limited::build_default(),
+        pico_frag_max_bytes: Limited::build_default(),
+        pico_accept_timeout_ms: Limited::build_default(),
+        pico_keepalives_per_lease: Limited::build_default(),
+    };
 
     /// `MAX_KEYEXPR_BYTES` as this snapshot holds it.
     pub const fn max_keyexpr_bytes(&self) -> Quota {
