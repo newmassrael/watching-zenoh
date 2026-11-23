@@ -33,8 +33,8 @@
 //! # Callbacks
 //!
 //! A row owns its callback, of the type the build's [`RowCallbacks`] names. A call of it pins the
-//! row (`pin_*`); a row undeclared while pinned leaves every lookup at once and is handed back by
-//! its last `unpin_*`, after the last call (P11).
+//! row's latch (`begin_*`, [`RowCallback`]); a row undeclared while a call of it runs leaves every
+//! lookup at once and is let go of by the call that ends last (`release_*`), after it (P11).
 //!
 //! # What a peer declared
 //!
@@ -60,6 +60,7 @@ use crate::query::any_local_queryable;
 use crate::query::stage_queryable_interest;
 use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
+use crate::row_callback::RowCallback;
 use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
@@ -158,13 +159,13 @@ pub enum InterestKind {
 /// build: a C function, its context and its drop, or a shared Rust closure.
 pub trait RowCallbacks {
     /// A subscriber's.
-    type Subscriber;
+    type Subscriber: RowCallback;
     /// A queryable's.
-    type Queryable;
+    type Queryable: RowCallback;
     /// A liveliness subscriber's.
-    type LivelinessSubscriber;
+    type LivelinessSubscriber: RowCallback;
     /// A matching listener's.
-    type Matching;
+    type Matching: RowCallback;
     /// A pending get's.
     type Reply;
 }
@@ -758,23 +759,31 @@ fn unkept(why: KeyUnkept) -> RegisterError {
 trait Entity {
     fn entity_id(&self) -> EntityId;
     fn key_prefix(&self) -> Option<KeyexprHandle>;
+    /// Retire what the row calls ([`RowCallback::retire`]): `true` when no call of it runs.
+    fn retire(&self) -> bool;
 }
 
-impl<Key, Cb> Entity for SubscriberRow<Key, Cb> {
+impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
     fn key_prefix(&self) -> Option<KeyexprHandle> {
         self.key.prefix
     }
+    fn retire(&self) -> bool {
+        self.callback.retire()
+    }
 }
 
-impl<Key, Cb> Entity for QueryableRow<Key, Cb> {
+impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
     fn key_prefix(&self) -> Option<KeyexprHandle> {
         self.key.prefix
+    }
+    fn retire(&self) -> bool {
+        self.callback.retire()
     }
 }
 
@@ -785,14 +794,20 @@ impl<Key> Entity for TokenRow<Key> {
     fn key_prefix(&self) -> Option<KeyexprHandle> {
         self.key.prefix
     }
+    fn retire(&self) -> bool {
+        true
+    }
 }
 
-impl<Key, Cb> Entity for LivelinessSubscriberRow<Key, Cb> {
+impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
     fn key_prefix(&self) -> Option<KeyexprHandle> {
         self.key.prefix
+    }
+    fn retire(&self) -> bool {
+        self.callback.retire()
     }
 }
 
@@ -818,9 +833,14 @@ fn undeclare_entity<K, R: Entity, P: Storage, const N: usize>(
     keyexprs: &mut Keyexprs<P>,
     handle: Handle<K>,
 ) -> Option<Undeclared<R>> {
-    let (id, prefix) = table
+    let (id, prefix, idle) = table
         .get(handle)
-        .map(|row| (row.entity_id(), row.key_prefix()))?;
+        .map(|row| (row.entity_id(), row.key_prefix(), row.retire()))?;
+    // A row a call of which runs is kept, retired, for the call that ends last to let go of
+    // (`release_*`).
+    if !idle {
+        let _held = table.pin(handle)?;
+    }
     let removal = table.remove(handle)?;
     let keyexpr = prefix.and_then(|prefix| release_keyexpr(keyexprs, prefix));
     Some(Undeclared {
@@ -1128,12 +1148,12 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Ok(declared)
     }
 
-    /// Undeclare the subscriber `handle` names. The row leaves every lookup now. When a call of
-    /// its callback runs (it is pinned, [`Self::pin_subscriber`]) the row is not handed back here
-    /// but by the last [`Self::unpin_subscriber`]: the undeclaring caller returns only once
-    /// `subscribers().holds_slot(handle)` is false, which is after the last call has returned and
-    /// the row, with its callback, has been dropped by whoever unpinned it (P11). The same holds
-    /// for every kind with a callback.
+    /// Undeclare the subscriber `handle` names. The row leaves every lookup now and no call of it
+    /// begins. When a call of its callback runs ([`Self::begin_subscriber`]) the row is not handed
+    /// back here: the call that ends last lets it go ([`Self::release_subscriber`]), so the
+    /// undeclaring caller returns only once `subscribers().holds_slot(handle)` is false, after the
+    /// last call has returned and the row, with its callback, was dropped (P11). The same holds for
+    /// every kind with a callback.
     pub fn undeclare_subscriber(
         &mut self,
         handle: SubscriberHandle,
@@ -1392,7 +1412,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: MatchingListenerHandle,
     ) -> Option<Unwatched<Matching<F>>> {
-        let interest = self.matching.get(handle)?.interest;
+        let (interest, idle) = self
+            .matching
+            .get(handle)
+            .map(|row| (row.interest, row.callback.retire()))?;
+        if !idle {
+            let _held = self.matching.pin(handle)?;
+        }
         let removal = self.matching.remove(handle)?;
         let interest_final = self.release_interest(interest);
         Some(Unwatched {
@@ -1619,60 +1645,88 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .filter(move |(_, row)| keyexpr_intersects(text(&row.key.key), key))
     }
 
-    /// Pin the subscriber `handle` names while its callback runs.
-    pub fn pin_subscriber(&mut self, handle: SubscriberHandle) -> Option<Pinned<kind::Subscriber>> {
-        self.subscribers.pin(handle)
+    /// Begin a call of the subscriber `handle` names, with the tables held: what the call is made
+    /// with once they are let go, `None` when no live row is named. End it with [`RowCallback::end`];
+    /// when that says it was the last call of a row undeclared meanwhile, let the row go with
+    /// [`Self::release_subscriber`]. A callback whose call reads the row where it lies is held only by
+    /// a table whose rows never move (P3, P11).
+    pub fn begin_subscriber(
+        &self,
+        handle: SubscriberHandle,
+    ) -> Option<<F::Subscriber as RowCallback>::Call> {
+        const {
+            assert!(!<F::Subscriber as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+        }
+        self.subscribers.get(handle)?.callback.begin()
     }
 
-    /// Give back a subscriber's pin: its row when it was undeclared while pinned and this was the
-    /// last pin.
-    pub fn unpin_subscriber(
-        &mut self,
-        pinned: Pinned<kind::Subscriber>,
-    ) -> Option<Subscriber<F, P>> {
-        self.subscribers.unpin(pinned)
+    /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
+    /// ended last: its row, to drop where no lock is held.
+    pub fn release_subscriber(&mut self, handle: SubscriberHandle) -> Option<Subscriber<F, P>> {
+        self.subscribers.release(handle)
     }
 
-    /// Pin the queryable `handle` names while its callback runs.
-    pub fn pin_queryable(&mut self, handle: QueryableHandle) -> Option<Pinned<kind::Queryable>> {
-        self.queryables.pin(handle)
+    /// Begin a call of the queryable `handle` names, with the tables held: what the call is made
+    /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
+    pub fn begin_queryable(
+        &self,
+        handle: QueryableHandle,
+    ) -> Option<<F::Queryable as RowCallback>::Call> {
+        const {
+            assert!(!<F::Queryable as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+        }
+        self.queryables.get(handle)?.callback.begin()
     }
 
-    /// Give back a queryable's pin, as [`Self::unpin_subscriber`].
-    pub fn unpin_queryable(&mut self, pinned: Pinned<kind::Queryable>) -> Option<Queryable<F, P>> {
-        self.queryables.unpin(pinned)
+    /// Let go of the queryable `handle` named, undeclared while a call of it ran, once that call
+    /// ended last: its row, to drop where no lock is held.
+    pub fn release_queryable(&mut self, handle: QueryableHandle) -> Option<Queryable<F, P>> {
+        self.queryables.release(handle)
     }
 
-    /// Pin the liveliness subscriber `handle` names while its callback runs.
-    pub fn pin_liveliness_subscriber(
+    /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
+    /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
+    pub fn begin_liveliness_subscriber(
+        &self,
+        handle: LivelinessSubscriberHandle,
+    ) -> Option<<F::LivelinessSubscriber as RowCallback>::Call> {
+        const {
+            assert!(
+                !<F::LivelinessSubscriber as RowCallback>::READS_ROW_IN_PLACE
+                    || P::ENFORCES_CAPACITY
+            );
+        }
+        self.liveliness_subscribers.get(handle)?.callback.begin()
+    }
+
+    /// Let go of the liveliness subscriber `handle` named, undeclared while a call of it ran, once that call
+    /// ended last: its row, to drop where no lock is held.
+    pub fn release_liveliness_subscriber(
         &mut self,
         handle: LivelinessSubscriberHandle,
-    ) -> Option<Pinned<kind::LivelinessSubscriber>> {
-        self.liveliness_subscribers.pin(handle)
-    }
-
-    /// Give back a liveliness subscriber's pin, as [`Self::unpin_subscriber`].
-    pub fn unpin_liveliness_subscriber(
-        &mut self,
-        pinned: Pinned<kind::LivelinessSubscriber>,
     ) -> Option<LivelinessSubscriber<F, P>> {
-        self.liveliness_subscribers.unpin(pinned)
+        self.liveliness_subscribers.release(handle)
     }
 
-    /// Pin the matching listener `handle` names while its callback runs.
-    pub fn pin_matching_listener(
+    /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made
+    /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
+    pub fn begin_matching_listener(
+        &self,
+        handle: MatchingListenerHandle,
+    ) -> Option<<F::Matching as RowCallback>::Call> {
+        const {
+            assert!(!<F::Matching as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+        }
+        self.matching.get(handle)?.callback.begin()
+    }
+
+    /// Let go of the matching listener `handle` named, undeclared while a call of it ran, once that call
+    /// ended last: its row, to drop where no lock is held.
+    pub fn release_matching_listener(
         &mut self,
         handle: MatchingListenerHandle,
-    ) -> Option<Pinned<kind::MatchingListener>> {
-        self.matching.pin(handle)
-    }
-
-    /// Give back a matching listener's pin, as [`Self::unpin_subscriber`].
-    pub fn unpin_matching_listener(
-        &mut self,
-        pinned: Pinned<kind::MatchingListener>,
     ) -> Option<Matching<F>> {
-        self.matching.unpin(pinned)
+        self.matching.release(handle)
     }
 
     /// Pin the pending get `handle` names while its callback runs.
@@ -1680,7 +1734,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.pending_gets.pin(handle)
     }
 
-    /// Give back a pending get's pin, as [`Self::unpin_subscriber`].
+    /// Give back a pending get's pin: the row when it was ended while pinned and this was its last
+    /// pin.
     pub fn unpin_get(&mut self, pinned: Pinned<kind::PendingGet>) -> Option<PendingGet<F, P>> {
         self.pending_gets.unpin(pinned)
     }

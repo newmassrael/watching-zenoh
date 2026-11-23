@@ -17,18 +17,25 @@
 //! (`ArcCallback`).
 
 use core::ffi::c_void;
+#[cfg(target_has_atomic = "32")]
 use core::ptr::NonNull;
+#[cfg(target_has_atomic = "32")]
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Set in a latch once its row is retired.
+#[cfg(target_has_atomic = "32")]
 const RETIRED: u32 = 0x8000_0000;
 /// The count of calls running, below [`RETIRED`].
+#[cfg(target_has_atomic = "32")]
 const CALLS: u32 = !RETIRED;
 
-/// How many calls of a row's callback run, and whether the row was retired, in one word.
+/// How many calls of a row's callback run, and whether the row was retired, in one word. Where the
+/// target has the atomic word.
+#[cfg(target_has_atomic = "32")]
 #[derive(Debug, Default)]
 pub struct CallLatch(AtomicU32);
 
+#[cfg(target_has_atomic = "32")]
 impl CallLatch {
     /// No call running, not retired.
     pub const fn new() -> Self {
@@ -103,6 +110,37 @@ pub trait RowCallback {
 /// What a C closure's `drop` is.
 pub type CDrop = unsafe extern "C" fn(*mut c_void);
 
+/// A callback the tables call only while they are held (a sink a fan hands `&mut` under the lock),
+/// or a row that holds none: no call of it outlives the tables' hold, so its row is let go of when
+/// it is undeclared.
+macro_rules! called_while_held {
+    ($($ty:ty),* $(,)?) => {$(
+        impl RowCallback for $ty {
+            type Call = core::convert::Infallible;
+
+            const READS_ROW_IN_PLACE: bool = false;
+
+            fn begin(&self) -> Option<core::convert::Infallible> {
+                None
+            }
+
+            unsafe fn end(call: core::convert::Infallible) -> bool {
+                match call {}
+            }
+
+            fn retire(&self) -> bool {
+                true
+            }
+        }
+    )*};
+}
+
+called_while_held!(());
+#[cfg(feature = "alloc")]
+called_while_held!(crate::sink::BoxedSink);
+#[cfg(feature = "storage-profile")]
+called_while_held!(crate::slot_observer::NoSink);
+
 /// The three values of a C closure (`call`, `context`, `drop`) and the latch of its calls, held
 /// by a row where it lies: the form a C program's callback takes in the tables, with no
 /// allocation. `Call` is the door's function pointer type, called by the door with arguments of
@@ -111,6 +149,7 @@ pub type CDrop = unsafe extern "C" fn(*mut c_void);
 /// Neither `Send` nor `Sync`: whether a C program's context may be used from another thread is
 /// the program's, so a door that hands a closure to the tables of several threads wraps it in a
 /// type of its own and states why that is sound.
+#[cfg(target_has_atomic = "32")]
 pub struct CClosure<Call: Copy> {
     call: Call,
     context: *mut c_void,
@@ -118,6 +157,7 @@ pub struct CClosure<Call: Copy> {
     latch: CallLatch,
 }
 
+#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> CClosure<Call> {
     /// The closure `call`, `context`, `drop`.
     ///
@@ -133,13 +173,9 @@ impl<Call: Copy> CClosure<Call> {
             latch: CallLatch::new(),
         }
     }
-
-    /// The latch of its calls.
-    pub fn latch(&self) -> &CallLatch {
-        &self.latch
-    }
 }
 
+#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> Drop for CClosure<Call> {
     fn drop(&mut self) {
         if let Some(drop) = self.drop.take() {
@@ -151,6 +187,7 @@ impl<Call: Copy> Drop for CClosure<Call> {
 }
 
 /// A call of a [`CClosure`]: what the door calls, and where the latch the call ends on lies.
+#[cfg(target_has_atomic = "32")]
 pub struct CCall<Call> {
     /// The closure's `call`.
     pub call: Call,
@@ -159,6 +196,7 @@ pub struct CCall<Call> {
     latch: NonNull<CallLatch>,
 }
 
+#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> RowCallback for CClosure<Call> {
     type Call = CCall<Call>;
 
@@ -185,17 +223,17 @@ impl<Call: Copy> RowCallback for CClosure<Call> {
 
 /// A Rust closure and the latch of its calls, shared with every call of it: the form a callback of
 /// a heap build takes, whose table may move its rows while a call runs.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
 pub struct ArcCallback<F>(alloc::sync::Arc<Shared<F>>);
 
 /// What an [`ArcCallback`] and its calls share.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
 pub struct Shared<F> {
     latch: CallLatch,
     callback: F,
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
 impl<F> Shared<F> {
     /// The closure.
     pub fn callback(&self) -> &F {
@@ -203,7 +241,7 @@ impl<F> Shared<F> {
     }
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
 impl<F> ArcCallback<F> {
     /// `callback`, with no call running.
     pub fn new(callback: F) -> Self {
@@ -214,7 +252,7 @@ impl<F> ArcCallback<F> {
     }
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
 impl<F> RowCallback for ArcCallback<F> {
     type Call = alloc::sync::Arc<Shared<F>>;
 
@@ -236,7 +274,7 @@ impl<F> RowCallback for ArcCallback<F> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_has_atomic = "32"))]
 mod tests {
     use super::*;
 
@@ -296,7 +334,7 @@ mod tests {
     }
 
     /// The Rust form's call holds the closure itself, so the row may move while it runs.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
     #[test]
     fn a_rust_closures_call_holds_the_closure() {
         let row = ArcCallback::new(|x: u32| x + 1);

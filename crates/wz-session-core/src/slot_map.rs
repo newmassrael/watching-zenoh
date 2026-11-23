@@ -507,6 +507,13 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         }
     }
 
+    /// Give back the pin a row `handle` names was retired under, by its handle: the row when that
+    /// was its last pin. What a table whose calls end without it held gives back once the call
+    /// that ended last says the row may go.
+    pub fn release(&mut self, handle: Handle<K>) -> Option<T> {
+        self.unpin(Pinned { handle })
+    }
+
     /// The next live row at or after `cursor`, the cursor moved past it, so a caller can walk the
     /// table while it changes it.
     pub fn next_from(&self, cursor: &mut usize) -> Option<(Handle<K>, &T)> {

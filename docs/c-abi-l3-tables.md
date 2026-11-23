@@ -102,13 +102,17 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   `IdsExhausted`), which the port already maps to its `Refusal`, and hands the callback back so
   the caller drops it where it holds no lock. The order is fixed: table room, then the key, then
   the id, so a refused declaration spends no id and keeps no key.
-- **Callbacks (P11).** A row owns its callback (`F::Subscriber` and its kin: a C triple or a
-  shared Rust `Fn`, chosen once per build by `RowCallbacks`). A delivery pins the row it calls
-  (`pin_subscriber`); undeclaring a pinned row retires it: the row leaves every lookup and
-  iteration at once, keeps its slot and its generation, and is handed back by the last
-  `unpin_*`, which is where its `drop` runs, after the last call. The undeclaring caller returns
-  only once `holds_slot(handle)` of the row's table is false, so after the last call and the
-  drop, as zenoh-pico's undeclare waits for the entity's lock.
+- **Callbacks (P11).** A row owns its callback (`F::Subscriber` and its kin, each a
+  `row_callback::RowCallback`: a C closure's three values with an inline atomic latch,
+  `CClosure`, or a shared Rust closure, `ArcCallback`, chosen once per build by `RowCallbacks`).
+  A call is begun with the tables held (`begin_subscriber`), made after they are let go, and
+  ended on the latch with no lock (`RowCallback::end`). Undeclaring retires the row: it leaves
+  every lookup and iteration at once and no call of it begins; when no call runs it is handed
+  back at once, else it keeps its slot and its generation and the call that ends last lets it go
+  (`release_subscriber`), which is where its `drop` runs. The undeclaring caller returns only
+  once `holds_slot(handle)` of the row's table is false, so after the last call and the drop, as
+  zenoh-pico's undeclare waits for the entity's lock. A form whose call reads the row where it
+  lies (the C one) is held only by tables whose rows never move (lent or static).
 
 ## 4. The API
 
@@ -142,8 +146,8 @@ fn subscribers_for<'a>(&'a self, key: &'a str, local: bool) -> impl Iterator<Ite
 fn queryables_for<'a>(&'a self, key: &'a str, local: bool) -> impl Iterator<...>;
 fn liveliness_subscribers_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
 fn tokens_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
-fn pin_subscriber(&mut self, h: SubscriberHandle) -> Option<Pinned<kind::Subscriber>>;
-fn unpin_subscriber(&mut self, p: Pinned<kind::Subscriber>) -> Option<Subscriber<F, P>>;
+fn begin_subscriber(&self, h: SubscriberHandle) -> Option<<F::Subscriber as RowCallback>::Call>;
+fn release_subscriber(&mut self, h: SubscriberHandle) -> Option<Subscriber<F, P>>;
 fn holds_slot(&self, h: Handle<K>) -> bool; // on each table: the undeclare's wait
 ```
 
