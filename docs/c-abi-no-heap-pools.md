@@ -200,14 +200,19 @@ the declarations owed it (`id_map.rs`, `declaration_sync.rs`, `peer_table.rs`,
   `SESSION_MAX_INBOUND_SUB_INTERESTS` (section 9.6).
 - Form: the fixed profile's split already holds them per session (`PeerTables`,
   `docs/no-heap-multi-session.md` section 2). Here what is owed to a peer (the answers staged to
-  its interests, the replies and `Final`s owed to its queries) is `Lent` tables in the face's part
-  of the arena, and what a peer writes by its own choice (its aliases, its subscribers, queryables
-  and tokens and the repeats of them, its interests) lies in one pool of each row kind for the
-  session (`crates/wz-session-core/src/row_pool.rs`): a slab of rows lent at the open, a free list
-  through the rows no face holds, each row carrying a generation so a handle kept past its row's
-  return names nothing. A face's table is a list of the rows its peer holds, at most the bound of
+  its interests and the `Final`s owed to its queries) is `Lent` tables in the face's part of the
+  arena; its reply stage is lent no row, as this engine's queryable answers into a stage of its
+  own. What a peer writes by its own choice (its aliases, its subscribers, queryables and tokens
+  and the repeats of them, its interests) is laid out by how many faces the session holds
+  (`crates/wz-session-core/src/row_pool.rs`). A session of many faces lends one pool of each row
+  kind: a slab of rows, a free list through the rows no face holds, each row carrying a `u16` link
+  and a `u16` generation beside its item's fields, so a handle kept past its row's return names
+  nothing, and the pool's state `u16` counters; a pool names at most 0x7FFE rows, which the open
+  holds its limits to. A face's table is a list of the rows its peer holds, at most the bound of
   one peer (`PooledIdMap`, `PooledRows`), and a lookup walks that face's rows as the scan of an
-  inline table did.
+  inline table did. A session of one face (a client, dial-only) shares with no one: each of its
+  tables takes a span of its own of that face's bound, laid out as the inline table laid its rows
+  out, with no link and no pool state.
 - Lifetime: the face's; a lost link takes them with it (the observer's link-loss flush), and a face
   that goes gives its rows back to the pools, one step each and no other face's.
 - Exhausted: the peer's declaration is refused and counted, whether its face's table is at the
@@ -917,66 +922,82 @@ and `MAX_ACCEPT_PENDING` 1 (section 9.1).
 
 **What one set holds.** A face's set is `FaceTables` (`crates/wz-capi-coop/src/engine/registry.rs`):
 the face's pending gets and `PeerTables` of what its peer writes and is owed. What the peer is owed
-is rows the arena lends each set at the open, sized by limits a document lowers. What the peer
-writes by its own choice is in the session's pools (below): the set holds a list head for each of
-those tables, a few words, in the registry. Estimates, not a measurement; the arena's parts are its
-row `peer tables` and its row `pending gets`:
+is rows the arena lends each set at the open, sized by limits a document lowers; the reply stage is
+lent none, as nothing stages there (this engine's queryable answers into a stage of its own, and the
+sink it registers leaves the face's untouched). What the peer writes by its own choice is in the
+session's pools or the face's own spans (below): the set holds a head for each of those tables, a
+pointer and three counters, in the registry. Estimates, not a measurement; the arena's parts are
+its row `peer tables` and its row `pending gets`:
 
 | part | where | sized by | build's defaults | pico preset |
 |------|-------|----------|-----------------:|------------:|
-| the replies staged for the peer's queries, each with a key and a payload | arena | `MAX_PENDING_REPLIES`, `MAX_REPLY_PAYLOAD_BYTES`, `MAX_KEYEXPR_BYTES` | 8 of 1,024 and 256 bytes, about 10,500 | 2, about 2,600 |
 | the answers staged to the peer's interests, and the `Final`s owed | arena | `MAX_PENDING_DECLARES`, `MAX_PENDING_FINALS` | 32 and 8 rows | 4 and 2 |
 | the face's pending gets | arena | `MAX_PENDING_QUERIES`, `MAX_PENDING_LIVELINESS_GETS` | 16 and 8 rows | 2 and 1 |
-| the heads of the lists of the peer's aliases, subscribers, queryables, tokens, repeats and interests | registry | none: a list holds the rows its peer declared | 7 heads, about 200 on a 64-bit host and 130 on a 32-bit core | the same |
+| the heads of the peer's aliases, subscribers, queryables, tokens, the two repeats and interests | registry | none: the rows lie in the pools or the face's spans | 7 heads, about 110 on a 64-bit host and 70 on a 32-bit core | the same |
 
-A set is about 18,100 bytes on a 64-bit host at the build's defaults and about 4,000 at the pico
-preset, besides its 200 of registry heads, and a link's buffers about 4,100 at a batch of 2,048
-bytes. Before the pools a set held its peer's interests in the arena (16 rows, about 640 bytes) and
-its peer's declarations inline in the registry at the build's capacities (about 2,200 bytes on a
+A set is about 7,600 bytes on a 64-bit host at the build's defaults and about 1,400 at the pico
+preset, besides its 110 of registry heads, and a link's buffers about 4,100 at a batch of 2,048
+bytes. Before the pools a set also held a reply stage (8 replies of a key and a payload, about 10,500
+bytes at the defaults, 2,600 at the preset), its peer's interests (16 rows, about 640 bytes) and,
+inline in the registry, its peer's declarations at the build's capacities (about 2,200 bytes on a
 64-bit host, 2,100 on a 32-bit core), whatever its peer declared.
 
-**The session's pools.** One pool of each kind of row a peer writes by its own choice, lent once
-(`PeerPools` in `crates/wz-session-core/src/peer_tables.rs`, the plan's rows `peer alias pool`,
-`peer declaration pools` and `peer interest pool`). Each holds the fewer of its `SESSION_MAX_`
-limit and what the faces could hold at one peer's bound, so a session of one face lends one face's
-worth, and a listener lends what its limit says its faces hold together. A row is its value and
-eight bytes that link and age it; a pool's state is one span of 32 bytes. Estimates, not a
-measurement, on a 64-bit host (a 32-bit core within a few percent):
+**What the peers write, by how many faces hold them.** `PeerPools` in
+`crates/wz-session-core/src/peer_tables.rs`, the plan's rows `peer alias pool`, `peer declaration
+pools` and `peer interest pool`, one area each.
 
-| pool | row | one face at the pico preset (16 of each) | a listener at the pico preset (32, 32, 16) | a listener at the build's defaults (16,016 of each) |
-|------|----:|-----------------------------------------:|-------------------------------------------:|---------------------------------------------------:|
-| aliases | 32 | 544 | 1,056 | 512,544 |
-| subscribers, queryables, tokens, and the repeats of the first two (twice the rows) | 32, 40, 32, 24 | 2,560 | 4,992 | 2,434,560 |
-| interests | 48 | 800 | 800 | 768,800 |
-| together | | about 3,900 | about 6,850 | about 3,716,000 |
+- A session of many faces lends one pool of each kind, holding the fewer of its `SESSION_MAX_` limit
+  and what the faces could hold at one peer's bound. A row is its item and a link of two `u16`s,
+  declared beside the item's fields: on a 32-bit core a row of an id and a key's place keeps the
+  item's 24 bytes, the link in the room the id's alignment leaves; a row whose item leaves none
+  (a queryable's, a repeat, an interest, and on a 64-bit host every one) is 8 bytes longer. A pool's
+  state is a pointer and six `u16`s, one span of 16 bytes on a 32-bit core and 32 on a 64-bit host.
+- A session of one face lends each table a span of its own of that face's bound (the session's
+  limit, where lower), with no link and no state: the aliases' span, one span the declaration
+  tables share, each table's rows after the one before's, and the interests' span. A face past
+  such a plan is handed none of them and holds what its peer writes in nothing.
 
-A row no face has ever held is never written (the pool hands out the rows past those written last),
-so on a host only the rows the peers declared become resident.
+Estimates, not a measurement, on a 64-bit host:
+
+| kind | one face at the pico preset (16 of each, its own spans) | a listener at the pico preset (pools of 32, 32, 16) | a listener at the build's defaults (pools of 16,016 of each) |
+|------|---------------------------------------------------------:|-----------------------------------------------------:|-------------------------------------------------------------:|
+| aliases | 384 | 1,056 | 512,544 |
+| subscribers, queryables, tokens, the subscribers' and the queryables' repeats | 1,792 | 5,024 | 2,434,592 |
+| interests | 640 | 800 | 768,800 |
+| together | 2,816 | about 6,880 | about 3,716,000 |
+
+The heads and the spans of one face together take no more than the inline tables of the same
+bounds did, checked by `one_faces_own_spans_take_no_more_than_the_inline_tables`
+(`crates/wz-session-core/src/peer_tables.rs`): on a 64-bit host the same bytes (a head is the room
+the inline table's length, count and padding took; the repeats' heads are 8 bytes longer each and
+the interests' 16 shorter), on a 32-bit core 24 fewer at the speed image's bounds. What the spans
+may add is their rounding to an arena's spans, under 16 bytes for each of the three, none at bounds
+whose rows fill 16 bytes. A row of a pool no face has ever held is never written (the pool hands
+out the rows past those written last), so on a host only the rows the peers declared become
+resident.
 
 **What a session reserves.** The arena of a client, and of a peer, at the pico preset is checked by
 `the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum`
-(`crates/wz-capi-coop/src/tests/arena.rs`): a client lends one set, the buffers of one link and
-pools of one face's worth; a peer lends the client's rows, with a set and a link's buffers for each
-of its 10 faces and a link's buffers for its one handshake, its pools at the preset's limits, every
-other row item for item the client's. So a peer reserves about 10 × (4,000 + 4,100) + 4,100 +
-(6,850 − 3,900), about 88,000 bytes, beyond the client's arena, and 10 sets of registry heads,
-about 2,000 bytes, beside it, where before the pools it reserved about 91,000 and 22,000.
+(`crates/wz-capi-coop/src/tests/arena.rs`): a client lends one set, the buffers of one link and the
+spans of its one face; a peer lends the client's rows, with a set and a link's buffers for each of
+its 10 faces and a link's buffers for its one handshake, and pools at the preset's limits in place of
+the spans, every other row item for item the client's. So a peer reserves about
+10 × (1,400 + 4,100) + 4,100 + (6,880 − 2,816), about 63,200 bytes, beyond the client's arena, and
+10 sets of registry heads, about 1,100 bytes, beside it.
 
 | session | sets | links | reserved by the faces (64-bit host, estimate) |
 |---------|-----:|------:|----------------------------------------------:|
 | a listener at the build's defaults, a set per handshake | 1,101 | 1,101 | about 25,100,000 in the arena and 2,400,000 of registry rows |
 | a listener at the build's defaults, a set per face | 1,001 | 1,101 | about 23,200,000 and 2,200,000 |
-| a listener at the build's defaults, with the pools | 1,001 | 1,101 | about 26,300,000 and 200,000, the pools' rows written only as peers declare |
+| a listener at the build's defaults, with the pools | 1,001 | 1,101 | about 15,840,000 and 110,000, the pools' rows written only as peers declare |
 | a listener at the pico preset, a set per face | 11 | 12 | about 100,000 and 24,000 |
-| a listener at the pico preset, with the pools | 11 | 12 | about 100,000 and 2,200 |
+| a listener at the pico preset, with the pools | 11 | 12 | about 71,500 and 1,200 |
 | a client, a set per face | 1 | 1 | about 8,700 and 2,200 at the preset, 22,800 and 2,200 at the defaults |
-| a client, with the pools | 1 | 1 | about 12,000 and 200 at the preset, 26,100 and 200 at the defaults |
+| a client, with its own spans | 1 | 1 | about 8,300 and 110 at the preset, 14,500 and 110 at the defaults |
 
-The pools cost a session of one face what they save a session of many: a client's one face holds
-the same rows as before, each eight bytes longer and in a pool whose state is 32 bytes, about 1,200
-bytes more at the preset on a 64-bit host, while a listener of the preset holds about 21,500 fewer.
-At the build's defaults the reservation grows by the same eight bytes a row, about 1,100,000 for a
-listener, of which a host makes resident only the rows its peers declare.
+A client's tables take what its inline tables took; what it no longer reserves is the reply stage
+nothing staged in. A listener's faces share the pools: a peer of the preset reserves about 51,000
+bytes fewer than with a set of every table per face, about 28,600 of them the reply stages.
 
 **On a host.** Only the pages a session writes are resident, so a listener's resident memory falls by
 what its open wrote of the sets and links it no longer lends: up to the 12,000,000 bytes the
@@ -988,11 +1009,9 @@ its build keeps the defaults and moves only by the 100 sets of the handshakes, a
 of reservation, until it states the preset's environment.
 
 **On an MCU.** The speed image is a client that states its own limits (`arm_w.conf`: four
-declarations of each kind, four aliases, two interests), and none of the session's: its pools hold
-one face's worth, four, four and two rows, which fit what its one peer declares. Its rows move from
-the registry and its set into the pools and each grows by the eight bytes that link and age it,
-with 32 bytes of state for each of the six pools: about 1,000 bytes where they were about 630 on a
-32-bit core, an estimate the speed matrix is to measure. One that listens at the preset reserves its
-10 faces and one handshake, about 87,000 bytes of arena as before the pools (its sets' interests
-moved into a pool of about the same size) and 1,300 of registry heads on a 32-bit core, where before
-the pools it held 21,000 of registry rows, and states fewer where its memory is smaller.
+declarations of each kind, four aliases, two interests) and none of the session's, so its tables
+take spans of their own of those bounds: on a 32-bit core 592 bytes of rows and 72 of heads, where
+its inline tables and its interests' table took about 688, and its set lends no reply stage. One
+that listens at the preset reserves its 10 faces and one handshake, about 57,000 bytes of arena and
+800 of registry heads on a 32-bit core, where before the pools it reserved about 87,000 and 21,000,
+and states fewer where its memory is smaller. Estimates the speed matrix is to measure.
