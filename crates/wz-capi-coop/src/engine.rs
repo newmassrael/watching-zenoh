@@ -1580,27 +1580,52 @@ struct InterestHold {
     plane: FilterPlane,
     keyexpr: RowKey,
     interest_id: u64,
+    /// How the Interest names its key. The rest of the key it names is no copy of its own when it
+    /// is a tail of `keyexpr` (`suffix_at`), which it is for every form the ABI asks with.
     form: InterestForm,
+    /// Where in `keyexpr` the rest of the key the form names begins: the whole key for a form that
+    /// names no declaration, what follows the declared prefix for one that does. `None` when the
+    /// form keeps a rest of its own, or names none.
+    suffix_at: Option<usize>,
     holds: usize,
 }
 
 impl InterestHold {
+    /// The rest of the key the form names.
+    fn suffix(&self) -> Option<&str> {
+        match self.suffix_at {
+            Some(at) => self.keyexpr.get(at..),
+            None => self.form.suffix.as_deref(),
+        }
+    }
+
     /// Send this Interest over `actions`, for what is declared now and what is declared later,
     /// naming its key as the link's key-wire form says: whether the link took it.
     fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let form = interest_on_link(actions, &self.keyexpr, &self.form);
+        let linked = interest_on_link(actions, &self.keyexpr, &self.form);
+        let (aggregate, mapping_id, suffix) = match &linked {
+            Cow::Borrowed(form) => (form.aggregate, form.mapping_id, self.suffix()),
+            Cow::Owned(form) => (form.aggregate, form.mapping_id, form.suffix.as_deref()),
+        };
         actions
             .send_interest_kinds(
                 self.interest_id,
                 kinds(self.plane),
                 /* current */ true,
                 /* future */ true,
-                form.aggregate,
-                form.mapping_id,
-                form.suffix.as_deref(),
+                aggregate,
+                mapping_id,
+                suffix,
             )
             .is_ok()
     }
+}
+
+/// Where in `keyexpr` a form's rest of the key, `suffix`, begins, when it is a tail of it.
+fn suffix_place(keyexpr: &str, suffix: Option<&str>) -> Option<usize> {
+    let suffix = suffix?;
+    let at = keyexpr.len().checked_sub(suffix.len())?;
+    (keyexpr.get(at..) == Some(suffix)).then_some(at)
 }
 
 struct MatchEntry {
@@ -4772,11 +4797,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(interest_id) = self.next_entity_id() else {
             return false;
         };
+        // The rest of the key the form names is read from the row's own key, not copied.
+        let suffix_at = suffix_place(keyexpr, form.suffix.as_deref());
         let hold = InterestHold {
             plane,
             keyexpr: key,
             interest_id: u64::from(interest_id),
-            form: form.clone(),
+            form: InterestForm {
+                mapping_id: form.mapping_id,
+                suffix: if suffix_at.is_some() {
+                    None
+                } else {
+                    form.suffix.clone()
+                },
+                aggregate: form.aggregate,
+            },
+            suffix_at,
             holds: 1,
         };
         core.announce(Kind::Interest, |actions| hold.send(actions));
@@ -6907,5 +6943,30 @@ mod clock_moves_tests {
             ended_by_clock_moves(IdleWait::Sleep(7), None),
             IdleWait::Sleep(7)
         ));
+    }
+}
+
+#[cfg(test)]
+mod interest_form_tests {
+    //! Where an Interest's rest of the key lies in the key its row keeps.
+    use super::suffix_place;
+
+    /// A form that names no declaration names the whole key, one that names a declared prefix the
+    /// rest after it: each a tail of the row's key, found where it begins. A rest that is not a tail,
+    /// or none, has no place, and the form keeps its own.
+    #[test]
+    fn a_forms_rest_of_the_key_is_found_in_the_rows_key() {
+        assert_eq!(suffix_place("demo/if/key", Some("demo/if/key")), Some(0));
+        assert_eq!(
+            suffix_place("demo/if/key", Some("/key")),
+            Some("demo/if".len())
+        );
+        assert_eq!(
+            suffix_place("demo/if/key", Some("")),
+            Some("demo/if/key".len())
+        );
+        assert_eq!(suffix_place("demo/if/key", Some("/other")), None);
+        assert_eq!(suffix_place("demo", Some("demo/longer")), None);
+        assert_eq!(suffix_place("demo/if/key", None), None);
     }
 }
