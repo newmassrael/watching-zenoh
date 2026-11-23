@@ -16,11 +16,11 @@
 //!   is [`SessionDatagramLink::recv_with`] instead, and each datagram is
 //!   dispatched where the link holds it, record by record
 //!   (`wz_session_core::drive::dispatch_datagram`).
-//! - deadlines: [`HandshakeDeadlineTracker`] yields the handshake deadline;
-//!   in Established the keepalive-resetting lease deadline applies and
-//!   [`check_lease_deadline`] (the shared comparator) runs when it elapses.
-//!   The sync loop fires a deadline when `now_ms >= deadline_ms` — the
-//!   busy-poll equivalent of the AP `select!` sleep branch winning the race.
+//! - deadlines: the session's own timers
+//!   ([`TransportTimers`](wz_session_core::transport_timers::TransportTimers))
+//!   say how long the link may wait and judge the handshake, lease and
+//!   keep-alive deadlines when the loop hands them the time; the loop keeps
+//!   none of its own.
 //! - outbound is transparent: the FSM action methods call
 //!   `link_driver().send_blocking` on the link's own `BoxedLinkDriver`.
 //!
@@ -67,10 +67,8 @@ use wz_session_core::drive::dispatch_link_event;
 use wz_session_core::drive::dispatch_parked_in_place;
 #[cfg(all(feature = "alloc", not(feature = "rx-in-place")))]
 use wz_session_core::drive::dispatch_pending;
+use wz_session_core::drive::new_session_engine_in;
 use wz_session_core::drive::SessionEngine;
-#[cfg(feature = "transport-keepalive")]
-use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
-use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_session_engine_in};
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, EventSink, IterationEvent};
@@ -83,8 +81,9 @@ use wz_session_core::link::RxFrame;
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::network_message::{new_record_buf, RecordBuf};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
-use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
+use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::{FixedText, TextOut};
+use wz_session_core::transport_timers::TransportTimers;
 
 #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
 use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, ReassemblyArena};
@@ -1004,7 +1003,7 @@ impl SessionRole {
 /// fields are `Copy`, so this owns them by value and carries no lifetime.
 pub struct SessionDriveConfig {
     /// The handshake deadline budget ([`SessionTimeouts::spec_defaults`]);
-    /// seeds the [`HandshakeDeadlineTracker`] the loop polls each tick.
+    /// seeds the session's timers ([`TransportTimers`]).
     pub timeouts: SessionTimeouts,
     /// The role to activate the FSM with before the loop starts
     /// ([`SessionRole::Acceptor`] listens for an inbound peer;
@@ -1203,7 +1202,9 @@ pub struct SessionPump<
     actions: SessionHandle<C, D>,
     clock: CoopTime<C>,
     engine: SessionEngine<CoopRuntime<C, D>, CoopTime<C>>,
-    deadline_tracker: HandshakeDeadlineTracker,
+    /// The session's own timers: the pump asks them how long its link may wait and hands them
+    /// the time, and keeps no deadline of its own.
+    timers: TransportTimers,
     /// The reassembly Router the session's fragments are staged in.
     #[cfg(feature = "reassembly")]
     reasm: R,
@@ -1524,8 +1525,7 @@ impl<
             core::ptr::addr_of_mut!((*at).link).write(link);
             core::ptr::addr_of_mut!((*at).actions).write(actions);
             core::ptr::addr_of_mut!((*at).clock).write(clock);
-            core::ptr::addr_of_mut!((*at).deadline_tracker)
-                .write(HandshakeDeadlineTracker::new(timeouts));
+            core::ptr::addr_of_mut!((*at).timers).write(TransportTimers::new(timeouts));
             #[cfg(feature = "reassembly")]
             {
                 let router = &mut *core::ptr::addr_of_mut!((*at).reasm).cast::<MaybeUninit<R>>();
@@ -1569,28 +1569,15 @@ impl<
     /// the keep-alive deadline and the next registered timer, less now. A deadline already past
     /// is 0, and `u64::MAX` is nothing due at all.
     ///
-    /// The handshake deadline is armed here, as `step` arms it a moment later: a state the session
-    /// has just entered is armed from this instant, which is no later than it used to be.
+    /// The session's deadlines are its timers' ([`TransportTimers::next_due_ms`]), which arm
+    /// the handshake deadline of a state they see for the first time from this instant; the
+    /// runtime's next timer is the driver's own.
     fn wake_budget_ms(&mut self) -> u64 {
         let now_ms = self.clock.now_monotonic_ms();
-        let mut due_ms = u64::MAX;
-        let handshake = self
-            .deadline_tracker
-            .poll(self.engine.get_current_state(), now_ms);
-        if let Some((deadline_ms, _event)) = handshake {
-            due_ms = due_ms.min(deadline_ms);
-        }
-        if let Some(deadline_ms) = lease_wake_deadline(&self.actions) {
-            due_ms = due_ms.min(deadline_ms);
-        }
-        #[cfg(feature = "transport-keepalive")]
-        if let Some(deadline_ms) = keepalive_wake_deadline(&self.actions) {
-            due_ms = due_ms.min(deadline_ms);
-        }
-        // The application layer's own (a pending query's), which the transport cannot know.
-        if let Some(deadline_ms) = self.actions.app_wake_deadline_ms() {
-            due_ms = due_ms.min(deadline_ms);
-        }
+        let due_ms = self
+            .timers
+            .next_due_ms(&self.engine, &self.actions, now_ms)
+            .unwrap_or(u64::MAX);
         let mut wait_ms = due_ms.saturating_sub(now_ms);
         if let Some(timer_us) = self.runtime.time_to_next_timer_us() {
             wait_ms = wait_ms.min(timer_us.div_ceil(1000));
@@ -1760,51 +1747,9 @@ impl<
             return None;
         }
 
-        // No inbound: the handshake / lease deadline. The tracker yields the
-        // active handshake deadline; in Established it disarms and the
-        // lease-expiry deadline applies — armed via the shared
-        // `lease_wake_deadline` helper (R311kx: baseline
-        // max(established_at, any-RX `last_inbound_at` — R311la pico
-        // `_received` parity) + the adopted min(local, peer) window, the
-        // same arithmetic the comparator re-derives). Fire when
-        // `now_ms >= deadline_ms` — the busy-poll equivalent of the AP
-        // select! sleep branch.
-        let deadline: Option<(u64, Option<SessionFsmUnicastEvent>)> = match self
-            .deadline_tracker
-            .poll(self.engine.get_current_state(), now_ms)
-        {
-            Some((dl_ms, ev)) => Some((dl_ms, Some(ev))),
-            None => lease_wake_deadline(&self.actions).map(|dl| (dl, None)),
-        };
-        if let Some((deadline_ms, kind)) = deadline {
-            if now_ms >= deadline_ms {
-                match kind {
-                    None => {
-                        let lease_outcome =
-                            check_lease_deadline(&self.actions, &mut self.engine, now_ms);
-                        on_event.event(IterationEvent::Lease(lease_outcome));
-                    }
-                    Some(event) => {
-                        self.engine.process_event(event);
-                    }
-                }
-            }
-        }
-
-        // R311kx — keepalive TX deadline, the busy-poll twin of the AP
-        // loop's min-deadline select arm: compare against the TX wake
-        // deadline each tick and run the (self-guarded) check only when it
-        // crossed, so the steady state stays event-free — the observer
-        // sees `Emitted` verdicts, not a per-tick `WithinInterval` flood.
-        // There is no deadline while the FSM's keepalive worker is stopped,
-        // so a session in Closing emits nothing after its Close frame.
-        #[cfg(feature = "transport-keepalive")]
-        if let Some(ka_deadline_ms) = keepalive_wake_deadline(&self.actions) {
-            if now_ms >= ka_deadline_ms {
-                let ka_outcome = check_keepalive_deadline(&self.actions, now_ms);
-                on_event.event(IterationEvent::KeepAlive(ka_outcome));
-            }
-        }
+        // No inbound: the session's timers are handed the time, and raise what has come due.
+        self.timers
+            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
 
         None
     }
@@ -3042,6 +2987,81 @@ mod wake_budget_tests {
         );
         // A deadline that is now is a wait of nothing.
         assert_eq!(waited(Some(0)), 0);
+    }
+
+    /// An acceptor's pump over the test's link, and the session's clock reading when it was made.
+    fn acceptor() -> (SessionPump<Stopped, Rc<Recording>>, u64) {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let now_ms = clock.now_monotonic_ms();
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::from_build(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let link = Rc::new(Recording::default());
+        (
+            SessionPump::new(runtime, link, actions, clock, config),
+            now_ms,
+        )
+    }
+
+    /// The session's timers name the nearest of its deadlines: the application layer's when it is
+    /// nearer than any of the transport's, and with none stated nothing that near.
+    #[test]
+    fn the_session_timers_name_the_nearest_deadline() {
+        let (mut pump, now_ms) = acceptor();
+        let unprompted = pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms);
+        assert!(
+            !unprompted.is_some_and(|due| due <= now_ms + 3),
+            "an idle session has nothing due within 3 ms, and named {unprompted:?}"
+        );
+        pump.actions.set_app_wake_deadline_ms(Some(now_ms + 3));
+        assert_eq!(
+            pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms),
+            Some(now_ms + 3)
+        );
+    }
+
+    /// An acceptor's handshake bound is armed when its timers first see its state, and its timeout
+    /// moves the machine on once the bound has passed and not a millisecond before; the loop is
+    /// told nothing of it, the machine is.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn the_session_timers_raise_the_handshake_timeout_at_its_deadline_and_not_before() {
+        let (mut pump, now_ms) = acceptor();
+        let state = pump.engine.get_current_state();
+        let window = wz_session_core::session_timeouts::handshake_deadline_for(
+            state,
+            &SessionTimeouts::from_build(),
+        )
+        .expect("an activated acceptor waits on its handshake's bound")
+        .deadline_ms;
+        assert_eq!(
+            pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms),
+            Some(now_ms + window)
+        );
+        let mut events = 0;
+        let mut count = |_event: IterationEvent<'_, '_>| events += 1;
+        pump.timers.fire_due(
+            &mut pump.engine,
+            &pump.actions,
+            now_ms + window - 1,
+            &mut count,
+        );
+        assert!(
+            pump.engine.get_current_state() == state,
+            "not yet due: the machine is where it was"
+        );
+        pump.timers
+            .fire_due(&mut pump.engine, &pump.actions, now_ms + window, &mut count);
+        assert!(
+            pump.engine.get_current_state() != state,
+            "due: the timeout moved the machine on"
+        );
+        assert_eq!(events, 0, "the handshake's timeout is the machine's event");
     }
 }
 
