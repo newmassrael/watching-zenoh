@@ -408,11 +408,21 @@ pub unsafe extern "C" fn ze_serializer_serialize_str(
     serializer: *mut ze_loaned_serializer_t,
     val: *const c_char,
 ) -> ZResult {
+    let (data, len) = str_run(val);
+    ze_serializer_serialize_buf(serializer, data, len)
+}
+
+/// The run a NUL-terminated string is written as: its bytes without the terminator, and none for
+/// a null one. Read the same way by the serializer's form and the one-shot form.
+///
+/// # Safety
+/// `val` must be null or a valid NUL-terminated string.
+unsafe fn str_run(val: *const c_char) -> (*const u8, usize) {
     if val.is_null() {
-        return ze_serializer_serialize_buf(serializer, core::ptr::null(), 0);
+        return (core::ptr::null(), 0);
     }
     let bytes = CStr::from_ptr(val).to_bytes();
-    ze_serializer_serialize_buf(serializer, bytes.as_ptr(), bytes.len())
+    (bytes.as_ptr(), bytes.len())
 }
 
 /// Write a length-prefixed owned string (pico `ze_serializer_serialize_string`).
@@ -825,9 +835,7 @@ pub unsafe extern "C" fn ze_serialize_buf(
     data: *const u8,
     len: usize,
 ) -> ZResult {
-    one_shot(bytes, |serializer| {
-        ze_serializer_serialize_buf(serializer, data, len)
-    })
+    one_shot(bytes, data, len)
 }
 
 /// Serialize a loaned slice as a whole payload (pico `ze_serialize_slice`).
@@ -840,9 +848,11 @@ pub unsafe extern "C" fn ze_serialize_slice(
     bytes: *mut z_owned_bytes_t,
     slice: *const crate::abi::z_loaned_slice_t,
 ) -> ZResult {
-    one_shot(bytes, |serializer| {
-        ze_serializer_serialize_slice(serializer, slice)
-    })
+    one_shot(
+        bytes,
+        crate::bytes::z_slice_data(slice),
+        crate::bytes::z_slice_len(slice),
+    )
 }
 
 /// Serialize a NUL-terminated string as a whole payload (pico
@@ -856,9 +866,8 @@ pub unsafe extern "C" fn ze_serialize_str(
     bytes: *mut z_owned_bytes_t,
     value: *const core::ffi::c_char,
 ) -> ZResult {
-    one_shot(bytes, |serializer| {
-        ze_serializer_serialize_str(serializer, value)
-    })
+    let (data, len) = str_run(value);
+    one_shot(bytes, data, len)
 }
 
 /// Serialize an explicitly-sized substring as a whole payload (pico
@@ -873,9 +882,7 @@ pub unsafe extern "C" fn ze_serialize_substr(
     start: *const core::ffi::c_char,
     len: usize,
 ) -> ZResult {
-    one_shot(bytes, |serializer| {
-        ze_serializer_serialize_substr(serializer, start, len)
-    })
+    one_shot(bytes, start as *const u8, len)
 }
 
 /// Serialize a loaned string as a whole payload (pico `ze_serialize_string`).
@@ -888,9 +895,11 @@ pub unsafe extern "C" fn ze_serialize_string(
     bytes: *mut z_owned_bytes_t,
     s: *const crate::abi::z_loaned_string_t,
 ) -> ZResult {
-    one_shot(bytes, |serializer| {
-        ze_serializer_serialize_string(serializer, s)
-    })
+    one_shot(
+        bytes,
+        crate::bytes::z_string_data(s) as *const u8,
+        crate::bytes::z_string_len(s),
+    )
 }
 
 /// Serialize a boolean as a whole payload (pico `ze_serialize_bool`).
@@ -913,18 +922,19 @@ pub unsafe extern "C" fn ze_serialize_bool(bytes: *mut z_owned_bytes_t, val: boo
     })
 }
 
-/// Build a payload by running `body` against a fresh serializer, then finishing
-/// it into `bytes`.
+/// Build a payload holding the one length-prefixed run of `len` bytes at `data`: a fresh
+/// serializer, the run written by [`ze_serializer_serialize_buf`], then finished into `bytes`.
 ///
-/// Shared by every `ze_serialize_*` above so the "null the destination, build,
-/// finish" sequence — and its failure path — cannot drift between them.
+/// Shared by every length-prefixed `ze_serialize_*` above so the "null the destination, build,
+/// finish" sequence — and its failure path — cannot drift between them. Each of them names its
+/// value as the run the serializer's own form of it writes, so this body is not generic and is
+/// never inlined: the five doors call one copy of it.
 ///
 /// # Safety
-/// `bytes` must be null or valid and writable.
-unsafe fn one_shot(
-    bytes: *mut z_owned_bytes_t,
-    body: impl FnOnce(*mut ze_loaned_serializer_t) -> ZResult,
-) -> ZResult {
+/// `bytes` must be null or valid and writable; `data` null with `len` zero, or `len` readable
+/// bytes.
+#[inline(never)]
+unsafe fn one_shot(bytes: *mut z_owned_bytes_t, data: *const u8, len: usize) -> ZResult {
     guarded(|| {
         if bytes.is_null() {
             return Z_ERR_NULL;
@@ -935,7 +945,7 @@ unsafe fn one_shot(
         if rc != Z_OK {
             return rc;
         }
-        let rc = body(ze_serializer_loan_mut(&mut serializer));
+        let rc = ze_serializer_serialize_buf(ze_serializer_loan_mut(&mut serializer), data, len);
         if rc != Z_OK {
             // Release the half-built serializer rather than leaking it; the
             // caller sees a null payload, which `z_internal_bytes_check`
@@ -1335,6 +1345,88 @@ mod tests {
                 ze_serialize_uint32(core::ptr::null_mut(), 1),
                 Z_ERR_NULL,
                 "no payload to write is refused"
+            );
+        }
+    }
+
+    /// Every length-prefixed one-shot form writes the run its serializer form writes, through the
+    /// one body: the length, then the bytes; a null string is a run of none; a run with no bytes
+    /// behind it is refused with the destination left null, and so is no destination.
+    #[test]
+    fn every_length_prefixed_one_shot_form_writes_one_run() {
+        unsafe fn written(bytes: &z_owned_bytes_t) -> alloc::vec::Vec<u8> {
+            bytes_ref(crate::bytes::z_bytes_loan(bytes))
+                .expect("payload")
+                .as_slice()
+                .to_vec()
+        }
+        unsafe fn release(mut bytes: z_owned_bytes_t) {
+            crate::bytes::z_bytes_drop(crate::bytes::z_bytes_move(&mut bytes));
+        }
+        let abc = [3u8, b'a', b'b', b'c'];
+        unsafe {
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_buf(&mut bytes, b"abc".as_ptr(), 3), Z_OK);
+            assert_eq!(written(&bytes), abc, "a buffer");
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_substr(&mut bytes, c"abcdef".as_ptr(), 3), Z_OK);
+            assert_eq!(written(&bytes), abc, "the first three bytes of a string");
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_str(&mut bytes, c"abc".as_ptr()), Z_OK);
+            assert_eq!(written(&bytes), abc, "a C string without its terminator");
+            release(bytes);
+
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(ze_serialize_str(&mut bytes, core::ptr::null()), Z_OK);
+            assert_eq!(written(&bytes), [0u8], "a null string is a run of none");
+            release(bytes);
+
+            let mut slice = core::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_slice_copy_from_buf(&mut slice, b"abc".as_ptr(), 3),
+                Z_OK
+            );
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(
+                ze_serialize_slice(&mut bytes, crate::bytes::z_slice_loan(&slice)),
+                Z_OK
+            );
+            assert_eq!(written(&bytes), abc, "a slice");
+            release(bytes);
+            crate::bytes::z_slice_drop(crate::bytes::z_slice_move(&mut slice));
+
+            let mut string = core::mem::zeroed();
+            assert_eq!(store_owned_string(&mut string, b"abc"), Z_OK);
+            let mut bytes = core::mem::zeroed();
+            assert_eq!(
+                ze_serialize_string(&mut bytes, crate::bytes::z_string_loan(&string)),
+                Z_OK
+            );
+            assert_eq!(written(&bytes), abc, "an owned string");
+            release(bytes);
+            crate::bytes::z_string_drop(crate::bytes::z_string_move(&mut string));
+
+            let mut bytes = z_owned_bytes_t {
+                handle: core::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+                _pad: [core::ptr::null_mut(); 3],
+            };
+            assert_eq!(
+                ze_serialize_buf(&mut bytes, core::ptr::null(), 2),
+                Z_ERR_NULL,
+                "two bytes with nothing behind them are refused"
+            );
+            assert!(
+                !crate::bytes::z_internal_bytes_check(&bytes),
+                "the destination is left null"
+            );
+            assert_eq!(
+                ze_serialize_buf(core::ptr::null_mut(), b"abc".as_ptr(), 3),
+                Z_ERR_NULL,
+                "no destination is refused"
             );
         }
     }
