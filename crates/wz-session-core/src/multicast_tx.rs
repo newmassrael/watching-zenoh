@@ -308,8 +308,8 @@ pub trait MulticastTxQueue {
     /// sequence number `sn` it already minted, as the unicast lend falls back.
     ///
     /// The default lends nothing, which is every queue that has no pool (the
-    /// MCU loop's, the collecting one behind `multicast_tx_emit`).
-    #[cfg(feature = "transport-tx-lend")]
+    /// MCU loop's, the collecting one behind `multicast_tx_emit`). A push asks
+    /// only under `transport-tx-lend`; a queue may offer its slots in any build.
     fn enqueue_lent(
         &mut self,
         priority: Priority,
@@ -1013,6 +1013,19 @@ impl MulticastTxLanes {
     pub fn of_group(params: &crate::multicast_params::MulticastParams) -> Self {
         let batch = usize::from(params.batch_size);
         Self::new(params.tx_queue.shape(params.is_qos, batch, batch))
+    }
+
+    /// The bytes the lane of `priority` holds at most, when `priority` has a lane of its own:
+    /// every priority on a group that runs QoS, DEFAULT alone otherwise. `None` is a priority
+    /// whose messages take DEFAULT's lane.
+    pub fn own_lane_bytes(&self, priority: Priority) -> Option<usize> {
+        (self.shape.qos || priority == Priority::DEFAULT).then(|| self.shape.lane_bytes(priority))
+    }
+
+    /// The index, by priority wire byte, of the lane a message of `priority` takes: its own on a
+    /// QoS group, the DEFAULT one otherwise.
+    pub fn lane_index(&self, priority: Priority) -> usize {
+        self.lane(priority)
     }
 
     /// The lane a message of `priority` takes: its own on a QoS group, the DEFAULT one otherwise.
