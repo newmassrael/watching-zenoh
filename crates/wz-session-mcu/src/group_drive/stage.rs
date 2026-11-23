@@ -49,14 +49,17 @@ use core::net::SocketAddr;
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
+use wz_session_core::frame_encode::BodyEncoder;
 use wz_session_core::limits::{MaxMulticastRepliesHeld, SessionLimits};
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 use wz_session_core::multicast_tx::{
-    multicast_tx_bytes, multicast_tx_conduit, multicast_tx_encoded_conduit, multicast_tx_push,
-    multicast_tx_push_batched, multicast_tx_push_encoded, MulticastBatch, MulticastTxDatagram,
-    MulticastTxEncoded, MulticastTxItem, MulticastTxLanes, MulticastTxQueue,
+    multicast_tx_bytes, multicast_tx_conduit, multicast_tx_encode_into,
+    multicast_tx_encoded_conduit, multicast_tx_item_body, multicast_tx_push,
+    multicast_tx_push_batched, multicast_tx_push_encoded, multicast_tx_push_meta,
+    multicast_tx_push_staged, MulticastBatch, MulticastTxDatagram, MulticastTxEncoded,
+    MulticastTxItem, MulticastTxLanes, MulticastTxMeta, MulticastTxQueue,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
@@ -114,10 +117,10 @@ struct Inner {
     /// Whether the batch window is open ([`GroupTxStage::batch_start`]).
     window_open: Cell<bool>,
     lanes: RefCell<Lanes>,
-    /// What was pushed while another push held the conduits, in the order it was pushed, each
-    /// with whether it holds a reply slot.
-    deferred: RefCell<VecDeque<(MulticastTxItem, bool)>>,
-    /// How many reply slots are held: by a reply deferred, or by the first datagram of a reply
+    /// What was pushed while another push held the conduits, encoded, waiting for its sequence
+    /// number.
+    staged: RefCell<Staged>,
+    /// How many reply slots are held: by a reply staged, or by the first datagram of a reply
     /// queued on a lane.
     replies: Cell<usize>,
     /// How many replies were dropped for want of a slot.
@@ -141,6 +144,87 @@ struct Writer {
     held: Option<Taken>,
     on_wire: MulticastTxConduits,
     lost: u32,
+}
+
+/// What was pushed while another push held the conduits, kept until they are let go, in the order
+/// it was pushed: each message's body encoded into storage taken when the group opens, beside how
+/// it is framed, so that it is framed when its sequence number can be minted, into the frame it
+/// would have had at once, and nothing of it is kept on the heap. It holds as many messages as the
+/// stage holds replies, each of up to a batch.
+struct Staged {
+    bytes: LaneRing,
+    held: VecDeque<StagedMessage>,
+    /// The most messages it holds.
+    most: usize,
+}
+
+/// One message [`Staged`] holds: how it is framed, the length of its body, and whether it holds a
+/// reply slot.
+#[derive(Clone, Copy)]
+struct StagedMessage {
+    meta: MulticastTxMeta,
+    len: usize,
+    reply: bool,
+}
+
+/// Why [`Staged::keep`] kept nothing of a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unkept {
+    /// It holds its most messages, or has no run free as long as the message's body may be.
+    Full,
+    /// The message's encoder refused it.
+    Unencodable,
+}
+
+impl Staged {
+    /// Storage for `most` messages of up to `batch` bytes each.
+    fn new(most: usize, batch: usize) -> Self {
+        Self {
+            bytes: LaneRing::new(most.saturating_mul(batch)),
+            held: VecDeque::with_capacity(most),
+            most,
+        }
+    }
+
+    /// Encode a message of at most `size` bytes framed as `meta` says, behind the ones held.
+    fn keep(
+        &mut self,
+        meta: MulticastTxMeta,
+        size: usize,
+        body: &BodyEncoder<'_>,
+        reply: bool,
+    ) -> Result<(), Unkept> {
+        if self.held.len() >= self.most {
+            return Err(Unkept::Full);
+        }
+        let (at, wraps) = self.bytes.room(size).ok_or(Unkept::Full)?;
+        let out = self
+            .bytes
+            .buf
+            .get_mut(at..at.saturating_add(size))
+            .ok_or(Unkept::Full)?;
+        let len = multicast_tx_encode_into(body, out).ok_or(Unkept::Unencodable)?;
+        self.bytes.commit(at, len, wraps);
+        self.held.push_back(StagedMessage { meta, len, reply });
+        Ok(())
+    }
+
+    /// The oldest message held.
+    fn front(&self) -> Option<StagedMessage> {
+        self.held.front().copied()
+    }
+
+    /// The body of the oldest message, `len` bytes long.
+    fn front_bytes(&self, len: usize) -> &[u8] {
+        self.bytes.front_run(0, len)
+    }
+
+    /// Let go of the oldest message, of `len` bytes.
+    fn pop(&mut self, len: usize) {
+        if self.held.pop_front().is_some() {
+            self.bytes.pop(len);
+        }
+    }
 }
 
 /// The lanes' bound and congestion marks, and each lane's storage, taken when the group opens,
@@ -498,13 +582,15 @@ impl GroupTxStage {
                 }),
                 window_open: Cell::new(false),
                 lanes: RefCell::new(Lanes::of_group(params, quota)),
-                // What is kept for a push's release is a reply of the group's own dispatch, as many
-                // as the stage holds replies.
-                deferred: RefCell::new(VecDeque::with_capacity(
+                // What is kept for a push's release is mostly a reply of the group's own dispatch:
+                // as many as the stage holds replies, the build's number where the stage holds no
+                // bound, since the storage is taken now.
+                staged: RefCell::new(Staged::new(
                     match super::quota_count(quota.get()) {
-                        usize::MAX => 0,
+                        usize::MAX => wz_session_core::caps::MAX_MULTICAST_REPLIES,
                         count => count,
                     },
+                    usize::from(params.batch_size),
                 )),
                 replies: Cell::new(0),
                 dropped: Cell::new(0),
@@ -565,17 +651,23 @@ impl GroupTxStage {
     /// lane: a reply the group's own dispatch stages runs inside the pump it would wait for. It
     /// takes a reply slot, or is dropped and counted ([`Self::dropped`]) when none is free.
     pub(super) fn admit_reply(&self, item: MulticastTxItem) {
+        let meta = MulticastTxMeta::of_item(&item, &self.inner.params);
+        let size = multicast_tx_bytes(&item);
+        multicast_tx_item_body(&item, |body| self.admit_reply_body(meta, size, body));
+    }
+
+    /// [`Self::admit_reply`] of a reply framed as `meta` says, whose body `body` encodes in at
+    /// most `size` bytes: framed at once, or kept encoded ([`Staged`]) while another push holds
+    /// the conduits.
+    fn admit_reply_body(&self, meta: MulticastTxMeta, size: usize, body: &BodyEncoder<'_>) {
         let inner = &*self.inner;
         // A lane's storage holds the replies the limit lets the stage hold; one its storage has no
         // room for is past that limit, and is refused by it.
-        let room = {
-            let priority = multicast_tx_conduit(&item, &inner.params);
-            let bytes = multicast_tx_bytes(&item);
-            inner
-                .lanes
-                .borrow()
-                .reply_room(priority, bytes, usize::from(inner.params.batch_size))
-        };
+        let room = inner.lanes.borrow().reply_room(
+            meta.conduit(),
+            size,
+            usize::from(inner.params.batch_size),
+        );
         if !room
             || !self
                 .quota
@@ -583,17 +675,66 @@ impl GroupTxStage {
                 .admits(inner.replies.get().saturating_add(1))
         {
             inner.dropped.set(inner.dropped.get().saturating_add(1));
-            // Freed here, with nothing of the stage borrowed.
-            drop(item);
             return;
         }
         inner.replies.set(inner.replies.get().saturating_add(1));
-        let _ = self.push_held(item, None, true);
+        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
+            let _ = self.stage(meta, size, body, true);
+            return;
+        };
+        let params = &inner.params;
+        let _ = self.push_on(
+            &mut conduits,
+            meta.conduit(),
+            None,
+            true,
+            |minted, queue, window| {
+                multicast_tx_push_meta(
+                    meta,
+                    size,
+                    body,
+                    minted,
+                    params,
+                    &params.tx_queue,
+                    queue,
+                    window,
+                )
+            },
+        );
+        drop(conduits);
         self.push_deferred();
     }
 
-    /// Push `item` holding the conduits, or keep it for the holder's release when another push
-    /// holds them (it then counts as pushed). `pace` is `None` for a push that does not wait;
+    /// Keep a message pushed while another push holds the conduits, framed once they are let go
+    /// ([`Self::push_deferred`]). One the staged storage cannot keep is refused as its kind is: a
+    /// reply by the reply limit, counted in [`Self::dropped`], a message of the session as a
+    /// congestion drop of its lane; a reply its encoder refuses holds no slot, as one put on no lane
+    /// does.
+    fn stage(
+        &self,
+        meta: MulticastTxMeta,
+        size: usize,
+        body: &BodyEncoder<'_>,
+        reply: bool,
+    ) -> PushOutcome {
+        let inner = &*self.inner;
+        let kept = inner.staged.borrow_mut().keep(meta, size, body, reply);
+        let Err(unkept) = kept else {
+            return PushOutcome::Pushed;
+        };
+        if reply {
+            inner.replies.set(inner.replies.get().saturating_sub(1));
+            if unkept == Unkept::Full {
+                inner.dropped.set(inner.dropped.get().saturating_add(1));
+            }
+        } else {
+            inner.lanes.borrow_mut().bound.dropped(meta.conduit());
+        }
+        PushOutcome::Congested
+    }
+
+    /// Push `item` holding the conduits, or keep it encoded for the holder's release when another
+    /// push holds them (it then counts as pushed, or is refused when it cannot be kept). `pace` is `None` for a push that does not wait;
     /// `reply` is a reply whose slot is taken already, which its first datagram holds.
     fn push_held(
         &self,
@@ -603,8 +744,9 @@ impl GroupTxStage {
     ) -> PushOutcome {
         let inner = &*self.inner;
         let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            inner.deferred.borrow_mut().push_back((item, reply));
-            return PushOutcome::Pushed;
+            let meta = MulticastTxMeta::of_item(&item, &inner.params);
+            let size = multicast_tx_bytes(&item);
+            return multicast_tx_item_body(&item, |body| self.stage(meta, size, body, reply));
         };
         let conduit = multicast_tx_conduit(&item, &inner.params);
         let params = &inner.params;
@@ -675,17 +817,34 @@ impl GroupTxStage {
         outcome
     }
 
-    /// Push what was kept while the conduits were held, once nothing holds them.
+    /// Frame what was kept while the conduits were held, oldest first, once nothing holds them: its
+    /// sequence number is minted now.
     fn push_deferred(&self) {
+        let inner = &*self.inner;
         loop {
-            if self.inner.conduits.try_borrow_mut().is_err() {
-                return;
-            }
-            let next = self.inner.deferred.borrow_mut().pop_front();
-            let Some((item, reply)) = next else {
+            let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
                 return;
             };
-            let _ = self.push_held(item, None, reply);
+            let Some(next) = inner.staged.borrow().front() else {
+                return;
+            };
+            let params = &inner.params;
+            {
+                // A push that does not wait runs nothing of the host, so nothing keeps a message
+                // while these bytes are lent.
+                let staged = inner.staged.borrow();
+                let body = staged.front_bytes(next.len);
+                let _ = self.push_on(
+                    &mut conduits,
+                    next.meta.conduit(),
+                    None,
+                    next.reply,
+                    |minted, queue, window| {
+                        multicast_tx_push_staged(next.meta, body, minted, params, queue, window)
+                    },
+                );
+            }
+            inner.staged.borrow_mut().pop(next.len);
         }
     }
 
@@ -756,7 +915,7 @@ impl GroupTxStage {
 
     /// Whether nothing is queued on the stage for the group's pump to write.
     pub fn is_empty(&self) -> bool {
-        self.inner.lanes.borrow().is_empty() && self.inner.deferred.borrow().is_empty()
+        self.inner.lanes.borrow().is_empty() && self.inner.staged.borrow().held.is_empty()
     }
 
     /// How many messages of `priority` the stage dropped for want of room on their lane; a reply
@@ -874,6 +1033,14 @@ impl GroupTxStage {
 impl MulticastReplyEnqueue for GroupTxStage {
     fn enqueue(&self, item: MulticastTxItem) {
         self.admit_reply(item);
+    }
+
+    // Written from where the reply lies, into the lane or the staged storage: no copy of it is
+    // made on the heap.
+    #[cfg(any(feature = "codec-response", feature = "liveliness-token"))]
+    fn enqueue_reply(&self, reply: wz_session_core::multicast_tx::MulticastTxReply<'_>) {
+        let meta = reply.meta(&self.inner.params);
+        reply.with_body(|body| self.admit_reply_body(meta, reply.bytes(), body));
     }
 }
 
@@ -1702,6 +1869,100 @@ mod tests {
             order,
             [(2, String::from("second")), (3, String::from("third"))]
         );
+    }
+
+    /// A message of the session pushed while another push holds the conduits is kept encoded,
+    /// with nothing framed, and is framed once they are let go into the datagram it would have
+    /// been at once. Turned red by a staged body that is framed apart from the at-once walk, or
+    /// one framed while the conduits are still held.
+    #[test]
+    fn a_push_made_while_the_conduits_are_held_is_framed_as_it_would_have_been_at_once() {
+        let at_once = GroupTxStage::new(&one_batch_lanes());
+        push_at_once(&at_once, put("first"));
+        let expected = at_once.take().expect("the put").bytes;
+        let stage = GroupTxStage::new(&one_batch_lanes());
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            assert_eq!(stage.push(put("first"), &host), PushOutcome::Pushed);
+            assert!(
+                stage.take().is_none(),
+                "nothing is framed while they are held"
+            );
+            assert!(!stage.is_empty(), "the message is kept");
+        }
+        stage.push_deferred();
+        let datagram = stage.take().expect("framed once they are let go");
+        assert_eq!(datagram.bytes, expected);
+        assert_eq!(
+            datagram.sn, 0,
+            "its sequence number is minted when it is framed"
+        );
+        assert!(stage.is_empty());
+        assert_eq!(stage.drops(Priority::DEFAULT), 0);
+    }
+
+    /// The staged storage keeps as many messages as the stage holds replies: a message of the
+    /// session pushed past them while the conduits are held is a congestion drop of its lane,
+    /// counted, and not a reply-limit drop; the ones kept are framed in order once the conduits are
+    /// let go. Turned red by a storage that grows past its count, or a refusal that is not counted.
+    #[test]
+    fn a_push_the_staged_storage_cannot_keep_is_a_counted_congestion_drop() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        let mut params = one_batch_lanes();
+        params.tx_queue.sizes = [MAX_MULTICAST_REPLIES + 1; Priority::NUM];
+        let stage = GroupTxStage::new(&params);
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            for _ in 0..MAX_MULTICAST_REPLIES {
+                assert_eq!(stage.push(put("first"), &host), PushOutcome::Pushed);
+            }
+            assert_eq!(stage.push(put("second"), &host), PushOutcome::Congested);
+        }
+        assert_eq!(stage.drops(Priority::DEFAULT), 1);
+        assert_eq!(stage.dropped(), 0, "no reply was refused");
+        stage.push_deferred();
+        let mut sns = Vec::new();
+        while let Some(datagram) = stage.take() {
+            assert!(datagram.bytes.ends_with(b"first"));
+            sns.push(datagram.sn);
+        }
+        assert_eq!(sns, (0..MAX_MULTICAST_REPLIES as u64).collect::<Vec<_>>());
+    }
+
+    /// A reply lent for the call is framed as its owned copy is, at once and when it is kept while
+    /// the conduits are held, and holds a reply slot until its datagram is taken. Turned red by a
+    /// lent reply framed with another band, channel or body than the owned one.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_reply_lent_for_the_call_is_framed_as_its_owned_copy() {
+        use wz_session_core::multicast_tx::MulticastTxReply;
+        let declare = wz_session_core::declare_build::build_declare_final_reply(7);
+        let owned = GroupTxStage::new(&params());
+        owned.enqueue(MulticastTxReply::DeclareReply(&declare).to_item());
+        let lent = GroupTxStage::new(&params());
+        lent.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
+        let staged = GroupTxStage::new(&params());
+        {
+            let _held = staged.inner.conduits.borrow_mut();
+            staged.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
+            assert!(staged.take().is_none(), "kept while the conduits are held");
+            assert_eq!(
+                staged.inner.replies.get(),
+                1,
+                "the kept reply holds its slot"
+            );
+        }
+        staged.push_deferred();
+        let bytes = |stage: &GroupTxStage| stage.take().expect("the reply").bytes;
+        let expected = bytes(&owned);
+        assert_eq!(bytes(&lent), expected);
+        assert_eq!(bytes(&staged), expected);
+        assert_eq!(staged.inner.replies.get(), 0, "its slot is free once taken");
+        assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
     }
 
     /// A message that may not wait, on a lane that holds its bound, is answered congested at once,

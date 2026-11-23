@@ -603,6 +603,220 @@ where
     )
 }
 
+/// How a message is framed onto a group, read off it once: the conduit it mints on, the frame's
+/// `ext_qos`, its channel, whether it may be dropped and whether it is express. A group that keeps
+/// a message's encoded body until a sequence number can be minted for it keeps this beside the
+/// bytes, so the frame it is put in later is the one it would have been put in at once.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[derive(Clone, Copy)]
+pub struct MulticastTxMeta(FrameMeta);
+
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+impl MulticastTxMeta {
+    /// How `item` is framed onto a group of `params`.
+    pub fn of_item(
+        item: &MulticastTxItem,
+        params: &crate::multicast_params::MulticastParams,
+    ) -> Self {
+        Self(frame_meta(item, params))
+    }
+
+    /// The conduit the message mints on: the lane its datagrams take.
+    pub fn conduit(self) -> Priority {
+        self.0.priority
+    }
+}
+
+/// A reply a group's dispatch hands its backing for the call
+/// ([`MulticastReplyEnqueue::enqueue_reply`](crate::multicast_reply_sink::MulticastReplyEnqueue::enqueue_reply)):
+/// the message borrowed from where it was built. A backing that keeps its replies owned copies it
+/// ([`Self::to_item`]); one that keeps them encoded writes it from where it lies.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+#[derive(Clone, Copy)]
+pub enum MulticastTxReply<'a> {
+    /// A queryable's `Response` to a member's query.
+    #[cfg(feature = "codec-response")]
+    Response(&'a crate::wire::ResponseOwned),
+    /// A `Declare` that answers a member's interest.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    DeclareReply(&'a crate::transport_profile::owned::DeclareOwned),
+}
+
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+impl MulticastTxReply<'_> {
+    /// The reply as the owned item a backing that keeps owned replies queues, copied.
+    pub fn to_item(self) -> MulticastTxItem {
+        match self {
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => MulticastTxItem::Response {
+                response: Box::new(response.clone()),
+            },
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::DeclareReply(declare) => MulticastTxItem::DeclareReply {
+                declare: Box::new(declare.clone()),
+            },
+        }
+    }
+
+    /// The most bytes the reply's network message encodes to, as [`multicast_tx_bytes`] counts
+    /// the owned item.
+    pub fn bytes(self) -> usize {
+        match self {
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => wz_codecs::response::ResponseWire::measure(response).len(),
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::DeclareReply(declare) => wz_codecs::declare::DeclareWire::measure(declare).len(),
+        }
+    }
+
+    /// How the reply is framed onto a group of `params`, as [`MulticastTxMeta::of_item`] reads the
+    /// owned item.
+    #[cfg(feature = "codec-push")]
+    pub fn meta(self, params: &crate::multicast_params::MulticastParams) -> MulticastTxMeta {
+        match self {
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => MulticastTxMeta(qos_frame_meta(
+                crate::declare_ext_qos::read_response_qos(response),
+                true,
+                params,
+            )),
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::DeclareReply(declare) => {
+                let _ = params;
+                MulticastTxMeta(declare_frame_meta(declare))
+            }
+        }
+    }
+
+    /// `f` handed the encoder of the reply's network message.
+    #[cfg(feature = "codec-push")]
+    pub fn with_body<R>(self, f: impl FnOnce(&crate::frame_encode::BodyEncoder<'_>) -> R) -> R {
+        match self {
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => f(&crate::frame_encode::response_body(response)),
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::DeclareReply(declare) => f(&crate::frame_encode::declare_body(declare)),
+        }
+    }
+}
+
+/// `f` handed the encoder of `item`'s network message: what a group that keeps the message's
+/// body until its sequence number can be minted encodes it with.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_item_body<R>(
+    item: &MulticastTxItem,
+    f: impl FnOnce(&crate::frame_encode::BodyEncoder<'_>) -> R,
+) -> R {
+    match item {
+        MulticastTxItem::Push { push, .. } => f(&crate::frame_encode::push_body(push)),
+        #[cfg(feature = "codec-request")]
+        MulticastTxItem::Request { request } => f(&crate::frame_encode::request_body(request)),
+        #[cfg(feature = "codec-response")]
+        MulticastTxItem::Response { response } => f(&crate::frame_encode::response_body(response)),
+        #[cfg(feature = "codec-response-final")]
+        MulticastTxItem::ResponseFinal { request_id, qos } => {
+            let response_final =
+                crate::response_final_build::build_response_final(*request_id, *qos);
+            f(&crate::frame_encode::response_final_body(&response_final))
+        }
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        MulticastTxItem::DeclareReply { declare } => f(&crate::frame_encode::declare_body(declare)),
+        #[cfg(feature = "codec-declare")]
+        MulticastTxItem::Declare { declare } => f(&crate::frame_encode::declare_body(declare)),
+        MulticastTxItem::Interest { interest } => f(&crate::frame_encode::interest_body(interest)),
+    }
+}
+
+/// Encode `body` into `out`: the length written, or `None` when the encoder refuses the message
+/// or `out` is too short for it.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_encode_into(
+    body: &crate::frame_encode::BodyEncoder<'_>,
+    out: &mut [u8],
+) -> Option<usize> {
+    #[cfg(feature = "transport-tx-lend")]
+    {
+        let mut slot = crate::tx_buf::SliceTxBuf::new(out);
+        body(&mut crate::tx_buf::TxSink::new(&mut slot)).ok()?;
+        Some(crate::tx_buf::TxBuf::len(&slot))
+    }
+    // A build whose encoders write a vector has no other buffer to write into: the bytes are
+    // copied out of one.
+    #[cfg(not(feature = "transport-tx-lend"))]
+    {
+        let mut bytes = Vec::new();
+        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).ok()?;
+        out.get_mut(..bytes.len())?.copy_from_slice(&bytes);
+        Some(bytes.len())
+    }
+}
+
+/// [`multicast_tx_push_encoded`] of a message whose framing was read off it before
+/// (`meta`) and whose body is `body`, at most `size` bytes.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+// The message (meta, size, body), where its SN comes from, the group and its queue, and the
+// window: as for the walk it hands them to.
+#[allow(clippy::too_many_arguments)]
+pub fn multicast_tx_push_meta<M, Q>(
+    meta: MulticastTxMeta,
+    size: usize,
+    body: &crate::frame_encode::BodyEncoder<'_>,
+    tx_sn: &mut M,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+    window: Option<&mut MulticastBatch>,
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
+    push_frame(meta.0, size, body, tx_sn, params, conf, queue, window)
+}
+
+/// [`multicast_tx_push_meta`] of a message whose body was encoded before, into `staged`
+/// ([`multicast_tx_encode_into`]): the bytes are the body the frame carries.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_push_staged<M, Q>(
+    meta: MulticastTxMeta,
+    staged: &[u8],
+    tx_sn: &mut M,
+    params: &crate::multicast_params::MulticastParams,
+    queue: &mut Q,
+    window: Option<&mut MulticastBatch>,
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
+    use sce_forge_runtime::codec::SceSink;
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| sink.write_bytes(staged);
+    push_frame(
+        meta.0,
+        staged.len(),
+        body,
+        tx_sn,
+        params,
+        &params.tx_queue,
+        queue,
+        window,
+    )
+}
+
 /// [`multicast_tx_push`] with or without a batch window ([`multicast_tx_push_batched`]).
 #[cfg(all(
     feature = "alloc",

@@ -22,18 +22,12 @@
 //! [`MulticastReplyEnqueue`] backing.
 
 use crate::multicast_tx::MulticastTxItem;
-// Only the boxed reply variants (Response / DeclareReply) name Box; the unboxed
-// ResponseFinal does not, so a codec-response-final-only build imports nothing.
-// R311y530 — `declare-subscriber` joins the list: the session-local subscriber
-// interest-response also enqueues boxed `DeclareReply` items, which exist under either feature
-// (`MulticastTxItem::DeclareReply`; open-debt item 913 found the variant still gated on
-// `liveliness-token` alone, which left a `declare-subscriber` build without it uncompilable).
 #[cfg(any(
     feature = "codec-response",
     feature = "liveliness-token",
     feature = "declare-subscriber"
 ))]
-use alloc::boxed::Box;
+use crate::multicast_tx::MulticastTxReply;
 
 /// The backing one staged multicast reply is enqueued onto for the drive loop to
 /// frame + multicast — the only per-profile difference between the AP loop (a
@@ -46,6 +40,18 @@ use alloc::boxed::Box;
 pub trait MulticastReplyEnqueue {
     /// Enqueue one outbound reply item for the loop to frame + multicast.
     fn enqueue(&self, item: MulticastTxItem);
+
+    /// Enqueue one reply lent for the call. A backing that queues owned items takes a copy (the
+    /// default); one that encodes its replies where they wait writes this one from where it lies,
+    /// and nothing of it is kept on the heap.
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    ))]
+    fn enqueue_reply(&self, reply: MulticastTxReply<'_>) {
+        self.enqueue(reply.to_item());
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -92,9 +98,8 @@ impl<Q> MulticastReplySink<Q> {
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: crate::wire::ResponseOwned) {
-        self.queue.enqueue(MulticastTxItem::Response {
-            response: Box::new(response),
-        });
+        self.queue
+            .enqueue_reply(MulticastTxReply::Response(&response));
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(
@@ -129,18 +134,17 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
                 |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
             )
         {
-            self.queue.enqueue(MulticastTxItem::DeclareReply {
-                declare: Box::new(declare),
-            });
+            self.queue
+                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
         }
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
         // Same UNGATED builder as the unicast sink, for the same reason: the
         // `local_token` module does not exist in a `declare-subscriber`-only
         // build, and `DeclFinal` was never a liveliness-specific message.
-        self.queue.enqueue(MulticastTxItem::DeclareReply {
-            declare: Box::new(crate::declare_build::build_declare_final_reply(interest_id)),
-        });
+        self.queue.enqueue_reply(MulticastTxReply::DeclareReply(
+            &crate::declare_build::build_declare_final_reply(interest_id),
+        ));
     }
     #[cfg(feature = "declare-subscriber")]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
@@ -149,9 +153,8 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
             subscriber_id,
             keyexpr,
         ) {
-            self.queue.enqueue(MulticastTxItem::DeclareReply {
-                declare: Box::new(declare),
-            });
+            self.queue
+                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
         }
     }
     /// Open-debt item 913 — a member's interest in queryables is answered on the group with each
@@ -175,9 +178,8 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
             keyexpr,
             crate::queryable_info::QueryableInfo::local(complete),
         ) {
-            self.queue.enqueue(MulticastTxItem::DeclareReply {
-                declare: Box::new(declare),
-            });
+            self.queue
+                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
         }
     }
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
@@ -186,11 +188,9 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
         // transport's own enqueue. Infallible where the declare twin is not:
         // an `UndeclSubscriber` carries no keyexpr, so there is no bounded
         // field to overflow.
-        self.queue.enqueue(MulticastTxItem::DeclareReply {
-            declare: Box::new(crate::declare_build::build_undeclare_subscriber(
-                subscriber_id,
-            )),
-        });
+        self.queue.enqueue_reply(MulticastTxReply::DeclareReply(
+            &crate::declare_build::build_undeclare_subscriber(subscriber_id),
+        ));
     }
 }
 
@@ -386,15 +386,15 @@ impl GroupKeyexprAnswers {
                     keyexpr,
                 ) {
                     answers.push(MulticastTxItem::DeclareReply {
-                        declare: Box::new(declare),
+                        declare: alloc::boxed::Box::new(declare),
                     });
                 }
             }
             if ask.ends {
                 answers.push(MulticastTxItem::DeclareReply {
-                    declare: Box::new(crate::declare_build::build_declare_final_reply(
-                        ask.interest_id,
-                    )),
+                    declare: alloc::boxed::Box::new(
+                        crate::declare_build::build_declare_final_reply(ask.interest_id),
+                    ),
                 });
             }
         }
