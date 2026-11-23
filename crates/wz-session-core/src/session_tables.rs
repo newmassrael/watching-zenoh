@@ -1112,18 +1112,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
     }
 
-    /// `text`, a key the program names by the declaration the wire calls `id` (`0` for none), as
+    /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
     /// the session sends it: named by that declaration while it stands and begins the key, and
-    /// whole otherwise. `None` for an empty text.
-    pub fn named_by<'k>(&self, text: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
+    /// whole otherwise. `None` for an empty key.
+    pub fn named_by<'k>(&self, key: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
         let declared = MappedId::new(id).and_then(|mapped| {
             let handle = self.keyexpr_by_id(id)?;
             let row = self.keyexprs.get(handle)?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
         match declared {
-            Some(prefix) => NamedKey::under(text, prefix).or_else(|| NamedKey::literal(text)),
-            None => NamedKey::literal(text),
+            Some(prefix) => NamedKey::under(key, prefix).or_else(|| NamedKey::literal(key)),
+            None => NamedKey::literal(key),
         }
     }
 
