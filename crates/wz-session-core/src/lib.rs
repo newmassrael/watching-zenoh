@@ -1856,12 +1856,6 @@ pub mod chunk_log;
 // reference, that the TCP run map and the message lists' entries are held in.
 // Undocumented on this line for the reason the module above gives.
 #[cfg(feature = "alloc")]
-// Totality debt TD-005 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod column_log;
 
 // Open-debt item 924, step 5 — an ordered map in sorted chunks whose every byte is
