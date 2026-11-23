@@ -1526,28 +1526,20 @@ impl SessionArena {
             .map_err(ArenaRefused::Lend)
     }
 
-    /// Lend what `plan` holds for the ABI, its last rows, in their order: the place for its handle,
-    /// held by the handle for the session's life and never given back to the arena, as the lane's
-    /// area is not (`None` for a plan with no place), and a table of each kind of entity it holds
-    /// places of. One body for every table of them, run once at the open. Refused only by an arena
-    /// reserved by another plan.
-    #[inline(never)]
-    pub(crate) fn lend_abi_places(
+    /// Lend the place for the ABI's handle `plan` holds, its last row: held by the handle for the
+    /// session's life and never given back to the arena, as the lane's area is not. `None` for a
+    /// plan with no place. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_handle(
         &mut self,
         plan: &ArenaPlan,
-    ) -> Result<(Option<HandlePlace>, EntityPlaces), ArenaRefused> {
-        let handle_cells = self.lend_cells_of(plan.handle_bytes, 1)?;
-        let mut places = EntityPlaces::NONE;
-        for ((kind, bytes), cells) in EntityKind::ALL
-            .into_iter()
-            .zip(plan.entity_bytes)
-            .zip(places.cells.iter_mut())
-        {
-            *cells = self.lend_cells_of(bytes, plan.entities.of_kind(kind))?;
+    ) -> Result<Option<HandlePlace>, ArenaRefused> {
+        if plan.handle_bytes == 0 {
+            return Ok(None);
         }
-        let Some(cells) = handle_cells else {
-            return Ok((None, places));
-        };
+        let cells = self
+            .arena
+            .lend_byte_cells(plan.handle_bytes, 1)
+            .map_err(ArenaRefused::Lend)?;
         let refused = ArenaRefused::Lend(LendRefused::Exhausted {
             asked: Some(plan.handle_bytes),
             left: 0,
@@ -1557,27 +1549,34 @@ impl SessionArena {
         // As the lane's: the claim is held for the session's life, and a buffer dropped then would
         // write its cell's flag into an arena given back before it.
         core::mem::forget(buffer);
-        let handle = HandlePlace {
+        Ok(Some(HandlePlace {
             base: NonNull::new(base).ok_or(refused)?,
             bytes,
-        };
-        Ok((Some(handle), places))
+        }))
     }
 
-    /// A table of `count` cells of `bytes` each, the next span of the arena, or none for cells of
-    /// no bytes, which the plan lays no row out for.
-    fn lend_cells_of(
+    /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
+    /// of each kind it holds places of. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_entity_places(
         &mut self,
-        bytes: usize,
-        count: usize,
-    ) -> Result<Option<LentByteCells>, ArenaRefused> {
-        if bytes == 0 {
-            return Ok(None);
+        plan: &ArenaPlan,
+    ) -> Result<EntityPlaces, ArenaRefused> {
+        let mut places = EntityPlaces::NONE;
+        for ((kind, bytes), cells) in EntityKind::ALL
+            .into_iter()
+            .zip(plan.entity_bytes)
+            .zip(places.cells.iter_mut())
+        {
+            if bytes == 0 {
+                continue;
+            }
+            *cells = Some(
+                self.arena
+                    .lend_byte_cells(bytes, plan.entities.of_kind(kind))
+                    .map_err(ArenaRefused::Lend)?,
+            );
         }
-        self.arena
-            .lend_byte_cells(bytes, count)
-            .map(Some)
-            .map_err(ArenaRefused::Lend)
+        Ok(places)
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,

@@ -3741,9 +3741,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 )
                 .map_err(OpenError::Arena)?,
         );
-        // The ABI's handle's place and the places of its objects of the session's entities, the
-        // plan's last rows.
-        let (handle_place, places) = arena.lend_abi_places(&plan).map_err(OpenError::Arena)?;
+        // The ABI's handle's place, the plan's last row.
+        let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
+        // The places of the ABI's objects of the session's entities, the rows after it.
+        let places = arena.lend_entity_places(&plan).map_err(OpenError::Arena)?;
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
