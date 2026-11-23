@@ -8,14 +8,10 @@
 //! decision PRIMITIVE is the shared `wz_session_core` SSOT — this module is
 //! only the loop STRUCTURE that sequences them:
 //!
-//! - inbound: [`SessionDatagramLink::try_recv`] ->
-//!   [`wz_session_core::link::LinkEvent::Rx`] ->
-//!   [`dispatch_link_event`](wz_session_core::drive::dispatch_link_event) (the
-//!   shared dispatch core) -> `report_outcome_reassembling` (reassembly-gated)
-//!   or the bare `on_event(Poll)` otherwise. Under `rx-in-place` the receive
-//!   is [`SessionDatagramLink::recv_with`] instead, and each datagram is
-//!   dispatched where the link holds it, record by record
-//!   (`wz_session_core::drive::dispatch_datagram`).
+//! - inbound: what [`SessionDatagramLink::try_recv`] read, or under `rx-in-place` what
+//!   [`SessionDatagramLink::recv_with`] lends, is handed with the time to the session's
+//!   receive ([`UnicastRx`]), which dispatches it, stages its fragments and reports each
+//!   outcome. The pump keeps no state of the receive between two datagrams.
 //! - deadlines: the session's own timers
 //!   ([`TransportTimers`](wz_session_core::transport_timers::TransportTimers))
 //!   say how long the link may wait and judge the handshake, lease and
@@ -59,52 +55,27 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use critical_section::Mutex;
 use wz_runtime_core::TimeSource;
 use wz_session_core::caps;
-#[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
-use wz_session_core::drive::dispatch_datagram;
-#[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
-use wz_session_core::drive::dispatch_link_event;
-#[cfg(all(feature = "alloc", feature = "rx-in-place"))]
-use wz_session_core::drive::dispatch_parked_in_place;
-#[cfg(all(feature = "alloc", not(feature = "rx-in-place")))]
-use wz_session_core::drive::dispatch_pending;
 use wz_session_core::drive::new_session_engine_in;
 use wz_session_core::drive::SessionEngine;
-#[cfg(feature = "rx-in-place")]
-use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, EventSink, IterationEvent};
 use wz_session_core::link::BoxedLinkDriver;
-#[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
-use wz_session_core::link::LinkEvent;
 use wz_session_core::link::LostCause;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
-#[cfg(feature = "rx-in-place")]
-use wz_session_core::network_message::{new_record_buf, RecordBuf};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::transport_timers::TransportTimers;
+use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
+
+// The units a pump dispatched in place, by the path they took: the session receive's count.
+#[cfg(feature = "rx-in-place")]
+pub use wz_session_core::unicast_rx::RxPathCounts;
 
 #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
 use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, ReassemblyArena};
 #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
-#[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
-use wz_session_core::drive::dispatch_datagram_reassembling;
-#[cfg(all(feature = "reassembly", feature = "alloc", feature = "rx-in-place"))]
-use wz_session_core::drive::report_outcome_in_place;
-#[cfg(all(
-    feature = "reassembly",
-    feature = "alloc",
-    not(feature = "rx-in-place")
-))]
-use wz_session_core::drive::report_outcome_reassembling;
-// R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
-// helper, not a unicast-drive one).
-#[cfg(feature = "reassembly")]
-use wz_session_core::reassembly_dispatch::sweep_reporting;
-#[cfg(feature = "reassembly")]
-use wz_session_core::{chain_staging::ChainStaging, reassembly_dispatch::ReassemblyDispatcher};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
@@ -1082,95 +1053,6 @@ pub type DefaultRouter = InPlaceReassembly;
 #[cfg(not(feature = "reassembly"))]
 pub type DefaultRouter = ();
 
-/// What the drive loop asks of the reassembly Router a pump stages its fragments in, whatever arena
-/// the Router stages into: the loop is written once, and a session whose maker lends its chains
-/// their buffers (`SessionPump::with_router`) runs it as one that builds its own Router does.
-pub trait PumpRouter {
-    /// End the chains past their deadline, telling `on_event` how many.
-    #[cfg(feature = "reassembly")]
-    fn pump_sweep<F: FnMut(IterationEvent<'_, '_>)>(&mut self, now_ms: u64, on_event: &mut F);
-
-    /// Hand `outcome` of the copying receive to `on_event` through the reassembly.
-    #[cfg(all(feature = "reassembly", feature = "alloc"))]
-    fn pump_report<R, T, F>(
-        &mut self,
-        outcome: &wz_session_core::driver_loop::DriverLoopOutcome,
-        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
-        now_ms: u64,
-        on_event: &mut F,
-    ) where
-        R: wz_session_core::link::SessionRuntime,
-        T: TimeSource,
-        F: FnMut(IterationEvent<'_, '_>) + ?Sized;
-
-    /// Dispatch one datagram read where the link holds it, its fragments staged through this
-    /// Router.
-    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
-    fn pump_dispatch<R, T>(
-        &mut self,
-        unit: &[u8],
-        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
-        engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
-        now_ms: u64,
-        on_event: &mut dyn EventSink,
-    ) -> DatagramPath
-    where
-        R: wz_session_core::link::SessionRuntime,
-        T: TimeSource;
-}
-
-#[cfg(feature = "reassembly")]
-impl<const SLOTS: usize, const CAP: usize, S> PumpRouter for ReassemblyDispatcher<SLOTS, CAP, S>
-where
-    S: ChainStaging<SLOTS, CAP>,
-{
-    fn pump_sweep<F: FnMut(IterationEvent<'_, '_>)>(&mut self, now_ms: u64, on_event: &mut F) {
-        sweep_reporting(self, now_ms, on_event);
-    }
-
-    #[cfg(feature = "alloc")]
-    fn pump_report<R, T, F>(
-        &mut self,
-        outcome: &wz_session_core::driver_loop::DriverLoopOutcome,
-        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
-        now_ms: u64,
-        on_event: &mut F,
-    ) where
-        R: wz_session_core::link::SessionRuntime,
-        T: TimeSource,
-        F: FnMut(IterationEvent<'_, '_>) + ?Sized,
-    {
-        // What the copying receive dispatched, through the whole reassembly hand-off; what a
-        // receive in place parked, through its own, which drives the pool from no outcome of a
-        // build that does not compress.
-        #[cfg(not(feature = "rx-in-place"))]
-        report_outcome_reassembling(outcome, self, actions, now_ms, on_event);
-        #[cfg(feature = "rx-in-place")]
-        report_outcome_in_place(outcome, self, actions, now_ms, on_event);
-    }
-
-    #[cfg(feature = "rx-in-place")]
-    fn pump_dispatch<R, T>(
-        &mut self,
-        unit: &[u8],
-        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
-        engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
-        now_ms: u64,
-        on_event: &mut dyn EventSink,
-    ) -> DatagramPath
-    where
-        R: wz_session_core::link::SessionRuntime,
-        T: TimeSource,
-    {
-        dispatch_datagram_reassembling(unit, actions, engine, record, self, now_ms, on_event)
-    }
-}
-
-#[cfg(not(feature = "reassembly"))]
-impl PumpRouter for () {}
-
 /// One MCU session, ready to be advanced one iteration at a time.
 ///
 /// R2364 — extracted from `run_session`, whose body this used to be
@@ -1189,8 +1071,8 @@ impl PumpRouter for () {}
 /// driver's own type for the profile whose image names it, which is what makes the calls the
 /// engine's actions make through the link direct ones.
 ///
-/// `R` is the reassembly Router the session stages its fragments in ([`PumpRouter`]): the one the
-/// pump builds for itself ([`DefaultRouter`]), or one its maker hands it.
+/// `R` is the reassembly Router the session's receive stages its fragments in ([`RxReassembly`]):
+/// the one the pump builds for itself ([`DefaultRouter`]), or one its maker hands it.
 pub struct SessionPump<
     C: ClockSource,
     L: SessionDatagramLink,
@@ -1205,25 +1087,11 @@ pub struct SessionPump<
     /// The session's own timers: the pump asks them how long its link may wait and hands them
     /// the time, and keeps no deadline of its own.
     timers: TransportTimers,
-    /// The reassembly Router the session's fragments are staged in.
-    #[cfg(feature = "reassembly")]
-    reasm: R,
-    #[cfg(not(feature = "reassembly"))]
-    _router: core::marker::PhantomData<R>,
-    /// `rx-in-place` — the one-record buffer each inbound record is decoded
-    /// into and dispatched from. Allocated once, with the pump, for one
-    /// record; a datagram costs it nothing however many records it carries.
-    ///
-    /// Under `session-slot` (which implies `bounded-heapless`) it is a fixed
-    /// buffer of one that lives in the pump, and the pump in a cell of a
-    /// `PumpSlots` table: a datagram costs the heap nothing and neither does
-    /// the pump that reads it.
-    #[cfg(feature = "rx-in-place")]
-    record: RecordBuf,
-    /// `rx-in-place` — how many units were read where the link held them, and
-    /// how many went down the copying path and why.
-    #[cfg(feature = "rx-in-place")]
-    rx_paths: RxPathCounts,
+    /// The session's receive: the reassembly Router its fragments are staged in and, with
+    /// `rx-in-place`, the record buffer each inbound record is decoded into and the count of the
+    /// paths its units took. Under `session-slot` it lives in the pump, and the pump in a cell of
+    /// a `PumpSlots` table, so a datagram costs the heap nothing.
+    rx: UnicastRx<R>,
     /// `session-slot` -- the role this pump is to activate the engine with at its
     /// FIRST step, and has not yet. The profile's pump does not speak when it is
     /// built: a dialling pump's activation sends the `InitSyn`, and a pump that
@@ -1235,76 +1103,6 @@ pub struct SessionPump<
     pending_role: Option<SessionRole>,
     iter: usize,
     max_iters: Option<usize>,
-}
-
-/// `rx-in-place` — the units a [`SessionPump`] dispatched, by the path they
-/// took (`wz_session_core::drive::dispatch_datagram`): read in place as a `Frame`,
-/// a `Fragment` or a lean batch, or not read as one, for one of the documented
-/// reasons. A unit of the second kind is not lost: it is read where the link holds
-/// it as one transport message (a compressed batch is copied and inflated), and
-/// this is where a profile sees how often that happens.
-#[cfg(feature = "rx-in-place")]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RxPathCounts {
-    /// Units that began with an admissible `Frame`, read in place.
-    pub in_place: u32,
-    /// Admissible `Fragment`s, staged into their reassembly slots from where
-    /// the link held them (`reassembly`).
-    pub fragment_in_place: u32,
-    /// Lean lowlatency units (a bare network message batch), read in place.
-    pub low_latency_in_place: u32,
-    /// Compressed batches.
-    pub compressed: u32,
-    /// `Fragment`s on a session that does not reassemble.
-    pub fragment: u32,
-    /// `Fragment`s whose own extension chain a participant must refuse.
-    pub fragment_ext_refused: u32,
-    /// `Fragment`s whose head does not decode.
-    pub fragment_head_undecodable: u32,
-    /// Handshake, KeepAlive, Close and every other non-`Frame` unit.
-    pub not_a_frame: u32,
-    /// `Frame`s whose own extension chain a participant must refuse.
-    pub frame_ext_refused: u32,
-    /// `Frame`s whose head does not decode.
-    pub frame_head_undecodable: u32,
-}
-
-#[cfg(feature = "rx-in-place")]
-impl RxPathCounts {
-    fn count(&mut self, path: DatagramPath) {
-        let slot = match path {
-            DatagramPath::InPlace => &mut self.in_place,
-            DatagramPath::FragmentInPlace => &mut self.fragment_in_place,
-            DatagramPath::LowLatencyInPlace => &mut self.low_latency_in_place,
-            DatagramPath::Copied(CopyReason::Compressed) => &mut self.compressed,
-            DatagramPath::Copied(CopyReason::Fragment) => &mut self.fragment,
-            DatagramPath::Copied(CopyReason::FragmentExtRefused) => &mut self.fragment_ext_refused,
-            DatagramPath::Copied(CopyReason::FragmentHeadUndecodable) => {
-                &mut self.fragment_head_undecodable
-            }
-            DatagramPath::Copied(CopyReason::NotAFrame) => &mut self.not_a_frame,
-            DatagramPath::Copied(CopyReason::FrameExtRefused) => &mut self.frame_ext_refused,
-            DatagramPath::Copied(CopyReason::FrameHeadUndecodable) => {
-                &mut self.frame_head_undecodable
-            }
-        };
-        *slot = slot.saturating_add(1);
-    }
-
-    /// Every unit that went down the copying path, whatever the reason.
-    pub fn copied(&self) -> u32 {
-        [
-            self.compressed,
-            self.fragment,
-            self.fragment_ext_refused,
-            self.fragment_head_undecodable,
-            self.not_a_frame,
-            self.frame_ext_refused,
-            self.frame_head_undecodable,
-        ]
-        .into_iter()
-        .fold(0u32, u32::saturating_add)
-    }
 }
 
 impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static>
@@ -1362,6 +1160,8 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             config,
             #[cfg(feature = "reassembly")]
             reasm,
+            #[cfg(not(feature = "reassembly"))]
+            (),
         )
     }
 
@@ -1387,7 +1187,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     /// witness of a delivered payload).
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
     pub fn reassembly(&self) -> &InPlaceReassembly {
-        &self.reasm
+        self.rx.router()
     }
 }
 
@@ -1395,7 +1195,7 @@ impl<
         C: ClockSource,
         L: SessionDatagramLink,
         D: BoxedLinkDriver + ?Sized + 'static,
-        R: PumpRouter,
+        R: RxReassembly,
     > SessionPump<C, L, D, R>
 {
     /// The pump `SessionPump::new` builds, over a reassembly Router its maker built: one whose
@@ -1449,19 +1249,12 @@ impl<
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        #[cfg(feature = "reassembly")] reasm: R,
+        reasm: R,
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
-        Self::build_in(
-            &mut place,
-            runtime,
-            link,
-            actions,
-            clock,
-            config,
-            #[cfg(feature = "reassembly")]
-            |slot| slot.write(reasm),
-        );
+        Self::build_in(&mut place, runtime, link, actions, clock, config, |slot| {
+            slot.write(reasm)
+        });
         // SAFETY: `build_in` wrote every field of the pump into `place`.
         unsafe { place.assume_init() }
     }
@@ -1478,9 +1271,9 @@ impl<
     /// A panic in the middle leaves `place` partly written, and it is not dropped: a leak, and
     /// on the profiles that build this (`panic = "abort"` on a board) not even that.
     ///
-    /// With `reassembly` the Router is written in its field by `make_router`, which lends it back
-    /// from there: a maker that lends back anything but the place it was handed has not written
-    /// it, and is refused with a panic.
+    /// The receive's Router is written in its field by `make_router`, which lends it back from
+    /// there: a maker that lends back anything but the place it was handed has not written it, and
+    /// is refused with a panic (`UnicastRx::init_in`).
     #[inline(never)]
     fn build_in(
         place: &mut MaybeUninit<Self>,
@@ -1489,7 +1282,7 @@ impl<
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        #[cfg(feature = "reassembly")] make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
+        make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) {
         let SessionDriveConfig {
             timeouts,
@@ -1526,22 +1319,9 @@ impl<
             core::ptr::addr_of_mut!((*at).actions).write(actions);
             core::ptr::addr_of_mut!((*at).clock).write(clock);
             core::ptr::addr_of_mut!((*at).timers).write(TransportTimers::new(timeouts));
-            #[cfg(feature = "reassembly")]
-            {
-                let router = &mut *core::ptr::addr_of_mut!((*at).reasm).cast::<MaybeUninit<R>>();
-                let field: *const R = router.as_ptr();
-                let made: *const R = make_router(router);
-                assert!(
-                    core::ptr::eq(made, field),
-                    "the Router is written in the field it was handed"
-                );
-            }
-            #[cfg(not(feature = "reassembly"))]
-            core::ptr::addr_of_mut!((*at)._router).write(core::marker::PhantomData);
-            #[cfg(feature = "rx-in-place")]
-            core::ptr::addr_of_mut!((*at).record).write(new_record_buf());
-            #[cfg(feature = "rx-in-place")]
-            core::ptr::addr_of_mut!((*at).rx_paths).write(RxPathCounts::default());
+            let rx = &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>();
+            let built = UnicastRx::init_in(rx, make_router).is_some();
+            assert!(built, "the Router is written in the field it was handed");
             #[cfg(feature = "session-slot")]
             core::ptr::addr_of_mut!((*at).pending_role).write(Some(role));
             core::ptr::addr_of_mut!((*at).iter).write(0);
@@ -1560,7 +1340,7 @@ impl<
     /// they took ([`RxPathCounts`]).
     #[cfg(feature = "rx-in-place")]
     pub fn rx_path_counts(&self) -> RxPathCounts {
-        self.rx_paths
+        self.rx.path_counts()
     }
 
     /// How long the loop may wait for a datagram before something of this session's or this
@@ -1642,9 +1422,7 @@ impl<
         // an `IterationEvent::ReassemblyTimeout` (the shared SSOT — the AP
         // loop calls the same primitive). A stalled chain whose continuation
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
-        #[cfg(feature = "reassembly")]
-        self.reasm
-            .pump_sweep(now_ms, &mut |event| on_event.event(event));
+        self.rx.sweep(now_ms, &mut *on_event);
 
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
@@ -1652,62 +1430,43 @@ impl<
         // A build with no allocator parks nothing: it reads the rest of a datagram
         // where the link holds it, so there is no remainder to come back to. Nor
         // does a receive in place, but for the rest of a compressed batch, which
-        // was inflated into a buffer of its own (`dispatch_parked_in_place`).
+        // was inflated into a buffer of its own.
         #[cfg(feature = "alloc")]
-        let pending = if self.link.takes_input() {
+        if self.link.takes_input() {
             #[cfg(not(feature = "rx-in-place"))]
-            {
-                dispatch_pending(&self.actions, &mut self.engine)
-            }
+            let parked =
+                self.rx
+                    .dispatch_pending(&self.actions, &mut self.engine, now_ms, &mut *on_event);
             #[cfg(feature = "rx-in-place")]
-            {
-                dispatch_parked_in_place(&self.actions, &mut self.engine)
+            let parked = self.rx.dispatch_parked_in_place(
+                &self.actions,
+                &mut self.engine,
+                now_ms,
+                &mut *on_event,
+            );
+            if parked {
+                return None;
             }
-        } else {
-            None
-        };
-        #[cfg(feature = "alloc")]
-        if let Some(outcome) = pending {
-            #[cfg(feature = "reassembly")]
-            self.reasm
-                .pump_report(&outcome, &self.actions, now_ms, &mut |event| {
-                    on_event.event(event)
-                });
-            #[cfg(not(feature = "reassembly"))]
-            on_event.event(IterationEvent::Poll(&outcome));
-            return None;
         }
 
         // `rx-in-place` — the datagram is read where the link holds it and
         // its records are dispatched one at a time, each outcome reported as
-        // it happens (`dispatch_datagram`). Inside the lend: what the
-        // observer does runs on the stack above the receive.
-        // A Push record arrives as `IterationEvent::InPlace`, lent where the
-        // datagram lies; every outcome goes through the reassembly hand-off as
-        // the copying loop's does. Which path the unit took is counted.
+        // it happens. Inside the lend: what the observer does runs on the stack
+        // above the receive. A Push record arrives as `IterationEvent::InPlace`,
+        // lent where the datagram lies; a Fragment is staged into its slot from
+        // where the link holds it. Which path the unit took is counted.
         #[cfg(feature = "rx-in-place")]
         {
             let link = &self.link;
             let actions = &self.actions;
             let engine = &mut self.engine;
-            let record = &mut self.record;
-            let paths = &mut self.rx_paths;
-            #[cfg(feature = "reassembly")]
-            let reasm = &mut self.reasm;
-            // With `reassembly` a Fragment is read in place too: its payload is
-            // staged into its slot from where the link holds it, and a chain
-            // it completes is read in that slot; every outcome goes through
-            // the reassembly hand-off.
+            let rx = &mut self.rx;
             let received = link.recv_with(&mut |unit| {
                 let mut sink = LinkSink {
                     link,
                     sink: &mut *on_event,
                 };
-                #[cfg(feature = "reassembly")]
-                let path = reasm.pump_dispatch(unit, actions, engine, record, now_ms, &mut sink);
-                #[cfg(not(feature = "reassembly"))]
-                let path = dispatch_datagram(unit, actions, engine, record, &mut sink);
-                paths.count(path);
+                rx.dispatch_datagram(unit, actions, engine, now_ms, &mut sink);
                 // The dispatch stopped where the session had no room: the link keeps the
                 // datagram, and a later step reads on from there.
                 #[cfg(feature = "alloc")]
@@ -1726,15 +1485,13 @@ impl<
         // needed.
         #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
         if let Some(frame) = self.link.try_recv() {
-            let outcome =
-                dispatch_link_event(LinkEvent::Rx(frame), &self.actions, &mut self.engine);
-            #[cfg(feature = "reassembly")]
-            self.reasm
-                .pump_report(&outcome, &self.actions, now_ms, &mut |event| {
-                    on_event.event(event)
-                });
-            #[cfg(not(feature = "reassembly"))]
-            on_event.event(IterationEvent::Poll(&outcome));
+            self.rx.dispatch_frame(
+                frame,
+                &self.actions,
+                &mut self.engine,
+                now_ms,
+                &mut *on_event,
+            );
             return None;
         }
 
@@ -1864,7 +1621,7 @@ pub fn spawn_session_with_router<C, L, R, M, F>(
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
-    R: PumpRouter + 'static,
+    R: RxReassembly + 'static,
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
 {
@@ -1894,7 +1651,7 @@ pub struct RouterSessionTask<C, L, R, M, F>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
-    R: PumpRouter + 'static,
+    R: RxReassembly + 'static,
 {
     /// What the pump is made of, until the task first runs.
     parts: Option<PumpParts<C, L, M>>,
@@ -1920,7 +1677,7 @@ impl<C, L, R, M, F> core::future::Future for RouterSessionTask<C, L, R, M, F>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
-    R: PumpRouter + 'static,
+    R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
 {
@@ -1968,7 +1725,7 @@ pub const fn router_session_task_bytes<C, L, R, M, F>() -> usize
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
-    R: PumpRouter + 'static,
+    R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
 {
@@ -2363,6 +2120,8 @@ impl<
                 config,
                 #[cfg(feature = "reassembly")]
                 |slot| slot.write(reasm),
+                #[cfg(not(feature = "reassembly"))]
+                |slot| slot.write(()),
             );
         }
         Ok(PumpRef { cell })

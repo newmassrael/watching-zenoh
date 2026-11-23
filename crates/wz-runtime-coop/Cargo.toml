@@ -193,8 +193,9 @@ pool-monitor = ["wz-session-core?/pool-monitor"]
 # (`wz_session_core::drive::dispatch_datagram`). A selector for the fixed-memory
 # MCU profile, off by default: the records are dispatched from inside the link's
 # lend, one call deeper than the copying loop dispatches, so a shipped image
-# switches only after its own stack measurement says the margin holds.
-rx-in-place = ["session-unicast", "codec-frame"]
+# switches only after its own stack measurement says the margin holds. The receive
+# is the session core's (`wz_session_core::unicast_rx`, its `rx-in-place`).
+rx-in-place = ["session-unicast", "codec-frame", "wz-session-core/rx-in-place"]
 
 # Stage 5 — the session handshake codec + role gates on the MCU profile.
 # These are the MCU mirror of wz-runtime-tokio's same-named forwarders: the

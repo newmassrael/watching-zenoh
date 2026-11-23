@@ -416,6 +416,11 @@ rx-control = []
 # `routing-namespace`, which read owned messages. The slot profile has it (`session-slot`); a heap
 # engine whose receive is in place selects it. It changes nothing on the copying receive.
 rx-lent-control = []
+# The unicast receive reads each datagram where its link holds it (`unicast_rx::UnicastRx`): the
+# receive keeps a one-record buffer and the count of the paths its units took, and dispatches a
+# lent datagram record by record. A driver whose receive is in place selects it (`wz-runtime-coop`'s
+# `rx-in-place` forwards here); without it the receive is the copying one alone.
+rx-in-place = ["codec-frame"]
 # The in-place receive delivers only what it can lend: a Push or a Response read where its frame lies
 # that the lent form cannot carry (a payload that is a list of shared-memory slices, a key past the
 # bounded buffer, a message that carries a timestamp stack) is refused and counted

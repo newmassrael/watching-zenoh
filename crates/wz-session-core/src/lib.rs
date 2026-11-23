@@ -2536,6 +2536,12 @@ pub mod drive;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_timers;
 
+/// The receive half of a unicast session's transport, as one value: the reassembly Router, the
+/// record buffer and the path counts of a receive in place (`rx-in-place`), which a driver hands
+/// bytes and the time. Gated like [`drive`], whose dispatch it sequences.
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod unicast_rx;
+
 /// The words of the session lifecycle that need no allocator: the open verdict, the
 /// refusals, the open key and the capability document. Unconditional, so a node of the
 /// fixed-memory profile answers an open in the words the heap profile does;
