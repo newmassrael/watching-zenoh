@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::bounded::ARENA_ALIGN;
+use crate::plane_lock::StdLocks;
 use crate::session_tables::{Absent, Present};
 use crate::wire_id::RequestId;
 use core::ptr::NonNull;
@@ -68,21 +69,6 @@ impl TokenCall for Call {
     fn hand(&self, sample: LivelinessSample<'_>) {
         self.log
             .note(format!("{} token {}", self.row, sample.keyexpr));
-    }
-}
-
-/// The host's mutex, as the lock the round keeps what answers its queries under.
-enum StdLocks {}
-
-impl LockFamily for StdLocks {
-    type Lock<T> = Mutex<T>;
-
-    fn new<T>(value: T) -> Mutex<T> {
-        Mutex::new(value)
-    }
-
-    fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        f(&mut lock.lock().unwrap())
     }
 }
 
