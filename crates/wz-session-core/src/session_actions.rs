@@ -10430,7 +10430,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 if let Some(cookie) = init.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                        crate::session_init_params::store_session_bytes(slot, cookie);
                     });
                 }
                 // R311kb — capture the InitAck's sizing caps too: the
@@ -10499,7 +10499,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
                 R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                    *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                    crate::session_init_params::store_session_bytes(slot, cookie);
                 });
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
                 // here, because the admission predicate needs it. The RX SN
