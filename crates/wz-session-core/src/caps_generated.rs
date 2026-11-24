@@ -48,6 +48,9 @@ pub(super) const HELD_CONFIGS: usize = limit(option_env!("WZ_LIMIT_HELD_CONFIGS"
 pub(super) const HELD_HELLOS: usize = limit(option_env!("WZ_LIMIT_HELD_HELLOS"), 16);
 pub(super) const HELD_PAYLOAD_BYTES: usize =
     limit(option_env!("WZ_LIMIT_HELD_PAYLOAD_BYTES"), 131072);
+pub(super) const HELD_ENCODINGS: usize = limit(option_env!("WZ_LIMIT_HELD_ENCODINGS"), 16);
+pub(super) const MAX_ENCODING_SCHEMA_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES"), 256);
 pub(super) const CONFIG_ENTRIES: usize = limit(option_env!("WZ_LIMIT_CONFIG_ENTRIES"), 32);
 pub(super) const MAX_SCOUT_HELLOS: usize = limit(option_env!("WZ_LIMIT_MAX_SCOUT_HELLOS"), 16);
 pub(super) const SCOUT_HELLO_LOCATORS: usize =

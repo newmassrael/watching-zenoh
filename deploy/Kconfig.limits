@@ -282,6 +282,32 @@ config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	  smallest that holds its bytes and a 16-byte head. A payload no free block
 	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
 
+config WZ_LIMIT_HELD_ENCODINGS
+	int "HELD_ENCODINGS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 16
+	help
+	  The encodings (z_owned_encoding_t) a program of the pico C ABI holds at once,
+	  each with a schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the slots of the
+	  pool of encodings the library reserves at its first object. An encoding takes
+	  one from the constructor or clone that makes it until it is dropped or moved
+	  into the call it describes, and a declared publisher's for as long as the
+	  publisher stands. One more is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and
+	  left null.
+
+config WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES
+	int "MAX_ENCODING_SCHEMA_BYTES"
+	range 0 65535
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 256
+	help
+	  The longest schema, in bytes, an encoding a program of the pico C ABI builds
+	  may carry, and the room each place that keeps an encoding to send it later
+	  holds for one: a slot of the pool of encodings, and a publication handed on to
+	  the next holder of a session. A longer schema is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY, never cut short. A schema a peer sends is read
+	  where it lies and is not bound by this. At most 65,535.
+
 config WZ_LIMIT_CONFIG_ENTRIES
 	int "CONFIG_ENTRIES"
 	range 1 255
