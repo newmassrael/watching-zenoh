@@ -320,8 +320,6 @@ pub mod face_life;
 // as this engine's seams, and the session shell's links over them, so a session opens no socket
 // of the system's. Documented in its own `//!`.
 #[cfg(all(feature = "app-link", feature = "alloc", not(feature = "session-slot")))]
-// Totality debt TD-202 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod app_link;
 
 // The multicast group session's seam to the network stack, the twin of
