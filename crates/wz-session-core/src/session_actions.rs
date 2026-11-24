@@ -12013,7 +12013,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// SN is given back. Nothing is staged on the heap, which this profile has no answer in.
     ///
     /// One body for the window's opening and for the frame sent whole: the two differ only in
-    /// the slot they write and what keeps it.
+    /// the slot they write and what keeps it. `admit` is a trait object so that the staged and
+    /// the fresh dispatch, whose admissions are closures of different types, share this body.
     #[cfg(all(
         feature = "tx-lend-only",
         any(
@@ -12030,19 +12031,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     #[inline(never)]
-    fn open_frame_lent<P, A>(
+    fn open_frame_lent<P>(
         &self,
         batch: &mut BatchTx,
         in_window: bool,
         priority: Priority,
-        admit: &A,
+        admit: &dyn Fn() -> Option<FrameEmit>,
         worst_case_payload: usize,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
-        A: Fn() -> Option<FrameEmit>,
     {
         let Some(emit) = admit() else {
             return Ok(UnicastPush::Congested);
