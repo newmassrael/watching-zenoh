@@ -310,7 +310,10 @@ mod tests {
         let mut dropped = FaceSlots::<WORDS>::none(3);
         dropped.insert(1);
         let attached = *b"att";
-        let options = PublishOptions::put().with_attachment(&attached);
+        // Set apart from `with_attachment`, which a build without `pubsub-attachment` has not: the
+        // table keeps what the options carry whichever setter put it there.
+        let mut options = PublishOptions::put();
+        options.attachment = Some(&attached);
         assert!(handed.keep("demo/a", b"one", &options, dropped));
         assert!(handed.keep("demo/b", b"two", &PublishOptions::put(), FaceSlots::none(3)));
         assert!(
