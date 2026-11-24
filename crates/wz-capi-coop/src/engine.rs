@@ -2096,7 +2096,7 @@ impl
 impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for QueryableRow {
     fn ask(
         cx: &mut RoundDelivery,
-        id: QueryableHandle,
+        _id: QueryableHandle,
         row: RowAccess<'_, QueryableRow>,
         query: &ProvenQuery<'_>,
         _responder: &mut QueryResponder<'_>,
@@ -2104,7 +2104,7 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // The callback is the program's and never runs under the session's lock: the query is
         // held for it with a call begun on its row, read where it lies, and the replies it makes
         // go out through a responder of the plane's own.
-        cx.plane.arrive(&cx.round, id, row.row(), query);
+        cx.plane.arrive(&cx.round, row.row(), query);
     }
 }
 
@@ -5107,29 +5107,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.answer(generation, query.rid(), true);
     }
 
-    /// End `call`, with no lock of the session held: when it was the last call of a queryable
-    /// undeclared meanwhile, its row is taken out of the tables under the session's lock and
-    /// dropped after it, so a C program's `drop` never runs under the lock.
-    #[cfg(feature = "local-queryable")]
-    fn end_query_call(&self, call: QueryableCall) {
-        let Some(handle) = call.end() else {
-            return;
-        };
-        let (row, letting_go) = {
-            let guard = self.core.lock();
-            // Counted before the row leaves its table, so an undeclaration that waits for it does
-            // not read it gone while its drop runs.
-            let letting_go = self.plane.letting_go();
-            let row = tables_mut(&guard.0.session.registry)
-                .release_queryable(handle)
-                .map(|row| row.into_callback());
-            (row, letting_go)
-        };
-        drop(row);
-        // Only now is the row's drop over, which a waiting undeclaration reads.
-        drop(letting_go);
-    }
-
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
     /// wire. A link that is down skips it, as a send over it would.
     // Out of line: the publish that calls it measured smaller with its link leg apart, the
@@ -5719,8 +5696,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_queryable_release(&self, handle: QueryableHandle) {
         self.wait_until_let_go(
             |tables| tables.queryables().holds_slot(handle),
-            // A query the round held ended its call there, and a get of the session's own here.
-            || self.plane.let_go_settled() && self.samples.released_settled(),
+            || self.samples.released_settled(),
         );
     }
 
@@ -6132,9 +6108,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let _delivering = self.deliveries.enter();
             for call in asked {
                 self.run_queryable(&call, get, query::LOCAL_QUERY);
-                self.end_query_call(call);
+                self.samples.end_query_call(call);
             }
         }
+        // A row whose last call one of these was, its queryable undeclared meanwhile, is let go
+        // of by the delivery's walk, its drop perhaps the program's own, with no lock held.
         self.deliver();
     }
 

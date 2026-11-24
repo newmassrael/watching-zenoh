@@ -631,3 +631,76 @@ fn a_queryable_of_the_session_reads_what_its_own_get_carries() {
         ]
     );
 }
+
+/// A queryable that undeclares itself from inside its call on the session's own get does not wait
+/// for itself: the undeclaration returns inside the call, and the row is let go of once the call
+/// has returned, before the get does, by one walk of the session's tables. A get after it is
+/// answered by none and walks no table; the CONTROL is the first get, which the queryable answered.
+#[test]
+fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_get_returns() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let own: Arc<Mutex<Option<QblId>>> = Arc::default();
+    let guard = Dropped(dropped.clone());
+    let session = Arc::downgrade(&engine);
+    let id = declare(&engine, "demo/lq/self/**", Locality::Any, {
+        let own = own.clone();
+        move |_, query, out| {
+            let _held = &guard;
+            out.reply_keyed(query.keyexpr(), b"v")
+                .expect("a reply on the query's own key");
+            let id = own.lock().unwrap().take();
+            if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                engine.undeclare_queryable(id);
+            }
+        }
+    });
+    *own.lock().unwrap() = Some(id);
+    let walks = || engine.takes.walks.load(Ordering::SeqCst);
+    let before = walks();
+    let (issued, leg) = ask(
+        &engine,
+        "demo/lq/self/a",
+        &get_for(Locality::SessionLocal),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(issued, Ok(1));
+    assert_eq!(
+        leg.lock().unwrap().replies.len(),
+        1,
+        "CONTROL: the queryable answered"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "let go of once its own call returned, before the get did"
+    );
+    assert_eq!(walks() - before, 1, "one walk let the marked row go");
+    let (_, leg) = ask(
+        &engine,
+        "demo/lq/self/b",
+        &get_for(Locality::SessionLocal),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        leg.lock().unwrap().replies.is_empty(),
+        "nothing is left to answer"
+    );
+    assert_eq!(
+        walks() - before,
+        1,
+        "a get that leaves no row waiting walks no table"
+    );
+}

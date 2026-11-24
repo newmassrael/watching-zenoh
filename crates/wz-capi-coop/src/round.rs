@@ -521,6 +521,10 @@ pub(crate) const RECORD_BYTES: usize = core::mem::size_of::<Entry>();
 /// The bytes of one callback a record of a round owes.
 pub(crate) const CALLBACK_BYTES: usize = core::mem::size_of::<Owed>();
 
+// Each call a record owes is a row's address alone, so a callback row is that and its tag; the
+// round's arena rows are sized by it.
+const _: () = assert!(CALLBACK_BYTES <= 2 * core::mem::size_of::<usize>());
+
 /// The tables of a round, lent from its session's arena ([`RoundRows::lent`]).
 pub(crate) struct RoundRows {
     records: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
@@ -890,7 +894,7 @@ impl Released {
     /// [`Self::end`] for a call of a queryable's callback.
     #[cfg(feature = "queryable")]
     fn end_query(&self, call: QueryableCall) {
-        if call.end().is_some() {
+        if call.end() {
             self.mark();
         }
     }
@@ -1924,6 +1928,14 @@ impl Round {
     #[cfg(feature = "local-subscriber")]
     pub(crate) fn end_call(&self, call: SubscriberCall) {
         self.released.end(call);
+    }
+
+    /// End `call`, which the session's own get began on a queryable it asked and handed with no
+    /// lock held: its row is marked to be let go of ([`Self::take_marked`]) when it was the
+    /// row's last call.
+    #[cfg(feature = "local-queryable")]
+    pub(crate) fn end_query_call(&self, call: QueryableCall) {
+        self.released.end_query(call);
     }
 
     /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
