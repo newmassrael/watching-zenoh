@@ -31,9 +31,10 @@ use crate::metadata::PushMetadata;
 #[cfg(feature = "pubsub-qos")]
 use crate::qos::CongestionControl;
 use crate::qos::Priority;
-use crate::sample::{
-    EncodingHint, EncodingRef, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint,
-};
+// A hint is the owned encoding the setters of a build with `pubsub-encoding` take.
+#[cfg(feature = "pubsub-encoding")]
+use crate::sample::EncodingHint;
+use crate::sample::{EncodingRef, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
 use crate::send_wire_error::SendWireError;
 
 /// Options bundle for a publish. Carries the locality routing predicate
