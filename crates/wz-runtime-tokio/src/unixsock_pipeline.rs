@@ -69,7 +69,7 @@ use std::sync::Arc;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::link_interfaces::{addressless_link_ends, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::LinkKind;
@@ -331,7 +331,7 @@ pub fn wire_unixsock_stream(
             .ok()
             .and_then(|a| a.as_pathname().map(|p| p.to_string_lossy().into_owned())),
     ) {
-        (Some(local), Some(peer)) => Some(addressless_link_endpoints(
+        (Some(local), Some(peer)) => Some(addressless_link_ends(
             LinkKind::UnixsockStream,
             &local,
             &peer,

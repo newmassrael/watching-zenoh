@@ -38,7 +38,7 @@ use crate::link_ring_fd::RingReadable;
 use crate::writer_queue::{OutboundQueue, OutboundTx};
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::LinkEndpoints;
+use wz_session_core::link::KeptLinkEnds;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::link::LostCause;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
@@ -708,7 +708,7 @@ pub struct StreamWriteDriver {
     /// name both. `None` when the pipeline could not read one of the two ends —
     /// the admin host still emits the link (the COUNT stays truthful), with the
     /// ends left blank rather than guessed.
-    endpoints: Option<LinkEndpoints>,
+    endpoints: Option<KeptLinkEnds>,
     /// ARCHITECTURE section 9.1 — the frame buffers this link has LENT the
     /// session and not yet taken back (`BoxedLinkDriver::tx_slot_acquire`).
     lent: Mutex<LentFrames>,
@@ -803,7 +803,7 @@ impl StreamWriteDriver {
         tx: OutboundTx,
         lowlatency: Arc<AtomicBool>,
         subject: LinkSubject,
-        endpoints: Option<LinkEndpoints>,
+        endpoints: Option<KeptLinkEnds>,
     ) -> Self {
         Self {
             #[cfg(feature = "runtime-zero-copy")]
@@ -971,8 +971,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
 
     // R311y473 — the adminspace `{src,dst}` pair the constructing pipeline
     // resolved, for the same six-pipelines reason as the subject above.
-    fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
-        self.endpoints.as_ref()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.endpoints
+            .as_ref()
+            .map(wz_session_core::link::KeptLinkEnds::ends)
     }
 
     // The connection's MTU bounds both what the session sends and what it invites a peer

@@ -84,8 +84,8 @@ use crate::stream_link::{write_wire, writer_task, StreamReadDriver, StreamWriteD
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkKind, LinkRoom, LinkSendOutcome,
-    LinkSubject, RoomAnswer, RoomPermit, RoomWait, TxQueueShape, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkDropCause, LinkKind, LinkRoom, LinkSendOutcome, LinkSubject, RoomAnswer,
+    RoomPermit, RoomWait, TxQueueShape, TxSlot, TxSlotGrant,
 };
 use wz_session_core::locator::{QuicAlpn, QuicStreamChoice, QuicStreams};
 use wz_session_core::qos::Priority;
@@ -703,8 +703,8 @@ impl BoxedLinkDriver for QuicWriteDriver {
         self.streams.link_subject()
     }
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.streams.link_endpoints()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.streams.link_ends()
     }
 
     fn link_mtu(&self) -> usize {
@@ -1291,7 +1291,7 @@ pub fn wire_quic_stream(
         .with_cert_credential_zid(peer_chain_credential_zid(&link.connection));
     // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
     // this end, quinn's `Connection::remote_address` the peer's.
-    let endpoints = crate::link_interfaces::ip_link_endpoints(
+    let endpoints = crate::link_interfaces::ip_link_ends(
         LinkKind::Quic,
         link.endpoint.local_addr().ok(),
         Some(link.connection.remote_address()),
@@ -1312,7 +1312,7 @@ pub fn wire_quic_stream(
 pub(crate) fn wire_stream_over_quic(
     link: QuicLink,
     subject: wz_session_core::link::LinkSubject,
-    endpoints: Option<wz_session_core::link::LinkEndpoints>,
+    endpoints: Option<wz_session_core::link::KeptLinkEnds>,
     rx_buffer_size: usize,
 ) -> (QuicReadDriver, Arc<QuicWriteDriver>, WriterHandle) {
     let QuicLink {

@@ -168,7 +168,7 @@ pub fn wire_tls_stream(
         ));
     // R311y473 — the adminspace `{src,dst}` pair, read off the same wrapped TCP
     // socket and in the same before-the-split window as the subject above.
-    let endpoints = crate::link_interfaces::ip_link_endpoints(
+    let endpoints = crate::link_interfaces::ip_link_ends(
         LinkKind::Tls,
         stream.get_ref().0.local_addr().ok(),
         stream.get_ref().0.peer_addr().ok(),

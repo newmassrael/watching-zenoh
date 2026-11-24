@@ -21,7 +21,7 @@
 //! the fixed one ([`FixedUdpDriver`]), where the driver is a few words in the session's slot and a
 //! datagram costs no allocation either way.
 
-use core::cell::{Cell, OnceCell, RefCell};
+use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 use core::fmt::Debug;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -53,8 +53,8 @@ use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, LocatorTooLong, TxSlot,
-    TxSlotGrant, DEFAULT_LINK_MTU,
+    BoxedLinkDriver, LinkDropCause, LinkEnds, LinkSendOutcome, TxSlot, TxSlotGrant,
+    DEFAULT_LINK_MTU,
 };
 #[cfg(feature = "session-unicast-accept")]
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
@@ -278,28 +278,6 @@ pub const fn dial_bind(local: IpAddr, peer: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, 0)
 }
 
-/// The two ends of a link of `proto` from `local` to `peer`, each zenoh's locator text
-/// ([`Locator::text`]), written whole. Refused only where the link holds its ends in itself
-/// (`session-slot`) and one is longer than the build's locator bound; a link this engine admits
-/// passed [`ends_fit`] first, so its ends are never refused.
-pub fn link_endpoints(
-    proto: LinkProto,
-    local: SocketAddr,
-    peer: SocketAddr,
-) -> Result<LinkEndpoints, LocatorTooLong> {
-    let (src, dst) = (
-        Locator { proto, at: local }.text(),
-        Locator { proto, at: peer }.text(),
-    );
-    let (Ok(src_text), Ok(dst_text)) = (src.finish(), dst.finish()) else {
-        // Unreachable: every IP locator is written whole into `LONGEST_IP_LOCATOR_LEN` bytes.
-        return Err(LocatorTooLong {
-            len: src.demanded().max(dst.demanded()),
-        });
-    };
-    LinkEndpoints::try_new(src_text, dst_text)
-}
-
 /// Whether a link of `proto` from `local` to `peer` names both its ends in the rows its faces are
 /// read in, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes each
 /// (`wz_session_core::face::RowText`): this engine refuses a link that does not where it admits
@@ -333,10 +311,6 @@ pub trait EndsFit {
 pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
     socket: S,
     binding: PeerBinding<SocketAddr>,
-    /// The link's two ends, `udp/<ip>:<port>` each, written the first time they are asked for
-    /// once the peer is known. Not at the binding: a node that never reads them (no admin space,
-    /// no link statistics) then carries no code that writes a locator's text.
-    endpoints: OnceCell<LinkEndpoints>,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`, the largest datagram the link receives whole.
     rx_len: usize,
@@ -441,7 +415,6 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
                 Some(peer) => PeerBinding::dialled(peer),
                 None => PeerBinding::accepting(),
             },
-            endpoints: OnceCell::new(),
             rx_buf: RefCell::new(rx_buf),
             rx_len,
             tx: TxLender::new(tx),
@@ -668,18 +641,15 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
     fn close_blocking(&self) {}
 
     // None until the peer is known: a dialled link's from its construction, an accepting one's
-    // from the `InitSyn` that binds it. The peer never changes after, and the socket's own end is
-    // its bind's, so the text written at the first ask is the text of every later one.
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+    // from the `InitSyn` that binds it. The addresses are lent as they are; a reader that reports
+    // the link writes its locators, so a node that reports none writes no locator's text.
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
         let peer = self.binding.peer()?;
-        if self.endpoints.get().is_none() {
-            // The link was admitted only with ends a row holds (`ends_fit`), so they are written
-            // here; `None` would say only that the link cannot name them.
-            let ends = link_endpoints(LinkProto::Udp, self.socket.local(), peer);
-            debug_assert!(ends.is_ok(), "a link was admitted with an end no row holds");
-            let _ = self.endpoints.set(ends.ok()?);
-        }
-        self.endpoints.get()
+        Some(LinkEnds::ip(
+            LinkProto::Udp.kind(),
+            self.socket.local(),
+            peer,
+        ))
     }
 
     #[cfg(feature = "alloc")]
@@ -1530,6 +1500,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::vec::Vec;
+    use wz_session_core::link::LinkEndsText;
 
     /// A datagram sorted for a peer's link is held in a buffer the port keeps once the link read
     /// it, so a peer that keeps sending datagrams of one length is held in the same buffer each
@@ -1835,11 +1806,12 @@ mod tests {
                 assert_eq!(std::format!("{locator}"), printed);
             }
         }
-        let ends = link_endpoints(
-            LinkProto::Udp,
+        let ends = LinkEnds::ip(
+            LinkProto::Udp.kind(),
             SocketAddr::from((Ipv6Addr::LOCALHOST, 4000)),
             SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
         )
+        .endpoints()
         .expect("a short IPv6 pair is held");
         assert_eq!(ends.src.as_str(), "udp/[::1]:4000");
         assert_eq!(ends.dst.as_str(), "udp/[::1]:7447");
@@ -1888,8 +1860,9 @@ mod tests {
                 Ok(v4.as_str())
             );
         }
-        let ends =
-            link_endpoints(LinkProto::Udp, widest_v4, widest_v4).expect("every IPv4 pair is held");
+        let ends = LinkEnds::ip(LinkProto::Udp.kind(), widest_v4, widest_v4)
+            .endpoints()
+            .expect("every IPv4 pair is held");
         assert_eq!(ends.dst.as_str(), "udp/255.255.255.255:65535");
     }
 

@@ -15,7 +15,12 @@
 use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::net::SocketAddr;
 use wz_runtime_core::Runtime;
+
+#[cfg(feature = "session-slot")]
+use crate::text_out::FixedText;
+use crate::text_out::TextOut;
 
 use crate::reliability::Reliability;
 
@@ -328,23 +333,45 @@ impl LinkKind {
     #[cfg(feature = "alloc")]
     pub fn locator_for(&self, address: &str) -> String {
         use alloc::format;
+        format!("{}/{address}{}", self.scheme(), self.locator_suffix())
+    }
+
+    /// The scheme a locator of this kind opens with, before its `/`: the table
+    /// [`Self::locator_for`] and [`LinkEnds`] write every locator with. Wildcard-free, so a
+    /// new kind states its scheme.
+    pub const fn scheme(self) -> &'static str {
         match self {
-            LinkKind::Tcp => format!("tcp/{address}"),
-            LinkKind::Udp => format!("udp/{address}"),
-            // The `rel=1` is what makes it DIALABLE as this kind: a peer reading
-            // `udp/{address}` alone dials the datagram link, which cannot talk to
-            // a reliable listener. Upstream's listener keeps its endpoint's
-            // metadata on the locator it returns for the same reason
-            // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `endpoint.metadata(),`).
-            LinkKind::UdpReliable => format!("udp/{address}?rel=1"),
-            LinkKind::Tls => format!("tls/{address}"),
-            LinkKind::Quic => format!("quic/{address}"),
-            LinkKind::QuicDatagram => format!("quic/{address}?rel=0"),
-            LinkKind::Serial => format!("serial/{address}"),
-            LinkKind::Unixpipe => format!("unixpipe/{address}"),
-            LinkKind::UnixsockStream => format!("unixsock-stream/{address}"),
-            LinkKind::Vsock => format!("vsock/{address}"),
-            LinkKind::Ws => format!("ws/{address}"),
+            LinkKind::Tcp => "tcp",
+            LinkKind::Udp | LinkKind::UdpReliable => "udp",
+            LinkKind::Tls => "tls",
+            LinkKind::Quic | LinkKind::QuicDatagram => "quic",
+            LinkKind::Serial => "serial",
+            LinkKind::Unixpipe => "unixpipe",
+            LinkKind::UnixsockStream => "unixsock-stream",
+            LinkKind::Vsock => "vsock",
+            LinkKind::Ws => "ws",
+        }
+    }
+
+    /// What a locator of this kind carries after its address. The `rel=1` is what makes the
+    /// reliable udp link DIALABLE as itself: a peer reading `udp/{address}` alone dials the
+    /// datagram link, which cannot talk to a reliable listener. Upstream's listener keeps its
+    /// endpoint's metadata on the locator it returns for the same reason
+    /// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `endpoint.metadata(),`); the QUIC
+    /// datagram link is told apart from the stream one by `rel=0` likewise.
+    pub const fn locator_suffix(self) -> &'static str {
+        match self {
+            LinkKind::UdpReliable => "?rel=1",
+            LinkKind::QuicDatagram => "?rel=0",
+            LinkKind::Tcp
+            | LinkKind::Udp
+            | LinkKind::Tls
+            | LinkKind::Quic
+            | LinkKind::Serial
+            | LinkKind::Unixpipe
+            | LinkKind::UnixsockStream
+            | LinkKind::Vsock
+            | LinkKind::Ws => "",
         }
     }
 }
@@ -1252,24 +1279,19 @@ pub trait BoxedLinkDriver {
         }
     }
 
-    /// R311y473 — the LOCATOR PAIR of this driver's transport: the `{src,dst}`
+    /// The ends of this driver's transport and its kind, which the `{src,dst}` locator pair
     /// zenoh's adminspace renders per link (`link_to_json`,
-    /// `net/runtime/adminspace.rs:608-613`), or `None` for a driver that cannot
-    /// name its endpoints (the test doubles, and the MCU drivers whose stack has
-    /// no address to read).
+    /// `net/runtime/adminspace.rs:608-613`) is written from, or `None` for a driver that
+    /// cannot name them (the test doubles, a datagram link whose peer is not known yet).
     ///
-    /// Resolved ONCE, at link open, and stored, for the same reason
-    /// [`Self::link_subject`] is: the constructing pipeline is the only object
-    /// that knows both its own scheme AND its own socket, and an admin GET must
-    /// not turn into a syscall per reply.
-    ///
-    /// The strings are DIALABLE LOCATORS, not log words. R311y470 found two of
-    /// nine advertise sites emitting a scheme no zenoh peer — and in one case not
-    /// even wz's own parser — could dial, because they reused a transport's log
-    /// name as its scheme. This accessor feeds an admin surface a foreign client
-    /// reads, so it inherits that contract: build the string through the
-    /// runtime's `link_interfaces` helpers, which state the scheme explicitly.
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+    /// The ends are FACTS the driver holds anyway (its socket's two addresses, or the names of
+    /// an addressless link's two ends), lent as they are: the locator text is written by the
+    /// reader that reports it, into its own row ([`LinkEnds::write_src`],
+    /// [`LinkEnds::endpoints`]), so a build that reports no link writes no locator and a
+    /// driver keeps no text beside the addresses it names. The scheme is the kind's
+    /// ([`LinkKind::scheme`]), the one table, so the text is a DIALABLE LOCATOR and not a log
+    /// word (R311y470).
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
         None
     }
 
@@ -1400,7 +1422,7 @@ pub const SESSION_LINKS_AGGREGATE: bool = cfg!(feature = "transport-multilink");
 /// sees the same shape against wz as against zenohd.
 ///
 /// Both fields are LOCATORS (`<scheme>/<address>`), not bare addresses — see the
-/// dialability contract on [`BoxedLinkDriver::link_endpoints`].
+/// dialability contract on [`BoxedLinkDriver::link_ends`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LinkEndpoints {
     /// This end of the link — zenoh's `Link::src`.
@@ -1484,6 +1506,146 @@ impl LinkEndpoints {
         {
             (self.src.as_str().into(), self.dst.as_str().into())
         }
+    }
+}
+
+/// One end of a link, as its driver knows it: the fact its locator is written from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkEnd<'a> {
+    /// The address of an IP socket, written as `SocketAddr`'s `Display` writes it.
+    Ip(SocketAddr),
+    /// The address of a link of another family, as its kind writes it after the scheme: a
+    /// socket path, a vsock `cid:port`, a pipe or a device.
+    Named(&'a str),
+}
+
+/// The two ends of a link and its kind, lent by its driver ([`BoxedLinkDriver::link_ends`]):
+/// what a reader writes the link's locator pair from, when it reports one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkEnds<'a> {
+    /// What kind of link it is, which names the locators' scheme.
+    pub kind: LinkKind,
+    /// This end of the link: zenoh's `Link::src`.
+    pub src: LinkEnd<'a>,
+    /// The peer's end: zenoh's `Link::dst`.
+    pub dst: LinkEnd<'a>,
+}
+
+impl<'a> LinkEnds<'a> {
+    /// The ends of an IP link of `kind` from `local` to `peer`.
+    pub const fn ip(kind: LinkKind, local: SocketAddr, peer: SocketAddr) -> Self {
+        Self {
+            kind,
+            src: LinkEnd::Ip(local),
+            dst: LinkEnd::Ip(peer),
+        }
+    }
+
+    /// The ends of a link of `kind` whose ends are named by `local` and `peer`.
+    pub const fn named(kind: LinkKind, local: &'a str, peer: &'a str) -> Self {
+        Self {
+            kind,
+            src: LinkEnd::Named(local),
+            dst: LinkEnd::Named(peer),
+        }
+    }
+
+    /// Write the locator of this end, `<scheme>/<address>`, into `out`.
+    pub fn write_src<W: TextOut + ?Sized>(&self, out: &mut W) {
+        write_locator(self.kind, self.src, out);
+    }
+
+    /// Write the locator of the peer's end into `out`.
+    pub fn write_dst<W: TextOut + ?Sized>(&self, out: &mut W) {
+        write_locator(self.kind, self.dst, out);
+    }
+
+    /// Both locators, as a pair a reader keeps.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn endpoints(&self) -> Result<LinkEndpoints, LocatorTooLong> {
+        let (mut src, mut dst) = (String::new(), String::new());
+        self.write_src(&mut src);
+        self.write_dst(&mut dst);
+        Ok(LinkEndpoints { src, dst })
+    }
+
+    /// Both locators, as a pair a reader keeps, each held within
+    /// [`crate::caps::MAX_LOCATOR_LEN`] bytes: a longer one is refused, as a link with such an
+    /// end is refused where it is admitted.
+    #[cfg(feature = "session-slot")]
+    pub fn endpoints(&self) -> Result<LinkEndpoints, LocatorTooLong> {
+        let mut src: FixedText<{ crate::caps::MAX_LOCATOR_LEN }> = FixedText::new();
+        self.write_src(&mut src);
+        let mut dst: FixedText<{ crate::caps::MAX_LOCATOR_LEN }> = FixedText::new();
+        self.write_dst(&mut dst);
+        let len = src.demanded().max(dst.demanded());
+        match (src.finish(), dst.finish()) {
+            (Ok(src), Ok(dst)) => LinkEndpoints::try_new(src, dst),
+            _ => Err(LocatorTooLong { len }),
+        }
+    }
+}
+
+/// `<scheme>/<address><suffix>` of one end of a link of `kind`: the one writer of a link's
+/// locator.
+fn write_locator<W: TextOut + ?Sized>(kind: LinkKind, end: LinkEnd<'_>, out: &mut W) {
+    out.push_str(kind.scheme());
+    out.push_str("/");
+    match end {
+        LinkEnd::Ip(at) => out.push_socket_addr(at),
+        LinkEnd::Named(name) => out.push_str(name),
+    }
+    out.push_str(kind.locator_suffix());
+}
+
+/// The ends a heap-profile driver keeps, opened once and lent as [`LinkEnds`]: two socket
+/// addresses, or the two names of an addressless link.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptLinkEnds {
+    /// An IP link's kind and its two addresses.
+    Ip {
+        /// The link's kind.
+        kind: LinkKind,
+        /// The socket's own address.
+        local: SocketAddr,
+        /// The peer's address.
+        peer: SocketAddr,
+    },
+    /// An addressless link's kind and the names of its two ends.
+    Named {
+        /// The link's kind.
+        kind: LinkKind,
+        /// This end's name.
+        local: String,
+        /// The peer end's name.
+        peer: String,
+    },
+}
+
+#[cfg(feature = "alloc")]
+impl KeptLinkEnds {
+    /// The ends, lent.
+    pub fn ends(&self) -> LinkEnds<'_> {
+        match self {
+            KeptLinkEnds::Ip { kind, local, peer } => LinkEnds::ip(*kind, *local, *peer),
+            KeptLinkEnds::Named { kind, local, peer } => LinkEnds::named(*kind, local, peer),
+        }
+    }
+}
+
+/// A link's locator pair written now from the ends its driver lends ([`LinkEnds::endpoints`]),
+/// for a reader that keeps the text: `None` for a driver that lends none, or whose ends this
+/// build's rows cannot hold. Implemented for every driver; it is code of the reader that calls
+/// it, so a build where nothing does carries none of it.
+pub trait LinkEndsText {
+    /// The locator pair of the link, written now.
+    fn link_endpoints(&self) -> Option<LinkEndpoints>;
+}
+
+impl<T: BoxedLinkDriver + ?Sized> LinkEndsText for T {
+    fn link_endpoints(&self) -> Option<LinkEndpoints> {
+        self.link_ends()?.endpoints().ok()
     }
 }
 
@@ -2613,6 +2775,89 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The locator a reader writes from a link's ends is the one the kind's table gives for the
+    /// address's `Display` text, for every kind and both address families, scope included, and
+    /// for a named end. Turned red by a scheme or suffix the two tables disagree on, or by an
+    /// address written otherwise than `Display` writes it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_locator_written_from_the_ends_is_the_kinds_locator_of_the_address() {
+        use core::net::{Ipv6Addr, SocketAddrV6};
+        let local = SocketAddr::from(([192, 168, 1, 50], 7447));
+        let peer = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            7446,
+            0,
+            3,
+        ));
+        for &kind in LinkKind::ALL {
+            let ends = LinkEnds::ip(kind, local, peer)
+                .endpoints()
+                .expect("a String holds any");
+            assert_eq!(
+                ends.src,
+                kind.locator_for(&std::format!("{local}")),
+                "{kind:?}"
+            );
+            assert_eq!(
+                ends.dst,
+                kind.locator_for(&std::format!("{peer}")),
+                "{kind:?}"
+            );
+            let named = LinkEnds::named(kind, "/tmp/a.sock", "2:7447")
+                .endpoints()
+                .expect("a String holds any");
+            assert_eq!(named.src, kind.locator_for("/tmp/a.sock"), "{kind:?}");
+            assert_eq!(named.dst, kind.locator_for("2:7447"), "{kind:?}");
+        }
+    }
+
+    /// The ends a heap driver keeps are lent as they were kept, so its locators are written from
+    /// the addresses or the names it opened with. Turned red by a kept form that lends the two
+    /// ends crossed, or another kind.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn kept_ends_lend_what_they_keep() {
+        let local = SocketAddr::from(([10, 0, 0, 1], 1));
+        let peer = SocketAddr::from(([10, 0, 0, 2], 7447));
+        let ip = KeptLinkEnds::Ip {
+            kind: LinkKind::Tcp,
+            local,
+            peer,
+        };
+        assert_eq!(ip.ends(), LinkEnds::ip(LinkKind::Tcp, local, peer));
+        let named = KeptLinkEnds::Named {
+            kind: LinkKind::Vsock,
+            local: String::from("3:1"),
+            peer: String::from("2:7447"),
+        };
+        assert_eq!(
+            named.ends(),
+            LinkEnds::named(LinkKind::Vsock, "3:1", "2:7447")
+        );
+    }
+
+    /// A row held in the link takes a locator within the bound and refuses the pair when either
+    /// end is past it, naming the longer length, as a pair built from text does. Turned red by a
+    /// writer that keeps a cut end.
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn ends_written_into_a_held_row_refuse_an_end_past_the_bound() {
+        let peer = SocketAddr::from(([10, 0, 0, 2], 7447));
+        let ends = LinkEnds::ip(LinkKind::Udp, peer, peer)
+            .endpoints()
+            .expect("an IPv4 end is within every bound");
+        assert_eq!(ends.dst.as_str(), "udp/10.0.0.2:7447");
+        let past = "n".repeat(crate::caps::MAX_LOCATOR_LEN);
+        let refused = LinkEnds::named(LinkKind::Serial, "tty", &past).endpoints();
+        assert_eq!(
+            refused,
+            Err(LocatorTooLong {
+                len: "serial/".len() + past.len()
+            })
+        );
+    }
 
     /// A pair of ends held in the link itself keeps a locator of the bound whole and refuses
     /// one byte more, naming its length, so no link of the build stands with a blank or cut end.

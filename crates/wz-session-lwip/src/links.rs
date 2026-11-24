@@ -265,7 +265,7 @@ mod tests {
         use wz_runtime_coop::session_drive::{spawn_session, SessionDriveConfig, SessionRole};
         use wz_runtime_coop::session_runtime::new_session_actions;
         use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
-        use wz_session_core::link::BoxedLinkDriver;
+        use wz_session_core::link::{BoxedLinkDriver, LinkEndsText};
         use wz_session_core::session_actions::SessionLinkActions;
         use wz_session_core::session_init_params::SessionInitParams;
         use wz_session_core::session_timeouts::SessionTimeouts;

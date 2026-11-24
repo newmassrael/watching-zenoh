@@ -25,7 +25,7 @@ use std::sync::Arc;
 use quinn::Endpoint;
 use wz_session_core::link::LinkKind;
 
-use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_interfaces::{ip_link_ends, ip_link_subject};
 use crate::link_socket::LinkSocket;
 use crate::quic_config::alpn_offer;
 use crate::quic_pipeline::{
@@ -121,6 +121,6 @@ pub fn wire_udp_reliable(
 ) -> (QuicReadDriver, Arc<QuicWriteDriver>, WriterHandle) {
     let local = link.endpoint.local_addr().ok();
     let subject = ip_link_subject(LinkKind::UdpReliable, local);
-    let endpoints = ip_link_endpoints(LinkKind::Udp, local, Some(link.connection.remote_address()));
+    let endpoints = ip_link_ends(LinkKind::Udp, local, Some(link.connection.remote_address()));
     wire_stream_over_quic(link, subject, endpoints, rx_buffer_size)
 }

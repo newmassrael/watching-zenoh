@@ -49,7 +49,7 @@ use std::sync::Arc;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
 
-use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_interfaces::{ip_link_ends, ip_link_subject};
 use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
@@ -826,7 +826,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     // R311y473 — the adminspace `{src,dst}` pair, resolved in the same
     // before-the-split window and for the same reason: after `into_split` neither
     // half is the socket any more.
-    let endpoints = ip_link_endpoints(
+    let endpoints = ip_link_ends(
         LinkKind::Tcp,
         stream.local_addr().ok(),
         stream.peer_addr().ok(),

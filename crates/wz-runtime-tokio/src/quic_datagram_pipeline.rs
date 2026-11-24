@@ -57,7 +57,7 @@ use tokio_rustls::rustls::{
 // R311y13 — the QUIC handshake SSOT (client connect / server endpoint / accept)
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
-use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_interfaces::{ip_link_ends, ip_link_subject};
 use crate::quic_config::{client_offering, datagram_alpn, server_offering};
 // R2971 — a received datagram is handed up as the buffer quinn gave it; the
 // one conversion lives with the stream link, whose mixed-reliability companion
@@ -69,8 +69,8 @@ use crate::quic_pipeline::{
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{KeptLinkEnds, LinkKind, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
-use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -159,7 +159,7 @@ pub struct QuicDatagramWriteDriver {
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
-    endpoints: Option<LinkEndpoints>,
+    endpoints: Option<KeptLinkEnds>,
     /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy`.
     #[cfg(feature = "runtime-zero-copy")]
@@ -174,7 +174,7 @@ impl QuicDatagramWriteDriver {
         tx: crate::writer_queue::OutboundTx,
         mtu: usize,
         subject: LinkSubject,
-        endpoints: Option<LinkEndpoints>,
+        endpoints: Option<KeptLinkEnds>,
     ) -> Self {
         Self {
             tx,
@@ -194,8 +194,10 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
     }
 
     // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.as_ref()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.endpoints
+            .as_ref()
+            .map(wz_session_core::link::KeptLinkEnds::ends)
     }
 
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -538,7 +540,7 @@ pub fn wire_quic_datagram(
             Some(ip) => SocketAddr::new(ip, bound.port()),
             None => bound,
         });
-    let endpoints = ip_link_endpoints(
+    let endpoints = ip_link_ends(
         LinkKind::QuicDatagram,
         local,
         Some(connection.remote_address()),
