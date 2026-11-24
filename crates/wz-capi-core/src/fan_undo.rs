@@ -52,7 +52,8 @@ fn undos() -> &'static (Arc<Undos>, Weak<dyn FanCanceller>) {
     static UNDOS: OnceLock<(Arc<Undos>, Weak<dyn FanCanceller>)> = OnceLock::new();
     UNDOS.get_or_init(|| {
         let undos = Arc::new(Undos::default());
-        let canceller: Weak<dyn FanCanceller> = Arc::downgrade(&undos);
+        // Downgraded as the table's own type, then unsized where it is bound.
+        let canceller: Weak<dyn FanCanceller> = Arc::<Undos>::downgrade(&undos);
         (undos, canceller)
     })
 }
