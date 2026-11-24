@@ -513,6 +513,8 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// Begin a dial of `to`, which the network answers later.
+    /// Out of line: the stack's dial of each protocol is put together here, not in its caller.
+    #[inline(never)]
     pub fn begin_dial(&self, to: Locator) -> Result<L::Dial, LinkOpenError> {
         self.links.begin_initiator(to)
     }
@@ -780,7 +782,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// Take back a read's wait, once made ([`IdleWait::wait`]): the buffer of its waits, which
-    /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept.
+    /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept. Out of
+    /// line: the open's steps and each read hand their wait back.
+    #[inline(never)]
     pub fn waited(&mut self, wait: IdleWait) {
         match wait {
             // The larger of the two buffers stays here.

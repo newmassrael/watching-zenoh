@@ -647,6 +647,152 @@ impl OpenKeyIds {
     }
 }
 
+/// What a session's open decided before its state is built ([`CoopEngine::core_of`]): its
+/// policies, the zid it announces and, with `shared-key-ids`, the key ids it holds and the
+/// key-wire form of each link. Small values, apart from the config and the stack's values the
+/// stage is handed as they are.
+struct OpenDecided {
+    policy: SessionPolicy,
+    zid: SessionZid,
+    #[cfg(feature = "shared-key-ids")]
+    key_ids: OpenKeyIds,
+    #[cfg(feature = "shared-key-ids")]
+    key_forms: LinkKeyForms,
+}
+
+/// What the arena of a session lends it at its open ([`lend_session`]). The arena is the last
+/// field, so a value of this let go of whole lets every table lent from it go first.
+struct SessionLent {
+    link_tables: wz_runtime_coop::link_storage::LinkTables,
+    cells: LinkCells<Option<LentByteCells>>,
+    samples: Arc<Round>,
+    router: SessionReassembly,
+    endpoints: EndpointTexts,
+    filters: FilterRows,
+    interests: InterestRows,
+    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
+    #[cfg(feature = "liveliness")]
+    live_subs: Rows<LiveSubEntry, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+    keys: KeySpace,
+    #[cfg(feature = "queryable")]
+    plane: Arc<QueryPlane>,
+    registry: Registry,
+    #[cfg(feature = "query")]
+    ended: EndedLegs,
+    handle_place: Option<HandlePlace>,
+    places: EntityPlaces,
+    arena: SessionArena,
+}
+
+/// Reserve the arena `plan` lays out in `memory` and lend from it, in the order the plan laid
+/// them out, every table of the session opened with `config` under `policy`: the links'
+/// buffers and cells, the round of deliveries, the reassembly, the endpoints' rows, the tables of
+/// the session's own declarations and the application's, and the ABI's places. The first table
+/// refused refuses the open, and what was lent before it goes back with the arena. Out of line
+/// and generic over nothing: one body for every stack and source the open is made over.
+#[inline(never)]
+fn lend_session(
+    plan: &ArenaPlan,
+    memory: &'static dyn ArenaMemory,
+    config: &CoopConfig<Counted>,
+    policy: &SessionPolicy,
+) -> Result<SessionLent, ArenaRefused> {
+    let mut arena = SessionArena::reserve(plan, memory)?;
+    let link_tables = arena.lend_links(plan)?;
+    let cells = arena.lend_cells(plan)?;
+    let (lane_area, lane_bytes) = arena.lend_lane(plan)?;
+    let round_rows =
+        RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
+    let reassembly = arena.lend_reassembly(plan)?;
+    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
+    let endpoints = arena.lend_endpoints(plan)?;
+    // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
+    // and given back only when the session is let go, after its last delivery; the round's
+    // tables are let go of before it (`Round::let_go`, in the engine's drop).
+    let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
+    // The tables of the session's own declarations, lent from the arena as the plan counts
+    // them. Declared after the arena, so a refusal drops them first.
+    let entities = plan.entities();
+    let filters = arena.lend(entities.filters().ok_or(ArenaRefused::TooLarge)?)?;
+    let interests = arena.lend(entities.interests().ok_or(ArenaRefused::TooLarge)?)?;
+    let matches = arena.lend(entities.matching_listeners)?;
+    #[cfg(feature = "liveliness")]
+    let live_subs = arena.lend(entities.liveliness_subscribers)?;
+    let keys = arena.lend_keys(plan, config.limits.max_keyexpr_bytes_held())?;
+    // The queries the session's queryables are asked wait for their callbacks here, and the
+    // Finals of them are held here, in a table the plan counts.
+    #[cfg(feature = "queryable")]
+    let plane = Arc::new(QueryPlane::holding(plan.held_queries()));
+    #[cfg(feature = "queryable")]
+    let delivery = RoundDelivery::new(samples.clone(), plane.clone());
+    #[cfg(not(feature = "queryable"))]
+    let delivery = RoundDelivery::new(samples.clone());
+    // The application's tables, lent from the rows the plan counts for them: the session's
+    // one table set among them, which holds its subscribers and its queryables.
+    let registry = Registry::new(
+        &resolve_limits(config),
+        arena.arena_mut(),
+        keys,
+        ObserverRows {
+            tables: plan.tables(),
+            local_tokens: entities.tokens,
+            liveliness_subscribers: entities.liveliness_subscribers,
+        },
+        plan.gets(),
+        plan.peers(),
+        delivery,
+    )
+    .map_err(ArenaRefused::Lend)?;
+    // The ends of the session's legs wait in rows the plan counts for them.
+    #[cfg(feature = "query")]
+    let ended = EndedLegs::over(arena.lend(plan.gets().legs().ok_or(ArenaRefused::TooLarge)?)?);
+    // The ABI's handle's place, the plan's last row, and the places of the ABI's objects of the
+    // session's entities, the rows after it.
+    let handle_place = arena.lend_handle(plan)?;
+    let places = arena.lend_entity_places(plan)?;
+    Ok(SessionLent {
+        link_tables,
+        cells,
+        samples,
+        router,
+        endpoints,
+        filters,
+        interests,
+        matches,
+        #[cfg(feature = "liveliness")]
+        live_subs,
+        keys,
+        #[cfg(feature = "queryable")]
+        plane,
+        registry,
+        #[cfg(feature = "query")]
+        ended,
+        handle_place,
+        places,
+        arena,
+    })
+}
+
+/// The zid the session opened with `config` announces: the configured one, or one drawn from
+/// `entropy`, or one derived from the endpoints it listens on (`endpoints`) and `entropy`, as
+/// `policy` says. Out of line and generic over nothing, as [`lend_session`] is.
+#[inline(never)]
+fn session_zid(
+    config: &CoopConfig<Counted>,
+    policy: &SessionPolicy,
+    endpoints: &EndpointTexts,
+    entropy: &mut SessionEntropy,
+) -> Result<SessionZid, OpenError> {
+    match (&config.zid, policy.zid_derivation()) {
+        (Some(zid), _) => wire_zid(zid),
+        (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(entropy),
+        (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zid(
+            (0..endpoints.listens()).map(|at| endpoints.listen_text(at)),
+            entropy,
+        ),
+    }
+}
+
 /// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
 /// when the configured bytes are not one to sixteen or are all zero, here and once, so the
 /// session it opens holds a zid.
@@ -1068,27 +1214,33 @@ impl<W: LinkWaits> LinkRooms<W> {
         }
     }
 
+    /// The handle the face at `at` of the list names for a wait for its room, read under the lock,
+    /// which goes before the caller waits on it.
+    fn room_at(&self, at: usize) -> Option<(FaceId, WaitOn)> {
+        lock(&self.rooms).get(at).copied()
+    }
+
     /// Ask each face that is up for room, within `wait_us` in all: the first face that takes none
     /// spends the wait, and the faces after it are asked without one, so the publish spends one
-    /// deadline whatever the number of faces. The waits are taken out of the lock first: a wait
-    /// blocks, and a face coming up must not wait behind it.
+    /// deadline whatever the number of faces. Each face's handle is read under the lock and the
+    /// lock let go before its wait: a wait blocks, and a face coming up must not wait behind it.
+    /// A face that comes up or goes meanwhile may be asked or passed over, a hint as every answer
+    /// is; nothing is copied out of the lock but one handle at a time.
     pub(crate) fn within(&self, wait_us: u64) -> Room {
-        let rooms: Vec<(FaceId, WaitOn)> = lock(&self.rooms).clone();
-        if rooms.is_empty() {
-            return Room::Unasked;
-        }
         let mut left_us = wait_us;
         let mut congested = Vec::new();
-        for (face, on) in rooms {
+        let mut at = 0;
+        while let Some((face, on)) = self.room_at(at) {
+            at += 1;
             if !self.waits.wait_room(on, left_us) {
                 congested.push(face);
                 left_us = 0;
             }
         }
-        if congested.is_empty() {
-            Room::Free
-        } else {
-            Room::Congested(congested)
+        match (at, congested.is_empty()) {
+            (0, _) => Room::Unasked,
+            (_, true) => Room::Free,
+            (_, false) => Room::Congested(congested),
         }
     }
 }
@@ -2342,6 +2494,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Begin a dial of `endpoint`, which the network answers later
     /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
+    /// Out of line: the dial role and a face added by the program each begin a dial.
+    #[inline(never)]
     fn begin_dial(&self, endpoint: &str) -> Result<L::Dial, OpenError> {
         let to = parse_locator(endpoint).map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
@@ -2651,6 +2805,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// counted from before the dials would then already be over, the next read would dial again at
     /// once, and the session would be held through dial after dial with no room for a publish or
     /// a close to take it.
+    /// Out of line: four arms of `poll_face` dial or wait, and one body serves them.
+    #[inline(never)]
     fn dial_or_wait(
         &mut self,
         from: usize,
@@ -2841,6 +2997,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// End the task of the link of the face at `at`, if it holds one.
+    /// Out of line: a face poll and the bring-up of a link end a link in three places.
+    #[inline(never)]
     fn abort_link(&self, at: usize) {
         if let Some(wire) = self.links.faces().get(at).and_then(|face| face.link.wire()) {
             wire.abort();
@@ -3253,6 +3411,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Tell the watchers of the faces that `face` came up or went, with the session's other
     /// deliveries (`face_of` says whether there is anything to tell).
+    /// Out of line: the face lost and the face up each tell, with the snapshot dropped once.
+    #[inline(never)]
     fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
         #[cfg(feature = "connectivity")]
         if let Some(face) = face {
@@ -3286,6 +3446,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// matching status or a write filter that counted on one reads the session as it now is.
     /// zenoh-pico drops a peer's targets from every write filter when its connection drops
     /// (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`).
+    /// Out of line: a lost face and a group that ended each take what the peer declared.
+    #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
         if let Some(face) = self.links.faces_mut().iter_mut().find(|face| face.id == id) {
@@ -3396,67 +3558,58 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&mut self) -> IdleWait {
-        let most = self.config.idle_wait_ms;
-        // The clock is read the first time a deadline asks for it, and that reading serves every
-        // deadline after it: a wait with nothing due reads it not at all.
-        let mut clock_now: Option<u64> = None;
-        // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
-        #[cfg(feature = "query")]
-        let most = match self.next_get_deadline_ms() {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is the next turn of a replay a link owes its peer, which is not due by input.
-        let most = match self
-            .links
-            .faces()
-            .iter()
-            .filter_map(|face| face.replay.next_turn_ms())
-            .min()
-        {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is a periodic job the program started, which no input brings about either.
-        #[cfg(feature = "ticker")]
-        let most = match self.tickers.next_due_ms() {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is a group's turn: its task takes one datagram a step, so a group that took one
-        // is stepped again at once; one that took none is stepped when its next datagram comes,
-        // which the read waits on below, or when its session is next due with nothing arriving
-        // (its beacon, its sweep, what the session pushed onto it, its join again). A group whose
-        // stack gives no wait for its input is looked at on its tick.
+        // What is due other than input, the earliest of it in milliseconds of the session's clock:
+        // a get whose deadline comes first is swept when it is due, not up to a whole wait late,
+        // and so is the next turn of a replay a link owes its peer, a periodic job the program
+        // started, and a group's session when it is next due with nothing arriving (its beacon,
+        // its sweep, what the session pushed onto it, its join again). A group that took a
+        // datagram is stepped again at once, its task taking one a step, so its own time is not
+        // asked.
         #[cfg(feature = "group")]
-        let most = if self.groups.iter().any(GroupFace::took_input) {
-            0
-        } else {
-            let most = match self.groups.iter().filter_map(GroupFace::due_us).min() {
-                Some(due_us) => Self::wait_until(
-                    most,
-                    due_us.div_ceil(1_000),
-                    *clock_now.get_or_insert_with(|| self.now_us()),
-                ),
-                None => most,
-            };
-            if self.groups.iter().any(GroupFace::unwaited) {
-                most.min(group::GROUP_TICK_MS)
+        let group_took = self.groups.iter().any(GroupFace::took_input);
+        let due_ms = [
+            #[cfg(feature = "query")]
+            self.next_get_deadline_ms(),
+            self.links
+                .faces()
+                .iter()
+                .filter_map(|face| face.replay.next_turn_ms())
+                .min(),
+            #[cfg(feature = "ticker")]
+            self.tickers.next_due_ms(),
+            #[cfg(feature = "group")]
+            if group_took {
+                None
             } else {
-                most
-            }
+                self.groups
+                    .iter()
+                    .filter_map(GroupFace::due_us)
+                    .min()
+                    .map(|due_us| due_us.div_ceil(1_000))
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // The clock is read when something is due, and that reading serves every bound after it:
+        // a wait with nothing due reads it not at all.
+        let mut clock_now: Option<u64> = None;
+        let most = match due_ms {
+            Some(due_ms) => Self::wait_until(
+                self.config.idle_wait_ms,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
+            None => self.config.idle_wait_ms,
+        };
+        // A group whose stack gives no wait for its input is looked at on its tick.
+        #[cfg(feature = "group")]
+        let most = if group_took {
+            0
+        } else if self.groups.iter().any(GroupFace::unwaited) {
+            most.min(group::GROUP_TICK_MS)
+        } else {
+            most
         };
         if most == 0 {
             return IdleWait::None;
@@ -3495,6 +3648,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its links' receives for as long ([`RouterLend::lend_for`]). Every pass of the session's
     /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
     /// a group's wait makes lends nothing, and a link's receive takes no input in it.
+    /// Out of line: nine places step the session's tasks, the lend around them one body.
+    #[inline(never)]
     fn run_tasks(&mut self) {
         let Self {
             local,
@@ -3664,7 +3819,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn assemble(
-        mut links: L,
+        links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         source: impl OpenSource,
@@ -3681,101 +3836,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let plan = arena_plan::<C, _>(&links, &config)
             .and_then(|plan| plan.holding(&held))
             .map_err(OpenError::Arena)?;
-        let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
-        links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
-        let cells = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
-        if let Some(driver_cells) = cells.driver {
-            links.lend_cells(driver_cells);
-        }
-        let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
-        let round_rows = RoundRows::lent(arena.arena_mut(), plan.round())
-            .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
-        let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
-        let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));
+        let mut lent = lend_session(&plan, memory, &config, &policy).map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
-        let mut endpoints = arena.lend_endpoints(&plan).map_err(OpenError::Arena)?;
-        write_endpoints(&mut EndpointWriter::over(&mut endpoints))?;
-        // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
-        // and given back only when the session is let go, after its last delivery; the round's
-        // tables are let go of before it (`Round::let_go`, in the engine's drop).
-        let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
+        write_endpoints(&mut EndpointWriter::over(&mut lent.endpoints))?;
         let mut entropy = SessionEntropy::new(entropy);
-        let wire = match (&config.zid, policy.zid_derivation()) {
-            (Some(zid), _) => wire_zid(zid)?,
-            (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(&mut entropy)?,
-            (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zid(
-                (0..endpoints.listens()).map(|at| endpoints.listen_text(at)),
-                &mut entropy,
-            )?,
+        let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
+        let decided = OpenDecided {
+            policy,
+            zid: wire,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
+            #[cfg(feature = "shared-key-ids")]
+            key_forms,
         };
-        // The tables of the session's own declarations, lent from the arena as the plan counts
-        // them. Declared after the arena, so a refusal before `core` holds them drops them first.
+        let (core, handle_place) =
+            Self::core_of(links, clock, entropy, config, decided, &plan, lent);
+        Ok(Self::engine_of(core, handle_place))
+    }
+
+    /// The session's state over `links`, on `clock` and `entropy`, out of `config`, what its open
+    /// decided (`decided`) and lent (`lent`, as `plan` laid it out): the links lent their buffers
+    /// and cells, the task and timer tables reserved, the dial role's face and every table in
+    /// place. Out of line, so the open's measure shows it apart.
+    #[inline(never)]
+    fn core_of(
+        mut links: L,
+        clock: C,
+        entropy: SessionEntropy,
+        config: CoopConfig<Counted>,
+        decided: OpenDecided,
+        plan: &ArenaPlan,
+        lent: SessionLent,
+    ) -> (Core<L, C>, Option<HandlePlace>) {
+        let OpenDecided {
+            policy,
+            zid: wire,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
+            #[cfg(feature = "shared-key-ids")]
+            key_forms,
+        } = decided;
+        links.lend_buffers(lent.link_tables);
+        if let Some(driver_cells) = lent.cells.driver {
+            links.lend_cells(driver_cells);
+        }
         let entities = plan.entities();
-        let filters = arena
-            .lend(
-                entities
-                    .filters()
-                    .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
-            )
-            .map_err(OpenError::Arena)?;
-        let interests = arena
-            .lend(
-                entities
-                    .interests()
-                    .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
-            )
-            .map_err(OpenError::Arena)?;
-        let matches = arena
-            .lend(entities.matching_listeners)
-            .map_err(OpenError::Arena)?;
-        #[cfg(feature = "liveliness")]
-        let live_subs = arena
-            .lend(entities.liveliness_subscribers)
-            .map_err(OpenError::Arena)?;
-        let keys = arena
-            .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
-            .map_err(OpenError::Arena)?;
-        // The queries the session's queryables are asked wait for their callbacks here, and the
-        // Finals of them are held here, in a table the plan counts.
-        #[cfg(feature = "queryable")]
-        let plane = Arc::new(QueryPlane::holding(plan.held_queries()));
-        #[cfg(feature = "queryable")]
-        let delivery = RoundDelivery::new(samples.clone(), plane.clone());
-        #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(samples.clone());
-        // The application's tables, lent from the rows the plan counts for them: the session's
-        // one table set among them, which holds its subscribers and its queryables.
-        let registry = Registry::new(
-            &resolve_limits(&config),
-            arena.arena_mut(),
-            keys,
-            ObserverRows {
-                tables: plan.tables(),
-                local_tokens: entities.tokens,
-                liveliness_subscribers: entities.liveliness_subscribers,
-            },
-            plan.gets(),
-            plan.peers(),
-            delivery,
-        )
-        .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
-        // The ends of the session's legs wait in rows the plan counts for them.
-        #[cfg(feature = "query")]
-        let ended = EndedLegs::over(
-            arena
-                .lend(
-                    plan.gets()
-                        .legs()
-                        .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
-                )
-                .map_err(OpenError::Arena)?,
-        );
-        // The ABI's handle's place, the plan's last row.
-        let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
-        // The places of the ABI's objects of the session's entities, the rows after it.
-        let places = arena.lend_entity_places(&plan).map_err(OpenError::Arena)?;
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
@@ -3795,9 +3902,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         let core = Core {
             local,
-            endpoints,
+            endpoints: lent.endpoints,
             clock,
-            registry: Rc::new(RefCell::new(registry)),
+            registry: Rc::new(RefCell::new(lent.registry)),
             #[cfg(feature = "listen")]
             tx_pool_short: plan.tx_pool_short(),
             // A handle for each face that may be up at once, the dial role's and each group's
@@ -3837,39 +3944,48 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )),
             wire_zid: wire,
             entities,
-            keys,
-            gate_cells: cells.gate,
-            actions_cells: cells.actions,
+            keys: lent.keys,
+            gate_cells: lent.cells.gate,
+            actions_cells: lent.cells.actions,
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
             #[cfg(feature = "shared-key-ids")]
             key_forms,
             #[cfg(feature = "local-queryable")]
             next_local_request: 0,
-            filters,
+            filters: lent.filters,
             next_filter: 1,
-            interests,
+            interests: lent.interests,
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
-            matches,
+            matches: lent.matches,
             next_match: 1,
             #[cfg(feature = "queryable")]
-            plane,
+            plane: lent.plane,
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
-            gets: Arc::new(GetPlane::new(ended)),
+            gets: Arc::new(GetPlane::new(lent.ended)),
             #[cfg(feature = "liveliness")]
-            live_subs,
+            live_subs: lent.live_subs,
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
-            lane: samples.clone(),
-            router,
+            lane: lent.samples,
+            router: lent.router,
             lend: RouterLend::new(),
             session_time,
-            places,
-            arena,
+            places: lent.places,
+            arena: lent.arena,
         };
+        (core, lent.handle_place)
+    }
+
+    /// The engine over `core`, held where its own handle (`this`) reaches it, with the ABI's
+    /// handle's place `handle_place`. Out of line, so the open's measure shows it apart.
+    #[inline(never)]
+    fn engine_of(core: Core<L, C>, handle_place: Option<HandlePlace>) -> Arc<Self> {
+        let samples = core.lane.clone();
+        let wire = core.wire_zid;
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
         #[cfg(feature = "query")]
@@ -3886,7 +4002,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let held_drop = core.config.tx_queue.held_drop;
         let handed_at_most = core.config.tx_queue.sizes;
         let arena_bytes = core.arena.bytes();
-        Ok(Arc::new_cyclic(|this| Self {
+        Arc::new_cyclic(|this| Self {
             core: CoreLock::new(core),
             rooms,
             wait_before_drop_us,
@@ -3922,7 +4038,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(test)]
             takes: Takes::default(),
             this: this.clone(),
-        }))
+        })
     }
 
     /// Open the links of the engine [`Self::assemble`] built: the ports bound and the groups

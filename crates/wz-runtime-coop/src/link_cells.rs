@@ -14,9 +14,10 @@
 //! heap, so a link is one type whichever memory it lives in.
 
 use alloc::boxed::Box;
+use core::alloc::Layout;
 use core::cell::Cell;
 use core::marker::PhantomData;
-use core::mem::{align_of, size_of, MaybeUninit};
+use core::mem::{size_of, MaybeUninit};
 use core::ops::Deref;
 use core::ptr::NonNull;
 
@@ -78,43 +79,66 @@ pub struct CellRc<T: ?Sized> {
     _owns: PhantomData<T>,
 }
 
+/// A claimed cell of `cells` for a slot of `layout`: its place and the claim, which gives the
+/// cell back when it goes. `None` when every cell is taken, a cell is too small for the slot, or
+/// the cell is not aligned for it. Out of line and generic over nothing: the one body of every
+/// kind of value a table's cell holds, which tells them apart by the slot's layout alone.
+#[inline(never)]
+fn table_cell(cells: &LentByteCells, layout: Layout) -> Option<(NonNull<u8>, ByteBuf)> {
+    if !fits_layout(cells.size(), layout) {
+        return None;
+    }
+    let claim = cells.claim()?;
+    let (base, _) = claim.raw();
+    // A table's cells start on its span's alignment, and each is a whole number of alignments
+    // long (`fits_layout`), so this holds; a table laid out otherwise is refused, the claim
+    // given back as it goes.
+    if (base as usize).checked_rem(layout.align()) != Some(0) {
+        return None;
+    }
+    Some((NonNull::new(base)?, claim))
+}
+
+/// A block of the heap for a slot of `layout`, which the slot's release gives back as the box
+/// of the slot it is. Out of line and generic over nothing, as [`table_cell`] is.
+#[inline(never)]
+fn heap_cell(layout: Layout) -> NonNull<u8> {
+    // SAFETY: a slot's layout is never of no bytes: it holds a head.
+    let base = unsafe { alloc::alloc::alloc(layout) };
+    match NonNull::new(base) {
+        Some(base) => base,
+        None => alloc::alloc::handle_alloc_error(layout),
+    }
+}
+
+/// Whether a slot of `layout` fits a cell of `size` bytes of a table, whose cells start on an
+/// arena's alignment: the whole slot fits, it asks for no more alignment than that, and the cells
+/// are a whole number of alignments long, so each starts on it too.
+const fn fits_layout(size: usize, layout: Layout) -> bool {
+    layout.size() <= size
+        && layout.align() <= ARENA_ALIGN
+        && matches!(size.checked_rem(ARENA_ALIGN), Some(0))
+}
+
 impl<K> CellRc<K> {
     /// `value` in a cell of `cells`, or `value` back when every cell is taken or a cell is too
-    /// small for it, or not aligned for it.
+    /// small for it, or not aligned for it. Out of line: inlined, each of its callers holds a copy
+    /// of the slot's writing for every kind of value it places.
+    #[inline(never)]
     pub fn place(cells: &LentByteCells, value: K) -> Result<Self, K> {
-        if !Self::fits(cells.size()) {
-            return Err(value);
-        }
-        let Some(claim) = cells.claim() else {
-            return Err(value);
-        };
-        let (base, _) = claim.raw();
-        let slot = base.cast::<Slot<K>>();
-        // A table's cells start on its span's alignment, and each is a whole number of
-        // alignments long ([`Self::fits`]), so this holds; a table laid out otherwise is refused.
-        if (slot as usize).checked_rem(align_of::<Slot<K>>()) != Some(0) {
-            return Err(value);
-        }
-        // SAFETY: the claim lends this cell to this call alone, the slot fits in it and is aligned
-        // for it (checked above), and the claim moves into the slot, which keeps the cell until
-        // the last handle releases it.
-        unsafe {
-            slot.write(Slot {
-                head: CellHead {
-                    handles: Cell::new(1),
-                    release: release::<K>,
-                },
-                owner: Owner::Table(claim),
-                value,
-            });
-            Ok(Self::over(slot))
+        match table_cell(cells, Layout::new::<Slot<K>>()) {
+            // SAFETY: the claim lends this cell to this call alone, of the slot's layout, and
+            // moves into the slot, which keeps the cell until the last handle releases it.
+            Some((base, claim)) => Ok(unsafe { Self::fill(base, Owner::Table(claim), value) }),
+            None => Err(value),
         }
     }
 
     /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
     /// takes it ([`Self::place`]); in a cell of its own on the heap when no table is
     /// ([`Self::boxed`]). What every maker of a link's part asks, whichever memory the session
-    /// lends.
+    /// lends. Out of line, as [`Self::place`] is.
+    #[inline(never)]
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
         match cells {
             Some(cells) => Self::place(cells, value),
@@ -124,25 +148,38 @@ impl<K> CellRc<K> {
 
     /// `value` in a cell of its own on the heap: the handle of a link lent no table.
     pub fn boxed(value: K) -> Self {
-        let slot = Box::into_raw(Box::new(Slot {
-            head: CellHead {
-                handles: Cell::new(1),
-                release: release::<K>,
-            },
-            owner: Owner::Heap,
-            value,
-        }));
-        // SAFETY: the slot was just written whole and is the heap's until its release.
-        unsafe { Self::over(slot) }
+        let base = heap_cell(Layout::new::<Slot<K>>());
+        // SAFETY: the block is the heap's, of the slot's layout, until the slot's release gives it
+        // back as the box of a slot of `K`.
+        unsafe { Self::fill(base, Owner::Heap, value) }
+    }
+
+    /// The handle of the slot written at `base`, from `owner` and `value`, its count one.
+    ///
+    /// # Safety
+    /// `base` is memory of `Slot<K>`'s layout that nothing else reaches, and `owner` is where it
+    /// came from.
+    unsafe fn fill(base: NonNull<u8>, owner: Owner, value: K) -> Self {
+        let slot = base.cast::<Slot<K>>().as_ptr();
+        // SAFETY: the caller's contract: the memory is the slot's alone and laid out for it.
+        unsafe {
+            slot.write(Slot {
+                head: CellHead {
+                    handles: Cell::new(1),
+                    release: release::<K>,
+                },
+                owner,
+                value,
+            });
+            Self::over(slot)
+        }
     }
 
     /// Whether a value of `K` fits a cell of `size` bytes of a table, whose cells start on an
     /// arena's alignment: the whole slot fits, it asks for no more alignment than that, and the
     /// cells are a whole number of alignments long, so each starts on it too.
     pub const fn fits(size: usize) -> bool {
-        size_of::<Slot<K>>() <= size
-            && align_of::<Slot<K>>() <= ARENA_ALIGN
-            && matches!(size.checked_rem(ARENA_ALIGN), Some(0))
+        fits_layout(size, Layout::new::<Slot<K>>())
     }
 
     /// The bytes of a cell that holds a `K`, a whole number of an arena's alignments: what a
