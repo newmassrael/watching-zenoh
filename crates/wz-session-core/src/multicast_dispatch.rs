@@ -2841,10 +2841,10 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
             not(feature = "multicast-ingress-gate")
         ))]
         if let Some(member) = self.member.as_deref_mut() {
-            use crate::multicast_member_scope::LentScope;
+            use crate::multicast_member_scope::PastBound;
             let tag = member.tag();
             let record = match record.declare().map(|declare| member.scope_lent(declare)) {
-                Some(LentScope::Scoped(scoped)) => {
+                Some(Ok(Some(scoped))) => {
                     self.inner.record(
                         crate::driver_loop::InPlaceRecord::declare_of_frame(
                             &scoped,
@@ -2856,8 +2856,8 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
                     );
                     return;
                 }
-                Some(LentScope::PastBound) => record.past_sender_bound(),
-                Some(LentScope::AsSent) | None => record,
+                Some(Err(PastBound)) => record.past_sender_bound(),
+                Some(Ok(None)) | None => record,
             };
             self.inner.record(record.from_sender(tag));
             return;

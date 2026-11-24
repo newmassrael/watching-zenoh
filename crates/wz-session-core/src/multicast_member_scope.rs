@@ -150,7 +150,8 @@ impl MemberKeyexprs {
     }
 }
 
-/// What a lent Declare a member sent is handed on as (`MemberDeclarations::scope_lent`).
+/// A keyexpr of a new id a member declared past the ids it may hold (`MAX_MEMBER_KEYEXPRS`): no
+/// alias is bound for it (`MemberDeclarations::scope_lent`).
 #[cfg(all(
     feature = "session-unicast",
     feature = "rx-lent-control",
@@ -159,14 +160,8 @@ impl MemberKeyexprs {
     not(feature = "multicast-declarations"),
     not(feature = "multicast-ingress-gate")
 ))]
-pub(crate) enum LentScope<'f> {
-    /// As the member sent it.
-    AsSent,
-    /// As this copy of it, its id under the member's tag.
-    Scoped(wz_codecs::lent::Declare<'f>),
-    /// A keyexpr of a new id past the ids the member may hold: no alias is bound for it.
-    PastBound,
-}
+#[derive(Debug)]
+pub(crate) struct PastBound;
 
 impl MemberDeclarations {
     /// The tag the member's records reach the observer under.
@@ -259,7 +254,7 @@ impl MemberDeclarations {
     pub(crate) fn scope_lent<'f>(
         &mut self,
         declare: &wz_codecs::lent::Declare<'f>,
-    ) -> LentScope<'f> {
+    ) -> Result<Option<wz_codecs::lent::Declare<'f>>, PastBound> {
         use crate::wire_id::declared_expr_id;
         use wz_codecs::lent::DeclareVariant as V;
         let (kind, raw, declared) = match &declare.body {
@@ -271,19 +266,19 @@ impl MemberDeclarations {
             V::CodecZenohUndeclToken(u) => (DeclKind::Token, u.id, false),
             V::CodecZenohDeclKexpr(d) => {
                 return if self.keyexprs.declare(declared_expr_id(d.id)) {
-                    LentScope::AsSent
+                    Ok(None)
                 } else {
-                    LentScope::PastBound
+                    Err(PastBound)
                 };
             }
             V::CodecZenohUndeclKexpr(u) => {
                 self.keyexprs.undeclare(declared_expr_id(u.id));
-                return LentScope::AsSent;
+                return Ok(None);
             }
-            _ => return LentScope::AsSent,
+            _ => return Ok(None),
         };
         let Some(scoped_id) = self.note(kind, raw, declared) else {
-            return LentScope::AsSent;
+            return Ok(None);
         };
         let mut scoped = declare.clone();
         match &mut scoped.body {
@@ -295,7 +290,7 @@ impl MemberDeclarations {
             V::CodecZenohUndeclToken(u) => u.id = scoped_id,
             _ => {}
         }
-        LentScope::Scoped(scoped)
+        Ok(Some(scoped))
     }
 
     /// An undeclaration of every subscriber, queryable and token the member still holds, by its
@@ -576,9 +571,9 @@ mod tests {
             wz_codecs::lent::Declare::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
                 .expect("it decodes");
         match member.scope_lent(&view) {
-            LentScope::AsSent => "as sent",
-            LentScope::Scoped(_) => "scoped",
-            LentScope::PastBound => "past bound",
+            Ok(None) => "as sent",
+            Ok(Some(_)) => "scoped",
+            Err(PastBound) => "past bound",
         }
     }
 
