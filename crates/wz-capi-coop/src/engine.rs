@@ -297,9 +297,10 @@ pub struct CoopConfig<E = Vec<String>> {
     pub endpoints: E,
     /// The role the session announces.
     pub whatami: WhatAmI,
-    /// The session's zid as the config states it, up to sixteen bytes; `None` mints sixteen
-    /// random ones.
-    pub zid: Option<Vec<u8>>,
+    /// The session's zid as the config states it, which the session announces up to its last
+    /// non-zero byte, as zenoh writes an id; `None` has the open make one as the session's
+    /// policy says.
+    pub zid: Option<SessionZid>,
     /// The batch size the session advertises.
     pub batch_size: u16,
     /// The lease the session advertises, in milliseconds.
@@ -852,7 +853,7 @@ fn session_zid(
     entropy: &mut SessionEntropy,
 ) -> Result<SessionZid, OpenError> {
     match (&config.zid, policy.zid_derivation()) {
-        (Some(zid), _) => wire_zid(zid),
+        (Some(zid), _) => Ok(wire_form(*zid)),
         (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(entropy),
         (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zid(
             (0..endpoints.listens()).map(|at| endpoints.listen_text(at)),
@@ -861,16 +862,22 @@ fn session_zid(
     }
 }
 
-/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
-/// when the configured bytes are not one to sixteen or are all zero, here and once, so the
-/// session it opens holds a zid.
+/// The wire form of the zid `zid` spells ([`wire_form`]), refused when the bytes are not one to
+/// sixteen or are all zero, so the session the open makes from them holds a zid.
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
-    let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
-    let mut kept: &[u8] = &stated;
-    while let [rest @ .., 0] = kept {
-        kept = rest;
-    }
-    SessionZid::new(kept).map_err(OpenError::InvalidZid)
+    SessionZid::new(zid)
+        .map(wire_form)
+        .map_err(OpenError::InvalidZid)
+}
+
+/// `zid` up to its last non-zero byte, as zenoh writes an id. A zid has a non-zero byte, so what
+/// is kept is a zid as well and the fallback to `zid` itself is never taken.
+pub(crate) fn wire_form(zid: SessionZid) -> SessionZid {
+    zid.iter()
+        .rposition(|byte| *byte != 0)
+        .and_then(|last| zid.get(..=last))
+        .and_then(|kept| SessionZid::new(kept).ok())
+        .unwrap_or(zid)
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).

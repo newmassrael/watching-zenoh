@@ -26,7 +26,7 @@ use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
-use super::client_config;
+use super::{client_config, config_zid};
 use crate::host_group::HostGroups;
 use crate::{CoopConfig, CoopEngine};
 
@@ -56,7 +56,7 @@ fn profile() -> GroupProfile {
 fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> Arc<Engine> {
     let config = CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![member; 4]),
+        zid: config_zid(member),
         groups: vec![GroupJoin {
             endpoint: endpoint.to_owned(),
             profile: profile(),

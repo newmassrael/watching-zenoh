@@ -33,7 +33,7 @@ use wz_session_core::publish_options::PublishOptions;
 #[cfg(feature = "query")]
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
 use wz_session_core::session_init_params::{
-    KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -851,13 +851,18 @@ fn config(router: &Router) -> CoopConfig {
     }
 }
 
+/// The four-byte zid of `byte` a test's config states.
+fn config_zid(byte: u8) -> Option<SessionZid> {
+    Some(SessionZid::from([byte; 4]))
+}
+
 /// A client's config that dials nothing and listens on nothing: what a test states the endpoints
 /// of itself.
 fn client_config() -> CoopConfig {
     CoopConfig {
         endpoints: Vec::new(),
         whatami: WhatAmI::Client,
-        zid: Some(vec![0xb1; 4]),
+        zid: config_zid(0xb1),
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
@@ -2402,11 +2407,11 @@ fn a_derived_zid_is_the_listeners_address_and_ports_then_the_sources_bytes() {
     );
 }
 
-/// A configured zid is refused when the session is opened, once: all zero bytes, none, and
-/// seventeen are refused, and one and sixteen, trailing zeros trimmed, are the zid the session
-/// announces.
+/// Bytes the open makes a zid of (drawn or derived) are refused when they are no zid: all zero
+/// bytes, none, and seventeen are refused, and one and sixteen, trailing zeros trimmed, are the
+/// zid the session announces.
 #[test]
-fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
+fn made_bytes_of_zero_or_seventeen_are_refused_as_a_zid() {
     use crate::engine::wire_zid;
     use crate::OpenError;
     use wz_session_core::session_init_params::ZidError;
@@ -2433,6 +2438,20 @@ fn a_configured_zid_of_zero_bytes_or_seventeen_is_refused_at_open() {
         wire_zid(&[0x22; 16]).map(|zid| zid.to_vec()),
         Ok(std::vec![0x22; 16])
     );
+}
+
+/// A zid's wire form ends at its last non-zero byte, whatever comes before it, and a zid whose
+/// last byte is not zero is its own wire form.
+#[test]
+fn the_wire_form_of_a_zid_ends_at_its_last_non_zero_byte() {
+    use crate::engine::wire_form;
+
+    assert_eq!(wire_form(SessionZid::from([0x11, 0, 0, 0])), [0x11]);
+    assert_eq!(
+        wire_form(SessionZid::from([0, 0x22, 0, 0x33, 0])),
+        [0, 0x22, 0, 0x33]
+    );
+    assert_eq!(wire_form(SessionZid::from([0x44; 16])), [0x44; 16]);
 }
 
 /// A build without the shared key ids names a key as upstream does and no other way: a session
@@ -2699,7 +2718,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
 
     let listener = || CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![0xa7; 4]),
+        zid: config_zid(0xa7),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         ..client_config()
     };

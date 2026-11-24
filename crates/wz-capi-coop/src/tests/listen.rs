@@ -21,11 +21,12 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
+use wz_session_core::session_init_params::SessionZid;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
 use super::get::remote_get;
-use super::{client_config, open_with, Engine};
+use super::{client_config, config_zid, open_with, Engine};
 use crate::CoopConfig;
 
 /// A session whose read task is running, closed when it is let go of: a test's session is stepped
@@ -68,7 +69,7 @@ pub(super) fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 pub(super) fn listening(tune: impl FnOnce(&mut CoopConfig)) -> (Stepped, String) {
     let mut config = CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![0xa1; 4]),
+        zid: config_zid(0xa1),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         ..client_config()
     };
@@ -82,7 +83,7 @@ pub(super) fn listening(tune: impl FnOnce(&mut CoopConfig)) -> (Stepped, String)
 pub(super) fn client(endpoint: &str, id: u8) -> Stepped {
     Stepped::new(open_with(CoopConfig {
         endpoints: vec![endpoint.to_owned()],
-        zid: Some(vec![id; 4]),
+        zid: config_zid(id),
         ..client_config()
     }))
 }
@@ -302,7 +303,7 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
 
     let silent = Stepped::new(open_with(CoopConfig {
         endpoints: vec![endpoint.clone()],
-        zid: Some(vec![0xc1; 4]),
+        zid: config_zid(0xc1),
         lease_ms: 600,
         ..client_config()
     }));
@@ -493,7 +494,7 @@ fn reads_until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) -> u
 fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let engine = open_with(CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![0xa1; 4]),
+        zid: config_zid(0xa1),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         ..client_config()
     });
@@ -568,7 +569,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let engine = open_with(CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![0xa1; 4]),
+        zid: config_zid(0xa1),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         ..client_config()
     });
@@ -683,4 +684,12 @@ fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
         listener.takes.polls.load(Ordering::SeqCst) > 0,
         "CONTROL: the listener waits on its port and its link together"
     );
+}
+
+/// The zid a config states is the one the open session announces, its trailing zero bytes left
+/// off as zenoh writes an id.
+#[test]
+fn a_session_announces_the_zid_its_config_states_without_its_trailing_zeros() {
+    let (node, _) = listening(|config| config.zid = Some(SessionZid::from([0x5a, 0x5b, 0, 0])));
+    assert_eq!(SessionEngine::session_zid(&*node), [0x5a, 0x5b]);
 }
