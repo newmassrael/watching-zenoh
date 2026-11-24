@@ -220,3 +220,47 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
         "every reply under the bound, none past it, then the final"
     );
 }
+
+/// A query kept past its session holds none of it: the kept query reaches the session by a weak
+/// handle alone, so the session's last handle lets the engine go, the rows of its held Finals
+/// before its arena, and the kept query then finds the session closed, answers nothing and is
+/// let go of with nothing to tell. The CONTROL is the session standing while its handle is held.
+/// Turned red by a kept query that keeps the engine, and so its arena, alive.
+#[test]
+fn a_query_kept_past_its_session_holds_none_of_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::default();
+    let slot = kept.clone();
+    declare(&engine, "demo/p/**", move |holder, query, _out| {
+        *slot.lock().unwrap() = Some(holder.hold_query(query));
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    router.send(Command::Query(5, "demo/p/a"));
+    until(&engine, "the callback to keep the query", || {
+        kept.lock().unwrap().is_some()
+    });
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    assert!(
+        !held.session_closed(),
+        "CONTROL: the session stands while its handle is held"
+    );
+
+    let gone = Arc::downgrade(&engine);
+    SessionDrive::close(&*engine);
+    drop(engine);
+    assert!(
+        gone.upgrade().is_none(),
+        "the kept query keeps nothing of the engine alive"
+    );
+    assert!(
+        held.session_closed(),
+        "the kept query finds the session gone"
+    );
+    let mut answered = false;
+    held.reply(&mut |_out| answered = true);
+    assert!(!answered, "a query of a session let go of answers nothing");
+    drop(held);
+}

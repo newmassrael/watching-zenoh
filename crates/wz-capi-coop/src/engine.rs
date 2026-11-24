@@ -169,7 +169,7 @@ use wz_session_core::reply_stage::ReplyStage;
 #[cfg(feature = "queryable")]
 mod query;
 #[cfg(feature = "queryable")]
-pub(crate) use query::QueryableCall;
+pub(crate) use query::{FinalHold, QueryableCall, RefusedFinal};
 
 #[cfg(feature = "group")]
 mod group;
@@ -723,6 +723,12 @@ struct StateTables {
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
     #[cfg(feature = "query")]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
+    /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
+    /// for each query held at once (`query::FinalHolds`).
+    #[cfg(feature = "queryable")]
+    held_finals: query::HeldFinals,
+    #[cfg(feature = "queryable")]
+    refused_finals: query::RefusedFinals,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
 }
@@ -741,6 +747,10 @@ impl SessionRows {
             leg_rows: lend.table(legs),
             #[cfg(feature = "query")]
             pending_gets: lend.table(legs),
+            #[cfg(feature = "queryable")]
+            held_finals: lend.table(self.held_queries()),
+            #[cfg(feature = "queryable")]
+            refused_finals: lend.table(self.held_queries()),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
         }
@@ -784,6 +794,10 @@ fn lend_session(
         leg_rows,
         #[cfg(feature = "query")]
         pending_gets,
+        #[cfg(feature = "queryable")]
+        held_finals,
+        #[cfg(feature = "queryable")]
+        refused_finals,
         #[cfg(feature = "advanced-cache")]
         cache,
     } = plan
@@ -826,9 +840,12 @@ fn lend_session(
         round.calls_legs_of(gets.clone());
     }
     // The queries the session's queryables are asked wait for their callbacks here, and the
-    // Finals of them are held here, in a table the plan counts.
+    // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
-    let plane = Arc::new(QueryPlane::holding(plan.held_queries()));
+    let plane = Arc::new(QueryPlane::over(query::FinalHolds::over(
+        held_finals,
+        refused_finals,
+    )));
     #[cfg(feature = "queryable")]
     let delivery = RoundDelivery::new(samples.clone(), plane.clone());
     #[cfg(not(feature = "queryable"))]
@@ -8064,6 +8081,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
             drop(registry);
             self.gets.let_go();
         }
+        // The held Finals' rows lie in the arena too; the round's calls were ended above.
+        #[cfg(feature = "queryable")]
+        self.plane.let_go();
     }
 }
 

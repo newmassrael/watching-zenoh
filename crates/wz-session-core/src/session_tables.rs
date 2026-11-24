@@ -633,23 +633,32 @@ impl<'a> InterestName<'a> {
 /// where in `key` its rest lies, read there rather than copied. A rest is the tail of the key it
 /// names, so it is found at the end of `key`, else anywhere in it; one found nowhere is named as
 /// `key` whole by no declaration, the same key. `None` for a key too long to be told by a range.
-fn kept_name(key: &str, name: InterestName<'_>) -> Option<(ExprId, bool, Option<(u16, u16)>)> {
+fn kept_name(key: &str, name: InterestName<'_>) -> Option<KeptName> {
     let range = |at: usize, len: usize| Some((u16::try_from(at).ok()?, u16::try_from(len).ok()?));
+    let kept = |mapping_id, suffix| KeptName {
+        mapping_id,
+        aggregate: name.aggregate,
+        suffix,
+    };
     let Some(rest) = name.suffix else {
-        return Some((name.mapping_id, name.aggregate, None));
+        return Some(kept(name.mapping_id, None));
     };
     let tail = key
         .len()
         .checked_sub(rest.len())
         .filter(|&at| key.get(at..) == Some(rest));
     match tail.or_else(|| key.find(rest)) {
-        Some(at) => Some((
-            name.mapping_id,
-            name.aggregate,
-            Some(range(at, rest.len())?),
-        )),
-        None => Some((0, name.aggregate, Some(range(0, key.len())?))),
+        Some(at) => Some(kept(name.mapping_id, Some(range(at, rest.len())?))),
+        None => Some(kept(0, Some(range(0, key.len())?))),
     }
+}
+
+/// An [`InterestName`] as the row of its Interest keeps it ([`kept_name`]).
+struct KeptName {
+    mapping_id: ExprId,
+    aggregate: bool,
+    /// Where in the key the rest lies, as a start and a length; `None` for no rest.
+    suffix: Option<(u16, u16)>,
 }
 
 /// A publisher's or a querier's write filter: whether a put or a get is sent at all.
@@ -1737,8 +1746,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if interests.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let (mapping_id, aggregate, suffix) =
-            kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
+        let KeptName {
+            mapping_id,
+            aggregate,
+            suffix,
+        } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
         self.next_entity = id.checked_add(1);

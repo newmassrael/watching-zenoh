@@ -257,11 +257,14 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
-    + CACHE_RING_ROWS;
+    + CACHE_RING_ROWS
+    + FINAL_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
+const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -804,6 +807,12 @@ impl SessionRows {
         self.key_bytes
     }
 
+    /// How many queries the session holds for its queryables' callbacks at once
+    /// (`MAX_PENDING_FINALS`): the rows of the Finals held and of the requests refused.
+    pub fn held_queries(&self) -> usize {
+        self.held_queries
+    }
+
     /// The bytes of the ring the session's advanced publishers' caches keep their samples in
     /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
     /// ([`CacheSpan::claimed`]).
@@ -1306,6 +1315,24 @@ impl ArenaPlan {
         } else {
             0
         };
+        // The Finals held for those queries and the requests a dispatch refused for want of a
+        // row, a row of each for each query held (`engine::query::FinalHolds`).
+        #[cfg(feature = "queryable")]
+        {
+            let held = plan.session.held_queries;
+            plan.put(
+                "held finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::FinalHold>(),
+            );
+            plan.put(
+                "refused finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::RefusedFinal>(),
+            );
+        }
         #[cfg(feature = "advanced-cache")]
         {
             plan.session.cache_bytes = plan.lent(
@@ -1435,8 +1462,8 @@ impl ArenaPlan {
 
     /// How many queries the session holds for its queryables' callbacks at once
     /// (`MAX_PENDING_FINALS`), resolved as the arena's rows are and none in a build without
-    /// `queryable`. They are no row of the arena: the query plane holds them in a fixed table of
-    /// its own, as it is shared with what answers outside the session's lock.
+    /// `queryable`. Their Finals lie in rows of the arena, a row each, as do the requests a
+    /// dispatch refused for want of one.
     pub fn held_queries(&self) -> usize {
         self.session.held_queries
     }
