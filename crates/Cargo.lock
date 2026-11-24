@@ -4046,6 +4046,7 @@ version = "0.1.0"
 dependencies = [
  "regex-automata",
  "wz-app-frame",
+ "wz-app-schema",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",

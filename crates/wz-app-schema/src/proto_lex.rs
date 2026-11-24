@@ -118,8 +118,9 @@ pub struct Token<'a> {
     /// Byte offsets of the token in the source text, `start..end`.
     pub start: usize,
     pub end: usize,
-    /// The comments in the gap in front of the token, when there are any. Shared
-    /// so that a token cloned for a look-ahead does not copy a long comment.
+    /// The comments in the gap in front of the token, when there are any and the
+    /// build keeps them (`docs`). Shared so that a token cloned for a look-ahead
+    /// does not copy a long comment.
     pub gap: Option<Rc<Gap>>,
 }
 
@@ -131,6 +132,7 @@ pub struct Lexer<'a> {
     col: u32,
     /// Whether a token has been handed out: the first gap of a file has no token
     /// before it for a comment to trail.
+    #[cfg(feature = "docs")]
     started: bool,
 }
 
@@ -142,6 +144,7 @@ enum CommentStart {
 }
 
 /// `protoc`'s `CommentCollector`: the comment being read, and where it goes.
+#[cfg(feature = "docs")]
 struct Collector {
     buffer: String,
     has_comment: bool,
@@ -150,6 +153,7 @@ struct Collector {
     trailing: Option<String>,
 }
 
+#[cfg(feature = "docs")]
 impl Collector {
     fn new(can_attach_to_prev: bool) -> Self {
         Self {
@@ -229,6 +233,7 @@ impl<'a> Lexer<'a> {
             at,
             line: 1,
             col: 1,
+            #[cfg(feature = "docs")]
             started: false,
         }
     }
@@ -370,6 +375,7 @@ impl<'a> Lexer<'a> {
     ///
     /// Leaves the cursor on the next token, so every caller that wants only the
     /// token goes on to read it.
+    #[cfg(feature = "docs")]
     fn gap(&mut self) -> Result<Gap, SyntaxError> {
         let mut c = Collector::new(self.started);
         if self.started {
@@ -437,11 +443,28 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// The next token. Calling it again after `Tok::Eof` returns `Tok::Eof`.
-    pub fn next_token(&mut self) -> Result<Token<'a>, SyntaxError> {
+    /// The comments in front of the next token, kept: the gap `protoc` would
+    /// record, or none when it holds no comment. Leaves the cursor on the token.
+    #[cfg(feature = "docs")]
+    fn leading_gap(&mut self) -> Result<Option<Rc<Gap>>, SyntaxError> {
         let gap = self.gap()?;
         self.started = true;
-        let gap = (gap != Gap::default()).then(|| Rc::new(gap));
+        Ok((gap != Gap::default()).then(|| Rc::new(gap)))
+    }
+
+    /// The trivia in front of the next token, skipped: a build without `docs`
+    /// keeps no comment, since only a reader that shows them reads them. The
+    /// cursor, the line count and the refusal of an unterminated block comment
+    /// are the ones the kept gap gives.
+    #[cfg(not(feature = "docs"))]
+    fn leading_gap(&mut self) -> Result<Option<Rc<Gap>>, SyntaxError> {
+        self.skip_trivia()?;
+        Ok(None)
+    }
+
+    /// The next token. Calling it again after `Tok::Eof` returns `Tok::Eof`.
+    pub fn next_token(&mut self) -> Result<Token<'a>, SyntaxError> {
+        let gap = self.leading_gap()?;
         let pos = self.pos();
         let start = self.at;
         let tok = self.token(pos)?;
@@ -842,6 +865,7 @@ mod tests {
 
     /// The gap in front of token number `index` of `src` (the end of the file
     /// counts as a token): `(trailing, leading)`.
+    #[cfg(feature = "docs")]
     fn gap_before(src: &str, index: usize) -> (Option<String>, Option<String>) {
         let mut lex = Lexer::new(src);
         for _ in 0..index {
@@ -852,10 +876,12 @@ mod tests {
         (g.trailing, g.leading)
     }
 
+    #[cfg(feature = "docs")]
     fn s(text: &str) -> Option<String> {
         Some(String::from(text))
     }
 
+    #[cfg(feature = "docs")]
     #[test]
     fn a_comment_on_the_line_of_the_token_before_trails_it() {
         // `//` after a token trails it, and the comment on the next lines is the
@@ -870,6 +896,7 @@ mod tests {
         assert_eq!(gap_before("a /* x */ b", 1), (None, None));
     }
 
+    #[cfg(feature = "docs")]
     #[test]
     fn a_blank_line_detaches_and_a_run_before_one_trails() {
         // No blank line before the run, one after it: the run trails.
@@ -883,6 +910,7 @@ mod tests {
         assert_eq!(gap_before("a\n\n// l\nb", 1), (None, s(" l\n")));
     }
 
+    #[cfg(feature = "docs")]
     #[test]
     fn a_comment_before_a_closing_bracket_leads_nothing() {
         // The end of the file, and a `}`: neither takes a leading comment, and the
@@ -893,6 +921,7 @@ mod tests {
         assert_eq!(gap_before("a\n\n// end\n}", 1), (None, None));
     }
 
+    #[cfg(feature = "docs")]
     #[test]
     fn a_block_comment_is_stripped_the_way_protoc_strips_it() {
         // `/**` starts the text with the second star; each continuation line loses
@@ -904,6 +933,7 @@ mod tests {
         assert_eq!(gap_before("/* one */\nx", 0), (None, s(" one ")));
     }
 
+    #[cfg(feature = "docs")]
     #[test]
     fn the_first_token_has_no_token_before_it_for_a_comment_to_trail() {
         let mut lex = Lexer::new("// lead\nx");
@@ -914,6 +944,25 @@ mod tests {
             (None, s(" lead\n"))
         );
         assert_eq!((t.start, t.end), (8, 9));
+    }
+
+    /// Without `docs` the same tokens stand at the same places, and none carries
+    /// a gap.
+    #[cfg(not(feature = "docs"))]
+    #[test]
+    fn a_build_without_docs_keeps_no_comment_and_moves_no_token() {
+        let mut lex = Lexer::new("a // t\n// l\n\n/* b */ b");
+        let a = lex.next_token().expect("a");
+        let b = lex.next_token().expect("b");
+        let end = lex.next_token().expect("end");
+        assert_eq!(a.tok, Tok::Ident("a"));
+        assert_eq!(a.pos, Pos { line: 1, col: 1 });
+        assert!(a.gap.is_none());
+        assert_eq!(b.tok, Tok::Ident("b"));
+        assert_eq!(b.pos, Pos { line: 4, col: 9 });
+        assert!(b.gap.is_none());
+        assert_eq!(end.tok, Tok::Eof);
+        assert!(end.gap.is_none());
     }
 
     #[test]

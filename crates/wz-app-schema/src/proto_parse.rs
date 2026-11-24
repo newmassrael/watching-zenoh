@@ -42,7 +42,8 @@
 //!
 //! ## Comments
 //!
-//! A message and a field keep the comments `protoc` attaches to them ([`Docs`]).
+//! A message and a field keep the comments `protoc` attaches to them ([`Docs`]), in a
+//! build that keeps them (the crate's `docs` feature); without it they have none.
 //! `protoc` does not look at every token for them: it reads the gap after a `;`,
 //! a `{` that opens a block and a `}` that closes one, the three tokens that end
 //! a declaration, so this parser does the same (`Parser::end_decl`), and the
@@ -436,6 +437,7 @@ struct Parser<'a> {
     /// The comment that leads the declaration about to start: found in the gap
     /// after the last `;`, `{` or `}` that ended a declaration, which is where
     /// `protoc` looks for it.
+    #[cfg(feature = "docs")]
     upcoming: Option<String>,
 }
 
@@ -449,6 +451,7 @@ pub fn parse_file(src: &str) -> Result<FileAst, SyntaxError> {
         lex: Lexer::new(src),
         ahead: VecDeque::new(),
         syntax: Syntax::Proto2,
+        #[cfg(feature = "docs")]
         upcoming: None,
     };
     p.file()
@@ -506,6 +509,7 @@ impl<'a> Parser<'a> {
     ///
     /// Peeks the token after, which a lexical error there surfaces at, the place
     /// `protoc` meets it.
+    #[cfg(feature = "docs")]
     fn end_decl(&mut self) -> Result<Docs, SyntaxError> {
         let next = self.peek()?;
         let (trailing, leading_next) = match &next.gap {
@@ -514,6 +518,15 @@ impl<'a> Parser<'a> {
         };
         let leading = core::mem::replace(&mut self.upcoming, leading_next);
         Ok(Docs { leading, trailing })
+    }
+
+    /// A declaration has just ended, in a build that keeps no comment: the token
+    /// after is peeked as the build that keeps them peeks it, so a lexical error
+    /// surfaces at the same place, and the declaration has no comment.
+    #[cfg(not(feature = "docs"))]
+    fn end_decl(&mut self) -> Result<Docs, SyntaxError> {
+        self.peek()?;
+        Ok(Docs::default())
     }
 
     fn is_sym(&mut self, c: char) -> bool {
@@ -598,8 +611,14 @@ impl<'a> Parser<'a> {
             extends: Vec::new(),
             options: Vec::new(),
         };
-        // The comment in front of the first declaration leads it.
-        self.upcoming = self.peek()?.gap.as_ref().and_then(|g| g.leading.clone());
+        // The comment in front of the first declaration leads it. Peeked in every
+        // build, so a lexical error on the first token surfaces here.
+        #[cfg(feature = "docs")]
+        {
+            self.upcoming = self.peek()?.gap.as_ref().and_then(|g| g.leading.clone());
+        }
+        #[cfg(not(feature = "docs"))]
+        self.peek()?;
         if self.is_ident("syntax") {
             ast.syntax = self.syntax_statement()?;
             self.syntax = ast.syntax;

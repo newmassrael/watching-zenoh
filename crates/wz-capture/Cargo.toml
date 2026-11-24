@@ -308,6 +308,11 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # writes through.
 wz-app-frame = { path = "../wz-app-frame", features = ["proto"] }
 
+# The schema reader under `wz-app-frame`'s `proto`, named here only to keep the comments `protoc`
+# attaches to a message and a field (`docs`), which the schema description (`crate::proto_describe`)
+# shows and no node that only reads payloads keeps.
+wz-app-schema = { path = "../wz-app-schema", features = ["docs"] }
+
 # `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
 # the meta engine and the Unicode tables a pattern's classes read.
 regex-automata = { version = "0.4", default-features = false, optional = true, features = [
