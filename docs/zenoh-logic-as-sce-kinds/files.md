@@ -400,7 +400,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-host-net/src/link_interfaces/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-host-net/src/multicast.rs` | S9 | |
 | `crates/wz-host-net/src/multicast/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-host-sync/src/in_place.rs` | S9 | |
 | `crates/wz-host-sync/src/lib.rs` | S9 | |
+| `crates/wz-host-sync/src/std_lock.rs` | S9 | |
 | `crates/wz-host-sync/src/unix.rs` | S9 | |
 | `crates/wz-host-sync/src/windows.rs` | S9 | |
 | `crates/wz-link-lwip/src/ethernet.rs` | S9 | |
