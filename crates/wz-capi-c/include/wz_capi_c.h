@@ -471,12 +471,17 @@ bool wz_capi_c_internal_config_verdict_check(
  * and every answer is that enforcer's own decision, not a second reading
  * of the rules.
  *
- * WHICH ZENOH. access_control is read in the shape of zenoh 1.10.2, the
- * version this library is built against: `rules`, `subjects` and
- * `policies` joined by id, with `enabled` and `default_permission`. That
- * shape has no other version here. A config that states a key or a member
- * 1.10.2 does not have is refused, as zenohd 1.10.2 refuses it, so a
- * config written for another shape is refused rather than misjudged.
+ * WHICH ZENOH. access_control is read in the layout of one zenoh release,
+ * the one this library is built against, and the answers NAME it in
+ * `zenoh_layout` (below): `rules`, `subjects` and `policies` joined by
+ * id, with `enabled` and `default_permission`. That layout has no other
+ * version here. A config that states a key or a member that release does not
+ * have is refused, as that release's zenohd refuses it, so a config written
+ * for another layout is refused rather than misjudged. Compare
+ * `zenoh_layout` with the release your configs are written for rather than
+ * reading a number from this comment: it is taken from the one constant the
+ * library states it by, which a gate holds to the zenoh release the tree is
+ * pinned to.
  *
  * THE QUESTIONS. `questions_json` is a NUL-terminated JSON5 (so also
  * JSON) list, one object per message:
@@ -508,11 +513,20 @@ bool wz_capi_c_internal_config_verdict_check(
  *
  * THE ANSWERS. On Z_OK `out_answers` holds one JSON document:
  *
- *   {"enabled":true,"default_permission":"deny","answers":[
+ *   {"document":{"name":"acl_verdicts","revision":1},
+ *    "zenoh_layout":"<major>.<minor>.<patch>",
+ *    "enabled":true,"default_permission":"deny","answers":[
  *     {"permission":"allow",
  *      "decided_by":[{"kind":"rule","rule":"r1","subject":"s1",
  *                     "policy":"p1","policy_index":0}],
  *      "needs":[],"exhaustive":true}, ...]}
+ *
+ *   document      the document's name and revision, the envelope every
+ *                 document of the dissect library opens with: a key renamed
+ *                 or removed moves the revision, so read by name and check
+ *                 it. Revision 1 is the shape described here.
+ *   zenoh_layout  the zenoh release whose config layout the questions were
+ *                 put to, as a version string.
  *
  * `answers` is in the order of the questions.
  *

@@ -2625,6 +2625,20 @@ fn validate_tx_queue(
     }
 }
 
+/// The zenoh release whose config layout [`ZenohNodeConfig::from_json5`] reads:
+/// the keys it admits and refuses, and the members of each `access_control`
+/// rule, subject and policy, as that release's `zenohd` reads them.
+///
+/// Handed to consumers as data (the access-control answers of `wz-capi-c`
+/// name it), so a reader of an answer knows which layout the question was put
+/// to. A TRIPWIRE and not a copy of the pin: the key lists below are adjudicated
+/// against whichever binary the pin builds and so name no version, but what
+/// this states is a reading a person checked, and it holds only until the pin
+/// moves. `scripts/lib/claude_md_upstream_pin_gate.py` refuses it whenever it
+/// differs from `UPSTREAM_VERSION`, so a pin bump stops here until the layout
+/// has been read again against the new release and this moved with it.
+pub const ZENOH_LAYOUT_VERSION: &str = "1.10.2";
+
 /// Every upstream config leaf path [`ZenohNodeConfig::from_json5`] HONOURS,
 /// in the order `to_json5` emits them.
 ///

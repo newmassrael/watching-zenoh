@@ -39,6 +39,16 @@
 //! values names the attribute in `needs`. A stated `null` is a KNOWN absence:
 //! no username, no certificate name, or for the zid a face the router could not
 //! attribute to any peer.
+//!
+//! # Which layout the answers read, said in the answers
+//!
+//! The answers document opens with its own name and revision, the envelope
+//! every document a wz door hands out carries (`wz_capture::doc_revision` states
+//! the rule and the tests here hold this one to it), and then `zenoh_layout`:
+//! the zenoh release whose config layout the question was put to,
+//! `zenoh_config::ZENOH_LAYOUT_VERSION`, the one constant that states it. A gate
+//! holds that constant to the pinned upstream version, so the document cannot
+//! name a layout the tree no longer reads.
 
 #![allow(non_camel_case_types)]
 
@@ -49,7 +59,9 @@ use wz_runtime_tokio::interceptor::{
     PartialSubject, Permission, Zid,
 };
 use wz_runtime_tokio::json5::{self, Json5Value};
-use wz_runtime_tokio::zenoh_config::{acl_config_with_origins, AclRuleOrigin, CompiledAcl};
+use wz_runtime_tokio::zenoh_config::{
+    acl_config_with_origins, AclRuleOrigin, CompiledAcl, ZENOH_LAYOUT_VERSION,
+};
 use wz_runtime_tokio::zenoh_config_finding::{BlamedSite, Finding};
 use wz_runtime_tokio::zid_hex::zenoh_hex_to_zid;
 use wz_session_core::json::escape_into;
@@ -319,6 +331,13 @@ enum Decider {
     Origin(usize),
 }
 
+/// The answers document's name, as its envelope writes it.
+const ANSWERS_DOCUMENT: &str = "acl_verdicts";
+
+/// The answers document's revision. A key renamed or removed moves it, and
+/// the history the tests hold the document to records each shape.
+const ANSWERS_REVISION: u32 = 1;
+
 /// The answers document for `questions` under the compiled policy, or under
 /// none when the access control is disabled.
 fn answers_document(
@@ -362,7 +381,12 @@ fn answers_document(
         Some(compiled) => &compiled.origins,
         None => &[],
     };
-    let mut out = String::from("{\"enabled\":");
+    let mut out = format!(
+        "{{\"document\":{{\"name\":\"{ANSWERS_DOCUMENT}\",\"revision\":{ANSWERS_REVISION}}},\
+         \"zenoh_layout\":"
+    );
+    escape_into(ZENOH_LAYOUT_VERSION, &mut out);
+    out.push_str(",\"enabled\":");
     out.push_str(bool_word(compiled.is_some()));
     out.push_str(",\"default_permission\":");
     escape_into(default_permission, &mut out);
@@ -535,6 +559,8 @@ mod tests {
 
     use std::ffi::CString;
 
+    use wz_capture::doc_revision::{audit, key_set, DocumentShape};
+
     use crate::abi::z_view_string_t;
     use crate::config::z_config_loan;
     use crate::config_verdict::tests::{config_of, take_text};
@@ -668,6 +694,13 @@ mod tests {
         format!(r#"{head},"policy":{policy},"policy_index":{index}}}"#)
     }
 
+    /// The answers document around `body`: its envelope and the layout it
+    /// read, then the members `body` writes.
+    fn document(body: &str) -> String {
+        let head = r#"{"document":{"name":"acl_verdicts","revision":1}"#;
+        format!(r#"{head},"zenoh_layout":"{ZENOH_LAYOUT_VERSION}",{body}}}"#)
+    }
+
     /// One answer, as the door writes it; `permission` is the JSON value.
     fn answer(permission: &str, decided_by: &[&str], needs: &[&str]) -> String {
         let decided_by = decided_by.join(",");
@@ -711,7 +744,9 @@ mod tests {
             answer("\"allow\"", &[allow_admin.as_str()], &[]),
         ]
         .join(",");
-        let want = format!(r#"{{"enabled":true,"default_permission":"deny","answers":[{all}]}}"#);
+        let want = document(&format!(
+            r#""enabled":true,"default_permission":"deny","answers":[{all}]"#
+        ));
         assert_eq!(text, want);
         assert!(json5::parse(&text).is_ok(), "the document is JSON");
     }
@@ -730,7 +765,9 @@ mod tests {
         assert_eq!(rc, Z_OK);
         assert!(rows.is_empty());
         let one = answer("\"allow\"", &[r#"{"kind":"disabled"}"#], &[]);
-        let want = format!(r#"{{"enabled":false,"default_permission":"deny","answers":[{one}]}}"#);
+        let want = document(&format!(
+            r#""enabled":false,"default_permission":"deny","answers":[{one}]"#
+        ));
         assert_eq!(text, want);
     }
 
@@ -884,7 +921,81 @@ mod tests {
         assert!(rows.is_empty());
         assert_eq!(
             text,
-            r#"{"enabled":true,"default_permission":"deny","answers":[]}"#
+            document(r#""enabled":true,"default_permission":"deny","answers":[]"#)
+        );
+    }
+
+    /// Every shape the answers document has been written in, oldest first.
+    const ANSWERS_HISTORY: &[DocumentShape] = &[DocumentShape {
+        document: ANSWERS_DOCUMENT,
+        revision: 1,
+        keys: &[
+            "answers",
+            "decided_by",
+            "default_permission",
+            "document",
+            "enabled",
+            "exhaustive",
+            "kind",
+            "name",
+            "needs",
+            "permission",
+            "policy",
+            "policy_index",
+            "revision",
+            "rule",
+            "subject",
+            "zenoh_layout",
+        ],
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    }];
+
+    /// THE ANSWERS DOCUMENT SAYS WHICH IT IS AND WHICH LAYOUT IT READ: it opens
+    /// with its name and revision, then `zenoh_layout`, the one constant the
+    /// layout is stated by; and its key set over every shape it is written in
+    /// (a rule, the default and a disabled enforcer deciding, an empty list) is
+    /// the newest of the history, which keeps the rules a rename is made by.
+    #[test]
+    fn the_answers_document_names_its_revision_and_the_zenoh_layout_it_read() {
+        audit(ANSWERS_HISTORY).expect("the history keeps the revision rules");
+        let newest = ANSWERS_HISTORY.last().expect("a revision");
+        assert_eq!(newest.revision, ANSWERS_REVISION);
+
+        let mut disabled: Vec<(&str, &str)> = POLICY.to_vec();
+        disabled[0] = ("access_control/enabled", "false");
+        let question = r#"[ { flow: "ingress", message: "put", key_expr: "admin/cfg",
+                              username: "alice" },
+                            { flow: "egress", message: "put", key_expr: "metrics/cpu" } ]"#;
+        let mut union: Vec<String> = Vec::new();
+        for (entries, questions) in [
+            (POLICY, question),
+            (disabled.as_slice(), question),
+            (POLICY, "[]"),
+        ] {
+            // SAFETY: the fixtures and the door are this test's own.
+            let (rc, text, rows) = unsafe { ask(entries, Some(questions)) };
+            assert_eq!(rc, Z_OK, "{rows:?}");
+            let (name, revision) = (ANSWERS_DOCUMENT, ANSWERS_REVISION);
+            let head = format!(
+                r#"{{"document":{{"name":"{name}","revision":{revision}}},"zenoh_layout":"#
+            );
+            assert!(text.starts_with(&head), "{text}");
+            assert!(
+                text.contains(&format!(r#""zenoh_layout":"{ZENOH_LAYOUT_VERSION}""#)),
+                "{text}"
+            );
+            union.extend(key_set(&text).into_iter().map(String::from));
+        }
+        union.sort_unstable();
+        union.dedup();
+        let pinned: Vec<String> = newest.keys.iter().map(|k| String::from(*k)).collect();
+        assert_eq!(
+            union, pinned,
+            "the key set moved: append a revision to ANSWERS_HISTORY and move \
+             ANSWERS_REVISION, announcing a key that goes away first"
         );
     }
 }
