@@ -557,8 +557,6 @@ impl KeyMaker<KeyRef> for LentKeys {
 
     /// The block the arena keeps `text` in already, one holder more, whoever holds it
     /// ([`KeySpace::kept`]); a new block otherwise, as [`Self::key`].
-    // Out of line: every table that keeps a key asks the arena through it, each a copy inlined.
-    #[inline(never)]
     fn shared(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
         let Some(keys) = &self.0 else {
             return Err(KeyUnkept::NoRoom);
