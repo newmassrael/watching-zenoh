@@ -41,6 +41,7 @@ use wz_codecs::response::{ResponseParts, ResponsePartsBody, ResponseWire};
 use wz_codecs::wire_const;
 use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
 use wz_codecs::wireexpr_local::WireexprLocalParts;
+use wz_codecs::wireexpr_nonlocal::WireexprNonlocalParts;
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{ext_identity, EXT_ENC_ZBUF, EXT_FLAG_Z};
@@ -62,6 +63,7 @@ const LOCAL_KEY: u8 = 0x40;
 /// full eight bits with no flag, so it ends at nine bytes.
 const VLE_U64: u32 = 8;
 const VLE_U32: u32 = 4;
+const VLE_U16: u32 = 2;
 
 /// The bytes a VLE of `value` takes, by the rule the codec runtime writes it by.
 fn vle_len(value: u64, continuation_max: u32) -> usize {
@@ -215,6 +217,15 @@ const RESPONDER_EXT_HEADER: u8 = ext_identity(0x03, false, EXT_ENC_ZBUF);
 /// first).
 const IDENTITY_EXT_BODY_BYTES: usize = 1 + 16 + 5 + 5;
 
+/// How a reply names its key on the wire: an id, the rest of the key after it, and whether the id
+/// is of the sender's space (the envelope's `M` bit). The literal is the id 0 and the whole key.
+#[derive(Clone, Copy)]
+struct KeyName<'a> {
+    id: crate::wire_id::ExprId,
+    suffix: Option<&'a str>,
+    sender_mapping: bool,
+}
+
 /// Why a staged reply cannot be written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseRefusal {
@@ -330,6 +341,9 @@ pub struct ResponseWriter<'a> {
     // Held only under `reply-source-info`, the feature that puts the extension on the wire.
     #[cfg(feature = "reply-source-info")]
     source_info: IdentityBody,
+    // How a link that shares key ids with its peer names the reply's key; the literal elsewhere.
+    #[cfg(feature = "shared-key-ids")]
+    key: crate::shared_key_ids::ReplyKey<'a>,
 }
 
 impl<'a> ResponseWriter<'a> {
@@ -352,7 +366,46 @@ impl<'a> ResponseWriter<'a> {
             source_info: Self::source_info_body(&parts),
             parts,
             responder,
+            #[cfg(feature = "shared-key-ids")]
+            key: crate::shared_key_ids::ReplyKey::Literal,
         })
+    }
+
+    /// The writer naming the reply's key as `key` says: the request's id and rest, in the space
+    /// the reply's `M` bit names, when the link's key ids mirror the query's form; the literal
+    /// otherwise. The bytes are those the owned reply carries once
+    /// [`crate::response_build::set_response_keyexpr_aliased`] has named its key so.
+    ///
+    /// A key past the literal's bound stays the literal, which both paths refuse, as the owned
+    /// reply is refused before its key is named: a shorter rest does not make it sendable.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn naming(mut self, key: crate::shared_key_ids::ReplyKey<'a>) -> Self {
+        if self.parts.keyexpr.len() <= usize::from(u16::MAX) {
+            self.key = key;
+        }
+        self
+    }
+
+    /// How the reply names its key on the wire.
+    fn key_name(&self) -> KeyName<'a> {
+        #[cfg(feature = "shared-key-ids")]
+        if let crate::shared_key_ids::ReplyKey::Mirrored {
+            id,
+            suffix,
+            sender_mapping,
+        } = self.key
+        {
+            return KeyName {
+                id,
+                suffix,
+                sender_mapping,
+            };
+        }
+        KeyName {
+            id: 0,
+            suffix: Some(self.parts.keyexpr),
+            sender_mapping: true,
+        }
     }
 
     /// The source-info extension's body, when the reply carries one that names a source
@@ -484,12 +537,15 @@ impl<'a> ResponseWriter<'a> {
             qos_extension,
         } = self.direct_view();
         let responder = self.responder.value();
+        let name = self.key_name();
+        let suffix = name.suffix.map_or(0, |suffix| {
+            sum([vle_len(suffix.len() as u64, VLE_U64), suffix.len()])
+        });
         let envelope = sum([
             1,
             vle_len(u64::from(parts.rid), VLE_U32),
-            1,
-            vle_len(parts.keyexpr.len() as u64, VLE_U64),
-            parts.keyexpr.len(),
+            vle_len(u64::from(name.id), VLE_U16),
+            suffix,
         ]);
         let qos = if qos_extension {
             sum([1, vle_len(u64::from(parts.qos.raw), VLE_U64)])
@@ -521,9 +577,10 @@ impl<'a> ResponseWriter<'a> {
     }
 
     /// The reply's bytes into a window of exactly [`Self::direct_len`] bytes, in the order the
-    /// generated encoders write them: the envelope's header (the `Local` arm of the key sets its
-    /// bit, and the chain flag is set when an extension follows), the request id, the key as an
-    /// id of 0 and a suffix, the QoS extension and the responder's if there are any (the chain
+    /// generated encoders write them: the envelope's header (the `N` bit when a suffix follows the
+    /// key's id, the `M` bit when the id is of the sender's space, which the literal's is, and the
+    /// chain flag when an extension follows), the request id, the key's id and its suffix, the QoS
+    /// extension and the responder's if there are any (the chain
     /// flag on each but the last), then the body: the Reply's header and a Put's (its header,
     /// encoding and payload) or a Del's header, or an Err's (its header, encoding and payload).
     fn write_direct(&self, window: &mut [u8]) -> Result<(), CodecError> {
@@ -538,16 +595,24 @@ impl<'a> ResponseWriter<'a> {
             rest: window,
             short: false,
         };
-        let header = if qos_extension || responder {
-            with_z(RESPONSE_HEADER)
-        } else {
-            RESPONSE_HEADER
-        };
-        out.byte(header | LOCAL_KEY);
+        let name = self.key_name();
+        let mut header = wire_const::N_MID_RESPONSE;
+        if name.suffix.is_some() {
+            header |= wire_const::FLAG_N_N;
+        }
+        if name.sender_mapping {
+            header |= LOCAL_KEY;
+        }
+        if qos_extension || responder {
+            header = with_z(header);
+        }
+        out.byte(header);
         out.vle(u64::from(parts.rid), VLE_U32);
-        out.vle(0, VLE_U64);
-        out.vle(parts.keyexpr.len() as u64, VLE_U64);
-        out.bytes(parts.keyexpr.as_bytes());
+        out.vle(u64::from(name.id), VLE_U16);
+        if let Some(suffix) = name.suffix {
+            out.vle(suffix.len() as u64, VLE_U64);
+            out.bytes(suffix.as_bytes());
+        }
         if qos_extension {
             let entry = QOS_EXT_HEADER & !EXT_FLAG_Z;
             out.byte(if responder { entry | EXT_FLAG_Z } else { entry });
@@ -691,12 +756,27 @@ impl<'a> ResponseWriter<'a> {
             ],
         );
         link_chain(chain);
-        let suffix = WireexprLocalParts {
-            id: 0,
-            suffix: Some(crate::codec_owned::sent_suffix(parts.keyexpr)?),
-        };
+        let name = self.key_name();
+        let suffix = name
+            .suffix
+            .map(crate::codec_owned::sent_suffix)
+            .transpose()?;
+        let local;
+        let nonlocal;
         let keyexpr = WireexprParts {
-            body: WireexprPartsBody::WireexprLocal(&suffix),
+            body: if name.sender_mapping {
+                local = WireexprLocalParts {
+                    id: name.id,
+                    suffix,
+                };
+                WireexprPartsBody::WireexprLocal(&local)
+            } else {
+                nonlocal = WireexprNonlocalParts {
+                    id: name.id,
+                    suffix,
+                };
+                WireexprPartsBody::WireexprNonlocal(&nonlocal)
+            },
         };
         let response = ResponseParts {
             // The codec sets the `Z` flag from the chain and the `M` flag from the key's arm.
@@ -1352,6 +1432,137 @@ mod tests {
             Err(ResponseRefusal::ResponderIdentity)
         ));
         assert!(ResponseWriter::new(parts("demo/a", Some((&[0u8; 16], 1)))).is_ok());
+    }
+
+    /// A reply named by the request's id and rest, in either space, is written as the owned reply
+    /// is once `set_response_keyexpr_aliased` has named its key so: by the codec's encoder, by the
+    /// transmit path (the direct writer for a plain reply), and counted alike. The literal is the
+    /// CONTROL. A key past the literal's bound is refused by both sides whatever it is named by.
+    ///
+    /// Turned red by a direct writer that writes the literal whatever the key (`write_direct`'s
+    /// header and key bytes), by a measure that counts the literal (`direct_len`), or by a
+    /// `naming` that keeps no key.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn a_mirrored_key_is_written_as_the_owned_reply_names_it() {
+        use crate::shared_key_ids::ReplyKey;
+        let keys = [
+            ReplyKey::Literal,
+            ReplyKey::Mirrored {
+                id: 43,
+                suffix: Some("/x"),
+                sender_mapping: false,
+            },
+            ReplyKey::Mirrored {
+                id: 43,
+                suffix: Some("/x"),
+                sender_mapping: true,
+            },
+            ReplyKey::Mirrored {
+                id: 300,
+                suffix: None,
+                sender_mapping: false,
+            },
+            ReplyKey::Mirrored {
+                id: 7,
+                suffix: None,
+                sender_mapping: true,
+            },
+        ];
+        let stamps: [Option<TimestampParts<'_>>; 2] = [
+            None,
+            Some(TimestampParts {
+                time: 123_456_789,
+                zid: &[0xAB; 8],
+            }),
+        ];
+        let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
+        let mut compared = 0usize;
+        for key in keys {
+            for body in [PartsBody::Put(b"answer"), PartsBody::Del] {
+                for timestamp in stamps {
+                    for responder in responders {
+                        for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
+                            let parts = ReplyParts {
+                                rid: 9,
+                                keyexpr: "lab/q/x",
+                                responder,
+                                qos,
+                                #[cfg(feature = "pubsub-ts-stack")]
+                                ts_stack: None,
+                                kind: PartsKind::Reply {
+                                    body,
+                                    encoding: None,
+                                    timestamp,
+                                    attachment: None,
+                                    source_info: None,
+                                },
+                            };
+                            let mut owned = QueryReply::from_parts(&parts)
+                                .into_response()
+                                .expect("the owned response is built");
+                            if let ReplyKey::Mirrored {
+                                id,
+                                suffix,
+                                sender_mapping,
+                            } = key
+                            {
+                                crate::response_build::set_response_keyexpr_aliased(
+                                    &mut owned,
+                                    id,
+                                    suffix,
+                                    sender_mapping,
+                                )
+                                .expect("the key is named");
+                            }
+                            let expected = owned.try_as_borrowed().expect("a view").encode_to_vec();
+                            let writer = ResponseWriter::new(parts).expect("writable").naming(key);
+                            let mut buffer = [0u8; 1024];
+                            let mut sink = SliceSink::new(&mut buffer);
+                            writer.encode(&mut sink).expect("the buffer holds it");
+                            let len = sink.position();
+                            assert_eq!(&buffer[..len], expected.as_slice(), "{key:?}: encoder");
+                            assert_eq!(writer.encoded_len(), Ok(len), "{key:?}: the count");
+                            let mut vector: Vec<u8> = Vec::new();
+                            let mut tx = crate::tx_buf::TxSink::over(&mut vector);
+                            writer.encode_tx(&mut tx).expect("grows");
+                            assert_eq!(vector, expected, "{key:?}: transmit path");
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 5 * 2 * 2 * 2 * 2, "the matrix ran whole");
+
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let parts = ReplyParts {
+            rid: 9,
+            keyexpr: &past,
+            responder: None,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"x"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        };
+        assert!(
+            QueryReply::from_parts(&parts).into_response().is_err(),
+            "CONTROL: the owned reply refuses the key"
+        );
+        let writer = ResponseWriter::new(parts)
+            .expect("writable")
+            .naming(ReplyKey::Mirrored {
+                id: 43,
+                suffix: Some("/x"),
+                sender_mapping: false,
+            });
+        assert_eq!(writer.encoded_len(), Err(CodecError::LengthOutOfRange));
     }
 
     /// A window filled to its last byte is the writer's measure; a store past its end, or a

@@ -983,6 +983,23 @@ impl MulticastReplyEnqueue for GroupTxStage {
         let meta = reply.meta(&self.inner.params);
         reply.with_body(|body| self.admit_reply_body(meta, reply.bytes(), body));
     }
+
+    // Written from the reply's parts into the lane or the staged storage, as a link's writer
+    // writes one: no owned record of it is built. A reply the writer refuses holds no slot, as the
+    // owned record refuses it.
+    #[cfg(feature = "codec-response")]
+    fn enqueue_reply_parts(&self, parts: wz_session_core::reply_stage::ReplyParts<'_>) {
+        let Ok(writer) = wz_session_core::lent_response::ResponseWriter::new(parts) else {
+            return;
+        };
+        let Ok(size) = writer.encoded_len() else {
+            return;
+        };
+        let meta = MulticastTxMeta::of_reply(parts.qos, &self.inner.params);
+        self.admit_reply_body(meta, size, &|sink: &mut wz_session_core::tx_buf::TxSink<
+            '_,
+        >| writer.encode_tx(sink));
+    }
 }
 
 /// Which lane the group's pump takes its next datagram from: the most urgent lane that holds one,
@@ -1956,6 +1973,71 @@ mod tests {
         assert_eq!(bytes(&staged), expected);
         assert_eq!(staged.inner.replies.get(), 0, "its slot is free once taken");
         assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
+    }
+
+    /// A staged reply handed as its parts is framed as its owned record is, at once and when it is
+    /// kept while the conduits are held, on the band its QoS names; one the writer refuses holds no
+    /// slot and is no datagram. Turned red by parts framed with another band, channel or body than
+    /// the owned record (`enqueue_reply_parts`), or by a refused reply that takes a slot.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn a_reply_handed_as_its_parts_is_framed_as_its_owned_record() {
+        use wz_session_core::multicast_tx::MulticastTxReply;
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::query::QueryReply;
+        use wz_session_core::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        use wz_session_core::sample::QosLevel;
+        let staged = |keyexpr| ReplyParts {
+            rid: 9,
+            keyexpr,
+            responder: Some((&[1, 2, 3, 4], 5)),
+            qos: QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"answer"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        };
+        let mut params = params();
+        params.is_qos = true;
+        let response = QueryReply::from_parts(&staged("demo/a"))
+            .into_response()
+            .expect("the owned reply");
+        let owned = GroupTxStage::new(&params);
+        owned.enqueue_reply(MulticastTxReply::Response(&response));
+        let lent = GroupTxStage::new(&params);
+        lent.enqueue_reply_parts(staged("demo/a"));
+        let held = GroupTxStage::new(&params);
+        {
+            let _held = held.inner.conduits.borrow_mut();
+            held.enqueue_reply_parts(staged("demo/a"));
+            assert!(held.take().is_none(), "kept while the conduits are held");
+            assert_eq!(held.inner.replies.get(), 1, "the kept reply holds its slot");
+        }
+        held.push_deferred();
+        let expected = owned.take().expect("the owned reply");
+        for stage in [&lent, &held] {
+            let datagram = stage.take().expect("the reply");
+            assert_eq!(datagram.bytes, expected.bytes);
+            assert_eq!(
+                (datagram.priority, datagram.reliable),
+                (expected.priority, expected.reliable)
+            );
+        }
+        assert_eq!(held.inner.replies.get(), 0, "its slot is free once taken");
+        assert_eq!((lent.dropped(), held.dropped()), (0, 0));
+
+        let refused = GroupTxStage::new(&params);
+        refused.enqueue_reply_parts(staged(""));
+        assert!(
+            refused.take().is_none(),
+            "a reply with no key is no datagram"
+        );
+        assert_eq!(refused.inner.replies.get(), 0, "and holds no slot");
     }
 
     /// A message that may not wait, on a lane that holds its bound, is answered congested at once,
