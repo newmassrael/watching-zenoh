@@ -1386,10 +1386,10 @@ unsafe fn advanced_subscriber_options(
             // default and narrowed — the shape that survives a new field.
             let mut cfg = HistoryConfig::default();
             cfg.sample_depth = (history.max_samples > 0).then_some(history.max_samples);
-            // Upstream carries an age in MILLISECONDS; wz's `_time=` selector
-            // bound is in SECONDS. Converting rather than passing the number
-            // through is the whole reason this is not a field copy.
-            cfg.max_age = (history.max_age_ms > 0).then(|| history.max_age_ms as f64 / 1000.0);
+            // Upstream carries an age in MILLISECONDS, built into the `Duration`
+            // the selector is written from without passing through seconds as `f64`.
+            cfg.max_age = (history.max_age_ms > 0)
+                .then(|| core::time::Duration::from_millis(history.max_age_ms));
             cfg.detect_late_publishers = history.detect_late_publishers;
             out.history = Some(cfg);
         }

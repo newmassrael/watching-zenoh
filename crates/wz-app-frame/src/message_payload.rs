@@ -991,7 +991,9 @@ fn held_of<'v>(
                 (ScalarKind::Float, Given::Real(v)) => {
                     let narrow = v as f32;
                     if v.is_finite() && narrow.is_infinite() {
-                        return Err(range(format!("{v} is finite and past what a float holds")));
+                        return Err(range(String::from(
+                            "the value is finite and past what a float holds",
+                        )));
                     }
                     Ok(Value::Float(narrow))
                 }

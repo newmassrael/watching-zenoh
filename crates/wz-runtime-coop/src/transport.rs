@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 
+use wz_session_core::bounded::push_text;
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::EventSink;
@@ -58,8 +59,9 @@ impl EndpointRefusal {
             cut = cut.saturating_sub(1);
         }
         let mut kept = LocatorText::new();
-        // The cut is at most a row's length, so the text before it fits whole.
-        let _ = kept.push_str(endpoint.get(..cut).unwrap_or_default());
+        // The cut is at most a row's length, so the text before it fits whole. One copy, and not
+        // heapless's append of a byte at a time.
+        let _ = push_text(&mut kept, endpoint.get(..cut).unwrap_or_default());
         Self {
             endpoint: kept,
             why,

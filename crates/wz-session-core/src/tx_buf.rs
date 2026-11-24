@@ -406,6 +406,18 @@ where
     fn position(&self) -> usize {
         self.buf.len().saturating_sub(self.start)
     }
+
+    /// The u64 form's bytes: a u32 runs out of bits before either width's continuation cap, so
+    /// the two forms write the same VLE, and one body writes both.
+    fn write_vle_u32(&mut self, v: u32) -> Result<(), CodecError> {
+        self.write_vle_u64(u64::from(v))
+    }
+
+    // Out of line, so the u32 form is a call to this body and not a second copy of its loop.
+    #[inline(never)]
+    fn write_vle_u64(&mut self, v: u64) -> Result<(), CodecError> {
+        self.write_vle_inner(v, 64)
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +504,39 @@ mod tests {
         sink.write_bytes(&[2, 3]).unwrap();
         assert_eq!(sink.position(), 3);
         assert_eq!(buf.as_slice(), &[0xAA, 0xBB, 1, 2, 3]);
+    }
+
+    /// The u32 VLE is the u64 VLE of the same value, at every width a u32 takes and at both ends
+    /// of each. Turned red by a u32 form that writes other bytes than the u64 form's.
+    #[test]
+    fn a_u32_vle_is_written_as_the_u64_vle_of_its_value() {
+        let widths = [
+            0u32,
+            0x7F,
+            0x80,
+            0x3FFF,
+            0x4000,
+            0x1F_FFFF,
+            0x20_0000,
+            0x0FFF_FFFF,
+            0x1000_0000,
+            u32::MAX,
+        ];
+        for v in widths {
+            let mut narrow = [0u8; 16];
+            let mut narrow_buf = SliceTxBuf::new(&mut narrow);
+            TxSink::new(&mut narrow_buf).write_vle_u32(v).unwrap();
+            let mut wide = [0u8; 16];
+            let mut wide_buf = SliceTxBuf::new(&mut wide);
+            TxSink::new(&mut wide_buf)
+                .write_vle_u64(u64::from(v))
+                .unwrap();
+            assert_eq!(narrow_buf.as_slice(), wide_buf.as_slice(), "value {v:#x}");
+        }
+        let mut storage = [0u8; 16];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        TxSink::new(&mut buf).write_vle_u32(u32::MAX).unwrap();
+        assert_eq!(buf.as_slice(), &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
     }
 
     #[test]

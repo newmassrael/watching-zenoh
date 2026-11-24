@@ -261,6 +261,10 @@ impl FilteredKey {
     /// goes to reads the next. A session that has handed out every id refuses the entity with
     /// `Z_ERR_GENERIC`, the code a refused declaration gets here; a refused key or filter answers
     /// its own. One body for the publisher and the querier.
+    #[cfg(any(
+        feature = "query",
+        all(test, not(feature = "engine-tokio"), feature = "peer")
+    ))]
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
@@ -268,6 +272,35 @@ impl FilteredKey {
         existing: Option<&DeclaredKeyexpr>,
         count_local: bool,
     ) -> Result<Self, ZResult> {
+        let mut filtered = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: room for one, which a refusal leaves holding none.
+        unsafe {
+            Self::declare_at(
+                filtered.as_mut_ptr(),
+                session,
+                plane,
+                keyexpr,
+                existing,
+                count_local,
+            )?;
+            Ok(filtered.assume_init())
+        }
+    }
+
+    /// [`Self::declare`], written at `at`, where its holder keeps it, so a publisher's key and
+    /// filter are not moved through the stack on their way to its place. Refused, nothing is
+    /// written there.
+    ///
+    /// # Safety
+    /// `at` is valid for the write of a `FilteredKey` and holds none.
+    pub(crate) unsafe fn declare_at(
+        at: *mut Self,
+        session: &PicoSession,
+        plane: FilterPlane,
+        keyexpr: &str,
+        existing: Option<&DeclaredKeyexpr>,
+        count_local: bool,
+    ) -> Result<(), ZResult> {
         let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
         let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
@@ -275,13 +308,15 @@ impl FilteredKey {
         // The entity keeps its key, which holds the declaration: its wire form holds nothing.
         let wire = key.wire(Arc::as_ref(&session.engine));
         let filter = WriteFilter::declare(session, plane, &key, &wire, count_local)?;
-        Ok(Self {
-            filter,
-            key,
-            wire,
+        // SAFETY: the caller's: `at` is room for one, written field by field, once each.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).filter).write(filter);
+            core::ptr::addr_of_mut!((*at).key).write(key);
+            core::ptr::addr_of_mut!((*at).wire).write(wire);
             #[cfg(feature = "unstable-api")]
-            eid,
-        })
+            core::ptr::addr_of_mut!((*at).eid).write(eid);
+        }
+        Ok(())
     }
 }
 
