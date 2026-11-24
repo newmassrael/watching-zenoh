@@ -21,30 +21,140 @@
 //! reaches the application registries. Pure no_std + no_alloc;
 //! unconditional (like [`crate::reliability`]).
 
+use crate::policy::SnResolution;
+use crate::policy_binding::PolicyValue;
+
+/// Whether the build's `sn-resolution` domain holds `bits-64`, the one width whose ring does
+/// not fit 32 bits. A build that leaves it out never advertises it (it advertises at most
+/// [`SN_RES_WIDEST`]), and a unicast session runs the smaller of the two advertised widths.
+pub const SN_RESOLUTION_HAS_64: bool =
+    <SnResolution as PolicyValue>::DOMAIN.contains_index(SnResolution::Bits64 as usize);
+
+/// The word a sequence number is held in: wide enough for the widest ring the build can
+/// negotiate, so a build without `bits-64` steps its rings in 32-bit arithmetic.
+pub type Sn = <SnWord<{ SN_RESOLUTION_HAS_64 }> as SnStorage>::Word;
+
+/// The widest `seq_num_res` code ([`mask_from_res`]) the build advertises and runs: `0x03`
+/// where [`Sn`] holds 64 bits, `0x02` otherwise.
+pub const SN_RES_WIDEST: u8 = if SN_RESOLUTION_HAS_64 { 0x03 } else { 0x02 };
+
+// The word is the width the domain asks for, and the widest ring the build runs leaves the word a
+// bit above its half window, so a distance on the ring never wraps the word.
+const _: () = assert!(
+    Sn::BITS == if SN_RESOLUTION_HAS_64 { 64 } else { 32 },
+    "the sequence-number word does not follow the sn-resolution domain"
+);
+const _: () = assert!(
+    mask_from_res(SN_RES_WIDEST) <= Sn::MAX >> 1,
+    "the widest ring of the build does not fit its sequence-number word"
+);
+
+/// The two words a sequence number can be held in, chosen by `WIDE`; [`Sn`] names the build's.
+#[doc(hidden)]
+pub struct SnWord<const WIDE: bool>;
+
+/// What a word of [`SnWord`] is and how it meets the wire, whose sequence numbers are 64-bit
+/// variable-length integers. Each impl is written for its own word, so neither converts a type
+/// to itself.
+#[doc(hidden)]
+pub trait SnStorage {
+    /// The word.
+    type Word;
+    /// The wire value of `sn`.
+    fn to_wire(sn: Self::Word) -> u64;
+    /// The word of a wire value: the value itself, or its low 32 bits.
+    fn from_wire(wire: u64) -> Self::Word;
+    /// `sn` as a `u32`, saturated.
+    fn saturating_u32(sn: Self::Word) -> u32;
+}
+
+impl SnStorage for SnWord<true> {
+    type Word = u64;
+
+    #[inline]
+    fn to_wire(sn: u64) -> u64 {
+        sn
+    }
+
+    #[inline]
+    fn from_wire(wire: u64) -> u64 {
+        wire
+    }
+
+    #[inline]
+    fn saturating_u32(sn: u64) -> u32 {
+        u32::try_from(sn).unwrap_or(u32::MAX)
+    }
+}
+
+impl SnStorage for SnWord<false> {
+    type Word = u32;
+
+    #[inline]
+    fn to_wire(sn: u32) -> u64 {
+        u64::from(sn)
+    }
+
+    #[inline]
+    fn from_wire(wire: u64) -> u32 {
+        let [b0, b1, b2, b3, ..] = wire.to_le_bytes();
+        u32::from_le_bytes([b0, b1, b2, b3])
+    }
+
+    #[inline]
+    fn saturating_u32(sn: u32) -> u32 {
+        sn
+    }
+}
+
+/// The wire value of a sequence number, for an encoder.
+#[inline]
+pub fn to_wire(sn: Sn) -> u64 {
+    <SnWord<{ SN_RESOLUTION_HAS_64 }> as SnStorage>::to_wire(sn)
+}
+
+/// The sequence number a wire value carries, for a decoder: the value itself where [`Sn`] is 64
+/// bits, its low 32 bits otherwise. Every ring such a build runs is at most 28 bits wide, so the
+/// low bits are the same residue on it, and every comparison on a ring masks its distance first:
+/// no value a peer sends is refused or panics here.
+#[inline]
+pub fn from_wire(wire: u64) -> Sn {
+    <SnWord<{ SN_RESOLUTION_HAS_64 }> as SnStorage>::from_wire(wire)
+}
+
+/// `sn` as a `u32`, saturated at `u32::MAX`: a count of sequence numbers a `u32` reports.
+#[inline]
+pub fn saturating_u32(sn: Sn) -> u32 {
+    <SnWord<{ SN_RESOLUTION_HAS_64 }> as SnStorage>::saturating_u32(sn)
+}
+
 /// Map the 2-bit `seq_num_res` wire code to the SN ring MASK (ring size -
 /// 1). Mirrors zenoh-pico `_z_sn_max` / `_z_sn_modulo_mask` (utils.c):
 /// `0x00` -> 7-bit, `0x01` -> 14-bit, `0x02` -> 28-bit, `0x03` -> 63-bit
-/// (the usable VLE widths of 1/2/4/8-byte encodings). An out-of-range code
+/// (the usable VLE widths of 1/2/4/8-byte encodings; `U8_MAX >> 1`,
+/// `U16_MAX >> 2`, `U32_MAX >> 4`, `U64_MAX >> 1`). An out-of-range code
 /// yields the widest mask — the defensive arm zenoh-pico leaves at 0, but
 /// a zero mask would collapse the ring to one value and drop every frame;
 /// wz prefers the permissive window (the codec cannot produce a code > 3
-/// from the 2-bit field, so the arm is unreachable from the wire).
-pub const fn mask_from_res(seq_num_res: u8) -> u64 {
+/// from the 2-bit field, so the arm is unreachable from the wire). In a
+/// build whose [`Sn`] is 32 bits the widest arm is `Sn::MAX >> 1`; such a
+/// build never runs `0x03` ([`SN_RES_WIDEST`]).
+pub const fn mask_from_res(seq_num_res: u8) -> Sn {
     match seq_num_res {
-        0x00 => (u8::MAX >> 1) as u64,
-        0x01 => (u16::MAX >> 2) as u64,
-        0x02 => (u32::MAX >> 4) as u64,
-        _ => u64::MAX >> 1,
+        0x00 => 0x7F,
+        0x01 => 0x3FFF,
+        0x02 => 0x0FFF_FFFF,
+        _ => Sn::MAX >> 1,
     }
 }
 
 /// The narrowest SN ring a session can negotiate that holds `sn`: the first of
-/// the four masks [`mask_from_res`] answers for, in order, that is at least
-/// `sn`. An `sn` past the widest ring is answered with the widest, which no
-/// sender of a conforming session can pass.
-pub const fn narrowest_mask_covering(sn: u64) -> u64 {
+/// the masks [`mask_from_res`] answers for, in order up to [`SN_RES_WIDEST`],
+/// that is at least `sn`. An `sn` past the widest ring is answered with the
+/// widest, which no sender of a conforming session can pass.
+pub const fn narrowest_mask_covering(sn: Sn) -> Sn {
     let mut res = 0u8;
-    while res < 3 && mask_from_res(res) < sn {
+    while res < SN_RES_WIDEST && mask_from_res(res) < sn {
         res = res.saturating_add(1);
     }
     mask_from_res(res)
@@ -52,7 +162,7 @@ pub const fn narrowest_mask_covering(sn: u64) -> u64 {
 
 /// Half the ring (`_z_sn_half`): the largest forward distance still
 /// considered "ahead" by [`precedes`].
-pub const fn half(mask: u64) -> u64 {
+pub const fn half(mask: Sn) -> Sn {
     mask >> 1
 }
 
@@ -60,7 +170,7 @@ pub const fn half(mask: u64) -> u64 {
 /// `left` on the ring of `mask`? True iff the modular distance
 /// `(right - left) & mask` is non-zero and at most [`half`] the ring.
 /// Equality is NOT precedence (a duplicate SN is stale).
-pub const fn precedes(mask: u64, left: u64, right: u64) -> bool {
+pub const fn precedes(mask: Sn, left: Sn, right: Sn) -> bool {
     let distance = right.wrapping_sub(left) & mask;
     distance != 0 && distance <= half(mask)
 }
@@ -72,7 +182,7 @@ pub const fn precedes(mask: u64, left: u64, right: u64) -> bool {
 /// First consumer: the reassembly dispatcher's strict in-order
 /// continuation check (§2.5) — a plain `==` on `wrapping_add(1)` diverges
 /// from this at the ring seam (R311ka F-5).
-pub const fn consecutive(mask: u64, left: u64, right: u64) -> bool {
+pub const fn consecutive(mask: Sn, left: Sn, right: Sn) -> bool {
     right.wrapping_sub(left) & mask == 1
 }
 
@@ -80,7 +190,7 @@ pub const fn consecutive(mask: u64, left: u64, right: u64) -> bool {
 /// SN from its JOIN-advertised `next_sn` (the next SN it WILL send): the
 /// baseline is one before, so the first data frame at exactly `next_sn`
 /// passes [`precedes`].
-pub const fn decrement(mask: u64, sn: u64) -> u64 {
+pub const fn decrement(mask: Sn, sn: Sn) -> Sn {
     sn.wrapping_sub(1) & mask
 }
 
@@ -90,7 +200,7 @@ pub const fn decrement(mask: u64, sn: u64) -> u64 {
 /// minted value onto the ring (`fetch_add & mask` — the equivalent walk,
 /// see `SessionLinkActions::next_outbound_frame_sn`), and the fragment
 /// walk (`frame_encode::fragment_body`) steps with this (R311kb).
-pub const fn increment(mask: u64, sn: u64) -> u64 {
+pub const fn increment(mask: Sn, sn: Sn) -> Sn {
     sn.wrapping_add(1) & mask
 }
 
@@ -105,18 +215,18 @@ pub const fn increment(mask: u64, sn: u64) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxSn {
     /// The ring mask ([`mask_from_res`]); both channels share it.
-    pub mask: u64,
+    pub mask: Sn,
     /// Next SN the reliable channel will send.
-    pub next_reliable: u64,
+    pub next_reliable: Sn,
     /// Next SN the best-effort channel will send.
-    pub next_best_effort: u64,
+    pub next_best_effort: Sn,
 }
 
 impl TxSn {
     /// A fresh announcer: both channels start at 0 on the ring of
     /// `mask` (zenoh-pico seeds from `Z_SN_RESOLUTION`-bounded random;
     /// wz starts at 0 — the JOIN advertisement makes any start valid).
-    pub const fn new(mask: u64) -> Self {
+    pub const fn new(mask: Sn) -> Self {
         Self {
             mask,
             next_reliable: 0,
@@ -126,7 +236,7 @@ impl TxSn {
 
     /// Mint the next SN for a channel: returns the current `next_*` and
     /// advances it one step on the ring.
-    pub fn mint(&mut self, reliable: bool) -> u64 {
+    pub fn mint(&mut self, reliable: bool) -> Sn {
         let slot = if reliable {
             &mut self.next_reliable
         } else {
@@ -139,7 +249,7 @@ impl TxSn {
 
     /// R2929 — the transport message carrying `sn` on a channel has been
     /// written: the next one this channel will WRITE is the one after it.
-    pub fn written(&mut self, reliable: bool, sn: u64) {
+    pub fn written(&mut self, reliable: bool, sn: Sn) {
         let slot = if reliable {
             &mut self.next_reliable
         } else {
@@ -163,8 +273,8 @@ impl TxSn {
 /// dropping, mirroring the multicast slot's JOIN-seeded tolerance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RxSn {
-    pub reliable: Option<u64>,
-    pub best_effort: Option<u64>,
+    pub reliable: Option<Sn>,
+    pub best_effort: Option<Sn>,
 }
 
 impl RxSn {
@@ -172,7 +282,7 @@ impl RxSn {
     /// (zenoh-pico peer.c:212-214 `_z_sn_decrement(sn_res, initial_sn_rx)`
     /// into BOTH `_sn_rx_*`), so the first frame at exactly `initial_sn`
     /// passes [`Self::admit`].
-    pub fn seed(&mut self, mask: u64, initial_sn: u64) {
+    pub fn seed(&mut self, mask: Sn, initial_sn: Sn) {
         let baseline = decrement(mask, initial_sn);
         self.reliable = Some(baseline);
         self.best_effort = Some(baseline);
@@ -183,7 +293,7 @@ impl RxSn {
     /// `sn` as the new baseline (rx.c stores the accepted `msg->_sn`).
     /// `false` = stale / duplicate / reordered — the caller drops the
     /// frame without advancing the FSM (pico's silent drop).
-    pub fn admit(&mut self, mask: u64, reliable: bool, sn: u64) -> bool {
+    pub fn admit(&mut self, mask: Sn, reliable: bool, sn: Sn) -> bool {
         !matches!(self.admit_judged(mask, reliable, sn), RxAdmit::Stale)
     }
 
@@ -193,7 +303,7 @@ impl RxSn {
     /// jump of `k > 1` is [`RxAdmit::Gap`] with `k - 1` frames missing; the
     /// first frame of an unseeded channel has no baseline to jump from and is
     /// [`RxAdmit::Accept`], and so is a step across the ring seam.
-    pub fn admit_judged(&mut self, mask: u64, reliable: bool, sn: u64) -> RxAdmit {
+    pub fn admit_judged(&mut self, mask: Sn, reliable: bool, sn: Sn) -> RxAdmit {
         let slot = if reliable {
             &mut self.reliable
         } else {
@@ -207,7 +317,7 @@ impl RxSn {
                 *slot = Some(sn);
                 if distance > 1 {
                     RxAdmit::Gap {
-                        missing: u32::try_from(distance.saturating_sub(1)).unwrap_or(u32::MAX),
+                        missing: saturating_u32(distance.saturating_sub(1)),
                     }
                 } else {
                     RxAdmit::Accept
@@ -314,7 +424,7 @@ impl RxConduits {
     /// Seed EVERY conduit one before `initial_sn` (the OpenSyn/OpenAck origin),
     /// so the first frame at exactly `initial_sn` passes [`RxSn::admit`] on any
     /// priority (SN-safety S2/S3 — all conduits share the one announced origin).
-    pub fn seed(&mut self, mask: u64, initial_sn: u64) {
+    pub fn seed(&mut self, mask: Sn, initial_sn: Sn) {
         #[cfg(feature = "transport-qos")]
         for c in &mut self.conduits {
             c.seed(mask, initial_sn);
@@ -330,9 +440,9 @@ impl RxConduits {
     pub fn admit(
         &mut self,
         priority: crate::qos::Priority,
-        mask: u64,
+        mask: Sn,
         reliable: bool,
-        sn: u64,
+        sn: Sn,
     ) -> bool {
         self.select_mut(priority).admit(mask, reliable, sn)
     }
@@ -342,9 +452,9 @@ impl RxConduits {
     pub fn admit_judged(
         &mut self,
         priority: crate::qos::Priority,
-        mask: u64,
+        mask: Sn,
         reliable: bool,
-        sn: u64,
+        sn: Sn,
     ) -> RxAdmit {
         self.select_mut(priority).admit_judged(mask, reliable, sn)
     }
@@ -388,7 +498,7 @@ pub struct MulticastTxConduits {
 impl MulticastTxConduits {
     /// A fresh announcer on the ring of `mask`: every conduit starts at 0, like
     /// [`TxSn::new`] (the JOIN advertisement makes any start valid).
-    pub fn new(mask: u64) -> Self {
+    pub fn new(mask: Sn) -> Self {
         #[cfg(feature = "transport-qos")]
         {
             Self {
@@ -405,7 +515,7 @@ impl MulticastTxConduits {
 
     /// The shared ring mask (every conduit is built on the same `mask`, so the
     /// DEFAULT conduit's is authoritative) — the fragment walk's masking point.
-    pub fn mask(&self) -> u64 {
+    pub fn mask(&self) -> Sn {
         self.advertise_default().mask
     }
 
@@ -439,7 +549,7 @@ impl MulticastTxConduits {
     /// on THAT conduit, advanced one step. Under a non-qos multicast session the
     /// emit seam passes `Priority::DEFAULT` and there is one conduit, so behavior
     /// is byte-identical to the pre-QoS single [`TxSn::mint`].
-    pub fn mint(&mut self, priority: crate::qos::Priority, reliable: bool) -> u64 {
+    pub fn mint(&mut self, priority: crate::qos::Priority, reliable: bool) -> Sn {
         self.select_mut(priority).mint(reliable)
     }
 
@@ -451,7 +561,7 @@ impl MulticastTxConduits {
     /// `_z_multicast_handle_join_inner` does), so a JOIN that advertised an SN
     /// minted but still queued would make the receiver drop that message as
     /// stale when it arrives.
-    pub fn written(&mut self, priority: crate::qos::Priority, reliable: bool, sn: u64) {
+    pub fn written(&mut self, priority: crate::qos::Priority, reliable: bool, sn: Sn) {
         self.select_mut(priority).written(reliable, sn);
     }
 
@@ -483,13 +593,13 @@ impl MulticastTxConduits {
 }
 
 /// R311y227 — one multicast per-peer RX SN gate pair (last-seen reliable +
-/// best_effort), the raw-`u64` twin of the unicast [`RxSn`] (no unseeded `Option`
+/// best_effort), the raw-[`Sn`] twin of the unicast [`RxSn`] (no unseeded `Option`
 /// state — a multicast slot is ALWAYS JOIN-seeded before any frame). One per
 /// `Priority` conduit inside [`MulticastRxConduits`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MulticastRxPair {
-    pub reliable: u64,
-    pub best_effort: u64,
+    pub reliable: Sn,
+    pub best_effort: Sn,
 }
 
 /// R311y227 — the multicast per-peer RX SN conduits: one [`MulticastRxPair`] per
@@ -545,7 +655,7 @@ impl MulticastRxConduits {
     /// pair; zenoh-pico `_z_conduit_sn_list_decrement`). Every other conduit stays
     /// at 0: a non-qos peer never sends a non-DEFAULT frame. Identical to the
     /// pre-R311y227 `PeerSlot::seed_from_join` 2-SN seed.
-    pub fn seed_plain(&mut self, mask: u64, next_reliable: u64, next_best_effort: u64) {
+    pub fn seed_plain(&mut self, mask: Sn, next_reliable: Sn, next_best_effort: Sn) {
         // JOIN-authoritative reset: a non-qos peer advertises ONLY the DEFAULT
         // 2-channel pair, so every OTHER conduit returns to its unseeded baseline.
         // This clears any stale non-DEFAULT baseline a recycled slot — or a peer
@@ -568,7 +678,7 @@ impl MulticastRxConduits {
     #[cfg(feature = "transport-qos")]
     pub fn seed_per_priority(
         &mut self,
-        mask: u64,
+        mask: Sn,
         pairs: &[MulticastRxPair; crate::qos::Priority::NUM],
     ) {
         for (c, p) in self.conduits.iter_mut().zip(pairs.iter()) {
@@ -586,9 +696,9 @@ impl MulticastRxConduits {
     pub fn admit(
         &mut self,
         priority: crate::qos::Priority,
-        mask: u64,
+        mask: Sn,
         reliable: bool,
-        sn: u64,
+        sn: Sn,
     ) -> bool {
         let pair = self.select_mut(priority);
         let last = if reliable {
@@ -619,23 +729,30 @@ mod tests {
         assert_eq!(mask_from_res(0x00), 0x7F);
         assert_eq!(mask_from_res(0x01), 0x3FFF);
         assert_eq!(mask_from_res(0x02), 0x0FFF_FFFF);
-        assert_eq!(mask_from_res(0x03), u64::MAX >> 1);
+        let widest = if SN_RESOLUTION_HAS_64 {
+            u64::MAX >> 1
+        } else {
+            u64::from(u32::MAX >> 1)
+        };
+        assert_eq!(to_wire(mask_from_res(0x03)), widest);
     }
 
-    /// The four masks are spelled out, and both sides of each edge are
-    /// checked: an SN equal to a mask fits it, one past it needs the next.
+    /// The masks are spelled out, and both sides of each edge are checked: an
+    /// SN equal to a mask fits it, one past it needs the next. Past the 28-bit
+    /// ring the answer is the widest ring the build runs.
     #[test]
     fn the_narrowest_mask_covering_an_sn_is_the_first_that_holds_it() {
+        let widest = mask_from_res(SN_RES_WIDEST);
         for (sn, mask) in [
-            (0u64, 0x7Fu64),
+            (0, 0x7F),
             (127, 0x7F),
             (128, 0x3FFF),
             (0x3FFF, 0x3FFF),
             (0x4000, 0x0FFF_FFFF),
             (1 << 20, 0x0FFF_FFFF),
             (0x0FFF_FFFF, 0x0FFF_FFFF),
-            (0x1000_0000, 0x7FFF_FFFF_FFFF_FFFF),
-            (u64::MAX, 0x7FFF_FFFF_FFFF_FFFF),
+            (0x1000_0000, widest),
+            (Sn::MAX, widest),
         ] {
             assert_eq!(narrowest_mask_covering(sn), mask, "sn {sn}");
         }
@@ -842,7 +959,8 @@ mod tests {
         let mut judged = RxSn::default();
         plain.seed(mask, 5);
         judged.seed(mask, 5);
-        for sn in [5u64, 6, 9, 9, 8, 10, 74, 40, 11, 127, 0, 2] {
+        let walk: [Sn; 12] = [5, 6, 9, 9, 8, 10, 74, 40, 11, 127, 0, 2];
+        for sn in walk {
             let folded = !matches!(judged.admit_judged(mask, true, sn), RxAdmit::Stale);
             assert_eq!(plain.admit(mask, true, sn), folded, "sn {sn}");
             assert_eq!(plain, judged, "baselines after sn {sn}");
@@ -1100,5 +1218,62 @@ mod tests {
             rx.admit(Priority::DEFAULT, mask, false, 20),
             "first best-effort at 20 admits"
         );
+    }
+    /// The word follows the domain: 64 bits where `bits-64` is allowed, 32
+    /// bits otherwise, and the widest ring the build runs is the one the
+    /// domain allows.
+    #[test]
+    fn the_word_and_the_widest_ring_follow_the_sn_resolution_domain() {
+        let allows_64 = <SnResolution as PolicyValue>::DOMAIN.contains(SnResolution::Bits64);
+        assert_eq!(SN_RESOLUTION_HAS_64, allows_64);
+        assert_eq!(Sn::BITS, if allows_64 { 64 } else { 32 });
+        assert_eq!(SN_RES_WIDEST, if allows_64 { 0x03 } else { 0x02 });
+    }
+
+    /// The 28-bit ring (pico's default) steps the same at its seam in either
+    /// word: `0x0FFF_FFFF -> 0` is consecutive and ahead, and its increment
+    /// wraps to 0.
+    #[test]
+    fn the_28_bit_seam_steps_the_same_in_either_word() {
+        let mask = mask_from_res(0x02);
+        assert_eq!(to_wire(mask), 0x0FFF_FFFF);
+        assert!(consecutive(mask, 0x0FFF_FFFF, 0));
+        assert!(precedes(mask, 0x0FFF_FFFF, 0));
+        assert!(
+            precedes(mask, 0x0FFF_FFF0, 0x10),
+            "distance 32 across the seam"
+        );
+        assert!(
+            !precedes(mask, 0, 0x0FFF_FFFF),
+            "a step back across the seam"
+        );
+        assert_eq!(increment(mask, 0x0FFF_FFFF), 0);
+        assert_eq!(decrement(mask, 0), 0x0FFF_FFFF);
+        assert!(
+            precedes(mask, 0, half(mask)) && !precedes(mask, 0, half(mask) + 1),
+            "the half window ends at half the ring"
+        );
+    }
+
+    /// A wire value above 32 bits keeps its residue on every ring a 32-bit
+    /// word runs: the ring arithmetic reads it as the value it is masked to,
+    /// and a value inside 32 bits comes back as it went out.
+    #[test]
+    fn a_wire_value_keeps_its_residue_on_the_ring() {
+        let mask = mask_from_res(0x02);
+        let far = (1u64 << 32) | 5;
+        assert!(consecutive(mask, from_wire(4), from_wire(far)));
+        assert_eq!(from_wire(far) & mask, 5);
+        assert_eq!(from_wire(u64::MAX) & mask, mask);
+        for wire in [0u64, 1, 0x0FFF_FFFF, u64::from(u32::MAX)] {
+            assert_eq!(to_wire(from_wire(wire)), wire, "wire {wire}");
+        }
+    }
+
+    /// A gap count saturates at `u32::MAX` and is exact below it.
+    #[test]
+    fn a_count_of_sequence_numbers_saturates_at_u32_max() {
+        assert_eq!(saturating_u32(7), 7);
+        assert_eq!(saturating_u32(Sn::MAX), u32::MAX);
     }
 }
