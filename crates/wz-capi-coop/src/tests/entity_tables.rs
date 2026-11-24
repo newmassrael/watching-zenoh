@@ -399,8 +399,12 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     });
     let asked = router.seen(|s| s.interests);
 
-    let refused_sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
-    let held = Arc::downgrade(&refused_sink);
+    // The sink holds the one strong count of the token the weak one reads.
+    let token = Arc::new(());
+    let held = Arc::downgrade(&token);
+    let refused_sink: MatchingSink = MatchingSink::shared(move |_matching: bool| {
+        let _ = &token;
+    });
     let refused =
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
     assert_eq!(refused, Err(Refusal::TableFull));
