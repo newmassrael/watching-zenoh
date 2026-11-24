@@ -781,7 +781,10 @@ impl<'f> Iterator for ReadEntries<'f> {
     // The slot profile keeps only the entries of an extension it reads
     // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
     // the two reads of one message agree.
+    // Out of line: each reader of a handshake chain walks it with this step, and the step holds
+    // the entry decoder, which one copy serves.
     #[cfg(feature = "session-slot")]
+    #[inline(never)]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.find(|entry| {
             crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
@@ -789,6 +792,7 @@ impl<'f> Iterator for ReadEntries<'f> {
     }
 
     #[cfg(not(feature = "session-slot"))]
+    #[inline(never)]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
