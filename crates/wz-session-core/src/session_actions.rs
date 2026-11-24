@@ -2181,7 +2181,7 @@ pub struct HandshakeFacts {
     /// window governs alone.
     ///
     /// R2782 — captured once the Open frame is ADMITTED
-    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack_in`; code spans,
     /// because a field doc's `Self` is this struct, which has neither), no
     /// longer at parse time: a replayed Open frame after `Established` used
     /// to rewrite it.
@@ -2317,6 +2317,29 @@ pub struct HandshakeFacts {
     /// emit InitAck directly without an inbound parse cycle
     /// (R60, layer3_init_body) continue to work.
     pub inbound_peer_init_caps: Option<PeerInitCaps>,
+}
+
+impl HandshakeFacts {
+    /// Whether the negotiated patch level has the peer mark its fragment chains' boundaries, read
+    /// off this row by every reader that holds it already, so the rule is written once.
+    pub(crate) fn fragmentation_markers(&self) -> bool {
+        crate::extpatch::has_fragmentation_markers(
+            self.negotiated_patch.unwrap_or(crate::extpatch::NO_PATCH),
+        )
+    }
+}
+
+/// What an OpenAck's admission answered (`SessionLinkActions::admit_open_ack_in`).
+#[cfg(feature = "codec-open-body")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenAckAdmission {
+    /// It was the one awaited, and the session took it.
+    Taken,
+    /// None was awaited: it is dropped and nothing of it is taken.
+    NotAwaited,
+    /// Its remote bound is present and invalid: the handshake is refused and nothing of it is
+    /// taken.
+    BoundRefused,
 }
 
 /// Every fact a session keeps under a lock, under its one lock (`SessionCore`'s `facts`), as
@@ -7707,9 +7730,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is not yet known.
     #[cfg(feature = "codec-open-body")]
     fn open_initial_sn(&self) -> Option<u64> {
-        let mask = self.negotiated_sn_mask();
-        let initial_sn = self.fact_remote_peer_zid(|slot| {
-            slot.as_deref()
+        // The ring and the peer's zid are facts of one row, read in one hold of it.
+        let initial_sn = self.with_facts(|f| {
+            let mask = self.sn_mask_for(f.handshake.inbound_peer_init_caps);
+            f.handshake
+                .remote_peer_zid
+                .as_deref()
                 .map(|peer| crate::initial_sn::derive_initial_sn(&self.params.zid, peer, mask))
         })?;
         self.outbound_frame_sn.reset(initial_sn);
@@ -9357,7 +9383,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// may enforce them ([`crate::reassembly_dispatch::ReassemblyDispatcher::
     /// set_fragmentation_markers`]).
     pub fn fragmentation_markers_negotiated(&self) -> bool {
-        crate::extpatch::has_fragmentation_markers(self.negotiated_patch())
+        self.with_facts(|f| f.handshake.fragmentation_markers())
     }
 
     /// transport-lowlatency — the negotiated lowlatency capability for this
@@ -10461,7 +10487,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// frame at `initial_sn` passes), on the ring the negotiated caps in `facts` give.
     ///
     /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
-    /// [`Self::admit_open_ack`], inside the hold in which they write the rest of what
+    /// [`Self::admit_open_ack_in`], inside the hold in which they write the rest of what
     /// an admitted Open takes, and by nothing at parse time.
     #[cfg(feature = "codec-open-body")]
     fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
@@ -10507,8 +10533,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2782 — the initiator's admission predicate for an OpenAck: one is
     /// awaited only between sending the OpenSyn and taking an OpenAck. A
-    /// question, so it only reads; `admit_open_ack` (crate-private, so a
-    /// code span rather than a link) is the answer's side effect.
+    /// question, so it only reads; `admit_open_ack_in` (crate-private, so a
+    /// code span rather than a link) asks it again in the hold in which it
+    /// takes the OpenAck.
     pub fn open_ack_awaited(&self) -> bool {
         self.fact_awaiting_open_ack(|s| *s)
     }
@@ -10621,9 +10648,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Established` reset the RX SN baseline (MEASURED at R2782). The
     /// initiator's caps come off the InitAck and are held, so its seed has
     /// nothing to wait for but admission.
+    ///
+    /// The OpenAck is judged in the same hold: refused, and nothing of it taken, when no OpenAck
+    /// is awaited (`open_ack_awaited`'s question) or when its `0x7` REMOTE-BOUND is present and
+    /// invalid (`admit_peer_remote_bound`'s refusal). Its bound is taken with the rest.
     #[cfg(feature = "codec-open-body")]
-    pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
+    pub(crate) fn admit_open_ack_in<E: crate::ext_view::ExtEntryView>(
+        &self,
+        lease: u64,
+        initial_sn: u64,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> OpenAckAdmission {
+        let bound = crate::extbound::peer_remote_bound_in(extensions);
         self.with_facts(|f| {
+            if !f.handshake.awaiting_open_ack {
+                return OpenAckAdmission::NotAwaited;
+            }
+            let Ok(bound) = bound else {
+                return OpenAckAdmission::BoundRefused;
+            };
+            f.handshake.peer_remote_bound = bound;
             f.handshake.awaiting_open_ack = false;
             // R311ke — pico captures `_initial_sn_rx` from either Open body
             // (transport.c:196/270).
@@ -10631,7 +10675,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
             // unicast/transport.c:193).
             f.handshake.peer_open_lease_ms = Some(lease);
-        });
+            OpenAckAdmission::Taken
+        })
     }
 
     /// R311y632 (§17) — the same, told how many bytes the message occupied.
@@ -10838,7 +10883,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // R2782 — an OpenAck takes nothing at parse time. Its RX SN seed
             // and lease used to be applied here, on every OpenAck; they are
-            // now [`Self::admit_open_ack`]'s, applied only to the one OpenAck
+            // now [`Self::admit_open_ack_in`]'s, applied only to the one OpenAck
             // the initiator is awaiting.
             _ => {}
         }
@@ -11354,13 +11399,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         sn: u64,
     ) -> crate::sn::RxAdmit {
-        // Sequential mutex scopes: the mask accessor takes
-        // `inbound_peer_init_caps`, then `rx_sn` — disjoint, never nested
-        // (the non-reentrant MCU critical_section forbids nesting).
+        // The ring the peer's capabilities give and the conduit's baseline are facts of one row,
+        // read and moved in one hold of it.
         // R311y215 — the SN gate is per-(priority, reliable) conduit; a non-QoS
         // session passes `Priority::DEFAULT` and gates on the single conduit.
-        let mask = self.negotiated_sn_mask();
-        self.fact_rx_sn(|s| s.admit_judged(priority, mask, reliable, sn))
+        self.with_facts(|f| {
+            let mask = self.sn_mask_for(f.handshake.inbound_peer_init_caps);
+            f.rx_sn.admit_judged(priority, mask, reliable, sn)
+        })
     }
 
     /// Record that the peer's `DeclareFinal` of the initial interest arrived,
