@@ -367,3 +367,29 @@ fn dropping_a_fixed_table_drops_its_live_and_retired_rows_once() {
     let drops = Cell::new(0);
     drops_each_row_once(SlotMap::<Test, Counted<'_>, 4, Static>::new(), &drops);
 }
+
+/// A row taken into a freed slot and one taken into a slot the table adds are each written once,
+/// over an empty place: no insert drops a row, the freed slot is taken before the table grows, and
+/// each row is dropped once, with the table. Turned red by an insert that takes a new slot while
+/// one is free, or that drops what it writes over.
+#[test]
+fn an_insert_writes_its_row_once_into_a_freed_or_an_added_slot() {
+    let drops = Cell::new(0);
+    let mut map = SlotMap::<Test, Counted<'_>, 4, Static>::new();
+    let freed = map
+        .insert(Counted(&drops))
+        .expect("a table of four takes a row");
+    drop(map.remove(freed));
+    assert_eq!(drops.get(), 1);
+    let reused = map.insert(Counted(&drops)).expect("the freed slot is free");
+    assert_eq!(reused.place(), freed.place());
+    assert_ne!(reused, freed);
+    let added = map
+        .insert(Counted(&drops))
+        .expect("a table of four takes a second row");
+    assert_eq!(added.place(), freed.place() + 1);
+    assert_eq!(drops.get(), 1, "an insert drops nothing");
+    assert_eq!(map.len(), 2);
+    drop(map);
+    assert_eq!(drops.get(), 3);
+}

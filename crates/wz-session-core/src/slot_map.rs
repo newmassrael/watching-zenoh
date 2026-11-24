@@ -395,30 +395,46 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
 
     /// Keep `value` in a free slot: its handle, or `value` back when the table is full.
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
+        // The slot is found first and the row written once, whichever way it was found: a row
+        // written in each way would be written twice in every caller of every row type.
+        let Some((at, handle)) = self.claim_slot() else {
+            return Err(CapacityFull(value));
+        };
+        match self.rows.get_mut(at) {
+            Some(row) => {
+                *row = Some(value);
+                Ok(handle)
+            }
+            // The two columns are the same length, so this is not reached; the slot goes back,
+            // free, and the value with the refusal.
+            None => {
+                self.core.free(&mut self.meta, at);
+                Err(CapacityFull(value))
+            }
+        }
+    }
+
+    /// A live slot for a row and its handle: a free one, or one added after every slot there is,
+    /// its row's place pushed empty so a refused push holds no value. `None` when the table is
+    /// full, with nothing taken.
+    fn claim_slot(&mut self) -> Option<(usize, Handle<K>)> {
         match self.core.claim(&mut self.meta) {
-            Claim::Full => Err(CapacityFull(value)),
+            Claim::Full => None,
             Claim::Reused(at) => {
                 let generation = self.meta.get(at).map_or(0, |slot| slot.generation);
-                match (self.rows.get_mut(at), Handle::at(at, generation)) {
-                    (Some(row), Some(handle)) => {
-                        *row = Some(value);
-                        Ok(handle)
-                    }
-                    // The two columns are the same length and every place is under `MAX_SLOTS`,
-                    // so neither is reached; the slot goes back and the value with the refusal.
-                    _ => {
-                        self.core.free(&mut self.meta, at);
-                        Err(CapacityFull(value))
-                    }
+                // Every place is under `MAX_SLOTS`, so a slot is always named; one that were not
+                // goes back.
+                let handle = Handle::at(at, generation);
+                if handle.is_none() {
+                    self.core.free(&mut self.meta, at);
                 }
+                handle.map(|handle| (at, handle))
             }
             Claim::Grow => {
                 let at = self.meta.len();
-                let Some(handle) = Handle::at(at, 0) else {
-                    return Err(CapacityFull(value));
-                };
+                let handle = Handle::at(at, 0)?;
                 if self.meta.free_slots() == 0 || self.rows.free_slots() == 0 {
-                    return Err(CapacityFull(value));
+                    return None;
                 }
                 let slot = Meta {
                     generation: 0,
@@ -426,25 +442,13 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
                     pins: 0,
                     state: State::Live,
                 };
-                if self.meta.push(slot).is_err() {
-                    return Err(CapacityFull(value));
-                }
-                // The row's place is pushed empty and filled after, so a refused push still holds
-                // `value` to hand back.
+                self.meta.push(slot).ok()?;
                 if self.rows.push(None).is_err() {
                     let _ = self.meta.pop();
-                    return Err(CapacityFull(value));
-                }
-                match self.rows.get_mut(at) {
-                    Some(row) => *row = Some(value),
-                    None => {
-                        let _ = self.rows.pop();
-                        let _ = self.meta.pop();
-                        return Err(CapacityFull(value));
-                    }
+                    return None;
                 }
                 self.core.grown();
-                Ok(handle)
+                Some((at, handle))
             }
         }
     }
