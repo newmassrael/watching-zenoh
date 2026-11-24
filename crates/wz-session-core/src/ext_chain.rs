@@ -1484,14 +1484,31 @@ mod tests {
 }
 
 // Every staged chain, on both forms. The fixed form holds the kinds the build stages, so the tests
-// that run on it stage the one every build has, the patch level.
-#[cfg(all(test, feature = "session-unicast"))]
+// that run on it stage the one every build has, the patch level. A build that stages no handshake
+// extension holds no chain, so there is none to test.
+#[cfg(all(
+    test,
+    feature = "session-unicast",
+    any(
+        not(feature = "session-fixed-storage"),
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 mod canonical_order_tests {
     use super::*;
+    #[cfg(not(feature = "session-fixed-storage"))]
     use crate::transport_profile::ExtEntryOwnedVariant;
 
     /// A unit entry whose header is its id: the order rule reads the id only,
     /// so the body is immaterial.
+    #[cfg(not(feature = "session-fixed-storage"))]
     fn unit(id: u8) -> ExtEntryOwned {
         ExtEntryOwned {
             header: id,
@@ -1573,22 +1590,9 @@ mod canonical_order_tests {
 
     /// A kind staged again replaces its own entry and `None` takes it off, on either form of the
     /// chain.
-    #[cfg(all(
-        any(
-            feature = "session-fixed-storage",
-            all(feature = "codec-init-body", feature = "session-unicast-accept")
-        ),
-        any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        )
+    #[cfg(any(
+        feature = "session-fixed-storage",
+        all(feature = "codec-init-body", feature = "session-unicast-accept")
     ))]
     #[test]
     fn a_kind_staged_again_replaces_its_entry_and_none_takes_it_off() {
