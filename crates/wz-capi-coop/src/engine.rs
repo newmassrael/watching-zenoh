@@ -948,8 +948,11 @@ fn session_zid(
 /// session it opens holds a zid.
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
-    let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    SessionZid::new(&stated[..len]).map_err(OpenError::InvalidZid)
+    let mut kept: &[u8] = &stated;
+    while let [rest @ .., 0] = kept {
+        kept = rest;
+    }
+    SessionZid::new(kept).map_err(OpenError::InvalidZid)
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
@@ -2255,6 +2258,15 @@ fn issued_so_far(issued: usize) -> Result<usize, Declined> {
     }
 }
 
+/// The deadline of a leg asked at `now_us` that waits `timeout_ms`, in milliseconds on the
+/// session's clock, rounded up so a sweep that reads whole milliseconds never ends the leg before
+/// its timeout. A clock of microseconds read in milliseconds leaves room past it for any timeout a
+/// `u32` states, so the sum does not saturate.
+#[cfg(any(feature = "query", feature = "liveliness-get"))]
+fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
+    now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
+}
+
 /// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2488,7 +2500,7 @@ impl RuntimeTables {
         let groups = config.groups.len().min(caps::MAX_TASKS);
         let links = usize::from(crate::arena::dials(config))
             .saturating_add(config.max_faces)
-            .min(caps::MAX_TASKS - groups);
+            .min(caps::MAX_TASKS.saturating_sub(groups));
         Self {
             rows: RuntimeRows {
                 tasks: links,
@@ -6078,7 +6090,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = &guard.0;
         // What the peers hold now is told first, so the ring must have the rows for it before
         // the watch is declared.
-        let mut held = 0;
+        let mut held: usize = 0;
         {
             let registry = core.session.registry.borrow();
             for face in core.transport.links.faces() {
@@ -6086,7 +6098,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     continue;
                 }
                 if let Some(tables) = registry.tables_of(face.id) {
-                    held += decl_watch::held(plane, tables);
+                    held = held.saturating_add(decl_watch::held(plane, tables));
                 }
             }
         }
@@ -6177,7 +6189,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // and nothing local when the link refused it.
         let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
         #[cfg(feature = "local-subscriber")]
-        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts)?;
+        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
         Ok(sent)
     }
 
@@ -6680,7 +6692,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .count();
             #[cfg(not(feature = "group"))]
             let groups = 0;
-            links + groups
+            links.saturating_add(groups)
         })
     }
 
@@ -6802,7 +6814,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             opts.expose_timestamp_by(&guard.0.policy)
         };
         let remote = opts.allowed_destination.allows_remote();
-        let mut issued = 0;
+        let mut issued: usize = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
@@ -6827,8 +6839,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never
             // ends before its timeout.
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             match core
                 .session
@@ -6839,14 +6851,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 Some(true) => {}
                 Some(false) => {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                     continue;
                 }
                 None => continue,
             }
             // The leg's callback, in a row of the plane's the entry's sink holds.
             let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             };
             let sink = ConsolidatingSink::with_hold(
@@ -6871,7 +6883,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     )
                 });
             if !matches!(registered, Some(Ok(_))) {
-                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                unheld = unheld.saturating_add(usize::from(matches!(
+                    registered,
+                    Some(Err(RegisterError::TableFull))
+                )));
                 // A leg no table holds is let go of with no lock held.
                 drop(guard);
                 self.end_leg_now(leg_id);
@@ -6910,11 +6925,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 kind: GetKind::Query(rid),
                 fan: tag,
             }) {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
                 return Ok(issued);
@@ -6955,8 +6970,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
             let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             match core
                 .session
@@ -6967,13 +6982,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 Some(true) => {}
                 Some(false) => {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                     continue;
                 }
                 None => continue,
             }
             let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             };
             let sink = ConsolidatingSink::with_hold(
@@ -6997,7 +7012,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     )
                 });
             if !matches!(registered, Some(Ok(_))) {
-                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                unheld = unheld.saturating_add(usize::from(matches!(
+                    registered,
+                    Some(Err(RegisterError::TableFull))
+                )));
                 drop(guard);
                 self.end_leg_now(leg_id);
                 continue;
@@ -7017,11 +7035,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 kind: GetKind::Query(rid),
                 fan: tag,
             }) {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             if self.cut_short(fan, tag) {
                 return Ok(issued);
             }
@@ -7035,8 +7053,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut guard.0;
             let rid = own.rid();
             let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             let row = if core.session.registry.borrow().local.replies.has_room() {
                 self.gets.open_leg(leg, expose)
@@ -7072,18 +7090,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     kind: GetKind::Query(rid),
                     fan: tag,
                 }) {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                 } else {
                     // Asked once the legs to the peers were, as zenoh-pico asks it only once the
                     // send succeeded.
                     let asked = self.ask_own_queryables(core, own, keyexpr, opts);
                     drop(guard);
-                    issued += 1;
+                    issued = issued.saturating_add(1);
                     let _ = self.cut_short(fan, tag);
                     self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
             } else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
@@ -7117,7 +7135,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             0 => DEFAULT_QUERY_TIMEOUT_MS,
             set => set,
         };
-        let mut issued = 0;
+        let mut issued: usize = 0;
         // The faces whose links are up, each asked once, as a query's are.
         let mut asked = None;
         loop {
@@ -7139,7 +7157,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             };
             let interest_id = u64::from(interest_id);
-            let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms = Some(leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A snapshot no row holds is refused before its leg's callback is minted.
             if !core
                 .session
@@ -7202,7 +7220,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
                 return Ok(issued);
@@ -8040,5 +8058,27 @@ mod row_id_tests {
             cfg!(feature = "local-subscriber")
         );
         assert_eq!(counts_own(querier, true), cfg!(feature = "local-queryable"));
+    }
+}
+
+#[cfg(all(test, any(feature = "query", feature = "liveliness-get")))]
+mod leg_deadline_tests {
+    //! Where a get's leg ends on the session's clock.
+    use super::leg_deadline_ms;
+
+    /// A leg's deadline is its timeout past the asking millisecond rounded up, at the clock's
+    /// last microsecond too.
+    ///
+    /// # Control
+    ///
+    /// Reading the clock as `now_us / 1000`, rounded down, reds the first assertion.
+    #[test]
+    fn a_legs_deadline_rounds_up_at_every_reading_of_the_clock() {
+        assert_eq!(leg_deadline_ms(1_001, 5), 7, "1.001 ms rounds up to 2");
+        assert_eq!(leg_deadline_ms(2_000, 0), 2, "a whole millisecond stays");
+        assert_eq!(
+            leg_deadline_ms(u64::MAX, u32::MAX),
+            18_446_744_073_709_552 + 4_294_967_295
+        );
     }
 }
