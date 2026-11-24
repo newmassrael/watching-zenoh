@@ -681,15 +681,24 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    // The gets pending on the session's own queryables are held apart from every face's.
-    let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(row(&dial, "pending gets").count, 1 + own);
-    assert_eq!(row(&listening, "pending gets").count, 3 + own);
-    assert_eq!(listening.gets().tables, 3 + own);
-    assert_eq!(
-        row(&listening, "pending gets").entry_bytes,
-        row(&dial, "pending gets").entry_bytes,
-        "every face's table is the same"
+    // The gets pending on the session's own queryables are held apart from every face's. A build
+    // that asks no query lays out no table of them.
+    #[cfg(feature = "query")]
+    {
+        let own = usize::from(cfg!(feature = "local-queryable"));
+        assert_eq!(row(&dial, "pending gets").count, 1 + own);
+        assert_eq!(row(&listening, "pending gets").count, 3 + own);
+        assert_eq!(listening.gets().tables, 3 + own);
+        assert_eq!(
+            row(&listening, "pending gets").entry_bytes,
+            row(&dial, "pending gets").entry_bytes,
+            "every face's table is the same"
+        );
+    }
+    #[cfg(not(feature = "query"))]
+    assert!(
+        dial.rows().iter().all(|row| row.part != "pending gets"),
+        "a build that asks no query lays out no table of gets"
     );
     // What a face's peer writes is held once for each face, as its gets are, and never for the
     // session's own gets.

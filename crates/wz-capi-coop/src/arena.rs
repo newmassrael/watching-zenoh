@@ -120,8 +120,6 @@ use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_RO
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-#[cfg(not(feature = "query"))]
-use wz_session_core::slot_observer::NoRequesters;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
@@ -390,12 +388,10 @@ impl GetTables {
     }
 }
 
-/// One face's table of pending gets, as the arena lends it.
+/// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
+/// (`engine::registry::Gets`) and lays out none.
 #[cfg(feature = "query")]
 type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
-/// A build that asks no query keeps none (`engine::registry::Gets`).
-#[cfg(not(feature = "query"))]
-type FaceGets = NoRequesters;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -795,14 +791,18 @@ impl ArenaPlan {
             },
             tables,
         };
-        // A row of tables, each the spans of one face's registries: a face takes one whole.
-        let get_bytes = plan.sized(FaceGets::arena_bytes(plan.gets.rows));
-        plan.put(
-            "pending gets",
-            "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
-            plan.gets.tables,
-            get_bytes,
-        );
+        // A row of tables, each the spans of one face's registries: a face takes one whole. A build
+        // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
+        #[cfg(feature = "query")]
+        {
+            let get_bytes = plan.sized(FaceGets::arena_bytes(plan.gets.rows));
+            plan.put(
+                "pending gets",
+                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                plan.gets.tables,
+                get_bytes,
+            );
+        }
         // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
