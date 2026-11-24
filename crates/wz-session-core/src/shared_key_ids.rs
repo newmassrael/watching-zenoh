@@ -268,11 +268,20 @@ impl KeyIds {
     pub fn new<'a>(
         entries: impl IntoIterator<Item = (ExprId, &'a str)>,
     ) -> Result<Self, KeyIdsRefused> {
-        let given: Vec<(usize, ExprId, &str)> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(at, (id, key))| (at, id, key))
-            .collect();
+        Self::from_given(
+            entries
+                .into_iter()
+                .enumerate()
+                .map(|(at, (id, key))| (at, id, key))
+                .collect(),
+        )
+    }
+
+    /// [`Self::new`] past the one step that depends on the caller's iterator. Not generic, so
+    /// the checks and the two sorts are compiled once however many kinds of source a build hands
+    /// `new`: in a generic body each closure carries the iterator's type, and every sort it
+    /// drives is compiled again for each.
+    fn from_given(given: Vec<(usize, ExprId, &str)>) -> Result<Self, KeyIdsRefused> {
         let mut first = None;
         dictionary_faults(&given, |fault| {
             first.get_or_insert(fault);
@@ -1316,6 +1325,39 @@ mod tests {
             KeyIds::new([(5, "lab/**/*")]),
             Err(KeyIdsRefused::NotAKeyExpr { at: 0, .. }),
         ));
+    }
+
+    /// The three kinds of source the builds hand `new` (an array, the C door's vector of pairs, and
+    /// a document reader's map over its triples) give one dictionary, and a refusal names the
+    /// entry's place in the source whatever its kind.
+    #[test]
+    fn every_kind_of_source_gives_the_same_dictionary() {
+        let pairs: Vec<(ExprId, &str)> =
+            vec![(17, "lab/*/beta"), (9, "lab/rig"), (3, "lab/rig/alpha")];
+        let triples: Vec<(usize, ExprId, &str)> = vec![
+            (4, 17, "lab/*/beta"),
+            (7, 9, "lab/rig"),
+            (9, 3, "lab/rig/alpha"),
+        ];
+        let from_array = dictionary();
+        let from_pairs = KeyIds::new(pairs).expect("a valid dictionary");
+        let from_triples =
+            KeyIds::new(triples.iter().map(|&(_, id, key)| (id, key))).expect("a valid dictionary");
+        assert_eq!(from_pairs, from_array);
+        assert_eq!(from_triples, from_array);
+        assert_eq!(
+            from_triples.iter().collect::<Vec<_>>(),
+            vec![(3, "lab/rig/alpha"), (9, "lab/rig"), (17, "lab/*/beta")],
+            "ascending by id whatever order the source gave"
+        );
+        assert_eq!(from_triples.id_of("lab/rig/alpha"), Some(3));
+
+        let refused: Vec<(ExprId, &str)> = vec![(5, "lab/a"), (6, "lab/b"), (0, "lab/c")];
+        assert_eq!(
+            KeyIds::new(refused.iter().copied()),
+            Err(KeyIdsRefused::ZeroId { at: 2 })
+        );
+        assert_eq!(KeyIds::new(refused), Err(KeyIdsRefused::ZeroId { at: 2 }));
     }
 
     #[test]
