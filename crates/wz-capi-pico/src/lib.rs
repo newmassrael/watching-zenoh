@@ -677,8 +677,6 @@ pub mod scout;
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]
 pub mod segment_sender;
-// Totality debt TD-160 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod serde;
 // Totality debt TD-167 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
