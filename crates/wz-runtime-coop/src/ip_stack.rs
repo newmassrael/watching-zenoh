@@ -115,17 +115,18 @@ pub enum IpDriver<
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub type HeapLink = crate::link_cells::CellRc<dyn SessionDatagramLink>;
 
-/// The driver `make` makes, opened as the session shell holds a link: the session's actions send
-/// through it and its loop pumps it, the one object behind both. `fits` says whether the rows of
-/// the build name both its ends, read off what the driver is made of
+/// The driver `make` writes in the place it is handed, opened as the session shell holds a link:
+/// the session's actions send through it and its loop pumps it, the one object behind both. `fits`
+/// says whether the rows of the build name both its ends, read off what the driver is made of
 /// ([`stream_ends_fit`](crate::stream_link::stream_ends_fit), [`datagram_ends_fit`]). The driver
-/// is made in its cell, once the cell is had; a link refused is never made, and what `make` holds
-/// for it (its socket, its buffers) is let go of with the refusal.
+/// is made in its cell, once the cell is had, and set there for its owner's wait; a link refused is
+/// never made, and what `make` holds for it (its socket, its buffers) is let go of with the
+/// refusal.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) fn heap_link<K>(
     cells: Option<&LentByteCells>,
     fits: bool,
-    make: impl FnOnce() -> K,
+    make: impl FnOnce(&mut core::mem::MaybeUninit<K>) -> &mut K,
 ) -> Result<OpenedLink<HeapLink>, LinkOpenError>
 where
     K: BoxedLinkDriver + SessionDatagramLink + 'static,
@@ -402,8 +403,8 @@ impl LinkPlace {
         rx: RxBuffer,
         tx: TxBuffer,
     ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
-        heap_link(self.cells.as_ref(), stream_ends_fit(&socket), || {
-            let mut link = link_over(socket, rx, tx);
+        heap_link(self.cells.as_ref(), stream_ends_fit(&socket), |place| {
+            let link = place.write(link_over(socket, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
             }
@@ -427,8 +428,8 @@ impl LinkPlace {
         heap_link(
             self.cells.as_ref(),
             datagram_ends_fit(&socket, peer),
-            || {
-                let mut link = UdpDriver::with_peer(socket, peer, rx, tx);
+            |place| {
+                let link = place.write(UdpDriver::with_peer(socket, peer, rx, tx));
                 if self.owner_waits {
                     link.wait_by_owner();
                 }
@@ -2419,6 +2420,61 @@ mod tests {
             .expect("a datagram link once the buffers are back")
             .sink;
         assert_eq!(datagram.link_rx_capacity(), rx_len);
+    }
+
+    /// A datagram link of links whose owner waits is set for that wait where it lies: the owner's
+    /// wait over it reads its socket's. The CONTROL is the same link of links whose owner does not
+    /// wait, which names no wait. Turned red by a link set for the wait in a value that is not the
+    /// one its handle names.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_datagram_link_of_links_whose_owner_waits_names_its_sockets_wait() {
+        /// A socket the platform can wait on, which takes everything and has nothing to read.
+        struct Waitable(SocketAddr);
+
+        impl DatagramSocket for Waitable {
+            type Error = ();
+            type Waits = crate::session_drive::NoWaits;
+            fn bind(at: SocketAddr) -> Result<Self, ()> {
+                Ok(Self(SocketAddr::new(at.ip(), 40_002)))
+            }
+            fn local(&self) -> SocketAddr {
+                self.0
+            }
+            fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), ()> {
+                Ok(())
+            }
+            fn wait_readable(&self, _timeout_ms: c_int) {}
+            fn times_out(&self) -> bool {
+                false
+            }
+            fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+                Ok(None)
+            }
+            fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+                Ok(None)
+            }
+            fn input_wait(&self) -> Option<WaitOn> {
+                Some(WaitOn::Socket(3))
+            }
+        }
+
+        let waited = IpLinks::<Waitable, Dial>::new(NODE, Dial).waited_by_owner();
+        let link = waited
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link");
+        assert!(
+            matches!(link.pump.input_wait(), Some(WaitOn::Socket(3))),
+            "the owner waits on the link's socket"
+        );
+        let unwaited = IpLinks::<Waitable, Dial>::new(NODE, Dial);
+        let link = unwaited
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link");
+        assert!(
+            link.pump.input_wait().is_none(),
+            "CONTROL: a link its owner does not wait on names no wait"
+        );
     }
 
     /// Links lent cells place every link they open in one: a link past the cells is refused as
