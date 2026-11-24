@@ -2688,7 +2688,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// machine releases on leaving `Established` stops the emits with it: a
     /// session in `Closing` sends nothing after its Close frame.
     #[cfg(feature = "transport-keepalive")]
-    pub keepalive_armed: R::Mutex<bool>,
+    pub keepalive_armed: core::sync::atomic::AtomicBool,
     /// Whether this link's lease monitor runs: set by the FSM's
     /// `start_lease_monitor` on `Established` entry and cleared by
     /// `stop_lease_monitor` on its exit (and by
@@ -2696,7 +2696,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// lease deadline ([`crate::drive::lease_wake_deadline`] is `None`) and
     /// [`crate::drive::check_lease_deadline`] raises nothing, so the machine
     /// is never told `lease.expired` outside the state that handles it.
-    pub lease_armed: R::Mutex<bool>,
+    pub lease_armed: core::sync::atomic::AtomicBool,
     /// The reason this link's Close frame carries: written by the FSM's
     /// `set_close_reason_*` on the transition into `Closing`, read by
     /// `send_close_frame_with_reason` on its entry. `None` until a
@@ -3847,6 +3847,14 @@ impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
 use crate::tx_deadline::PushDeadline;
 use crate::tx_deadline::TxExpiry;
 
+/// A link's millisecond value held under its runtime's lock (a stamp of the link's clock, or the
+/// lease its peer advertised), read. Out of line: one copy of the read for every reader of these,
+/// where each read inlined was a copy of the lock.
+#[inline(never)]
+pub(crate) fn read_ms<R: SessionRuntime>(slot: &R::Mutex<Option<u64>>) -> Option<u64> {
+    R::with_mutex_mut(slot, |ms| *ms)
+}
+
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
     #[inline]
@@ -4600,8 +4608,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: crate::send_gate::SendGate::new(true),
                 #[cfg(feature = "transport-keepalive")]
-                keepalive_armed: R::new_mutex(false),
-                lease_armed: R::new_mutex(false),
+                keepalive_armed: core::sync::atomic::AtomicBool::new(false),
+                lease_armed: core::sync::atomic::AtomicBool::new(false),
                 close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
                 transport_deletion_taken: R::new_mutex(false),
@@ -10770,12 +10778,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Stop asking for keepalives for this session: the worker the machine starts on `Established`
-    /// and stops when it leaves it, stopped from outside, at the cost of one lock. The first step
+    /// and stops when it leaves it, stopped from outside, at the cost of one store. The first step
     /// of [`Self::close_for_capacity`], on its own so that a node closing many sessions can take
     /// them all off its keepalive service before it spends the time the closes take.
     pub fn stop_keepalives(&self) {
         #[cfg(feature = "transport-keepalive")]
-        R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
+        self.link
+            .keepalive_armed
+            .store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Close this session because the node that holds it can no longer serve it: it is one of
@@ -16169,7 +16179,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// arrival (unicast/transport.c:193/269) and every task reads the
     /// same `_common._lease`.
     pub fn adopted_lease_ms(&self) -> u64 {
-        let peer = R::with_mutex_mut(&self.peer_open_lease_ms, |g| *g);
+        let peer = read_ms::<R>(&self.peer_open_lease_ms);
         match peer {
             Some(advertised) => advertised.min(self.params.lease_ms),
             None => self.params.lease_ms,
@@ -17920,8 +17930,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // established: the replacement link's Established entry starts
             // its own, and none runs over the re-dial window.
             #[cfg(feature = "transport-keepalive")]
-            R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
-            R::with_mutex_mut(&self.link.lease_armed, |armed| *armed = false);
+            self.link
+                .keepalive_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
+            self.link
+                .lease_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
@@ -18125,7 +18139,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if progress == u64::MAX {
             return None;
         }
-        let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
+        let established = read_ms::<R>(&self.link.established_at)?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),
@@ -18628,6 +18642,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
+    // Out of line: each of the actions inlined it whole.
+    #[inline(never)]
     fn stage_close_reason(&self, reason: CloseReason) {
         self.inner
             .note_action(|t| t.set_close_reason_count = t.set_close_reason_count.saturating_add(1));
@@ -19248,14 +19264,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             .note_action(|t| t.start_lease_monitor = t.start_lease_monitor.saturating_add(1));
         // The monitor is the drive loop's lease deadline; arming it is what
         // gives this link one (`drive::lease_wake_deadline`).
-        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
+        self.link()
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
         self.inner
             .note_action(|t| t.stop_lease_monitor = t.stop_lease_monitor.saturating_add(1));
-        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
+        self.link()
+            .lease_armed
+            .store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[inline(never)]
@@ -19271,7 +19291,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             });
             // The worker is the drive loops' keepalive deadline and the AP
             // pacer; both emit only while this is set.
-            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
+            self.link()
+                .keepalive_armed
+                .store(true, core::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -19282,7 +19304,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             self.inner.note_action(|t| {
                 t.stop_keepalive_worker = t.stop_keepalive_worker.saturating_add(1)
             });
-            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
+            self.link()
+                .keepalive_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
         }
     }
 

@@ -7741,9 +7741,15 @@ mod reconnect_tx_tests {
         TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| {
             *slot = Some([9; 4].into())
         });
-        TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed = true);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
         #[cfg(feature = "transport-keepalive")]
-        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed = true);
+        actions
+            .link
+            .keepalive_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
         TokioRuntime::with_mutex_mut(&actions.link.close_reason, |reason| {
             *reason = Some(wz_session_core::close_reason::CloseReason::Generic)
         });
@@ -7756,12 +7762,18 @@ mod reconnect_tx_tests {
             "reset must drop Established so declare gates hold until re-handshake"
         );
         assert!(
-            !TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed),
+            !actions
+                .link
+                .lease_armed
+                .load(core::sync::atomic::Ordering::SeqCst),
             "no lease monitor runs over the re-dial window"
         );
         #[cfg(feature = "transport-keepalive")]
         assert!(
-            !TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed),
+            !actions
+                .link
+                .keepalive_armed
+                .load(core::sync::atomic::Ordering::SeqCst),
             "no keepalive worker runs over the re-dial window"
         );
         assert_eq!(
