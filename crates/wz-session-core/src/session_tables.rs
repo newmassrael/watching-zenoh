@@ -643,11 +643,17 @@ fn kept_name(key: &str, name: InterestName<'_>) -> Option<KeptName> {
     let Some(rest) = name.suffix else {
         return Some(kept(name.mapping_id, None));
     };
+    // Searched as bytes: a text search brings the pattern searcher and the panic formatting of a
+    // text slice into every image that holds an Interest. A rest is whole UTF-8, so the place it
+    // starts at is a character boundary of `key`.
+    let (bytes, wanted) = (key.as_bytes(), rest.as_bytes());
     let tail = key
         .len()
         .checked_sub(rest.len())
-        .filter(|&at| key.get(at..) == Some(rest));
-    match tail.or_else(|| key.find(rest)) {
+        .filter(|_| bytes.ends_with(wanted));
+    let inside =
+        || (0..key.len()).find(|&at| bytes.get(at..).is_some_and(|from| from.starts_with(wanted)));
+    match tail.or_else(inside) {
         Some(at) => Some(kept(name.mapping_id, Some(range(at, rest.len())?))),
         None => Some(kept(0, Some(range(0, key.len())?))),
     }
@@ -722,7 +728,9 @@ pub struct MatchingRow<Cb> {
     plane: Plane,
     interest: Option<InterestHandle>,
     count_local: bool,
-    last: bool,
+    /// The verdict it was last told, recorded by a read that holds the tables shared beside what
+    /// the peers declared ([`SessionTables::next_matching_change`]).
+    last: Cell<bool>,
     callback: Cb,
 }
 
@@ -750,7 +758,7 @@ impl<Cb> MatchingRow<Cb> {
 
     /// The verdict it was last told.
     pub fn last(&self) -> bool {
-        self.last
+        self.last.get()
     }
 
     /// Its callback.
@@ -1930,7 +1938,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane: owner.plane,
             interest: owner.interest,
             count_local: owner.count_local,
-            last: false,
+            last: Cell::new(false),
             callback,
         };
         self.insert_matching_listener(row)
@@ -1968,7 +1976,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane,
             interest: Some(interest),
             count_local,
-            last: false,
+            last: Cell::new(false),
             callback,
         };
         match self.insert_matching_listener(row) {
@@ -2125,36 +2133,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// The next matching listener at or after `cursor` whose verdict changed, with its new
     /// verdict, now recorded as the one it was told.
     pub fn next_matching_change(
-        &mut self,
+        &self,
         cursor: &mut usize,
         peers: &impl PeerDeclarations,
     ) -> Option<(MatchingListenerHandle, bool)> {
-        loop {
-            let (handle, plane, interest, filter, count_local, last) = {
-                let (handle, row) = self.kept_matching()?.next_from(cursor)?;
-                (
-                    handle,
-                    row.plane,
-                    row.interest,
-                    row.filter,
-                    row.count_local,
-                    row.last,
-                )
-            };
-            let Some(key) = self.listener_key(interest, filter) else {
+        let matching = self.kept_matching()?;
+        while let Some((handle, row)) = matching.next_from(cursor) {
+            let Some(key) = self.listener_key(row.interest, row.filter) else {
                 continue;
             };
-            let now = self.matches(plane, key, count_local, peers);
-            if now != last {
-                if let Some(row) = self
-                    .kept_matching_mut()
-                    .and_then(|matching| matching.get_mut(handle))
-                {
-                    row.last = now;
-                }
+            let now = self.matches(row.plane, key, row.count_local, peers);
+            if now != row.last.get() {
+                row.last.set(now);
                 return Some((handle, now));
             }
         }
+        None
     }
 
     // ---- pending gets ----------------------------------------------------------------------

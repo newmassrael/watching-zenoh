@@ -63,7 +63,7 @@ use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
     InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, Plane, RowCallbacks,
-    SessionTables, SubscriberHandle,
+    SessionTables, SubscriberHandle, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -2225,6 +2225,15 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
         .interests()
         .iter()
         .position(|(held, _)| held == handle)
+}
+
+/// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
+/// of there: the id of the Interest it held last, `None` when no filter is there. Every caller
+/// passes this one closure, so the tables' walk is built once.
+fn unwatch_filter(tables: &mut CoopTables, handle: WriteFilterHandle) -> Option<Option<EntityId>> {
+    tables
+        .undeclare_write_filter(handle, |_, _| {})
+        .map(|unwatched| unwatched.interest_final)
 }
 
 /// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
@@ -6077,11 +6086,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// lock hands it: after a step that wrote the faces' tables, and after each declaration of the
     /// session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
-        let mut registry = core.session.registry.borrow_mut();
+        let registry = core.session.registry.borrow();
         core.session.matching_read.set(registry.faces_written());
-        let (tables, peers) = registry.tables_and_peers();
         let mut cursor = 0;
-        while let Some((handle, matching)) = tables.next_matching_change(&mut cursor, &peers) {
+        while let Some((handle, matching)) = registry
+            .app
+            .tables
+            .next_matching_change(&mut cursor, &*registry)
+        {
             self.matching.lock().flip(row_id(handle), matching);
         }
     }
@@ -6242,6 +6254,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
         self.core.lock().0.session.registry.borrow().peer_looks()
+    }
+
+    /// Hand out entity ids from `next` on, none with `None`: how a test reaches the end of the
+    /// id space without spending it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn entity_ids_from(&self, next: Option<EntityId>) {
+        tables_mut(&self.core.lock().0.session.registry).entity_ids_from(next);
     }
 
     /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread
@@ -6947,8 +6966,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // `_z_add_interest` takes it before it decides: a filter that finds none left is
             // refused, its row given back.
             let Some(taken) = core.take_entity_id() else {
-                let _ = tables_mut(&core.session.registry)
-                    .undeclare_write_filter(watching.handle, |_, _| {});
+                let _ = unwatch_filter(&mut tables_mut(&core.session.registry), watching.handle);
                 return Err(Declined::NoEntityId);
             };
             Some(u64::from(taken))
@@ -7004,13 +7022,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             interest_rank(&tables, row.interest())
         };
-        let Some(unwatched) =
-            tables_mut(&core.session.registry).undeclare_write_filter(handle, |_, _| {})
+        let Some(interest_final) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
         else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
+        if let (Some(interest), Some(at)) = (interest_final, place) {
             core.retract(
                 Kind::Interest,
                 at,
