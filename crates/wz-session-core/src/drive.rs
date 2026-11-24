@@ -14,9 +14,9 @@
 //! `report_outcome_reassembling` drives the const-generic reassembly pool on a
 //! `Fragment` outcome and re-enters `parse_frame_payload` on chain completion;
 //! generic over the pool dims + runtime so the AP (32/65536) and MCU (4/4096)
-//! profiles share one ingest path. The peer ZID (the §2.3 chain key) is read
-//! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
-//! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
+//! profiles share one ingest path. The peer ZID (the §2.3 chain key) is copied
+//! out of the session's facts (`inbound_peer_zid`) before the pool is driven,
+//! so the pool's machine never runs under the facts' lock.
 
 use sce_rust_runtime::Engine;
 
@@ -3075,19 +3075,23 @@ where
     // and bounded by the session's configuration the same way.
     reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
     reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
-    let sn_mask = actions.negotiated_sn_mask();
-    // The chain key's peer half, copied out of the session's slot first: the
-    // Router delivers a completed chain from inside the ingest, and what the
-    // delivery dispatches must not run under that slot's lock. The Router keys
-    // a chain on at most this many bytes of it.
+    // The peer's caps (for the SN ring) and the chain key's peer half, read in
+    // one hold of the facts and copied out first: the Router delivers a
+    // completed chain from inside the ingest, and what the delivery dispatches
+    // must not run under the facts' lock. The Router keys a chain on at most
+    // this many bytes of the zid.
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
-    let peer_len = actions.fact_inbound_peer_zid(|zid_slot| {
-        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
+    let (caps, peer_len) = actions.with_facts(|facts| {
+        let zid: &[u8] = facts.handshake.inbound_peer_zid.as_deref().unwrap_or(&[]);
         for (to, from) in peer.iter_mut().zip(zid) {
             *to = *from;
         }
-        zid.len().min(peer.len())
+        (
+            facts.handshake.inbound_peer_init_caps,
+            zid.len().min(peer.len()),
+        )
     });
+    let sn_mask = actions.sn_mask_for(caps);
     let mut dropped_by_decode = None;
     let ingest_outcome = reasm.ingest_keeping(
         ReassemblyFragment {
@@ -4126,7 +4130,7 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 /// resulting `FramePayload` (or `ParseError`) is reported as a second
 /// `IterationEvent::Poll`. Non-terminal ingests (Begun / Continued / Aborted /
 /// Refused) report only the `Fragment` outcome. The peer ZID (the §2.3 chain
-/// key) is read from `actions.inbound_peer_zid` through `R::with_mutex_mut`.
+/// key) is copied out of the session's facts (`inbound_peer_zid`) first.
 ///
 /// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 1 MiB) and MCU
 /// (4 / 4096) profiles share one ingest path; the AP host passes its
@@ -4209,12 +4213,12 @@ where
     else {
         return false;
     };
-    actions.fact_inbound_peer_zid(|zid_slot| {
-        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-        // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
-        // chain the rejected frame's conduit owns, not a sibling priority's.
-        reasm.abort_channel(zid, *priority, *reliable);
-    });
+    // The zid is copied out: the abort drives the slot's machine, which does not run under the
+    // facts' lock.
+    let peer = actions.fact_inbound_peer_zid(|zid_slot| *zid_slot);
+    // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
+    // chain the rejected frame's conduit owns, not a sibling priority's.
+    reasm.abort_channel(peer.as_deref().unwrap_or(&[]), *priority, *reliable);
     true
 }
 
@@ -4286,48 +4290,45 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     // configuration rather than the host's Router construction, so every host
     // that drives a unicast session applies it.
     reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
-    // The negotiated SN ring mask resolves BEFORE the peer-ZID guard:
-    // `negotiated_sn_mask` takes the `inbound_peer_init_caps` mutex, and the
-    // guard below documents that nothing inside it re-enters a session mutex
-    // slot — hoisting keeps the two scopes disjoint instead of weakening
-    // that invariant to "only disjoint slots nest".
-    let sn_mask = actions.negotiated_sn_mask();
-    // The peer ZID guard must wrap the whole `ingest` call: the completion
-    // closure borrows `zid` for the chain-key lookup. `with_mutex_mut` scopes
-    // that borrow to the closure (the AP std mutex and the MCU critical_section
-    // mutex behind one seam); the non-reentrant MCU mutex is safe because
-    // `ingest` does not re-enter the session's mutex slots.
-    let mut completed: Option<DriverLoopOutcome> = None;
-    let ingest_outcome = actions.fact_inbound_peer_zid(|zid_slot| {
-        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-        // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
-        // arena when it can be, so the reassembled message is decoded where its
-        // fragments were staged and nothing copies it a second time.
-        reasm.ingest_lending(
-            ReassemblyFragment {
-                peer_key: zid,
-                reliable: *reliable,
-                sn: *sn,
-                more: u8::from(*more),
-                payload: payload.as_slice(),
-                // R311y215 — key the chain by (peer, reliable, priority).
-                priority: *priority,
-                // R311y578 — the `0x2 First` / `0x3 Drop` markers this
-                // fragment carried; honoured iff the level armed above says
-                // the peer emits them.
-                markers: *markers,
-            },
-            sn_mask,
-            now_ms,
-            |chain| {
-                // R311y221 — the reassembled whole-frame carries the chain's
-                // band (the `(peer, reliable, priority)` key above), so a
-                // fragmented prioritized Put delivers on the same band a
-                // single-frame Put would.
-                completed = Some(reassembled_chain_outcome(*reliable, *sn, *priority, chain));
-            },
+    // The peer's caps (for the SN ring) and its zid (the chain key's peer half),
+    // read in one hold of the facts and copied out: the ingest drives the slot's
+    // machine and decodes a completed chain, neither of which runs under the
+    // facts' lock.
+    let (caps, peer) = actions.with_facts(|facts| {
+        (
+            facts.handshake.inbound_peer_init_caps,
+            facts.handshake.inbound_peer_zid,
         )
     });
+    let sn_mask = actions.sn_mask_for(caps);
+    let mut completed: Option<DriverLoopOutcome> = None;
+    // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
+    // arena when it can be, so the reassembled message is decoded where its
+    // fragments were staged and nothing copies it a second time.
+    let ingest_outcome = reasm.ingest_lending(
+        ReassemblyFragment {
+            peer_key: peer.as_deref().unwrap_or(&[]),
+            reliable: *reliable,
+            sn: *sn,
+            more: u8::from(*more),
+            payload: payload.as_slice(),
+            // R311y215 — key the chain by (peer, reliable, priority).
+            priority: *priority,
+            // R311y578 — the `0x2 First` / `0x3 Drop` markers this
+            // fragment carried; honoured iff the level armed above says
+            // the peer emits them.
+            markers: *markers,
+        },
+        sn_mask,
+        now_ms,
+        |chain| {
+            // R311y221 — the reassembled whole-frame carries the chain's
+            // band (the `(peer, reliable, priority)` key above), so a
+            // fragmented prioritized Put delivers on the same band a
+            // single-frame Put would.
+            completed = Some(reassembled_chain_outcome(*reliable, *sn, *priority, chain));
+        },
+    );
     // The chain this fragment ended besides its own (a `0x2 First` restart, or
     // an eviction from a full pool) ended before the fragment's chain was
     // delivered, so it is reported first.
