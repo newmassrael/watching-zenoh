@@ -4037,8 +4037,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn run_tasks(&mut self) {
         let Self {
             local,
-            router,
-            lend,
+            transport: TransportState { router, lend, .. },
             ..
         } = self;
         lend.lend_for(router, || local.run_until_idle());
