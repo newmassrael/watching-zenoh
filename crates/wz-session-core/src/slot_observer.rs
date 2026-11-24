@@ -33,8 +33,9 @@
 
 // `Requesters` is generic over the application's reply sink and names no heap
 // type, and neither is [`SlotObserverOf`]: the sinks it registers are the types an
-// [`ObserverSinks`] names. The liveliness planes and the switchboard register heap
-// forms, so they, and what only they name, sit behind `alloc`.
+// [`ObserverSinks`] names, the liveliness listeners among them. The switchboard and the
+// tokens wz holds keep heap forms, so they, and the liveliness planes gated with them, sit
+// behind `alloc`.
 use core::mem::MaybeUninit;
 
 use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
@@ -396,8 +397,7 @@ pub struct SlotObserverOf<
     matching: core::marker::PhantomData<M>,
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
-    pub liveliness:
-        LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink, P>,
+    pub liveliness: LivelinessRegistry<K::Declared, K::Undeclared, P>,
     /// The tokens wz itself holds, answered to a peer's interest, and the staging of those
     /// answers. Where the tables keep the session's tokens as rows ([`ObserverTables::held_tokens`])
     /// the answers are read from them and this registry holds none.
@@ -1137,7 +1137,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
             ptr::write(addr_of_mut!((*at).matching), core::marker::PhantomData);
             #[cfg(feature = "liveliness-token")]
-            ptr::write(addr_of_mut!((*at).liveliness), LivelinessRegistry::new());
+            ptr::write(
+                addr_of_mut!((*at).liveliness),
+                LivelinessRegistry::with_sink_backing(),
+            );
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
         }
@@ -1225,11 +1228,7 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
         #[cfg(feature = "liveliness-token")]
         let bytes = sum_of(
             bytes,
-            LivelinessRegistry::<
-                crate::decl_sink::BoxedDeclSink,
-                crate::decl_sink::BoxedUndeclSink,
-                Lent,
-            >::arena_bytes(rows),
+            LivelinessRegistry::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
         );
         let _ = rows;
         bytes
@@ -3376,5 +3375,31 @@ mod lent_tests {
                 Err(RegisterError::TableFull)
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "liveliness-token"))]
+mod token_listener_tests {
+    use super::*;
+    use crate::declare::liveliness::LivelinessRegistry;
+
+    /// The listeners on the tokens a peer declares are held as the types the observer's sinks
+    /// name, as the listeners on its subscribers and queryables are: an observer of closed sinks
+    /// holds no boxed closure for them.
+    ///
+    /// # Control
+    ///
+    /// Typing the token listeners as boxed closures whatever the sinks fails to compile the
+    /// borrow below.
+    #[test]
+    fn the_token_listeners_are_the_types_the_sinks_name() {
+        fn listeners<K: ObserverSinks>(
+            observer: &SlotObserverOf<K>,
+        ) -> &LivelinessRegistry<K::Declared, K::Undeclared> {
+            &observer.liveliness
+        }
+        let observer = SlotObserverOf::<NoSinks>::default();
+        assert_eq!(listeners(&observer).on_decl_len(), 0);
+        assert_eq!(listeners(&observer).on_undecl_len(), 0);
     }
 }
