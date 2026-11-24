@@ -465,7 +465,7 @@ pub(super) struct Registry {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    pub(super) decl_watches: alloc::sync::Arc<DeclWatches>,
+    pub(super) decl_watches: DeclWatches,
     /// Moves each time a face's peer tables are handed out to be written and each time a face
     /// comes or goes: an answer read off what the peers declared ([`Self::peers_declare`]) holds
     /// for as long as this reads what it read when the answer was taken.
@@ -574,7 +574,7 @@ impl Registry {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            decl_watches: alloc::sync::Arc::new(DeclWatches::under(limits)?),
+            decl_watches: DeclWatches::under(limits)?,
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
@@ -895,7 +895,10 @@ impl Registry {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    pub(super) fn settle_decl_events(&self, peer: impl FnOnce() -> Option<Vec<u8>>) {
+    pub(super) fn settle_decl_events(
+        &self,
+        peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
+    ) {
         self.decl_watches.settle(peer);
     }
 
