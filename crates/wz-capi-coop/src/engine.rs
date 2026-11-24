@@ -1322,7 +1322,9 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// Whether a publish dropped on `set` passes over `face`: one of the set, or one that took
     /// its place after the set was read, as a transport that opened after a publish is not sent
     /// it ([`DroppedOn::owes`]). A face with no place, which names no wait for its room, is sent
-    /// it.
+    /// it: when it came is not known, and a droppable publish sent to a face that came after it
+    /// costs that face one message it could have missed, where passing it over could lose one the
+    /// face was owed.
     #[cfg(any(feature = "listen", feature = "group"))]
     pub(crate) fn skips(&self, set: &DroppedOn, face: FaceId) -> bool {
         lock(&self.rooms)
