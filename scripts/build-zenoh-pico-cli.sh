@@ -832,6 +832,13 @@ NOFRAG_TARGETS=(z_put)
 # switches off. It is BUILT, because the control that says whether a red is wz's or the
 # program's links the library of this arm. wz builds the drop-in for it from its config.h, as
 # for the other arms.
+#
+# The workflow builds through `GNUmakefile` (`make all`), not through CMake's own defaults, so
+# its buffer sizes are the makefile's (`vendor/zenoh-pico/GNUmakefile` @ `# Buffer sizes`:
+# `FRAG_MAX_SIZE?=300000`, `BATCH_UNICAST_SIZE?=65535`, `BATCH_MULTICAST_SIZE?=8192`) and not
+# `cmake/feature_config.cmake`'s 4096 and 2048. `tests/z_client_test.c` sends messages of
+# 100,000 bytes in fragments, which a build at 4096 drops whole. wz's build of this arm takes
+# the same numbers from this config.h (`wz_config.py --env pico`).
 cmake -B "${BUILD_DIR_INTEG}" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
@@ -843,7 +850,10 @@ cmake -B "${BUILD_DIR_INTEG}" -S "$EXAMPLES_DIR" \
     -DZ_FEATURE_CONNECTIVITY=1 \
     -DZ_FEATURE_LOCAL_SUBSCRIBER=1 \
     -DZ_FEATURE_LOCAL_QUERYABLE=1 \
-    -DZ_FEATURE_ADMIN_SPACE=1 >&2
+    -DZ_FEATURE_ADMIN_SPACE=1 \
+    -DFRAG_MAX_SIZE=300000 \
+    -DBATCH_UNICAST_SIZE=65535 \
+    -DBATCH_MULTICAST_SIZE=8192 >&2
 
 GENERATED_CONFIG_INTEG="${BUILD_DIR_INTEG}/zenohpico/include/zenoh-pico/config.h"
 if [[ ! -f "$GENERATED_CONFIG_INTEG" ]]; then
@@ -853,6 +863,12 @@ fi
 for switch in Z_FEATURE_LOCAL_SUBSCRIBER Z_FEATURE_LOCAL_QUERYABLE Z_FEATURE_ADMIN_SPACE; do
     if ! grep -qx "#define $switch 1" "$GENERATED_CONFIG_INTEG"; then
         echo "build-zenoh-pico-cli: the integration arm did NOT take $switch" >&2
+        exit 1
+    fi
+done
+for size in "Z_FRAG_MAX_SIZE 300000" "Z_BATCH_UNICAST_SIZE 65535" "Z_BATCH_MULTICAST_SIZE 8192"; do
+    if ! grep -qx "#define $size" "$GENERATED_CONFIG_INTEG"; then
+        echo "build-zenoh-pico-cli: the integration arm did NOT take #define $size" >&2
         exit 1
     fi
 done

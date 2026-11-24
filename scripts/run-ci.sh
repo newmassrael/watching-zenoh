@@ -22949,12 +22949,16 @@ layer_z_zenohd_interop() {
         --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-local" --quiet) || return 1
     # And wz's build of the INTEGRATION arm, the configuration upstream's integration workflow
     # builds its `tests/z_api_*_test.c` under: the sixteen programs of
-    # `pico_upstream_api_tests_on_wz` link it below.
-    local integration_features
-    integration_features="$(python3 scripts/lib/wz_config.py --features pico \
-        "$WZ_ARTIFACTS/target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h")" || return 1
-    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $integration_features \
+    # `pico_upstream_api_tests_on_wz` link it below. That arm states buffer sizes of its own
+    # (build-zenoh-pico-cli.sh, the integration arm), so the build takes the header's numbers as
+    # well as its switches: `--env pico` gives the `WZ_LIMIT_<NAME>=<n>` of each value switch
+    # whose number is not the limit's default.
+    local integration_header integration_features integration_env
+    integration_header="$WZ_ARTIFACTS/target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h"
+    integration_features="$(python3 scripts/lib/wz_config.py --features pico "$integration_header")" || return 1
+    integration_env="$(python3 scripts/lib/wz_config.py --env pico "$integration_header")" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments and the limits are words on purpose
+    (cd crates && env $integration_env cargo build -p wz-capi-pico $integration_features \
         --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-integration" --quiet) || return 1
     # And the reference arm's build for the cooperative engine, which Layer E builds too: the
     # drop-in legs below that need a router run against it as well
