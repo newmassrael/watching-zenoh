@@ -1473,7 +1473,7 @@ impl<'a> QueryResponder<'a> {
     /// job (wz-runtime-tokio) builds a responder over its own reply
     /// buffer when it runs the user handler OUTSIDE the observer lock,
     /// then routes the accumulated [`QueryReply`]s per query origin
-    /// (wire -> `ResponseSink::send_response`, local ->
+    /// (wire -> `OwnedResponseSink::send_response`, local ->
     /// `ReplyRegistry::deliver_local_reply`). In-module dispatch keeps
     /// building the struct literally.
     /// R311y834 — `accept` is REQUIRED, for the reason the requester-side

@@ -131,6 +131,19 @@ impl TempPayloadSource for TempPayloadParts {
     }
 }
 
+#[allow(dead_code)]
+impl TempPayloadParts {
+    /// The parts of what `src` says, each accessor of [`TempPayloadSource`] read
+    /// once: the one form a codec that holds this one writes it from,
+    /// whatever form the value it is handed is in (docs/adr/0058).
+    #[doc(hidden)]
+    pub fn of<S: TempPayloadSource + ?Sized>(src: &S) -> Self {
+        Self {
+            celsius_centi: src.celsius_centi(),
+        }
+    }
+}
+
 impl TempPayloadSource for TempPayload {
     fn celsius_centi(&self) -> u16 {
         self.celsius_centi

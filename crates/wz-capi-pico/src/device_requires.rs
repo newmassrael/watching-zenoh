@@ -10,12 +10,12 @@
 //! carries none of it, whether or not it has pico's unstable API.
 //!
 //! It reads the config as [`z_open`](crate::session::z_open) does (`open_config`, the TLS
-//! material, pico's group rule) into the engine-neutral facts of `wz_session_core::facilities`, and
-//! refuses what `z_open` refuses, with the same code. pico's open makes one attempt at its one
-//! locator and fails when it cannot dial or bind it, and scouts only when neither locator is
-//! given, which is then the only way to a node.
+//! material, pico's group rule, each endpoint by the grammar of the engine's open) into the facts
+//! of `wz_session_core::facilities`, and refuses what `z_open` refuses, with the same code.
+//! pico's open makes one attempt at its one locator and fails when it cannot dial or bind it, and
+//! scouts only when neither locator is given, which is then the only way to a node.
 
-use wz_session_core::facilities::{device_requires, OpenFacts, Scouting};
+use wz_session_core::facilities::{device_requires_of, EndpointReading, ReadFacts, Scouting};
 #[cfg(not(feature = "peer"))]
 use wz_session_core::WhatAmI;
 
@@ -61,8 +61,22 @@ pub unsafe extern "C" fn wz_ext_config_device_requires(
     })
 }
 
+/// A refusal of the open: its code and the reason the door names.
+type Refused = (ZResult, &'static str);
+
+/// What the open does with an endpoint, which decides the grammar it is read by.
+#[derive(Clone, Copy)]
+enum Role {
+    /// An endpoint dialled.
+    Dial,
+    /// A unicast endpoint listened on.
+    Listen,
+    /// A multicast group joined.
+    Group,
+}
+
 /// The requirement of pico's open of `cfg`, or the code and reason `z_open` refuses it with.
-fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> {
+fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
     // The TLS material is resolved before anything else, as `z_open` resolves it: a key whose file
     // cannot be read or whose inline value cannot be decoded refuses the open. A build without a
     // TLS backend reads no certificate file, whatever its engine.
@@ -124,18 +138,33 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
             )),
             _ => Scouting::Off,
         };
-    let (connect, listen, groups): (Vec<String>, Vec<String>, Vec<&str>) = match listen {
+    let (dials, listens, groups): (Vec<&str>, Vec<&str>, Vec<&str>) = match listen {
         Some(group) if joins_a_group => (Vec::new(), Vec::new(), vec![group]),
         listen => (
-            connect.into_iter().map(String::from).collect(),
-            listen.into_iter().map(String::from).collect(),
+            connect.into_iter().collect(),
+            listen.into_iter().collect(),
             Vec::new(),
         ),
     };
-    Ok(device_requires(&OpenFacts {
-        connect: &connect,
+    // The cooperative engine's open judges every unicast endpoint as pico reads it before it
+    // opens anything, the listener first (`open_request`), and reads what that judgement keeps
+    // when it opens each link.
+    #[cfg(not(feature = "engine-tokio"))]
+    for endpoint in listens.iter().chain(&dials) {
+        crate::endpoint::checked_endpoint(endpoint).map_err(|code| {
+            (
+                code,
+                "the open refuses this config: pico's reading of an endpoint refuses it",
+            )
+        })?;
+    }
+    let listen = read_all(&listens, Role::Listen)?;
+    let groups = read_all(&groups, Role::Group)?;
+    let connect = read_all(&dials, Role::Dial)?;
+    Ok(device_requires_of(&ReadFacts {
+        connect,
         dial_must_succeed: true,
-        listen: &listen,
+        listen,
         groups,
         bind_must_succeed: true,
         scouting,
@@ -143,6 +172,84 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
         reads_calendar: false,
     })
     .to_json())
+}
+
+/// Each of `endpoints` read, in `role`, as the build's open reads it; the first the open refuses
+/// refuses the config.
+fn read_all(endpoints: &[&str], role: Role) -> Result<Vec<EndpointReading>, Refused> {
+    endpoints
+        .iter()
+        .map(|endpoint| read(endpoint, role))
+        .collect()
+}
+
+/// The tokio engine's runtime reads every endpoint with the grammar of every scheme the tree
+/// knows, and a scheme it does not carry fails the link it opens and not the reading, so the door
+/// reads with that grammar and refuses nothing here.
+#[cfg(feature = "engine-tokio")]
+fn read(endpoint: &str, _role: Role) -> Result<EndpointReading, Refused> {
+    Ok(wz_session_core::facilities::read_any_endpoint(endpoint))
+}
+
+/// The cooperative engine's reading of one endpoint, which pico's reading already admitted
+/// (`requirement_of`): a unicast endpoint is the text that reading keeps (`with_engine_text`,
+/// the one the engine is handed), read by the engine's own grammar (`locator_text`), which
+/// dials and listens on an address and refuses a host name, a scheme it has no link for, a config
+/// or metadata part and a port it cannot use; `z_open` answers that refusal as a link it could
+/// not open. A group is read by the grammar its host joiner reads it with.
+#[cfg(not(feature = "engine-tokio"))]
+fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
+    use wz_capi_coop::locator_text::{parse_listen_locator, parse_locator};
+    use wz_capi_coop::LinkProto;
+    use wz_session_core::facilities::Endpoint;
+    use wz_session_core::locator::Proto;
+    let parsed = match role {
+        Role::Dial => crate::endpoint::with_engine_text(endpoint, parse_locator),
+        Role::Listen => crate::endpoint::with_engine_text(endpoint, parse_listen_locator),
+        Role::Group => return read_group(endpoint),
+    };
+    // The engine's links are IP links: a locator of another kind is one it cannot open either.
+    let locator = parsed.ok().and_then(|locator| locator.as_ip()).ok_or((
+        crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+        "the open refuses this config: the engine reads no address it can open in an endpoint",
+    ))?;
+    let proto = match locator.proto {
+        LinkProto::Udp => Proto::Udp,
+        LinkProto::Tcp => Proto::Tcp,
+        LinkProto::Tls => Proto::Tls,
+    };
+    Ok(Ok(Endpoint::Ip {
+        proto,
+        named: false,
+    }))
+}
+
+/// A group as the cooperative engine's host joiner reads it (`host_group::group_of`): a UDP
+/// multicast group, or a group the open cannot join.
+#[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
+fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
+    use wz_session_core::facilities::Endpoint;
+    use wz_session_core::locator::Proto;
+    match wz_capi_coop::host_group::group_of(endpoint) {
+        Some(_) => Ok(Ok(Endpoint::Ip {
+            proto: Proto::Udp,
+            named: false,
+        })),
+        None => Err((
+            crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+            "the open refuses this config: its group is not one the host joins",
+        )),
+    }
+}
+
+/// A build without the multicast transport has no group to read; `requirement_of` refused one
+/// with this code before reading.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
+fn read_group(_endpoint: &str) -> Result<EndpointReading, Refused> {
+    Err((
+        crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+        "the open refuses this config: a group is a transport this build does not have",
+    ))
 }
 
 #[cfg(test)]
@@ -168,6 +275,8 @@ mod tests {
         );
     }
 
+    /// The tokio engine's runtime resolves a host name, so the door asks for the resolver.
+    #[cfg(feature = "engine-tokio")]
     #[test]
     fn a_host_named_locator_requires_the_resolver() {
         let got = requirement_of(&config(&[(
@@ -212,7 +321,8 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "engine-tokio", feature = "multicast-transport"))]
+    /// Either engine joins the group a listen endpoint with an interface names.
+    #[cfg(feature = "multicast-transport")]
     #[test]
     fn a_listened_group_requires_the_membership() {
         use crate::config::Z_CONFIG_LISTEN_KEY;
@@ -226,5 +336,129 @@ mod tests {
             "{\"requires\": [\"entropy\", \"multicast\", \"sockets-udp\", \"threads\"], \
              \"may_require\": [\"interface-list\"], \"unknown\": []}"
         );
+    }
+
+    /// The cooperative engine has no resolver: its open refuses a host name as a link it could not
+    /// open, and so does the door.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn a_host_named_locator_is_refused_as_the_open_refuses_it() {
+        let (code, reason) = requirement_of(&config(&[(
+            Z_CONFIG_CONNECT_KEY,
+            "tcp/router.example:7447",
+        )]))
+        .unwrap_err();
+        assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
+        assert!(reason.contains("address"), "{reason}");
+    }
+
+    /// A listen endpoint the cooperative engine reads is answered with its socket.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_listener_on_an_address_requires_its_socket() {
+        use crate::config::Z_CONFIG_LISTEN_KEY;
+        let got = requirement_of(&config(&[(Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:0")])).unwrap();
+        assert!(
+            got.starts_with("{\"requires\": [\"entropy\", \"sockets-tcp\", \"threads\"]"),
+            "{got}"
+        );
+    }
+}
+
+/// The door against `z_open` on the same config, on the cooperative engine: each config the open
+/// refuses before it opens a link the door refuses with the open's own code, and a config the open
+/// opens the door answers.
+#[cfg(all(test, not(feature = "engine-tokio")))]
+mod against_the_open {
+    use super::wz_ext_config_device_requires;
+    use crate::abi::{z_owned_config_t, z_owned_string_t};
+    use crate::bytes::{z_string_drop, z_string_move};
+    use crate::config::{
+        z_config_default, z_config_drop, z_config_loan, z_config_loan_mut, z_config_move,
+        zp_config_insert, Z_CONFIG_CONNECT_KEY,
+    };
+    use crate::result::{ZResult, Z_OK};
+    use crate::session::{z_open, z_owned_session_t, z_session_drop, z_session_move};
+    use alloc::ffi::CString;
+
+    /// A config made through the C doors, holding `entries`.
+    ///
+    /// # Safety
+    /// The caller lets go of the config it is handed.
+    unsafe fn config(entries: &[(u8, &str)]) -> z_owned_config_t {
+        let mut config = z_owned_config_t::null_value();
+        assert_eq!(z_config_default(&mut config), Z_OK);
+        for (key, value) in entries {
+            let value = CString::new(*value).expect("no NUL");
+            assert_eq!(
+                zp_config_insert(z_config_loan_mut(&mut config), *key, value.as_ptr()),
+                Z_OK
+            );
+        }
+        config
+    }
+
+    /// The code the door answers for a config holding `entries`.
+    fn door(entries: &[(u8, &str)]) -> ZResult {
+        // SAFETY: every pointer is to a live owned value of this frame, each let go of once.
+        unsafe {
+            let mut config = config(entries);
+            let mut out = z_owned_string_t::null_value();
+            let code = wz_ext_config_device_requires(z_config_loan(&config), &mut out);
+            z_string_drop(z_string_move(&mut out));
+            z_config_drop(z_config_move(&mut config));
+            code
+        }
+    }
+
+    /// The code `z_open` answers for a config holding `entries`, the session it opened let go of.
+    fn open(entries: &[(u8, &str)]) -> ZResult {
+        // SAFETY: every pointer is to a live owned value of this frame; the open consumes the
+        // config, and dropping what it left is dropping nothing.
+        unsafe {
+            let mut config = config(entries);
+            let mut session = z_owned_session_t::null_value();
+            let code = z_open(&mut session, z_config_move(&mut config), core::ptr::null());
+            if code == Z_OK {
+                z_session_drop(z_session_move(&mut session));
+            }
+            z_config_drop(z_config_move(&mut config));
+            code
+        }
+    }
+
+    /// A dial the open refuses before any link: a scheme the engine has no link for, a host name
+    /// it has no resolver for, a port it cannot dial, and a config pair pico's reading refuses.
+    #[test]
+    fn a_dial_the_open_refuses_is_refused_with_its_code() {
+        for endpoint in [
+            "quic/127.0.0.1:7447",
+            "tcp/router.example:7447",
+            "udp/127.0.0.1:0",
+            "tcp/127.0.0.1:7447#tout",
+        ] {
+            let entries = [(Z_CONFIG_CONNECT_KEY, endpoint)];
+            let opened = open(&entries);
+            assert_ne!(opened, Z_OK, "z_open of {endpoint} is refused");
+            assert_eq!(
+                door(&entries),
+                opened,
+                "the door answers {endpoint} as z_open does"
+            );
+        }
+    }
+
+    /// A listener the open opens is answered, and one it refuses is refused with its code.
+    #[cfg(feature = "peer")]
+    #[test]
+    fn a_listener_is_answered_as_the_open_takes_it() {
+        use crate::config::Z_CONFIG_LISTEN_KEY;
+        let taken = [(Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:0")];
+        assert_eq!(open(&taken), Z_OK);
+        assert_eq!(door(&taken), Z_OK);
+        let refused = [(Z_CONFIG_LISTEN_KEY, "quic/127.0.0.1:0")];
+        let opened = open(&refused);
+        assert_ne!(opened, Z_OK);
+        assert_eq!(door(&refused), opened);
     }
 }

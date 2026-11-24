@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 use super::reply::ReplyView;
@@ -618,6 +618,21 @@ impl ResponseWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `Response` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct ResponseWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for ResponseWalk {
+    type Entry<'b> = ResponseView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ResponseView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `ResponseView` is what a decode of `Response` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `Response` holds it, an embedded body or a variant arm as its
@@ -644,18 +659,10 @@ impl<'a> Default for ResponseViewVariant<'a> {
     }
 }
 
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct ResponseExtensionsWalk;
-
-impl ListWalk<0> for ResponseExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type ResponseExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -663,7 +670,7 @@ pub struct ResponseView<'a> {
     pub header: u8,
     pub request_id: u32,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, ResponseExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
     pub body: ResponseViewVariant<'a>,
 }
 

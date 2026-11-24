@@ -64,6 +64,9 @@ e2e-supervision = ["std", "unstable-api", "wz-session-core/e2e-supervision"]
 instance-key = ["std", "unstable-api", "dep:wz-app-frame", "wz-app-frame/instance-key"]
 message-catalog = ["std", "unstable-api", "dep:wz-app-frame"]
 message-payload = ["message-catalog", "dep:wz-app-frame", "wz-app-frame/message-payload"]
+# The doors of `message-payload` and `instance-key` that read a schema from `.proto` text, over the
+# text reader of `wz-app-frame`; it turns neither of them on.
+proto-text = ["wz-app-frame?/proto-text"]
 replay-cache = [
     "std",
     "unstable-api",

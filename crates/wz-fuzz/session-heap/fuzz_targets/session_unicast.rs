@@ -134,6 +134,7 @@ fn params() -> SessionInitParams {
         policy: SessionPolicy::defaults(),
         limits: SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("a key of 32 bytes"),
+        region: None,
     }
 }
 

@@ -691,12 +691,12 @@ const _: () = assert!(
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 
-/// zenoh's text of the locator: `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port` for an IP link.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port` for an IP link:
+/// [`Locator::text`], which holds every IP locator whole, so printing one carries no `core::net`
+/// formatting.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Ip(ip) => write!(f, "{}/{}", ip.proto.scheme(), ip.at),
-        }
+        f.write_str(self.text().finish().map_err(|_| core::fmt::Error)?)
     }
 }
 
@@ -2536,6 +2536,7 @@ mod wake_budget_tests {
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            region: None,
         }
     }
 

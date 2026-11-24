@@ -229,6 +229,14 @@ pub struct SessionInitParams {
     /// peer's InitAck instead.
     pub cookie_signing_key: SigningKey,
 
+    /// The region this node names itself, announced by every Init the session sends as its
+    /// last extension (`0x8`, the largest id an Init carries), and by none when `None`. Part of
+    /// what the session is opened with and never changed after: upstream builds its
+    /// `RegionNameFsm` once from the configuration and returns the name from both
+    /// `send_init_syn` and `send_init_ack`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs` @ `fn send_init_syn`).
+    pub region: Option<crate::extregion::RegionName>,
+
     /// R2924 — the session's outbound queue configuration: upstream's
     /// `transport/link/tx/queue` sizes and congestion waits. Not a codec
     /// value, unlike the fields above; it rides here because this bundle is

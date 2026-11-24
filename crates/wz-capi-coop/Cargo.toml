@@ -238,6 +238,16 @@ group = [
 # link are one decision for both engines. It needs no `std`: a host library without it joins a
 # group as one with it does.
 group-host = ["group", "dep:wz-runtime-posix", "dep:log"]
+# The keyexprs the members of a group declare, each member's kept apart (zenoh-pico's
+# `Z_FEATURE_MULTICAST_DECLARATIONS`, the pico ABI's `multicast-declarations`): every key a member
+# names by one of its own ids, in a put, a declaration, a query, a reply or an interest, reaches the
+# session as the literal that member declared, resolved by the session core's
+# `MulticastDispatcher::apply_declared_aliases` as the tokio engine's group resolves it. Two
+# zenoh-pico members number their keyexprs from the same counter, so the one table of the group's
+# face would hand one member's put the other's key. A group then reads each datagram whole into an
+# owned batch, as a build with `transport-stats` does. Off, which is pico's default build, whose
+# members declare no keyexpr on a group, the text has no table of them.
+multicast-declarations = ["group", "wz-session-core/multicast-declarations"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the

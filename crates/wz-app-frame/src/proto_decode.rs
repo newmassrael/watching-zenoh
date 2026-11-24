@@ -15,7 +15,7 @@
 //! the bytes itself is a second reader of the wire format beside this
 //! library's one writer -- the two disagree exactly where the format is
 //! unusual. This is the one typed reader, and it reads with the same schema
-//! reader ([`crate::proto_schema`]), from the same list of files, under the
+//! reader (`proto_schema`), from the same list of files, under the
 //! same rules as the writer.
 //!
 //! ## What comes out
@@ -29,7 +29,7 @@
 //!   value is field 2 (`google/protobuf/descriptor.proto`, the comment on
 //!   `MessageOptions.map_entry`), and it is listed as exactly that: one entry
 //!   per map entry, holding a `key` and a `value`, which are the names `protoc`
-//!   gives them and the paths [`crate::proto_schema`] declares (`5.1`, `5.2`).
+//!   gives them and the paths `proto_schema` declares (`5.1`, `5.2`).
 //! * A packed run is one entry PER ELEMENT, each with the span of its own bytes
 //!   inside the run, so a repeated field reads the same packed or not. Both
 //!   forms are accepted for every repeated numeric, `bool` and enum field,
@@ -78,9 +78,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::proto_parse::{FieldOption, Label, ScalarKind, MAX_FIELD_NUMBER};
-use crate::proto_schema::{
-    EnumInfo, FieldKind, FileOptions, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile,
+#[cfg(feature = "proto-text")]
+use crate::proto_schema::{Linker, ProtoFile};
+use crate::proto_types::{
+    EnumInfo, FieldKind, FieldOption, FileOptions, Label, LinkedTypes, MapValueKind, Msg,
+    ProtoDiagnostic, ScalarKind, MAX_FIELD_NUMBER,
 };
 
 /// How many messages deep the reader walks: a message inside a message is one
@@ -223,11 +225,13 @@ impl fmt::Display for DecodeError {
 
 /// A schema read and its root message found: what reading any number of
 /// messages of one type needs, built once.
+#[cfg(feature = "proto-text")]
 pub struct LinkedSchema<'f, 'a> {
     linker: Linker<'f, 'a>,
     root: usize,
 }
 
+#[cfg(feature = "proto-text")]
 impl<'f, 'a> LinkedSchema<'f, 'a> {
     /// Read `files` and find `root_message` in them, by full name including the
     /// package, looked up from the file `root_file` indexes.
@@ -270,7 +274,7 @@ impl<'f, 'a> LinkedSchema<'f, 'a> {
 /// declaration text that carries `.proto` files keeps for as long as the map it
 /// built is consulted (the capture crate's `FormatMap`).
 ///
-/// [`LinkedSchema`] borrows its files and names one root, which is right for a
+/// `LinkedSchema` borrows its files and names one root, which is right for a
 /// door that reads one frame. A map is consulted for every message of a capture
 /// and names a message per rule, so it reads the files ONCE, into this, and each
 /// rule holds the [`SchemaMessage`] it names. Every file is read, as
@@ -303,6 +307,16 @@ impl FileOptions for SchemaSet {
     }
 }
 
+impl LinkedTypes for SchemaSet {
+    fn linked_messages(&self) -> &[Msg] {
+        &self.msgs
+    }
+
+    fn linked_enums(&self) -> &[EnumInfo] {
+        &self.enums
+    }
+}
+
 impl SchemaSet {
     /// Read every file of `files`, each with what it imports.
     ///
@@ -310,13 +324,24 @@ impl SchemaSet {
     ///
     /// The first problem found, in the order the files are listed, with the
     /// diagnostic the writer gives for the same file.
+    #[cfg(feature = "proto-text")]
     pub fn read(files: &[ProtoFile<'_>]) -> Result<Self, ProtoDiagnostic> {
         let (msgs, enums, file_options) = Linker::read_all(files)?.into_types();
-        Ok(Self {
+        Ok(Self::from_tables(msgs, enums, file_options))
+    }
+
+    /// The set of the tables a reader linked: the messages and the enums at the
+    /// indices their fields name them by, and each file's own options.
+    pub(crate) fn from_tables(
+        msgs: Vec<Msg>,
+        enums: Vec<EnumInfo>,
+        file_options: Vec<Vec<FieldOption>>,
+    ) -> Self {
+        Self {
             msgs,
             enums,
             file_options,
-        })
+        }
     }
 
     /// The message whose full name, package included, is `full_name`.
@@ -362,7 +387,7 @@ impl SchemaSet {
         self.enums.get(index)
     }
 
-    /// Read `bytes` as one `message`, on [`LinkedSchema::decode`]'s rules.
+    /// Read `bytes` as one `message`, on `LinkedSchema::decode`'s rules.
     ///
     /// # Errors
     ///
@@ -387,6 +412,7 @@ impl SchemaSet {
 ///
 /// A [`DecodeError`] for the first problem found: the schema's, then the
 /// bytes'.
+#[cfg(feature = "proto-text")]
 pub fn decode_message(
     root_message: &str,
     files: &[ProtoFile<'_>],
@@ -1191,7 +1217,7 @@ fn unknown(number: u64, raw: Raw, bytes: &[u8], span: (usize, usize)) -> Decoded
 // The reading of one field path against the listing it must agree with: every payload is read
 // both ways, and the field the old lookup over the listing finds is the one the walk finds. The
 // schema and every byte are synthetic, laid by hand.
-#[cfg(test)]
+#[cfg(all(test, feature = "proto-text"))]
 mod read_path_tests {
     use alloc::vec::Vec;
 
