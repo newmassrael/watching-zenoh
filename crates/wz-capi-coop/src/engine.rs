@@ -3552,67 +3552,58 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&mut self) -> IdleWait {
-        let most = self.config.idle_wait_ms;
-        // The clock is read the first time a deadline asks for it, and that reading serves every
-        // deadline after it: a wait with nothing due reads it not at all.
-        let mut clock_now: Option<u64> = None;
-        // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
-        #[cfg(feature = "query")]
-        let most = match self.next_get_deadline_ms() {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is the next turn of a replay a link owes its peer, which is not due by input.
-        let most = match self
-            .links
-            .faces()
-            .iter()
-            .filter_map(|face| face.replay.next_turn_ms())
-            .min()
-        {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is a periodic job the program started, which no input brings about either.
-        #[cfg(feature = "ticker")]
-        let most = match self.tickers.next_due_ms() {
-            Some(due_ms) => Self::wait_until(
-                most,
-                due_ms,
-                *clock_now.get_or_insert_with(|| self.now_us()),
-            ),
-            None => most,
-        };
-        // And so is a group's turn: its task takes one datagram a step, so a group that took one
-        // is stepped again at once; one that took none is stepped when its next datagram comes,
-        // which the read waits on below, or when its session is next due with nothing arriving
-        // (its beacon, its sweep, what the session pushed onto it, its join again). A group whose
-        // stack gives no wait for its input is looked at on its tick.
+        // What is due other than input, the earliest of it in milliseconds of the session's clock:
+        // a get whose deadline comes first is swept when it is due, not up to a whole wait late,
+        // and so is the next turn of a replay a link owes its peer, a periodic job the program
+        // started, and a group's session when it is next due with nothing arriving (its beacon,
+        // its sweep, what the session pushed onto it, its join again). A group that took a
+        // datagram is stepped again at once, its task taking one a step, so its own time is not
+        // asked.
         #[cfg(feature = "group")]
-        let most = if self.groups.iter().any(GroupFace::took_input) {
-            0
-        } else {
-            let most = match self.groups.iter().filter_map(GroupFace::due_us).min() {
-                Some(due_us) => Self::wait_until(
-                    most,
-                    due_us.div_ceil(1_000),
-                    *clock_now.get_or_insert_with(|| self.now_us()),
-                ),
-                None => most,
-            };
-            if self.groups.iter().any(GroupFace::unwaited) {
-                most.min(group::GROUP_TICK_MS)
+        let group_took = self.groups.iter().any(GroupFace::took_input);
+        let due_ms = [
+            #[cfg(feature = "query")]
+            self.next_get_deadline_ms(),
+            self.links
+                .faces()
+                .iter()
+                .filter_map(|face| face.replay.next_turn_ms())
+                .min(),
+            #[cfg(feature = "ticker")]
+            self.tickers.next_due_ms(),
+            #[cfg(feature = "group")]
+            if group_took {
+                None
             } else {
-                most
-            }
+                self.groups
+                    .iter()
+                    .filter_map(GroupFace::due_us)
+                    .min()
+                    .map(|due_us| due_us.div_ceil(1_000))
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // The clock is read when something is due, and that reading serves every bound after it:
+        // a wait with nothing due reads it not at all.
+        let mut clock_now: Option<u64> = None;
+        let most = match due_ms {
+            Some(due_ms) => Self::wait_until(
+                self.config.idle_wait_ms,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
+            None => self.config.idle_wait_ms,
+        };
+        // A group whose stack gives no wait for its input is looked at on its tick.
+        #[cfg(feature = "group")]
+        let most = if group_took {
+            0
+        } else if self.groups.iter().any(GroupFace::unwaited) {
+            most.min(group::GROUP_TICK_MS)
+        } else {
+            most
         };
         if most == 0 {
             return IdleWait::None;
