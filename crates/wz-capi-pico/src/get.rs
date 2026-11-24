@@ -1254,7 +1254,7 @@ pub(crate) unsafe fn get_inner(
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
     let engine = crate::session::engine_of(handle);
-    let wire = wire_key_of(keyexpr, &engine);
+    let wire = wire_key_of(keyexpr, Arc::as_ref(&engine));
 
     let value_meta = PicoQueryValueMeta {
         encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),
