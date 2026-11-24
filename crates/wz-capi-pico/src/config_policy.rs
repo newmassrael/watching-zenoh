@@ -350,7 +350,7 @@ fn next_member<'t>(lex: &mut Lexer<'t>) -> Result<Option<Json5Str<'t>>, Refused>
     }
     let name = lex.member_name()?;
     lex.skip_trivia()?;
-    lex.expect(b':', ": after a member name")?;
+    lex.consume(b':', ": after a member name")?;
     lex.skip_trivia()?;
     Ok(Some(name))
 }
@@ -371,6 +371,14 @@ fn after_member(lex: &mut Lexer<'_>) -> Result<(), Refused> {
 
 #[cfg(feature = "config-document")]
 impl DocumentRows {
+    /// How deep a member of the document's object may nest, the object being the first level: a
+    /// build whose document depth leaves no room for one fails to compile.
+    const MEMBER_DEPTH: usize = caps::CONFIG_DOCUMENT_DEPTH - 1;
+
+    /// How deep a member of the `wz` member may nest, two levels below the document's object.
+    #[cfg(feature = "shared-key-ids")]
+    const WZ_MEMBER_DEPTH: usize = caps::CONFIG_DOCUMENT_DEPTH - 2;
+
     /// Whether the document states nothing, so a config resolves as one handed none.
     fn states_nothing(&self) -> bool {
         let stated =
@@ -428,7 +436,7 @@ impl DocumentRows {
             if name.eq_str(WZ_MEMBER) {
                 self.read_wz(lex, &mut seen_wz)?;
             } else {
-                lex.skip_value(caps::CONFIG_DOCUMENT_DEPTH - 1)?;
+                lex.skip_value(Self::MEMBER_DEPTH)?;
             }
             after_member(lex)?;
         }
@@ -471,7 +479,7 @@ impl DocumentRows {
                 {
                     self.key_ids = wz_session_core::shared_key_ids::read_member_in(
                         lex,
-                        caps::CONFIG_DOCUMENT_DEPTH - 2,
+                        Self::WZ_MEMBER_DEPTH,
                         wz_session_core::shared_key_ids::form_in_domain,
                     )
                     .map_err(|_| Refused)?;

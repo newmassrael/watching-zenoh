@@ -499,12 +499,6 @@ pub mod config;
 // The policies a config states for its session, from code and from a zenoh document: wz doors
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
-// Totality debt TD-163 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod config_policy;
 // What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
 // unstable surface (docs/target-build-contract.md T9).
