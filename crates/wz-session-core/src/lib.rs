@@ -661,6 +661,9 @@ pub mod locator;
 // The part of the locator grammar that needs no heap: the span split every leaf shares and the
 // serial leaf, read and written, for the heap profile's leaf above and an engine without a heap.
 pub mod locator_grammar;
+// The endpoint a session joins a multicast group by, read once into fields of fixed size, for
+// every engine that opens group sockets.
+pub mod group_locator;
 // What an open of a configuration asks of the operating system, for every reader of one
 // (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
 #[cfg(feature = "alloc")]

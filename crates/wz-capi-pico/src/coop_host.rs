@@ -59,6 +59,18 @@ mod posix_host {
         WithSerial::<S>::new(links, wz_runtime_posix::serial::PosixSerialOpen)
     }
 
+    /// The links `S` with links over the host's named FIFOs beside them, which `unixpipe/`
+    /// locators are dialled and listened on with.
+    #[cfg(feature = "transport-link-unixpipe")]
+    pub(crate) type WithUnixpipe<S> = wz_runtime_posix::unixpipe::PosixUnixpipeLinks<S>;
+
+    /// `links`, and links over the host's named FIFOs beside them, made and locked as zenoh's
+    /// unixpipe link makes and locks its own.
+    #[cfg(feature = "transport-link-unixpipe")]
+    pub(crate) fn with_unixpipe<S>(links: S) -> WithUnixpipe<S> {
+        WithUnixpipe::<S>::new(links, wz_runtime_posix::unixpipe::PosixFifoOpen)
+    }
+
     pub(crate) fn clock() -> Clock {
         wz_runtime_posix::PosixClock
     }

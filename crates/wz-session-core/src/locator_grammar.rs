@@ -431,12 +431,48 @@ pub fn write_unixpipe_path_with_config<W: TextOut + ?Sized>(
 }
 
 /// The first value a `key=value;...` span gives `key`, as upstream's `Parameters::get` reads it.
-fn first_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
+fn first_value<'a>(config: &'a str, key: &'a str) -> Option<&'a str> {
+    config_values(config, key).next()
+}
+
+/// Every value a `key=value;...` span gives `key`, in the order written, as upstream's
+/// `Parameters::values` reads them: a key a link reads more than once (`join`) takes them all.
+pub(crate) fn config_values<'a>(
+    config: &'a str,
+    key: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
     config
         .split(';')
         .filter_map(|pair| pair.split_once('='))
-        .find(|(k, _)| *k == key)
+        .filter(move |(k, _)| *k == key)
         .map(|(_, value)| value)
+}
+
+/// A `dscp` value in upstream's exact accepted set, or `None`.
+///
+/// Mirrors `parse_dscp`
+/// (`io/zenoh-link-commons/src/dscp.rs` @ `dscp.split('|')`): `|`-separated
+/// integers OR-ed together, each decimal, `0x`/`0X` hexadecimal, or `0B`
+/// binary. Upstream also lists a `0xb` binary prefix, but its `0x` arm is tried
+/// first and takes every string that prefix could match, so `0xb101` is
+/// hexadecimal there and here. Mirrored rather than corrected: an operator's
+/// string must mean the same thing to both implementations. Any part that does
+/// not parse refuses the whole value, as upstream's `reduce` over `Option`s does.
+pub fn parse_dscp_value(value: &str) -> Option<u32> {
+    fn part(s: &str) -> Option<u32> {
+        if let Some(hex) = ["0x", "0X"].iter().find_map(|p| s.strip_prefix(p)) {
+            u32::from_str_radix(hex, 16).ok()
+        } else if let Some(bin) = ["0xb", "0B"].iter().find_map(|p| s.strip_prefix(p)) {
+            u32::from_str_radix(bin, 2).ok()
+        } else {
+            s.parse::<u32>().ok()
+        }
+    }
+    value
+        .split('|')
+        .map(part)
+        .reduce(|a, b| Some(a? | b?))
+        .flatten()
 }
 
 #[cfg(test)]

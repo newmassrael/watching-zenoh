@@ -762,11 +762,13 @@ mod tests {
     /// The bytes written into a FIFO and not read yet.
     type Queue = Rc<RefCell<VecDeque<u8>>>;
 
-    /// The host's FIFOs, as the test keeps them: each node's bytes, the nodes a read end holds the
-    /// lock of, the suffixes the dials draw, and the clock.
+    /// The host's FIFOs, as the test keeps them: each node's bytes, the mode each read end asked
+    /// its node made with, the nodes a read end holds the lock of, the suffixes the dials draw,
+    /// and the clock.
     #[derive(Default)]
     struct Host {
         nodes: RefCell<BTreeMap<String, Queue>>,
+        modes: RefCell<BTreeMap<String, u32>>,
         locked: RefCell<BTreeSet<String>>,
         suffixes: RefCell<VecDeque<u32>>,
         now_us: Cell<u64>,
@@ -816,10 +818,11 @@ mod tests {
     impl FifoOpen for TestOpen {
         type Fifo = TestFifo;
 
-        fn reader(&self, path: &str, _mode: u32) -> Result<TestFifo, LinkOpenError> {
+        fn reader(&self, path: &str, mode: u32) -> Result<TestFifo, LinkOpenError> {
             if !self.0.locked.borrow_mut().insert(String::from(path)) {
                 return Err(LinkOpenError::AddressInUse);
             }
+            self.0.modes.borrow_mut().insert(String::from(path), mode);
             let queue = Rc::clone(
                 self.0
                     .nodes
@@ -1019,6 +1022,29 @@ mod tests {
             !open.0.locked.borrow().contains("/tmp/p_uplink9"),
             "the unconfirmed pair is let go"
         );
+    }
+
+    /// Every FIFO of a link, the listener's request FIFO and both of a dial's pair, is made owner
+    /// only when the locator states no mode, and with the mode a locator states. Turned red by a
+    /// default wider than the owner's (upstream's `0o777`), or by a mode the listener or the dial
+    /// does not hand down.
+    #[test]
+    fn a_link_makes_its_fifos_owner_only_unless_its_locator_states_a_mode() {
+        for (file_mask, mode) in [(None, 0o600), (Some(0o666), 0o666)] {
+            let open = TestOpen::default();
+            let links = links(&open);
+            let at = Locator::Unixpipe(UnixpipeLocator {
+                path: UnixpipePath::new("/tmp/p").expect("a path a row holds"),
+                file_mask,
+            });
+            let listener = links.open_listener(at).expect("a listener");
+            let mut dial = links.begin_initiator(at).expect("a dial");
+            assert!(dial.poll().is_none(), "the listener has not confirmed");
+            assert!(listener.accept().expect("a sound listener").is_none());
+            for node in ["/tmp/p_uplink", "/tmp/p_downlink7", "/tmp/p_uplink7"] {
+                assert_eq!(open.0.modes.borrow().get(node), Some(&mode), "{node}");
+            }
+        }
     }
 
     /// A locator of another kind is the stack's to dial and listen on. Turned red by a combinator

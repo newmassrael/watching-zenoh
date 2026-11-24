@@ -592,12 +592,22 @@ type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
 type SocketLinks = SecuredLinks;
 
-/// The links a cooperative session opens over the host: its sockets', and its ttys' beside them
-/// where the build has serial links (`transport-link-serial`).
+/// The links a cooperative session opens over the host's sockets and lines: its sockets', and its
+/// ttys' beside them where the build has serial links (`transport-link-serial`).
 #[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-serial"))]
-pub(crate) type HostLinks = crate::coop_host::WithSerial<SocketLinks>;
+type TtyLinks = crate::coop_host::WithSerial<SocketLinks>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-serial")))]
-pub(crate) type HostLinks = SocketLinks;
+type TtyLinks = SocketLinks;
+
+/// The links a cooperative session opens over the host: its sockets' and ttys', and its named
+/// FIFOs' beside them where the build has unixpipe links (`transport-link-unixpipe`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-unixpipe"))]
+pub(crate) type HostLinks = crate::coop_host::WithUnixpipe<TtyLinks>;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(feature = "transport-link-unixpipe")
+))]
+pub(crate) type HostLinks = TtyLinks;
 
 /// The links a cooperative session opens over: the host's, or with `app-transport` whichever of
 /// the host's and the program's transport the config chose. One type either way, so the engine
@@ -2101,6 +2111,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // is dialled and listened on over them, any other over the sockets.
     #[cfg(feature = "transport-link-serial")]
     let links = crate::coop_host::with_serial(links).waited_by_owner();
+    // The host's named FIFOs are links beside those, waited for the same way: a `unixpipe/`
+    // locator is dialled and listened on over them.
+    #[cfg(feature = "transport-link-unixpipe")]
+    let links = crate::coop_host::with_unixpipe(links).waited_by_owner();
     #[cfg(feature = "app-transport")]
     let links = match request.app_transport {
         Some(transport) => PicoLinks::Right(app_links_on(
