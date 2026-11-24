@@ -71,6 +71,18 @@ mod posix_host {
         WithWs::<S>::new(links, wz_runtime_posix::ws::PosixWsOpen, handshakes)
     }
 
+    /// The links `S` with links over the host's named FIFOs beside them, which `unixpipe/`
+    /// locators are dialled and listened on with.
+    #[cfg(feature = "transport-link-unixpipe")]
+    pub(crate) type WithUnixpipe<S> = wz_runtime_posix::unixpipe::PosixUnixpipeLinks<S>;
+
+    /// `links`, and links over the host's named FIFOs beside them, made and locked as zenoh's
+    /// unixpipe link makes and locks its own.
+    #[cfg(feature = "transport-link-unixpipe")]
+    pub(crate) fn with_unixpipe<S>(links: S) -> WithUnixpipe<S> {
+        WithUnixpipe::<S>::new(links, wz_runtime_posix::unixpipe::PosixFifoOpen)
+    }
+
     pub(crate) fn clock() -> Clock {
         wz_runtime_posix::PosixClock
     }
@@ -167,11 +179,17 @@ mod windows_host {
 // has none: refused here by name, rather than by the empty runtime crate the open would reach.
 #[cfg(all(
     any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    not(any(target_os = "linux", target_os = "android", target_os = "nto", windows))
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "nto",
+        target_os = "macos",
+        windows
+    ))
 ))]
 compile_error!(
     "wz-capi-pico: the cooperative engine's host is `wz-runtime-posix`, which has Linux, Android, \
-     QNX Neutrino and Windows; another host names its clock, random source, wall clock and \
+     QNX Neutrino, macOS and Windows; another host names its clock, random source, wall clock and \
      sockets there and a module of its own in src/coop_host.rs"
 );
 

@@ -575,7 +575,7 @@ async fn join_group(
             beacon: wz_runtime_tokio::multicast_glue::GroupBeacon {
                 lease_ms: join.profile.lease_ms,
                 join_interval_ms: join.profile.join_interval_ms,
-                seq_num_res: join.profile.seq_num_res,
+                seq_num_res: join.profile.seq_num_res.wire_code(),
                 req_id_res: join.profile.req_id_res,
                 batch_size: join.profile.batch_size,
             },

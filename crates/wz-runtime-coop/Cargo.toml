@@ -196,6 +196,12 @@ serial = ["alloc", "session-unicast", "wz-session-core/transport-link-serial"]
 # the build does not carry.
 ws = ["alloc", "session-unicast", "wz-session-core/transport-link-ws"]
 
+# Links over a pair of named FIFOs on this host (`unixpipe/` locators): the locator of one, read
+# and written with the session core's grammar. The link over the FIFOs is the heap profile's, so
+# this takes `alloc` and the unicast session, as the serial links do. Without it a `unixpipe/`
+# endpoint is a scheme the build does not carry.
+unixpipe = ["alloc", "session-unicast"]
+
 # The high-water mark of the pump cells (`wz-session-core`'s `pool-monitor`).
 # Without it the table keeps no mark and is the size it was.
 pool-monitor = ["wz-session-core?/pool-monitor"]

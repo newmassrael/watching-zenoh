@@ -199,7 +199,8 @@ pub enum Link<S, D> {
     },
     /// The dial role's face, whose link reached the node `zid` while another face holds that
     /// node or brings a link to it up: it stands by, and is dialled again once no other face has
-    /// the node.
+    /// the node. Only a session that takes faces besides its dial (`listen`) has another face.
+    #[cfg(feature = "listen")]
     Held {
         /// The node the link reached.
         zid: SessionZid,
@@ -233,6 +234,7 @@ impl<S, D> Link<S, D> {
                 deadline_us: *deadline_us,
             },
             Link::Waiting { at_us } => Phase::Waiting { at_us: *at_us },
+            #[cfg(feature = "listen")]
             Link::Held { zid } => Phase::Held { node: *zid },
         }
     }
@@ -737,6 +739,8 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     /// another thread then makes no buffer of its own after the open.
     waits: Option<Vec<LinkWait>>,
     next_face: FaceId,
+    /// The record each face is kept as: the table `P` holds it, the supervisor names it.
+    records: core::marker::PhantomData<fn() -> F>,
 }
 
 impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlaces<F>>
@@ -753,6 +757,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             listeners: Vec::new(),
             waits: Some(Vec::with_capacity(waits)),
             next_face: 1,
+            records: core::marker::PhantomData,
         }
     }
 
@@ -931,11 +936,16 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     // Out of line, so its caller reads the role as a value and takes one path for either role.
     #[inline(never)]
     pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
+        // A session that takes no face besides its dial has the dial role alone: a place past the
+        // first holds a departed face's tomb there, which never moves.
+        #[cfg(feature = "listen")]
         let role = if at == 0 || !P::TAKES {
             FaceRole::Dial
         } else {
             FaceRole::Taken
         };
+        #[cfg(not(feature = "listen"))]
+        let role = FaceRole::Dial;
         let phase = self
             .face(at)
             .map_or(Phase::Waiting { at_us: u64::MAX }, |face| {
@@ -959,9 +969,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             }
             None => {}
         }
+        #[cfg(feature = "listen")]
         if let Phase::Held { node } = &phase {
             signals.node_held = P::TAKES && self.node_is_held(node.as_slice(), id);
         }
+        #[cfg(not(feature = "listen"))]
+        let _ = id;
         FaceRead {
             role,
             phase,
@@ -1098,7 +1111,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                 }
                 // A face waiting, dialling or standing by brings no input of its own: its time,
                 // read above, is what wakes the read for it.
-                Link::Waiting { .. } | Link::Dialing { .. } | Link::Held { .. } => {}
+                Link::Waiting { .. } | Link::Dialing { .. } => {}
+                #[cfg(feature = "listen")]
+                Link::Held { .. } => {}
             }
         }
         if holds {
@@ -1467,6 +1482,7 @@ mod tests {
 
     /// Another face holds a node while its link to it is up, and a face never holds one for
     /// itself; once that face goes, no face holds the node.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_node_is_held_by_another_face_while_its_link_is_up() {
         let runtime = CoopRuntime::new(Still);
@@ -1542,12 +1558,15 @@ mod tests {
         assert!(!up.signals.established);
         assert!(!up.signals.ended);
 
-        faces.put_link(0, Link::Held { zid: held_node() });
-        assert!(faces.read_face(0, 100).signals.node_held);
-        assert!(
-            !faces.read_face(0, 1).signals.node_held,
-            "a face does not hold the node for itself"
-        );
+        #[cfg(feature = "listen")]
+        {
+            faces.put_link(0, Link::Held { zid: held_node() });
+            assert!(faces.read_face(0, 100).signals.node_held);
+            assert!(
+                !faces.read_face(0, 1).signals.node_held,
+                "a face does not hold the node for itself"
+            );
+        }
 
         let past = faces.read_face(9, 9);
         assert_eq!(past.phase, Phase::Waiting { at_us: u64::MAX });
@@ -1567,8 +1586,18 @@ mod tests {
         };
         assert!(faces.place_face(1, taken).is_ok());
         assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
-        assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
-        assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+        #[cfg(feature = "listen")]
+        {
+            assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
+            assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+        }
+        // Without `listen` no face is taken besides the dial: a place past the first holds only a
+        // departed face's tomb, read in the one role there is.
+        #[cfg(not(feature = "listen"))]
+        {
+            assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
+            assert_eq!(faces.read_face(9, 9).role, FaceRole::Dial);
+        }
     }
 
     /// A table of the dial role's face alone reads every place in that role, so a step of such a
@@ -1577,15 +1606,12 @@ mod tests {
     /// table.
     #[test]
     fn a_table_of_one_face_reads_every_place_in_the_dial_role() {
-        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> = LinkSupervisor::new(
-            Net,
-            TestFace {
-                id: 100,
-                link: Link::Held { zid: held_node() },
-            },
-            2,
-            2,
-        );
+        #[cfg(feature = "listen")]
+        let link = Link::Held { zid: held_node() };
+        #[cfg(not(feature = "listen"))]
+        let link = Link::Waiting { at_us: 0 };
+        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> =
+            LinkSupervisor::new(Net, TestFace { id: 100, link }, 2, 2);
         assert!(!faces.takes_faces());
         assert!(
             supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
@@ -1593,6 +1619,7 @@ mod tests {
         );
         assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
         assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
+        #[cfg(feature = "listen")]
         assert!(!faces.read_face(0, 100).signals.node_held);
     }
 
@@ -1606,7 +1633,7 @@ mod tests {
         assert_eq!(faces.end_dial(0, 7), Some(named));
         assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 7 }));
 
-        faces.put_link(0, Link::Held { zid: held_node() });
+        faces.put_link(0, Link::Waiting { at_us: 3 });
         assert_eq!(faces.end_dial(0, 9), None, "no dial, no endpoint");
         assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 9 }));
 
@@ -1877,11 +1904,14 @@ mod tests {
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)
         ));
-        faces.put_link(0, Link::Held { zid: held_node() });
-        assert!(matches!(
-            faces.idle_wait(10, &mut now, [], None),
-            IdleWait::None
-        ));
+        #[cfg(feature = "listen")]
+        {
+            faces.put_link(0, Link::Held { zid: held_node() });
+            assert!(matches!(
+                faces.idle_wait(10, &mut now, [], None),
+                IdleWait::None
+            ));
+        }
         assert_eq!(clock_reads, 1, "only the waiting face read the clock");
 
         let runtime = CoopRuntime::new(Still);
@@ -2010,14 +2040,17 @@ mod tests {
             }
             _ => panic!("a sleep beside a wake waits on it"),
         }
-        faces.put_link(0, Link::Held { zid: held_node() });
-        assert!(
-            matches!(
-                faces.idle_wait(10, &mut || 0u64, [], Some(wake)),
-                IdleWait::None
-            ),
-            "the wake made a wait of its own"
-        );
+        #[cfg(feature = "listen")]
+        {
+            faces.put_link(0, Link::Held { zid: held_node() });
+            assert!(
+                matches!(
+                    faces.idle_wait(10, &mut || 0u64, [], Some(wake)),
+                    IdleWait::None
+                ),
+                "the wake made a wait of its own"
+            );
+        }
 
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);

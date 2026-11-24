@@ -3883,6 +3883,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the rows of a group's members: its multicast transport keeps each peer on the heap, and the count a profile states for a group's sessions is a quota within these rows, not their capacity; the default is the member table the cooperative engine's group session already held."
 
 [[limit]]
+id = "MAX_MEMBER_KEYEXPRS"
+kconfig = "WZ_LIMIT_MAX_MEMBER_KEYEXPRS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
+help = '''
+The key expressions one member of a multicast group may have declared to
+this session at a time, to name them by a short id of its own. Each member
+holds its own, and they are let go of when it leaves. One more is refused
+and counted, and a message that names it is dropped, as one naming an
+undeclared id is. The group's face reserves this many aliases for each of
+its MAX_GROUP_MEMBERS members when the session opens. The default is
+MAX_PEER_KEYEXPR_ALIASES, one peer's.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids a peer declared in a map of its face that grows with each declaration, and zenoh-pico keeps the resources each member of a group declared in a list of that peer with no count, dropped with the peer (`vendor/zenoh-pico/src/transport/peer.c` @ `_z_resource_slist_free(&src->_remote_resources);`)."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
+
+[[limit]]
 id = "MAX_CONNECTIVITY_REPLAY_EVENTS"
 kconfig = "WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"
 kind = "bound"
@@ -5682,6 +5710,7 @@ id = "sn-resolution"
 kind = "choice"
 kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
+wire_codes = { bits-32 = 2, bits-8 = 0, bits-16 = 1, bits-64 = 3 }
 default = "bits-32"
 upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
 scope = "session"

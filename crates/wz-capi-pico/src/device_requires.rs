@@ -214,8 +214,8 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
             "the open refuses this config: the engine reads no address it can open in an endpoint",
         )
     })?;
-    // A link of another kind, a serial line, is a request no facility of the vocabulary names:
-    // the vocabulary's own reading says so, in its words.
+    // A link of another kind, a serial line or a pair of named FIFOs, is a request no facility of
+    // the vocabulary names: the vocabulary's own reading says so, in its words.
     let Some(ip) = locator.as_ip() else {
         return Ok(wz_session_core::facilities::read_any_endpoint(endpoint));
     };

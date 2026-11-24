@@ -9,7 +9,8 @@
 //! host's SEAMS, over the C library:
 //!
 //! 1. [`PosixClock`] -- a [`ClockSource`] over `clock_gettime(CLOCK_MONOTONIC)`.
-//! 2. [`PosixEntropy`] -- the session core's `EntropySource`, over `getrandom(2)`.
+//! 2. [`PosixEntropy`] -- the session core's `EntropySource`, over `getrandom(2)` (macOS:
+//!    `getentropy(2)`).
 //! 3. [`PosixEpoch`] -- the session core's `EpochSource`, over `clock_gettime(CLOCK_REALTIME)`.
 //! 4. [`net`] -- UDP over the kernel's sockets ([`net::PosixUdpSocket`]), the socket the shared
 //!    link is written against; and, under `session-slot`, [`slot`], the stack the slot profile's
@@ -35,12 +36,15 @@
 //! The profile is single-threaded by construction, and the `critical_section` implementation says
 //! so: it takes no lock, because nothing else runs.
 //!
-//! The POSIX hosts are Linux, Android and QNX Neutrino. Two OS calls differ between them and are
-//! named once each: `errno` (glibc's `__errno_location`, bionic's `__errno`, Neutrino's
-//! `__get_errno_ptr`) and the entropy (`getrandom(2)` on Linux and Android; Neutrino 7.1's C
-//! library has none, so `/dev/urandom` is read). A socket the three make alike is made by one code
-//! path, and the one thing Linux has that Neutrino does not (`SOCK_NONBLOCK`, `accept4`) is two
-//! calls where Linux has one.
+//! The POSIX hosts are Linux, Android, QNX Neutrino and macOS. Two OS calls differ between them
+//! and are named once each: `errno` (glibc's `__errno_location`, bionic's `__errno`, Neutrino's
+//! `__get_errno_ptr`, Darwin's `__error`) and the entropy (`getrandom(2)` on Linux and Android,
+//! `getentropy(2)` on macOS; Neutrino 7.1's C library has neither, so `/dev/urandom` is read). A
+//! socket the four make alike is made by one code path, and the one thing Linux has that Neutrino
+//! does not (`SOCK_NONBLOCK`, `accept4`) is two calls where Linux has one. macOS has no
+//! `SOCK_CLOEXEC` either, so its socket is made close-on-exec by a call of its own, and a write to
+//! a stream whose peer is gone is kept from raising SIGPIPE by the socket's `SO_NOSIGPIPE`, the way
+//! Darwin states it, where the others pass `MSG_NOSIGNAL` to each send.
 //!
 //! Windows is the one host that is not POSIX: its calls are the system's own (the performance
 //! counter, the system's random number generator, Winsock), and they are
@@ -51,7 +55,13 @@
 //! half's, compiled on a POSIX host only; `group` is written once over either host's sockets. On another OS this crate
 //! is empty, so a workspace-wide build there does not stop on it; a port names its own calls here.
 #![no_std]
-#![cfg(any(target_os = "linux", target_os = "android", target_os = "nto", windows))]
+#![cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "nto",
+    target_os = "macos",
+    windows
+))]
 
 #[cfg(test)]
 extern crate std;
@@ -105,6 +115,10 @@ pub mod serial;
 pub mod slot;
 #[cfg(unix)]
 pub mod stream;
+/// The host's named FIFOs as the ends of the cooperative engine's unixpipe links, on Linux and
+/// Android.
+#[cfg(feature = "unixpipe")]
+pub mod unixpipe;
 #[cfg(windows)]
 pub mod windows;
 /// The host's TCP connections, clock and entropy as what the cooperative engine's WebSocket links
@@ -150,9 +164,10 @@ impl ClockSource for PosixClock {
 }
 
 /// The session core's [`EntropySource`](wz_session_core::entropy::EntropySource) over
-/// `getrandom(2)` (on Neutrino, which has none, a read of `/dev/urandom`): the kernel's CSPRNG. A
-/// call that returns fewer bytes than asked is asked again for the rest; one that fails, fails the
-/// fill -- the cookie nonce and the signing key must never be made of whatever the buffer held.
+/// `getrandom(2)` (`getentropy(2)` on macOS; on Neutrino, which has neither, a read of
+/// `/dev/urandom`): the kernel's CSPRNG. A call that returns fewer bytes than asked is asked again
+/// for the rest; one that fails, fails the fill -- the cookie nonce and the signing key must never
+/// be made of whatever the buffer held.
 #[cfg(unix)]
 #[derive(Clone, Copy, Default)]
 pub struct PosixEntropy;
@@ -184,6 +199,24 @@ fn random_bytes(rest: &mut [u8]) -> usize {
     let got = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
     usize::try_from(got).unwrap_or(0)
 }
+
+/// macOS has no `getrandom`; `getentropy(2)` is its call to the kernel's generator, and it fills
+/// at most `GETENTROPY_MAX` bytes a call (`EIO` past that), so a longer fill is asked in pieces
+/// by the caller's loop, as a short `getrandom` is.
+#[cfg(target_os = "macos")]
+fn random_bytes(rest: &mut [u8]) -> usize {
+    let take = rest.len().min(GETENTROPY_MAX);
+    // SAFETY: the first `take` bytes of `rest` are live and writable.
+    if unsafe { libc::getentropy(rest.as_mut_ptr().cast(), take) } == 0 {
+        take
+    } else {
+        0
+    }
+}
+
+/// The most bytes one `getentropy(2)` call fills (`<sys/random.h>`, `GETENTROPY_MAX`).
+#[cfg(target_os = "macos")]
+const GETENTROPY_MAX: usize = 256;
 
 /// Neutrino 7.1's C library has no `getrandom` and no `getentropy`; its random service answers
 /// reads of `/dev/urandom`. The descriptor is opened for the read and closed after it, so the node
@@ -309,7 +342,8 @@ mod tests {
         entropy.try_fill_bytes(&mut b).expect("getrandom works");
         assert_ne!(a, [0u8; 64], "64 zero bytes from a CSPRNG is not a draw");
         assert_ne!(a, b, "two draws of 64 bytes are not the same");
-        // More than `getrandom` returns at once on a small-limit kernel still fills whole.
+        // More than one call gives (`getrandom` on a small-limit kernel, `getentropy`'s 256 bytes
+        // on macOS) still fills whole.
         let mut big = [0u8; 4096];
         entropy.try_fill_bytes(&mut big).expect("a large fill");
         assert_ne!(&big[..64], &[0u8; 64][..]);

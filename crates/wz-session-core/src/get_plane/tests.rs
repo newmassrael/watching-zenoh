@@ -60,6 +60,7 @@ impl RoundCalls for Asking {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
 }
 
 impl PlaneCalls for Asking {
@@ -95,6 +96,7 @@ impl RoundCalls for Remote {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
 }
 
 impl PlaneCalls for Remote {

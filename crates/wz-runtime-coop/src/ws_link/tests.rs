@@ -15,7 +15,7 @@ use wz_session_core::ws_link::MASK_SEED_LEN;
 
 use super::*;
 use crate::link_storage::{HeapTx, RxStore, TxStore};
-use crate::session_drive::SessionDatagramLink;
+use crate::session_drive::{LinkProto, SessionDatagramLink};
 use crate::stream_link::StreamDriver;
 
 /// What the peer sent, in the pieces the stream cuts it into, and what the link wrote.
@@ -41,12 +41,12 @@ impl StreamSocket for Pipe {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        SocketAddr::from(([10, 0, 0, 2], 40_000))
-    }
-
-    fn peer(&self) -> SocketAddr {
-        SocketAddr::from(([10, 0, 0, 1], 7447))
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: SocketAddr::from(([10, 0, 0, 2], 40_000)),
+            peer: SocketAddr::from(([10, 0, 0, 1], 7447)),
+        }
     }
 
     fn write(&self, bytes: &[u8]) -> Result<usize, Self::Error> {

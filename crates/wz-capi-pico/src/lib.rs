@@ -250,22 +250,27 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
-// The unixpipe link is built on a Unix host alone, so elsewhere the feature names nothing to refuse.
+// The cooperative engine's unixpipe links are the host's named FIFOs (`wz-runtime-posix`'s
+// `unixpipe`), which it opens on Linux and Android; another host, and a Zephyr image, which has no
+// named FIFO, are refused by name rather than by the missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "transport-link-unixpipe",
-    unix,
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(any(target_os = "linux", target_os = "android"))
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-unixpipe` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-unixpipe` on the cooperative engine opens the host's named \
+     FIFOs, which `wz-runtime-posix` opens on Linux and Android only, and a Zephyr image has no \
+     named FIFO in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's FIFOs"
 );
 // The cooperative engine's WebSocket links run over the host's TCP (`wz-runtime-posix`'s `ws`,
 // on a POSIX host and on Windows); a Zephyr image has no opener in `src/coop_host.rs` yet and is
@@ -294,8 +299,7 @@ compile_error!(
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-tls",
-        feature = "transport-link-unixpipe"
+        feature = "transport-link-tls"
     ))
 ))]
 compile_error!(

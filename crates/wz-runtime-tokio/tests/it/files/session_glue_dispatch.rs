@@ -90,7 +90,7 @@ fn fixture_params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x10, 0x20, 0x30, 0x40].into(),
-        seq_num_res: 0x03,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits64,
         req_id_res: 0x02,
         batch_size: 0xCAFE,
         lease_ms: 30_000,
@@ -104,7 +104,9 @@ fn fixture_params() -> SessionInitParams {
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte test key valid"),
+        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+            .expect("32-byte test key valid")
+            .into(),
         region: None,
     }
 }
@@ -213,7 +215,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // expected_init_cbyte is an independent API-form oracle ((api>>1)&3), kept
     // separate from production's WhatAmI::to_wire, so feed it the API byte.
     let init_cbyte = expected_init_cbyte(params.whatami.to_api(), params.zid.len());
-    let init_sn_res = expected_sn_res(params.seq_num_res, params.req_id_res);
+    let init_sn_res = expected_sn_res(params.seq_num_res.wire_code(), params.req_id_res);
 
     // InitSyn — flags=S|Z (R121f1 default ext chain seeds the patch
     // extension entry per zenoh-pico's `Z_FEATURE_FRAGMENTATION=1`

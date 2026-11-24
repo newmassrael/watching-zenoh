@@ -56,6 +56,8 @@ use wz_session_core::link::RxFrame;
 use wz_session_core::locator_grammar::{
     write_serial_address_with_config, SerialAddress, SerialOptions, SERIAL_SCHEME,
 };
+#[cfg(feature = "unixpipe")]
+use wz_session_core::locator_grammar::{write_unixpipe_path_with_config, UNIXPIPE_SCHEME};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::{FixedText, TextOut};
@@ -617,6 +619,9 @@ pub enum Locator {
     /// A WebSocket link: `ws/` to an address and a port, over a TCP connection.
     #[cfg(feature = "ws")]
     Ws(WsLocator),
+    /// A link over a pair of named FIFOs on this host: `unixpipe/` to a base path.
+    #[cfg(feature = "unixpipe")]
+    Unixpipe(UnixpipeLocator),
 }
 
 /// The locator of a link over IP: a protocol and the end it reaches, an IPv4 or an IPv6 address
@@ -703,27 +708,47 @@ pub enum SerialLine {
     },
 }
 
-/// The path of a serial device, held inline so a [`Locator`] stays `Copy`: at most
-/// [`SERIAL_PATH_LEN`] bytes, the most a `serial/<path>` text of a row of the build
-/// ([`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN)) can name, so a link over any path it holds can
-/// be named in its faces' rows.
-#[cfg(feature = "serial")]
+/// A path held inline so a [`Locator`] stays `Copy`: at most `N` bytes, the most a locator of
+/// its kind in a row of the build ([`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN)) can name, so a link
+/// over any path it holds can be named in its faces' rows (`SerialPath`, `UnixpipePath`).
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SerialPath {
-    bytes: [u8; SERIAL_PATH_LEN],
+pub struct LinkPath<const N: usize> {
+    bytes: [u8; N],
     len: usize,
 }
+
+/// The path of a serial device: what a row leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub type SerialPath = LinkPath<SERIAL_PATH_LEN>;
 
 /// The longest device path a [`SerialPath`] holds: what a row of
 /// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `serial/`.
 #[cfg(feature = "serial")]
 pub const SERIAL_PATH_LEN: usize = caps::MAX_LOCATOR_LEN.saturating_sub(SERIAL_SCHEME.len() + 1);
 
-#[cfg(feature = "serial")]
-impl SerialPath {
-    /// The path `path`, or `None` when it is empty or longer than [`SERIAL_PATH_LEN`] bytes.
+/// The base path of a unixpipe link's FIFOs.
+#[cfg(feature = "unixpipe")]
+pub type UnixpipePath = LinkPath<UNIXPIPE_PATH_LEN>;
+
+/// The longest base path a [`UnixpipePath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `unixpipe/` and the longest
+/// suffix a link appends to name the FIFO of one of its ends, `_downlink` and a `u32` in decimal
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `let suffix_str = suffix.to_string();`),
+/// so both ends of every link over the path are named in its faces' rows.
+#[cfg(feature = "unixpipe")]
+pub const UNIXPIPE_PATH_LEN: usize =
+    caps::MAX_LOCATOR_LEN.saturating_sub(UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_LONGEST_SUFFIX.len());
+
+/// The longest suffix a unixpipe link appends to its base path.
+#[cfg(feature = "unixpipe")]
+const UNIXPIPE_LONGEST_SUFFIX: &str = "_downlink4294967295";
+
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> LinkPath<N> {
+    /// The path `path`, or `None` when it is empty or longer than `N` bytes.
     pub fn new(path: &str) -> Option<Self> {
-        let mut bytes = [0u8; SERIAL_PATH_LEN];
+        let mut bytes = [0u8; N];
         bytes
             .get_mut(..path.len())
             .filter(|_| !path.is_empty())?
@@ -741,10 +766,37 @@ impl SerialPath {
     }
 }
 
-#[cfg(feature = "serial")]
-impl core::fmt::Debug for SerialPath {
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> core::fmt::Debug for LinkPath<N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+/// The locator of a link over a pair of named FIFOs on this host, as zenoh's unixpipe link reads
+/// one: `unixpipe/<path>[#file_mask=<n>]`, the base path the link's FIFOs are named after and the
+/// mode they are created with (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @
+/// `pub const FILE_ACCESS_MASK: &str = "file_mask";`). The grammar is the session core's
+/// (`wz_session_core::locator_grammar`), read and written there for this engine and the heap
+/// profile's leaf alike.
+#[cfg(feature = "unixpipe")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixpipeLocator {
+    /// The base path of the link's FIFOs.
+    pub path: UnixpipePath,
+    /// The mode the FIFOs are created with, as written; `None` when the locator names none and
+    /// the opener's default applies.
+    pub file_mask: Option<u32>,
+}
+
+#[cfg(feature = "unixpipe")]
+impl UnixpipeLocator {
+    /// Write zenoh's text of the locator into `out`: the scheme, the path and the mask the
+    /// locator is read back with.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(UNIXPIPE_SCHEME);
+        out.push_str("/");
+        write_unixpipe_path_with_config(out, self.path.as_str(), self.file_mask);
     }
 }
 
@@ -803,6 +855,8 @@ impl Locator {
             Self::Serial(_) => None,
             #[cfg(feature = "ws")]
             Self::Ws(_) => None,
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(_) => None,
         }
     }
 
@@ -811,9 +865,7 @@ impl Locator {
     pub const fn as_serial(self) -> Option<SerialLocator> {
         match self {
             Self::Serial(serial) => Some(serial),
-            Self::Ip(_) => None,
-            #[cfg(feature = "ws")]
-            Self::Ws(_) => None,
+            _ => None,
         }
     }
 
@@ -822,9 +874,16 @@ impl Locator {
     pub const fn as_ws(self) -> Option<WsLocator> {
         match self {
             Self::Ws(ws) => Some(ws),
-            Self::Ip(_) => None,
-            #[cfg(feature = "serial")]
-            Self::Serial(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The locator of a unixpipe link, or `None` for a link of another kind.
+    #[cfg(feature = "unixpipe")]
+    pub const fn as_unixpipe(self) -> Option<UnixpipeLocator> {
+        match self {
+            Self::Unixpipe(unixpipe) => Some(unixpipe),
+            _ => None,
         }
     }
 
@@ -838,6 +897,8 @@ impl Locator {
             Self::Serial(serial) => serial.write(&mut text),
             #[cfg(feature = "ws")]
             Self::Ws(ws) => ws.write(&mut text),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(unixpipe) => unixpipe.write(&mut text),
         }
         text
     }
@@ -861,25 +922,36 @@ pub const LONGEST_IP_LOCATOR_LEN: usize =
 #[cfg(feature = "serial")]
 pub const LONGEST_SERIAL_LOCATOR_LEN: usize = SERIAL_SCHEME.len()
     + 1
-    + longer(SERIAL_PATH_LEN, "4294967295.4294967295".len())
+    + longest(&[SERIAL_PATH_LEN, "4294967295.4294967295".len()])
     + "#baudrate=4294967295;exclusive=false;tout=18446744073709551615;release_on_close=false".len();
 
-/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
-/// writes into.
-#[cfg(not(feature = "serial"))]
-pub const LONGEST_LOCATOR_LEN: usize = LONGEST_IP_LOCATOR_LEN;
-/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
-/// writes into.
-#[cfg(feature = "serial")]
-pub const LONGEST_LOCATOR_LEN: usize = longer(LONGEST_IP_LOCATOR_LEN, LONGEST_SERIAL_LOCATOR_LEN);
+/// The longest unixpipe locator text: `unixpipe/`, the longest base path, and the widest mask.
+#[cfg(feature = "unixpipe")]
+pub const LONGEST_UNIXPIPE_LOCATOR_LEN: usize =
+    UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_PATH_LEN + "#file_mask=4294967295".len();
 
-/// The larger of two lengths, for the constants above.
-#[cfg(feature = "serial")]
-const fn longer(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
+/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
+/// writes into.
+pub const LONGEST_LOCATOR_LEN: usize = longest(&[
+    LONGEST_IP_LOCATOR_LEN,
+    #[cfg(feature = "serial")]
+    LONGEST_SERIAL_LOCATOR_LEN,
+    #[cfg(feature = "unixpipe")]
+    LONGEST_UNIXPIPE_LOCATOR_LEN,
+]);
+
+/// The largest of `lens`, for the constants above.
+const fn longest(lens: &[usize]) -> usize {
+    match lens {
+        [first, rest @ ..] => {
+            let rest = longest(rest);
+            if *first > rest {
+                *first
+            } else {
+                rest
+            }
+        }
+        [] => 0,
     }
 }
 
@@ -2719,7 +2791,7 @@ mod wake_budget_tests {
         SessionInitParams {
             whatami: wz_session_core::WhatAmI::Peer,
             zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
@@ -2733,7 +2805,9 @@ mod wake_budget_tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
-            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32])
+                .expect(">=32-byte key")
+                .into(),
             region: None,
         }
     }

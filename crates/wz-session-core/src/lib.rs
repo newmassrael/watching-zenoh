@@ -392,6 +392,9 @@ pub mod registry_error;
 // R311gh).
 pub mod sink;
 
+#[cfg(feature = "alloc")]
+mod once_built;
+
 // R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
 // adapter (`EventInjector` DIP port over the SCE engine's
 // `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
@@ -658,6 +661,9 @@ pub mod locator;
 // The part of the locator grammar that needs no heap: the span split every leaf shares and the
 // serial leaf, read and written, for the heap profile's leaf above and an engine without a heap.
 pub mod locator_grammar;
+// The endpoint a session joins a multicast group by, read once into fields of fixed size, for
+// every engine that opens group sockets.
+pub mod group_locator;
 // What an open of a configuration asks of the operating system, for every reader of one
 // (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
 #[cfg(feature = "alloc")]

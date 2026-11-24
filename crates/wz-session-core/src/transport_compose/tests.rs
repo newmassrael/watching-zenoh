@@ -12,7 +12,7 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: crate::session_zid::SessionZid::new(zid).expect("a 1 to 16 byte zid, not all zero"),
-        seq_num_res: 2,
+        seq_num_res: crate::policy::SnResolution::Bits32,
         req_id_res: 1,
         batch_size,
         lease_ms,
@@ -25,7 +25,8 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
         ),
         link_rx: LinkRxConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key"),
+            .expect("32-byte test key")
+            .into(),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
         region: None,
@@ -67,7 +68,7 @@ fn compose_init_matches_the_session_encoder() {
                     whatami: 1,
                     zid: &zid,
                     size: Some(SizeParams {
-                        frame_sn_code: p.seq_num_res,
+                        frame_sn_code: p.seq_num_res.wire_code(),
                         request_id_code: p.req_id_res,
                         batch_size: p.batch_size,
                     }),
@@ -97,7 +98,7 @@ fn compose_init_writes_a_zero_batch_size_the_session_encoder_replaces() {
         whatami: 1,
         zid: &zid,
         size: Some(SizeParams {
-            frame_sn_code: p.seq_num_res,
+            frame_sn_code: p.seq_num_res.wire_code(),
             request_id_code: p.req_id_res,
             batch_size: 0,
         }),

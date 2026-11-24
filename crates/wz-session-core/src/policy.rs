@@ -50,12 +50,21 @@ impl SnResolution {
     /// `Resolution` for a frame's sequence number, and zenoh-pico's `Z_SN_RESOLUTION`, which it
     /// puts in its InitSyn and its Join (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
     /// `msg._body._init._seq_num_res = Z_SN_RESOLUTION;`) and has fixed at `0x02`.
+    /// The declaration states each width's code (`wire_codes`), which is the width's
+    /// discriminant.
     pub const fn wire_code(self) -> u8 {
-        match self {
-            Self::Bits8 => 0x00,
-            Self::Bits16 => 0x01,
-            Self::Bits32 => 0x02,
-            Self::Bits64 => 0x03,
+        self as u8
+    }
+
+    /// The width a two-bit `seq_num_res` code names, the inverse of [`Self::wire_code`]. Only
+    /// the field's two bits are read, so every byte names a width: a sized Init or a Join carries
+    /// the code in those bits, and a session settles on the smaller of two codes it holds.
+    pub const fn from_wire_code(code: u8) -> Self {
+        match code & 0x03 {
+            0x00 => Self::Bits8,
+            0x01 => Self::Bits16,
+            0x02 => Self::Bits32,
+            _ => Self::Bits64,
         }
     }
 
@@ -268,6 +277,20 @@ mod tests {
         assert_eq!(SnResolution::Bits8.wire_code(), 0);
         assert_eq!(SnResolution::Bits64.wire_code(), 3);
         assert_eq!(SnResolution::Bits16.id(), "bits-16");
+    }
+
+    /// Each width reads back from its two-bit code, and a byte is read by its two low bits
+    /// alone, as the field it stands in occupies them.
+    #[test]
+    fn each_sn_width_reads_back_from_its_two_bit_code() {
+        for width in SnResolution::WIDTHS {
+            assert_eq!(SnResolution::from_wire_code(width.wire_code()), width);
+            assert_eq!(
+                SnResolution::from_wire_code(width.wire_code() | 0xFC),
+                width,
+                "the bits above the field are not read"
+            );
+        }
     }
 
     /// Each width reads back from zenoh's spelling of it, and the texts zenoh refuses (the

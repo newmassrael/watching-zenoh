@@ -472,7 +472,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
@@ -590,7 +590,7 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size,
             is_qos: false,
@@ -1715,7 +1715,7 @@ fn pico_preset_limits() -> SessionLimits {
 
 /// What the pico interface opens for a session that listens on nothing: the dial role's face and
 /// no other, as zenoh-pico's client holds its one transport.
-fn preset_client() -> CoopConfig {
+fn one_face_client() -> CoopConfig {
     CoopConfig {
         max_faces: 0,
         ..client_config()
@@ -1777,7 +1777,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         );
     }
     let limits = pico_preset_limits();
-    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
+    let plan = ArenaPlan::of(&one_face_client(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let preset = pico_value;
@@ -1840,14 +1840,16 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     }
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
-    assert_eq!(
-        entities.filters(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"))
-    );
-    assert_eq!(
-        entities.interests(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
-    );
+    // A matching listener declared on a key judges through a filter of its own, in a build that
+    // keeps such listeners.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        preset("MAX_MATCHING_LISTENERS")
+    } else {
+        0
+    };
+    let filters = preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + key_listeners;
+    assert_eq!(entities.filters(), Some(filters));
+    assert_eq!(entities.interests(), Some(filters), "one Interest a filter");
     assert_eq!(
         plan.gets().rows.queries,
         if cfg!(feature = "query") {
@@ -1925,6 +1927,7 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
 /// its table of pending gets, and the ends of their legs, their callbacks and the session's note
 /// of each.
+#[cfg(feature = "listen")]
 const FACE_PARTS: [&str; 5] = [
     "peer tables",
     "pending gets",
@@ -1942,14 +1945,17 @@ const POOL_PARTS: [&str; 3] = [
 ];
 
 /// The parts of an arena held once for each link: its place among the session's links.
+#[cfg(feature = "listen")]
 const LINK_PARTS: [&str; 1] = ["link places"];
 
 /// The parts of the pool of receive buffers the links share (`RX_POOL_BUFFERS`, at most one for
 /// each link).
+#[cfg(feature = "listen")]
 const RX_PARTS: [&str; 2] = ["link receive flags", "link receive buffers"];
 
 /// The parts of the pool of outbound slots the links share (`TX_POOL_SLOTS`, at most one for each
 /// link).
+#[cfg(feature = "listen")]
 const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 
 /// The pico preset holds a session's faces to zenoh-pico's own bounds: ten peers on a listener
@@ -2006,7 +2012,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     let client = ArenaPlan::of(
         &CoopConfig {
             accept_pending: handshakes,
-            ..preset_client()
+            ..one_face_client()
         },
         &limits,
     )
@@ -2190,7 +2196,7 @@ fn the_arena_of_a_session_by_row_measured() {
         let client = ArenaPlan::of(
             &CoopConfig {
                 accept_pending: handshakes,
-                ..preset_client()
+                ..one_face_client()
             },
             &limits,
         )
@@ -2501,7 +2507,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
@@ -2827,4 +2833,22 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
         }))
     );
     assert!(!probe.reached(), "a refused open dials nothing");
+}
+
+/// A group whose members' keyexprs are each their own counts every member's aliases at its face's
+/// place in the session's pool, and each other face one peer's.
+#[cfg(feature = "multicast-declarations")]
+#[test]
+fn a_groups_face_counts_every_members_aliases_in_the_pool() {
+    use crate::arena::{faces_aliases, GROUP_FACE_ALIASES};
+    assert_eq!(faces_aliases(3, 0, 16), 48, "CONTROL: no group's face");
+    assert_eq!(
+        faces_aliases(3, 1, 16),
+        2 * 16 + GROUP_FACE_ALIASES,
+        "two faces of one peer and one group's"
+    );
+    assert_eq!(
+        GROUP_FACE_ALIASES,
+        caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
+    );
 }

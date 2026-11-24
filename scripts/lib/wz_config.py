@@ -288,7 +288,7 @@ def read_decl_toml(text: str) -> dict:
     `[array.table]`, a table of the last element of an array of tables opened before it (a
     profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
     an integer, a boolean, an array of strings or a non-empty array of integers (a limit's
-    `range`); a `'''`
+    `range`), or an inline table of bare keys to integers (a policy's `wire_codes`); a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -345,6 +345,21 @@ def read_decl_toml(text: str) -> dict:
             value = rest[3:-3]
         elif rest.startswith("'''"):
             raise ValueError(f"line {number}: a ''' string opens a line of its own")
+        elif rest.startswith("{"):
+            # An inline table of bare keys to integers on one line (a policy's `wire_codes`).
+            body_m = re.fullmatch(r"\{\s*(.*?)\s*\}", rest)
+            entries = [] if body_m is None or not body_m.group(1) else body_m.group(1).split(",")
+            inline: dict = {}
+            for entry in entries:
+                kv = re.fullmatch(r"\s*([A-Za-z0-9_-]+)\s*=\s*(-?[0-9]+)\s*", entry)
+                if body_m is None or kv is None or kv.group(1) in inline:
+                    raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                     "each once, on one line")
+                inline[kv.group(1)] = int(kv.group(2))
+            if body_m is None:
+                raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                 "each once, on one line")
+            value = inline
         else:
             try:
                 value = json.loads(rest)
@@ -1817,7 +1832,7 @@ def validate_limits(limits: list[dict]) -> list[str]:
 POLICY_KINDS = ("bool", "choice")
 POLICY_ID_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
 POLICY_KEYS = {"id", "kind", "kconfig", "choices", "default", "upstream", "since", "help",
-               "scope", "binding", "mutability", "boundary", "wire"}
+               "scope", "binding", "mutability", "boundary", "wire", "wire_codes"}
 
 
 def policy_binding_problems(pid: str, pol: dict) -> list[str]:
@@ -1998,6 +2013,8 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
         if kind == "bool":
             if "choices" in pol:
                 out.append(f"policy `{pid}`: a bool has no `choices`")
+            if "wire_codes" in pol:
+                out.append(f"policy `{pid}`: a bool has no `wire_codes`")
             if pol.get("default") != "off":
                 out.append(f"policy `{pid}`: a bool policy defaults to `off`, which is upstream's "
                            f"behaviour (C2); it says {pol.get('default')!r}")
@@ -2016,6 +2033,7 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
                 if pol.get("default") not in choices:
                     out.append(f"policy `{pid}`: default {pol.get('default')!r} is not one of "
                                f"its choices")
+                out += wire_code_problems(pid, pol, choices)
         if not isinstance(pol.get("upstream"), str) or not pol["upstream"].strip():
             out.append(f"policy `{pid}`: it does not say what upstream does; a behaviour that "
                        "departs from no upstream behaviour is a capability or a defect, not a policy")
@@ -2029,6 +2047,28 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
         elif re.search(r"\[`|crate::", pol["help"]):
             out.append(f"policy `{pid}`: its help names Rust items; it is written for a deployer")
     return out
+
+
+def wire_code_problems(pid: str, pol: dict, choices: list) -> list[str]:
+    """A choice whose values a peer reads as codes on the wire may state them in `wire_codes`,
+    one code for each of its choices: its enum then holds each value at its code, so a value
+    becomes its wire byte by its discriminant, and a domain finds a value by its place among the
+    choices apart from that (`position`). Only a policy a peer sees has codes."""
+    if "wire_codes" not in pol:
+        return []
+    where = f"policy `{pid}`"
+    codes = pol["wire_codes"]
+    if pol.get("wire") == "none":
+        return [f"{where}: `wire_codes` is stated only by a policy a peer sees; its `wire` is "
+                "'none'"]
+    if not isinstance(codes, dict) or sorted(codes) != sorted(str(c) for c in choices):
+        return [f"{where}: `wire_codes` gives each of its choices one code, and nothing else"]
+    values = list(codes.values())
+    if not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255 for v in values):
+        return [f"{where}: a wire code is an integer from 0 to 255"]
+    if len(set(values)) != len(values):
+        return [f"{where}: two of its choices have the same wire code"]
+    return []
 
 
 PROFILE_KEYS = {"id", "help", "policies"}
@@ -3754,14 +3794,25 @@ def emit_rust_policies(decl: dict) -> str:
         values = pol["choices"]
         out += rust_doc(f"`{pol['id']}`: {pol['help'].strip()}".replace("\n", " "), "")
         out += rust_doc(f"Upstream: {pol['upstream'].strip()}", "")
-        out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub enum {name} {{"]
+        codes = pol.get("wire_codes")
+        out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]"]
+        if codes is not None:
+            out.append("#[repr(u8)]")
+        out.append(f"pub enum {name} {{")
         for value in values:
-            out += [f"    /// `{value}`.", f"    {camel(value)},"]
+            code = "" if codes is None else f" = {codes[value]}"
+            out += [f"    /// `{value}`.", f"    {camel(value)}{code},"]
         out += ["}", "", f"impl {name} {{"]
         out += ["    /// The value as the declaration, the Kconfig and the environment spell it.",
                 "    pub const fn id(self) -> &'static str {", "        match self {"]
         out += [f'            Self::{camel(v)} => "{v}",' for v in values]
         out += ["        }", "    }", ""]
+        if codes is not None:
+            out += ["    /// The value's place among the values (`PolicyValue::ALL`), the bit a domain keeps",
+                    "    /// for it: apart from the discriminant, which is the value's code on the wire.",
+                    "    pub const fn position(self) -> usize {", "        match self {"]
+            out += [f"            Self::{camel(v)} => {i}," for i, v in enumerate(values)]
+            out += ["        }", "    }", ""]
         out += rust_static_array(f"const CHOICES: [&str; {len(values)}] =",
                                  [f'"{v}"' for v in values], "    ")
         out += rust_static_array(f"const ALL: [Self; {len(values)}] =",
@@ -4000,10 +4051,11 @@ def rust_stated_assert(pol: dict) -> list[str]:
     return rust_refusal(f"{camel(pol['id'])}::stated().is_some()", STATED_REFUSALS[pol["kind"]])
 
 
-def rust_default_assert(name: str, pid: str) -> list[str]:
+def rust_default_assert(name: str, pid: str, index: str = "as usize") -> list[str]:
     """The constant that refuses a build whose domain of `pid` leaves out its default, laid out as
-    rustfmt lays it out (the message is short enough for any id a line holds)."""
-    arg = f"{name}::DEFAULT as usize"
+    rustfmt lays it out (the message is short enough for any id a line holds). `index` is how a
+    value is turned into its place among the values (`rust_value_index`)."""
+    arg = f"{name}::DEFAULT {index}" if index.startswith("as ") else f"{name}::DEFAULT{index}"
     one = f"    default_is_allowed::<{name}>({arg}),"
     if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
         check = [one]
@@ -4051,6 +4103,9 @@ def policy_value_rust(pol: dict) -> list[str]:
         stated_arm, upstream = "Some(on) => Self::from_bool(on),", "off"
     else:
         stated_arm, upstream = "Some(value) => value,", pol["default"]
+    index = rust_value_index(pol)
+    default_index = f"Self::DEFAULT {index}" if index.startswith("as ") else f"Self::DEFAULT{index}"
+    self_index = f"self {index}" if index.startswith("as ") else f"self{index}"
     out = bool_value_rust(pol) if pol["kind"] == "bool" else []
     out += rust_bound_alias(pol)
     out += [f"impl PolicyValue for {name} {{",
@@ -4061,7 +4116,7 @@ def policy_value_rust(pol: dict) -> list[str]:
     for value in values:
         out += rust_domain_entry(rust_word(policy_allows_symbol(pol, value)))
     out += ["        ],",
-            "        Self::DEFAULT as usize,",
+            f"        {default_index},",
             "        DEFAULTS_ONLY,",
             "    );",
             "    const DEFAULT: Self = match Self::stated() {",
@@ -4076,9 +4131,16 @@ def policy_value_rust(pol: dict) -> list[str]:
         out += rust_boundary(rust_text(pol["boundary"]))
     else:
         out.append("    const BOUNDARY: Option<&'static str> = None;")
-    out += ["", "    fn index(self) -> usize {", "        self as usize", "    }", "}", ""]
-    return (out + rust_stated_assert(pol) + [""] + rust_default_assert(name, pol["id"])
+    out += ["", "    fn index(self) -> usize {", f"        {self_index}", "    }", "}", ""]
+    return (out + rust_stated_assert(pol) + [""] + rust_default_assert(name, pol["id"], index)
             + policy_field_rust(pol))
+
+
+def rust_value_index(pol: dict) -> str:
+    """How a value of `pol` becomes its place among the values, the bit its domain keeps: the
+    discriminant (`as usize`) of an enum declared in that order, and `.position()` of one whose
+    discriminants are the values' wire codes (`wire_codes`)."""
+    return ".position()" if pol.get("wire_codes") is not None else "as usize"
 
 
 def global_axes(decl: dict) -> list[dict]:
@@ -6029,6 +6091,47 @@ def cmd_selftest() -> int:
            "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n" in kpolicies
            and "\t  Upstream: Flushes on the batch boundary.\n" in kpolicies)
     rpolicies = emit_rust_policies(pdecl)
+    # A choice whose values are codes on the wire holds each value at its code.
+    choices_line = 'choices = ["os-default", "on", "off"]'
+    coded = with_policy.replace(choices_line,
+                                choices_line + "\nwire_codes = { os-default = 2, on = 0, off = 1 }")
+
+    def coded_refused(codes: str, words: str, text: str = with_policy) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(
+            text.replace(choices_line, choices_line + "\nwire_codes = " + codes))))
+
+    expect("a choice that states a wire code for each of its choices validates",
+           validate_decl(read_decl_toml(coded)) == [])
+    expect("wire codes that leave out a choice are refused",
+           coded_refused("{ os-default = 2, on = 0 }", "each of its choices one code"))
+    expect("wire codes that name a value the policy does not have are refused",
+           coded_refused("{ os-default = 2, on = 0, off = 1, loud = 3 }",
+                         "each of its choices one code"))
+    expect("two choices on one wire code are refused",
+           coded_refused("{ os-default = 1, on = 0, off = 1 }", "the same wire code"))
+    expect("a wire code past a byte is refused",
+           coded_refused("{ os-default = 256, on = 0, off = 1 }", "from 0 to 255"))
+    expect("wire codes on a policy no peer sees are refused",
+           coded_refused("{ os-default = 2, on = 0, off = 1 }", "its `wire` is 'none'",
+                         with_policy.replace('wire = "visible"', 'wire = "none"')))
+    expect("wire codes on a bool are refused",
+           policy_refused('kconfig = "WZ_POLICY_EAGER_FLUSH"',
+                          'kconfig = "WZ_POLICY_EAGER_FLUSH"\nwire_codes = { off = 0, on = 1 }',
+                          "a bool has no `wire_codes`"))
+    rcoded = emit_rust_policies(decl_of(read_decl_toml(coded)))
+    expect("the discriminant of a coded value is its wire code, and its place in the domain is apart",
+           "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[repr(u8)]\npub enum WireMode {\n"
+           "    /// `os-default`.\n    OsDefault = 2,\n    /// `on`.\n    On = 0,\n" in rcoded
+           and "    pub const fn position(self) -> usize {\n        match self {\n"
+               "            Self::OsDefault => 0,\n            Self::On => 1,\n"
+               "            Self::Off => 2,\n" in rcoded
+           and "        Self::DEFAULT.position(),\n        DEFAULTS_ONLY,\n" in rcoded
+           and "    fn index(self) -> usize {\n        self.position()\n    }\n" in rcoded
+           and "    default_is_allowed::<WireMode>(WireMode::DEFAULT.position()),\n" in rcoded
+           and "WireMode::DEFAULT as usize" not in rcoded and "Self::DEFAULT as usize" in rcoded)
+    expect("an enum without wire codes is held at its place, with no second mapping",
+           "#[repr(u8)]" not in rpolicies and "fn position" not in rpolicies
+           and "    fn index(self) -> usize {\n        self as usize\n    }\n" in rpolicies)
     expect("a choice policy is an enum whose stated word is found, without an index, among its values",
            "pub enum WireMode {" in rpolicies
            and "    const fn stated() -> Option<Self> {\n"
@@ -6375,8 +6478,8 @@ def cmd_selftest() -> int:
     expect("the generated rule and the Kconfig help name the build that selects nothing",
            f"(no `{POLICY_SELECTION_FEATURE}`)" in rpolicies
            and "or a build where nothing selects a policy after it," in kpolicies)
-    pico_doors = re.search(r"^config-policy = \[(.*)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
-                           re.MULTILINE)
+    pico_doors = re.search(r"^config-policy = \[(.*?)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
+                           re.MULTILINE | re.DOTALL)
     expect("the pico config doors keep the domains wide, and a pico build without them does not",
            pico_doors is not None
            and f'"wz-session-core/{POLICY_SELECTION_FEATURE}"' in pico_doors.group(1))

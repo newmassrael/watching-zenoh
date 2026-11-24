@@ -483,9 +483,10 @@ struct SourceState {
     last_delivered: Option<u32>,
     /// In-flight recovery GETs for this source (zenoh `pending_queries`): a
     /// new GET is only issued when this is 0, and the buffer is flushed when
-    /// it returns to 0.
+    /// it returns to 0. Upstream counts in a `u64`; every increment here is
+    /// behind that zero test, so the count is 0 or 1 and a `u32` holds it.
     #[cfg(feature = "advanced-recovery")]
-    pending_queries: u64,
+    pending_queries: u32,
 }
 
 impl SourceState {
@@ -558,8 +559,8 @@ struct TimestampedState {
     /// [`SourceState::pending_queries`]: the `uhlc` late-publisher trigger
     /// opens a slot and the GET's terminal Final closes it, so a second token
     /// Put for the same publisher while its cache GET is still outstanding does
-    /// not fan a duplicate.
-    pending_queries: u64,
+    /// not fan a duplicate. 0 or 1, as [`SourceState::pending_queries`] is.
+    pending_queries: u32,
 }
 
 #[cfg(feature = "advanced-history")]

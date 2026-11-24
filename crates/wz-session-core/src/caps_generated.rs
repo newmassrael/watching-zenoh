@@ -113,6 +113,8 @@ pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATO
 pub(super) const MAX_GROUP_ENDPOINT_LEN: usize =
     limit(option_env!("WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"), 96);
 pub(super) const MAX_GROUP_MEMBERS: usize = limit(option_env!("WZ_LIMIT_MAX_GROUP_MEMBERS"), 32);
+pub(super) const MAX_MEMBER_KEYEXPRS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_MEMBER_KEYEXPRS"), 16);
 pub(super) const MAX_CONNECTIVITY_REPLAY_EVENTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"), 8);
 pub(super) const MAX_FACE_WATCH_ROWS: usize =

@@ -11,7 +11,8 @@
 //! honours them, and opening one anyway would quietly drop what the writer asked for. Both are
 //! permanent for the text. A build with serial links (`serial`) reads `serial/` too, with the
 //! `#config` that is that link's own (`wz_session_core::locator_grammar`); without it the scheme
-//! is one more this build does not carry. Whether a stack carries the protocol or the family is
+//! is one more this build does not carry; a build with unixpipe links (`unixpipe`) reads
+//! `unixpipe/` with its `#file_mask` the same way. Whether a stack carries the protocol or the family is
 //! the stack's to answer when it opens the link; a stack built without IPv6 reads its endpoints with
 //! [`parse_locator_for`], so its image holds the IPv4 reader alone.
 //!
@@ -23,8 +24,12 @@ use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use crate::session_drive::{LinkProto, Locator};
 #[cfg(feature = "serial")]
 use crate::session_drive::{SerialLine, SerialLocator, SerialPath};
+#[cfg(feature = "unixpipe")]
+use crate::session_drive::{UnixpipeLocator, UnixpipePath};
 #[cfg(feature = "serial")]
 use wz_session_core::locator_grammar::{read_serial_locator, SerialAddress, SerialTextError};
+#[cfg(feature = "unixpipe")]
+use wz_session_core::locator_grammar::{read_unixpipe_locator, UnixpipeTextError};
 
 /// Why a dial could not even be attempted. Permanent for this endpoint text in this build, so it
 /// is not retried.
@@ -38,6 +43,10 @@ pub enum DialRefused {
     /// links, which a session of this runtime cannot hold. Decided by a connection manager from
     /// the list, before any dial.
     MultiLinkGroup,
+    /// The node's sessions offer a width of sequence numbers the build's `sn-resolution` domain
+    /// leaves out, so no endpoint can be dialled until the node's parameters change. Decided by
+    /// the dialer before it opens a link.
+    SnResolution,
 }
 
 impl DialRefused {
@@ -47,6 +56,7 @@ impl DialRefused {
             DialRefused::Unsupported => "unsupported",
             DialRefused::BadAddress => "bad_address",
             DialRefused::MultiLinkGroup => "multi_link_group",
+            DialRefused::SnResolution => "sn_resolution",
         }
     }
 }
@@ -87,6 +97,10 @@ fn parse_endpoint<const IPV6: bool>(
     #[cfg(feature = "serial")]
     if let Some(serial) = serial_endpoint(endpoint) {
         return serial;
+    }
+    #[cfg(feature = "unixpipe")]
+    if let Some(unixpipe) = unixpipe_endpoint(endpoint) {
+        return unixpipe;
     }
     // A WebSocket link is reached at a socket address as a TCP one is
     // (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`), so its text is
@@ -170,6 +184,32 @@ fn serial_endpoint(endpoint: &str) -> Option<Result<Locator, DialRefused>> {
         line,
         baudrate: read.baudrate,
         options: read.options,
+    })))
+}
+
+/// A `unixpipe/` endpoint's text read into its locator, or `None` for a text of another scheme.
+/// An empty path, a path longer than a row of the build names with the suffix of a link's end
+/// ([`UnixpipePath`]), or a `file_mask` that is no decimal `u32` is [`DialRefused::BadAddress`];
+/// a `?metadata` span is [`DialRefused::Unsupported`], as on every other scheme here. A listener
+/// reads the same text: a path has no port for the stack to choose.
+#[cfg(feature = "unixpipe")]
+fn unixpipe_endpoint(endpoint: &str) -> Option<Result<Locator, DialRefused>> {
+    let read = match read_unixpipe_locator(endpoint) {
+        Ok(read) => read,
+        Err(UnixpipeTextError::NotUnixpipeScheme) => return None,
+        Err(UnixpipeTextError::EmptyPath | UnixpipeTextError::BadFileMask(_)) => {
+            return Some(Err(DialRefused::BadAddress))
+        }
+    };
+    if !read.metadata.is_empty() {
+        return Some(Err(DialRefused::Unsupported));
+    }
+    let Some(path) = UnixpipePath::new(read.path) else {
+        return Some(Err(DialRefused::BadAddress));
+    };
+    Some(Ok(Locator::Unixpipe(UnixpipeLocator {
+        path,
+        file_mask: read.file_mask,
     })))
 }
 
@@ -886,6 +926,69 @@ mod tests {
     fn a_build_without_serial_links_refuses_a_serial_text() {
         std::assert_eq!(
             parse_locator("serial//dev/ttyUSB0#baudrate=115200"),
+            Err(DialRefused::Unsupported)
+        );
+    }
+
+    /// A unixpipe locator read from its text writes that text back, to dial and to listen on, and
+    /// is no IP locator. Turned red by a reader or a writer of the unixpipe grammar that drifts
+    /// from the other, or by a unixpipe text read as another kind.
+    #[cfg(feature = "unixpipe")]
+    #[test]
+    fn a_unixpipe_locator_is_written_as_it_was_read() {
+        for text in [
+            "unixpipe//tmp/wz.pipe",
+            "unixpipe//tmp/wz.pipe#file_mask=438",
+        ] {
+            let read = parse_locator(text).expect("a dialable unixpipe locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            std::assert_eq!(read.as_ip(), None, "{text}");
+            std::assert_eq!(parse_listen_locator(text), Ok(read), "{text}");
+        }
+        let read = parse_locator("unixpipe//tmp/wz.pipe#file_mask=438").ok();
+        std::assert_eq!(
+            read.and_then(Locator::as_unixpipe),
+            Some(UnixpipeLocator {
+                path: UnixpipePath::new("/tmp/wz.pipe").expect("short"),
+                file_mask: Some(438),
+            })
+        );
+    }
+
+    /// A unixpipe text this engine cannot open a link from is refused for good, with the reason:
+    /// no path, a mask that is no decimal `u32`, a path a row cannot name with the suffix of an
+    /// end, and a `?metadata` span no link here honours. Turned red by a reader that takes any of
+    /// them, or by a path bound that leaves no room for the suffix.
+    #[cfg(feature = "unixpipe")]
+    #[test]
+    fn a_unixpipe_text_that_names_no_path_is_refused() {
+        use crate::session_drive::UNIXPIPE_PATH_LEN;
+        for (text, why) in [
+            ("unixpipe/", DialRefused::BadAddress),
+            ("unixpipe//tmp/p#file_mask=0o600", DialRefused::BadAddress),
+            ("unixpipe//tmp/p?prio=1", DialRefused::Unsupported),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+        let longest = std::format!("unixpipe/{}", "a".repeat(UNIXPIPE_PATH_LEN));
+        std::assert!(parse_locator(&longest).is_ok(), "{longest}");
+        let past = std::format!("unixpipe/{}", "a".repeat(UNIXPIPE_PATH_LEN + 1));
+        std::assert_eq!(parse_locator(&past), Err(DialRefused::BadAddress));
+        let end = std::format!("{longest}_downlink4294967295");
+        std::assert!(
+            end.len() <= wz_session_core::caps::MAX_LOCATOR_LEN,
+            "the end of a link over the longest path fits a row"
+        );
+    }
+
+    /// A build without unixpipe links refuses a unixpipe text as a scheme it does not carry.
+    /// Turned red by a reader that takes it into another kind of locator.
+    #[cfg(not(feature = "unixpipe"))]
+    #[test]
+    fn a_build_without_unixpipe_links_refuses_a_unixpipe_text() {
+        std::assert_eq!(
+            parse_locator("unixpipe//tmp/wz.pipe"),
             Err(DialRefused::Unsupported)
         );
     }

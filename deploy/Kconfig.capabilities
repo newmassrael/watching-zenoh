@@ -184,7 +184,7 @@ config WZ_CAP_GROUP
 
 config WZ_CAP_GOSSIP
 	bool "gossip"
-	default y
+	default n
 	select WZ_CAP_PEER
 	help
 	  A session told of a node by one it holds a link to dials it.

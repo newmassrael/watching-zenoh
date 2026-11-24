@@ -185,7 +185,7 @@ fn profile() -> GroupProfile {
         lease_ms: 10_000,
         join_interval_ms: 100,
         max_sessions: None,
-        seq_num_res: 0x02,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
@@ -425,6 +425,93 @@ fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
             "max_faces {max_faces}"
         );
     }
+}
+
+/// The endpoint a [`LateDialStack`] answers late; any other unicast endpoint it refuses.
+const LATE: &str = "tcp/192.0.2.50:7447";
+
+/// A member's stack that also dials: it joins [`GROUP`] as [`MemberStack`] does, answers a dial
+/// of [`LATE`] up only once the session has asked it and gone on, and refuses any other; each
+/// unicast endpoint it is asked to open is recorded.
+struct LateDialStack {
+    member: MemberStack,
+    dialled: Arc<Mutex<Vec<String>>>,
+}
+
+impl AppPort for LateDialStack {
+    fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+        if kind == AppLinkKind::Group {
+            return self.member.open(link, kind, locator);
+        }
+        self.dialled.lock().unwrap().push(locator.to_owned());
+        if !locator.starts_with(LATE) {
+            return ProgramOpen::Refused;
+        }
+        let transport = self.member.transport.lock().unwrap().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(transport) = transport.upgrade() {
+                let _ = transport.event(link, ProgramEvent::Connected);
+            }
+        });
+        ProgramOpen::Pending
+    }
+
+    fn send(&self, link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+        self.member.send(link, bytes)
+    }
+
+    fn close(&self, link: LinkHandle) {
+        self.member.close(link);
+    }
+}
+
+/// A session whose groups hold every task cell dials [`LATE`], which answers after the dial was
+/// begun, and then a second endpoint. The late link's session finds no task cell: a cell is not
+/// the endpoint's, so the second endpoint would be refused the same, and the dial role dials it
+/// not; the open, which redials none, ends for want of a task. Turned red by a walk that goes on
+/// to the next endpoint after a late answer whose task was refused, which dials the second
+/// endpoint and ends with that endpoint's refusal.
+#[test]
+fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
+    use wz_runtime_coop::executor::SpawnRefusal;
+    use wz_session_core::caps::MAX_TASKS;
+
+    const REFUSED: &str = "tcp/192.0.2.51:7447";
+    let network = Arc::new(Network::default());
+    let mut config = member_config(1, GROUP);
+    let join = config.groups[0].clone();
+    config.groups = vec![join; MAX_TASKS];
+    config.endpoints = vec![LATE.to_owned(), REFUSED.to_owned()];
+    config.redial_ms = None;
+    let dialled = Arc::new(Mutex::new(Vec::new()));
+    let own = Arc::new(Mutex::new(Weak::new()));
+    let transport = Arc::new(AppTransport::new(
+        Box::new(Table(Mutex::new(AppLinkTable::new()))),
+        Box::new(LateDialStack {
+            member: MemberStack {
+                network: Arc::clone(&network),
+                member: 1,
+                transport: Arc::clone(&own),
+            },
+            dialled: Arc::clone(&dialled),
+        }),
+    ));
+    *own.lock().unwrap() = Arc::downgrade(&transport);
+    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let opened = Engine::open(links, PosixClock, PosixEntropy, config);
+    assert_eq!(
+        opened.err(),
+        Some(OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+        "the open ends for want of a task"
+    );
+    let dialled = dialled.lock().unwrap();
+    assert_eq!(
+        dialled.len(),
+        1,
+        "only the late endpoint is dialled: {dialled:?}"
+    );
+    assert!(dialled[0].starts_with(LATE), "{dialled:?}");
 }
 
 /// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
@@ -895,7 +982,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -942,7 +1029,8 @@ mod mapped {
         until_members_know_each_other(&first, &second);
         let id = first
             .acquire_keyexpr("demo/mapped/q")
-            .expect("a session with ids left declares a keyexpr");
+            .expect("a session with ids left declares a keyexpr")
+            .mapping_id();
         eventually("the declaration to leave", || {
             carried(&network, 1, b"mapped/q")
         });
@@ -1016,9 +1104,10 @@ mod mapped {
         let network = Arc::new(Network::default());
         let first = open_mapped(&network, 1).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
-        let id = first
+        let held = first
             .acquire_keyexpr("demo/mapped/b")
             .expect("a session with ids left declares a keyexpr");
+        let id = held.mapping_id();
         let second = open_mapped(&network, 2).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
         until_members_know_each_other(&first, &second);
@@ -1049,7 +1138,7 @@ mod mapped {
                 .iter()
                 .any(|payload| payload == b"by-its-literal")
         });
-        first.release_keyexpr(id);
+        held.release(&*first);
         SessionDrive::close(&*second);
         SessionDrive::close(&*first);
     }
@@ -2138,9 +2227,8 @@ mod in_place {
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole. A build whose group reads
-    /// owned batches reads each datagram whole whatever the host's room.
-    #[cfg(not(any(feature = "transport-stats", feature = "multicast-declarations")))]
+    /// by its sequence number once, until the datagram is read whole.
+    #[cfg(not(feature = "transport-stats"))]
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2271,6 +2359,7 @@ mod member_keyexprs {
     use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
     use wz_session_core::declare_build::{build_declare_kexpr, build_declare_subscriber};
     use wz_session_core::frame_encode::{encode_frame_with_declare, encode_frame_with_push};
+    use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
     use wz_session_core::push_build::build_push_aliased;
 
     use super::in_place::{beacon, hand_in};
@@ -2363,6 +2452,33 @@ mod member_keyexprs {
         eventually(
             "each member's subscriber to open the filter on its own key",
             || !session.write_filter_active(on_a) && !session.write_filter_active(on_b),
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// The first member leaves after both declared the id 1: what it declared goes with it, and
+    /// the member that stays keeps its own declaration of the same id, so its put by the id still
+    /// reaches the key it declared, and only that one.
+    #[test]
+    fn a_member_that_leaves_takes_its_keyexprs_and_the_other_keeps_its_own() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let on_a = subscribe(&session, "demo/alias/a");
+        let on_b = subscribe(&session, "demo/alias/b");
+        declare_one_id_for_two_keys(&network);
+        let [(leaving, _), (staying, _)] = MEMBERS;
+        let mut close = [0u8; 8];
+        let len = encode_multicast_close_into_slice(&mut close).expect("a close");
+        hand_in(&network, 1, leaving, &close[..len]);
+        let push = build_push_aliased(1, None, b"after").expect("a put by the id");
+        hand_in(&network, 1, staying, &encode_frame_with_push(1, push, true));
+        eventually("the staying member's put on its own key", || {
+            !on_b.lock().unwrap().is_empty()
+        });
+        assert!(
+            on_a.lock().unwrap().is_empty(),
+            "nothing reaches the key of the member that left"
         );
         SessionDrive::close(&*session);
     }

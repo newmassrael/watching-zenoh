@@ -802,6 +802,18 @@ pub const MAX_GROUP_MEMBERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_MEMBER_KEYEXPRS`] is bound.
+pub const MAX_MEMBER_KEYEXPRS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_CONNECTIVITY_REPLAY_EVENTS`] is bound.
 pub const MAX_CONNECTIVITY_REPLAY_EVENTS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

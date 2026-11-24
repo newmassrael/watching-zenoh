@@ -252,7 +252,7 @@ fn session_init_params(
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: REPLAY_ZID.into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 65535,
         lease_ms: 10_000,
@@ -268,7 +268,8 @@ fn session_init_params(
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::from_entropy(
             &mut wz::runtime_tokio::session_glue::OsEntropy,
-        )?,
+        )?
+        .into(),
         region: None,
     })
 }

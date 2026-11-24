@@ -642,8 +642,13 @@ impl<P: Storage> LocalTokenRegistry<P> {
             #[cfg(feature = "rx-lent-control")]
             IterationEvent::InPlace(record) => match record.interest() {
                 Some(interest) => usize::from(
-                    self.answer_interest_view(held, interest, peer_keyexpr_table, pending)
-                        .is_err(),
+                    self.answer_interest_view(
+                        held,
+                        interest,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                        pending,
+                    )
+                    .is_err(),
                 ),
                 None => 0,
             },

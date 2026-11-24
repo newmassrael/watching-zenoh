@@ -351,7 +351,7 @@ pub(crate) struct PublisherState {
     /// was not one the caller declared: held for the publisher's life, released when it is
     /// dropped. What a put names its key by, with the caller's own declaration ahead of it
     /// ([`Self::wire_mapping`]).
-    held_declaration: Option<wz_session_core::wire_id::ExprId>,
+    held_declaration: Option<wz_capi_core::faces::KeyHold>,
     /// The question this publisher asks every face for the subscribers of its key, held for
     /// its life and let go when it is dropped; `None` for a publisher that writes to its own
     /// session alone and asks nobody.
@@ -397,8 +397,8 @@ impl Drop for PublisherState {
         // Let go of the key this publisher declared for itself: the last holder retracts it
         // on every face, and nothing goes on the wire while another publisher on the same
         // key still holds it.
-        if let Some(id) = self.held_declaration.take() {
-            self.shared.release_keyexpr(id);
+        if let Some(hold) = self.held_declaration.take() {
+            hold.release(&*self.shared);
         }
         // The last publisher asking on its key (or aggregate) retracts the question on every
         // face with its `Interest(Final)`; one that still has company sends nothing.
@@ -412,7 +412,11 @@ impl PublisherState {
     /// The id a put on this publisher names its key by: the key the caller declared, or the
     /// one the publisher took for itself, or `None` for the literal.
     pub(crate) fn wire_mapping(&self) -> Option<wz_session_core::wire_id::ExprId> {
-        self.keyexpr.mapping.or(self.held_declaration)
+        self.keyexpr.mapping.or_else(|| {
+            self.held_declaration
+                .as_ref()
+                .map(wz_capi_core::faces::KeyHold::mapping_id)
+        })
     }
 
     /// Record a background matching listener, retiring any previous one.
@@ -922,8 +926,8 @@ pub(crate) unsafe fn declare_publisher_stated(
                 // The session has no entity id left to ask by: the declaration is refused, as
                 // a publisher that cannot ask could never be told it matches.
                 None => {
-                    if let Some(id) = own_declaration {
-                        state.shared.release_keyexpr(id);
+                    if let Some(hold) = own_declaration {
+                        hold.release(&*state.shared);
                     }
                     return Z_EGENERIC;
                 }

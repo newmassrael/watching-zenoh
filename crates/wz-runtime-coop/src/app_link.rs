@@ -70,7 +70,8 @@ use crate::session_drive::{
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
 };
 use crate::stream_link::{
-    stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
+    stream_ends_fit, StreamDial, StreamDriver, StreamEnds, StreamListen, StreamSocket,
+    STREAM_RX_CAPACITY,
 };
 use crate::udp_link::{datagram_ends_fit, DatagramSocket, Received, UdpDriver, UDP_RX_CAPACITY};
 
@@ -674,12 +675,12 @@ impl StreamSocket for AppStreamSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     // Every byte is taken: what the program does not take now is held for it.
@@ -1705,7 +1706,9 @@ mod tests {
                 String::from("tcp/192.0.2.9:7447")
             )
         );
-        assert_eq!(stream.peer(), PEER);
+        assert!(
+            matches!(stream.ends(), StreamEnds::Ip { proto: LinkProto::Tcp, peer, .. } if peer == PEER)
+        );
         drop(stream);
         assert_eq!(
             script.closes.lock().unwrap().len(),

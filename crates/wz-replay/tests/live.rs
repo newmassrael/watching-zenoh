@@ -558,7 +558,7 @@ fn peer_init_params() -> SessionInitParams {
         // Distinct from the replay tool's own zid, or the handshake is a node
         // talking to itself.
         zid: [0x02, 0x02, 0x02, 0x02].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 65535,
         lease_ms: 10_000,
@@ -572,7 +572,7 @@ fn peer_init_params() -> SessionInitParams {
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32 bytes"),
+        cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32 bytes").into(),
         region: None,
     }
 }

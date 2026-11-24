@@ -103,7 +103,7 @@ fn unicast_params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [zid; 4].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -118,7 +118,8 @@ fn unicast_params(zid: u8) -> SessionInitParams {
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
-            .expect("key"),
+            .expect("key")
+            .into(),
         region: None,
     }
 }
