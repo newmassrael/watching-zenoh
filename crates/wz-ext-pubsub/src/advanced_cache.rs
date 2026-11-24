@@ -304,7 +304,7 @@ impl Default for CacheConfig {
 /// What a ring's lock panics with when a panic of its holder poisoned it.
 const RING_POISONED: &str = "advanced cache ring mutex poisoned";
 
-mod ring;
+pub(crate) mod ring;
 
 use ring::RecordRing;
 
@@ -415,7 +415,7 @@ struct Held<'a> {
     keyexpr: &'a str,
     bytes: &'a [u8],
     source_info: Option<SourceInfo>,
-    timestamp: TimestampHint,
+    timestamp: Option<TimestampHint>,
     kind: SampleKind,
     encoding: Option<EncodingRef<'a>>,
     attachment: Option<&'a [u8]>,
@@ -430,7 +430,7 @@ impl<'a> Held<'a> {
             keyexpr: &sample.keyexpr,
             bytes: sample.bytes(),
             source_info: sample.source_info.clone(),
-            timestamp: sample.timestamp.clone(),
+            timestamp: Some(sample.timestamp.clone()),
             kind: sample.kind,
             encoding: sample.encoding.as_ref().map(EncodingHint::view),
             attachment: sample.attachment.as_deref(),
@@ -759,7 +759,9 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
         .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
     let matches = |s: &Held<'_>| {
         sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range)
-            && sample_matches_time(s.timestamp.time, time_range)
+            && s.timestamp.as_ref().map_or(time_range.is_none(), |ts| {
+                sample_matches_time(ts.time, time_range)
+            })
     };
 
     // `_max`: keep the newest `m` (the ring tail), still replied oldest-first. The ring is walked
@@ -806,7 +808,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
         // `z_query_reply_options_t` each do. Set on the shared `meta` so the
         // Put and Del arms cannot drift.
         let meta = ReplyMeta::new()
-            .with_timestamp(Some(&s.timestamp))
+            .with_timestamp(s.timestamp.as_ref())
             .with_source_info(s.source_info.as_ref())
             .with_qos(Some(replies_config.qos()));
         // R3063 -- a sample cached as a buffer of shared memory is replied AS the buffer, so a

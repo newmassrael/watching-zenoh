@@ -3647,6 +3647,61 @@ value = 2
 reason = "zenoh-pico bounds its sample-miss listeners by no count; its callback drop test holds an owned one and a background one on one advanced subscriber (`vendor/zenoh-pico/tests/z_api_callback_drop_on_undeclare_test.c` @ `ze_advanced_subscriber_declare_background_sample_miss_listener(`), and its advanced subscriber example holds one (`vendor/zenoh-pico/examples/unix/c11/z_advanced_sub.c` @ `ze_advanced_subscriber_declare_sample_miss_listener(z_loan(sub), &miss_listener, z_move(miss_callback));`)."
 
 [[limit]]
+id = "MAX_ADVANCED_SOURCES"
+kconfig = "WZ_LIMIT_MAX_ADVANCED_SOURCES"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "entity"
+# Bound in the build: the rows lie in each advanced subscriber's own part, on every runtime that
+# hosts one, so meeting a new publisher takes no memory.
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The publishers one advanced subscriber orders at once, of each of its two
+kinds (those that number their samples and those that only timestamp them):
+the rows of the tables kept with the subscriber. A publisher met while every
+row is taken takes the row of the one met longest ago that holds no sample
+back and waits on no get; while every row does, its samples are delivered as
+they come, unordered.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the sources an advanced subscriber orders: zenoh keeps the sequenced ones in a map that grows with each publisher and the timestamped ones in a cache that lets its least recently used entry go, and zenoh-pico keeps both in hash maps of chained buckets, sixteen of them to begin with (`vendor/zenoh-pico/include/zenoh-pico/collections/hashmap.h` @ `#define _Z_DEFAULT_HASHMAP_CAPACITY 16`). wz keeps a fixed table of each kind and lets the least recently met idle source go, as the timestamped cache does; the default is those sixteen."
+
+[[limit]]
+id = "ADVANCED_SUBSCRIBER_PENDING_BYTES"
+kconfig = "WZ_LIMIT_ADVANCED_SUBSCRIBER_PENDING_BYTES"
+kind = "bound"
+driven = "remote"
+default = 1712
+storage = "capacity"
+scope = "entity"
+# Bound in the build: the ring lies in each advanced subscriber's own part.
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes one advanced subscriber holds samples back in while what comes
+before them is on its way (a recovery or history get): one ring of records,
+each a sample's header, key, encoding schema, payload and attachment, as long
+as they are. A sample that finds no room is not held: what its publisher holds
+goes on first, in order, with a miss reported for each hole given up, and then
+it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds what an advanced subscriber holds back: zenoh and zenoh-pico keep each held sample on the heap, at most the history's max_samples of each publisher. wz keeps them as records of one ring of the subscriber's own bytes, so holding a sample allocates nothing, and gives up the wait rather than a sample when the ring is full. 1712 is the size of the publisher cache's ring of the same default, ten records of the samples zenoh-pico's tests publish into a cache of ten (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`), which is the most a subscriber recovering from that cache holds back at once."
+
+[limit.pico_preset]
+value = 1552
+reason = "Ten records of the samples zenoh-pico's tests put into a cache of ten (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`) and a subscriber recovers from it, as the publisher cache's preset counts them."
+
+[[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
 kind = "bound"

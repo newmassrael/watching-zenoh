@@ -330,6 +330,16 @@ pub const MAX_ADVANCED_SUBSCRIBERS: usize = generated::MAX_ADVANCED_SUBSCRIBERS;
 /// refused, its closure let go of.
 pub const MAX_SAMPLE_MISS_LISTENERS: usize = generated::MAX_SAMPLE_MISS_LISTENERS;
 
+/// The sources one advanced subscriber orders at once, of each of its two kinds (sequenced and
+/// timestamped): the rows of the tables kept with the subscriber. A source met while every row is
+/// taken takes the row of the idle one met longest ago; while none is idle it is not ordered.
+pub const MAX_ADVANCED_SOURCES: usize = generated::MAX_ADVANCED_SOURCES;
+
+/// The bytes one advanced subscriber holds samples back in, kept with the subscriber: one ring of
+/// records, each a sample as long as it is, until what comes before it is in. A sample that finds
+/// no room is not held: what its source holds goes on first, in order, and then it.
+pub const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = generated::ADVANCED_SUBSCRIBER_PENDING_BYTES;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
