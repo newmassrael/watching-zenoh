@@ -194,9 +194,9 @@ fn read(endpoint: &str, _role: Role) -> Result<EndpointReading, Refused> {
 /// The cooperative engine's reading of one endpoint, which pico's reading already admitted
 /// (`requirement_of`): a unicast endpoint is the text that reading keeps (`with_engine_text`,
 /// the one the engine is handed), read by the engine's own grammar (`locator_text`), which
-/// dials and listens on an address and refuses a host name, a scheme it has no link for, a config
-/// or metadata part and a port it cannot use; `z_open` answers that refusal as a link it could
-/// not open. A group is read by the grammar its host joiner reads it with.
+/// dials and listens on an address and refuses a host name, a config or metadata part and a port
+/// it cannot use (a scheme the build has no link for that reading refused already); `z_open`
+/// answers that refusal as a link it could not open. A group is read by the grammar its host joiner reads it with.
 #[cfg(not(feature = "engine-tokio"))]
 fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
     use wz_capi_coop::locator_text::{parse_listen_locator, parse_locator};

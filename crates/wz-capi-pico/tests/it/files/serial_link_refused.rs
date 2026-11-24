@@ -7,15 +7,19 @@
 ))]
 
 //! A `serial/` endpoint in a cooperative library built without `transport-link-serial`: no link
-//! of the build opens one, so a session that listens on one, or dials one, does not open, as a
-//! zenoh-pico build without `Z_FEATURE_LINK_SERIAL` does not. The build with the feature carries
-//! the link (`serial_link_roundtrip`).
+//! of the build opens one, so a session that listens on one, or dials one, is refused before
+//! anything is opened with `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN`, as a zenoh-pico build without
+//! `Z_FEATURE_LINK_SERIAL` refuses it (`vendor/zenoh-pico/src/link/link.c` @
+//! `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`). The build with the feature carries the link
+//! (`serial_link_roundtrip`).
 //!
-//! RED reproduction: hand the open of every build the host's ttys beside its sockets
-//! (`coop_host::with_serial` in `open_on_coop` without its `cfg`), and the listen below opens.
+//! RED reproduction: answer `serial` as built in every build (`link_built` in
+//! `src/endpoint.rs`), and the open reaches the engine, which refuses the endpoint as a link it
+//! could not open, `_Z_ERR_TRANSPORT_OPEN_FAILED`.
 
 use std::ffi::CStr;
 
+use wz_capi_pico::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
 use wz_capi_pico::{
     z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
     z_owned_session_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
@@ -36,19 +40,18 @@ fn open_code(key: u8, endpoint: &CStr) -> i8 {
     }
 }
 
-/// Neither role opens over a `serial/` endpoint: the listener has no link to listen on it with,
-/// and the dial none to dial it with. Turned red by a build that links the serial opener whatever
-/// its features.
+/// Neither role opens over a `serial/` endpoint, each refused as a scheme the build has no link
+/// for. Turned red by a scheme judged built without its link, or by a refusal left to the engine.
 #[test]
 fn a_serial_endpoint_opens_no_session_without_the_feature() {
     for (key, role) in [
         (Z_CONFIG_LISTEN_KEY, "listen"),
         (Z_CONFIG_CONNECT_KEY, "connect"),
     ] {
-        assert_ne!(
+        assert_eq!(
             open_code(key, c"serial//dev/ttyS0#baudrate=9600"),
-            Z_OK,
-            "a {role} on a serial endpoint opened in a build without serial links"
+            Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+            "a {role} on a serial endpoint in a build without serial links"
         );
     }
 }
