@@ -63,6 +63,23 @@ pub trait MulticastReplyEnqueue {
             self.enqueue_reply(MulticastTxReply::Response(&response));
         }
     }
+
+    /// Enqueue the answer to a member's interest in liveliness tokens for the held token
+    /// `token_id` on `keyexpr`. A backing that queues owned items builds the owned `Declare` of it
+    /// (the default); one that encodes its replies where they wait writes the borrowed reply from
+    /// where it lies (`multicast_tx::multicast_tx_token_reply`), and builds no owned record of it.
+    /// A keyexpr past the protocol's bound is not answered either way: the chain's `DeclFinal`
+    /// still terminates the interest.
+    #[cfg(feature = "liveliness-token")]
+    fn enqueue_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        if let Ok(declare) =
+            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id).and_then(
+                |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
+            )
+        {
+            self.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
+        }
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -146,18 +163,11 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::OwnedResponseSink for Multi
 // (the multicast reply loop is a `DeclareReplySink` consumer either way).
 #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for MulticastReplySink<Q> {
+    // The backing writes the reply as it keeps its replies, owned or encoded where they wait.
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
-        // below skips one: the chain's `DeclFinal` still terminates the interest.
-        if let Ok(declare) =
-            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id).and_then(
-                |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
-            )
-        {
-            self.queue
-                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
-        }
+        self.queue
+            .enqueue_token_reply(token_id, keyexpr, interest_id);
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
         // Same UNGATED builder as the unicast sink, for the same reason: the
@@ -471,6 +481,31 @@ mod tests {
         #[cfg(feature = "liveliness-get")]
         sink.prune_liveliness_get_interest(7);
         assert!(recorded.0.borrow().is_empty());
+    }
+
+    /// A held token's answer to a member's interest reaches a backing that queues owned items as
+    /// the owned reply `build_token_reply` builds, and a keyexpr past the protocol's bound reaches
+    /// it as nothing. Turned red by a default `enqueue_token_reply` that queues another reply, or
+    /// one that queues a refused reply.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_reaches_an_owned_backing_as_the_owned_reply() {
+        let recorded = Recorded(RefCell::new(Vec::new()));
+        let sink = MulticastReplySink::new(&recorded);
+        sink.send_declare_token_reply(9, "demo/token", 42);
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        sink.send_declare_token_reply(10, &past, 42);
+        let expected = crate::declare::local_token::build_token_reply(9, "demo/token", 42)
+            .and_then(|reply| {
+                reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+            })
+            .expect("an owned reply");
+        let items = recorded.0.borrow();
+        assert_eq!(items.len(), 1, "the refused reply queues nothing");
+        match items.first() {
+            Some(MulticastTxItem::DeclareReply { declare }) => assert_eq!(**declare, expected),
+            _ => panic!("the answer is a declaration reply"),
+        }
     }
 
     /// A member's current interest in keyexprs is answered with each declared keyexpr its key
