@@ -687,15 +687,57 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     open: Option<OpenChain<S::Chain>>,
 }
 
-impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
-    fn new() -> Self {
-        let mut engine = Engine::new(ReassemblySlotPolicy::new_with_checked_session_id(
+/// A slot's machine.
+type SlotEngine = Engine<ReassemblySlotPolicy<SlotBinding>>;
+
+/// Build a slot machine in `cell` and enter its initial `Empty` leaf (W3C SCXML 3.3).
+///
+/// Not generic over the Router and out of line, so every Router type and every place a slot is
+/// built or put back in service share one copy of the machine's start, and the machine is written
+/// where the slot keeps it rather than built on a stack and moved there.
+#[inline(never)]
+fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
+    Engine::new_in_place(
+        cell,
+        ReassemblySlotPolicy::new_with_checked_session_id(
             REASSEMBLY_SLOT_SESSION_ID,
             SlotBinding::default(),
-        ));
-        // W3C SCXML 3.3: enter the initial `Empty` leaf.
-        engine.initialize().unwrap_or_else(|never| match never {});
-        Self { engine, open: None }
+        ),
+    )
+    .initialize()
+    .unwrap_or_else(|never| match never {});
+}
+
+impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
+    /// A free slot, built in `cell` where the Router keeps it. Whatever `cell` held is not
+    /// dropped.
+    fn init_in(cell: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
+        use core::ptr::addr_of_mut;
+        let at = cell.as_mut_ptr();
+        // Names every field of the slot with no `..`, so a field added to the struct stops this from
+        // compiling until it is written below too.
+        let _every_field_is_written = |slot: &Self| {
+            let Self { engine: _, open: _ } = slot;
+        };
+        // SAFETY: `at` points at storage for one slot that holds no value. The machine is written
+        // in its field by `start_slot_engine` and the chain state beside it, every field the list
+        // above names. With both written the slot is whole.
+        unsafe {
+            start_slot_engine(
+                &mut *addr_of_mut!((*at).engine).cast::<core::mem::MaybeUninit<SlotEngine>>(),
+            );
+            addr_of_mut!((*at).open).write(None);
+            &mut *at
+        }
+    }
+
+    /// A free slot as a value, for the tests that drive one slot without its Router.
+    #[cfg(test)]
+    fn new() -> Self {
+        let mut cell = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut cell);
+        // SAFETY: `init_in` wrote the whole slot.
+        unsafe { cell.assume_init() }
     }
 
     fn is_free(&self) -> bool {
@@ -749,7 +791,16 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         if let Some(open) = self.open.take() {
             staging.release(open.chain);
         }
-        *self = Self::new();
+        let cell =
+            core::ptr::addr_of_mut!(self.engine).cast::<core::mem::MaybeUninit<SlotEngine>>();
+        // SAFETY: the machine is whole, so dropping it is sound, and its field is then storage
+        // that holds no value, which `start_slot_engine` fills with a whole machine before it
+        // returns. Nothing between the drop and the write can unwind: the machine's start cannot
+        // fail. The chain state was emptied above, as a fresh slot's is.
+        unsafe {
+            core::ptr::drop_in_place(cell.cast::<SlotEngine>());
+            start_slot_engine(&mut *cell);
+        }
     }
 
     /// [`Self::release`] from a state the chart makes terminal, and
@@ -806,14 +857,10 @@ where
     /// The arena must be EMPTY, with no chain of its own outstanding; the
     /// Router's accounting starts from all of `SLOTS` free.
     pub fn with_staging(config: ReassemblyConfig, staging: S) -> Self {
-        Self {
-            slots: core::array::from_fn(|_| Slot::new()),
-            config,
-            staging,
-            capacity_refusals: 0,
-            opened: 0,
-            displaced: None,
-        }
+        let mut place = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut place, config, staging);
+        // SAFETY: `init_in` wrote every field of the Router.
+        unsafe { place.assume_init() }
     }
 
     /// [`Self::with_staging`] built where `place` lies, and lent back: each slot is made in its
@@ -834,14 +881,31 @@ where
     ) -> &mut Self {
         use core::ptr::addr_of_mut;
         let at = place.as_mut_ptr();
+        // A field added to the Router and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |router: &Self| {
+            let Self {
+                slots: _,
+                config: _,
+                staging: _,
+                capacity_refusals: _,
+                opened: _,
+                displaced: _,
+            } = router;
+        };
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`). An array of `SLOTS`
         // slots has the layout of `SLOTS` consecutive slots, so each is written once through its
-        // own address, as is every other field; `every_field_is_written` holds the list of fields
-        // to the struct's, so `place` is fully written before it is lent back.
+        // own address, as is every other field the list above names, so `place` is fully written
+        // before it is lent back.
         unsafe {
             let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
             for index in 0..SLOTS {
-                slots.add(index).write(Slot::new());
+                Slot::<SLOTS, CAP, S>::init_in(
+                    &mut *slots
+                        .add(index)
+                        .cast::<core::mem::MaybeUninit<Slot<SLOTS, CAP, S>>>(),
+                );
             }
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).staging).write(staging);
@@ -850,21 +914,6 @@ where
             addr_of_mut!((*at).displaced).write(None);
             place.assume_init_mut()
         }
-    }
-
-    /// A field added to the Router and not written by [`Self::init_in`] would be read
-    /// uninitialised. This destructures the struct with no `..`, so adding a field without naming
-    /// it here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(router: Self) {
-        let Self {
-            slots: _,
-            config: _,
-            staging: _,
-            capacity_refusals: _,
-            opened: _,
-            displaced: _,
-        } = router;
     }
 
     /// The open chain the last ingest ended for a fragment that was not of
@@ -1098,37 +1147,48 @@ where
             slot.release_or_replace(staging);
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
-        if hand != Hand::Borrow {
-            if let Some(OpenChain {
-                key,
-                last_sn,
-                deadline_ms,
-                opened,
-                chain,
-            }) = slot.open.take()
-            {
-                match Self::hand_up(staging, chain, hand) {
-                    Ok(bytes) => {
-                        slot.release_or_replace(staging);
-                        deliver(bytes);
-                        return IngestOutcome::Reassembled;
-                    }
-                    Err(chain) => {
-                        slot.open = Some(OpenChain {
-                            key,
-                            last_sn,
-                            deadline_ms,
-                            opened,
-                            chain,
-                        })
-                    }
+        let taken = if hand == Hand::Borrow {
+            None
+        } else {
+            slot.open.take()
+        };
+        let handed_up = taken.and_then(
+            |OpenChain {
+                 key,
+                 last_sn,
+                 deadline_ms,
+                 opened,
+                 chain,
+             }| match Self::hand_up(staging, chain, hand) {
+                Ok(bytes) => Some(bytes),
+                Err(chain) => {
+                    slot.open = Some(OpenChain {
+                        key,
+                        last_sn,
+                        deadline_ms,
+                        opened,
+                        chain,
+                    });
+                    None
                 }
-            }
+            },
+        );
+        let released_first = handed_up.is_some();
+        if released_first {
+            slot.release_or_replace(staging);
         }
-        if let Some(open) = slot.open.as_ref() {
-            deliver(ChainBytes::Borrowed(staging.bytes(&open.chain)));
+        // One call of `deliver` for both hands, so the delivery is compiled in here once.
+        let bytes = handed_up.or_else(|| {
+            slot.open
+                .as_ref()
+                .map(|open| ChainBytes::Borrowed(staging.bytes(&open.chain)))
+        });
+        if let Some(bytes) = bytes {
+            deliver(bytes);
         }
-        slot.release_or_replace(staging);
+        if !released_first {
+            slot.release_or_replace(staging);
+        }
         IngestOutcome::Reassembled
     }
 
@@ -2641,6 +2701,26 @@ mod duty_tests {
 
     fn state(slot: &TestSlot) -> State {
         slot.engine.get_current_state()
+    }
+
+    /// A slot put back in service in the middle of a chain is a fresh one where it stands: its
+    /// machine is at `Empty` with nothing posted, it holds no chain, and the next first fragment
+    /// begins a chain as on a slot never used.
+    #[test]
+    fn a_replaced_slot_is_fresh_in_its_own_place() {
+        let mut staging = <HeapStaging<1, 64> as BuildsOwnStorage<1, 64>>::new();
+        let mut slot = TestSlot::new();
+        assert_eq!(state(&slot), State::Empty);
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
+
+        slot.replace(&mut staging);
+        assert_eq!(state(&slot), State::Empty, "the machine was started again");
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
+        assert!(slot.is_free());
+        assert_eq!(staging.available(), 1, "the arena lent nothing");
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
     }
 
     /// Every transition of `reassembly_slot.scxml` posts exactly the duties of

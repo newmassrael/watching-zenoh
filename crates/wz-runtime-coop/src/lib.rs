@@ -315,6 +315,15 @@ pub mod faces;
     target_has_atomic = "ptr"
 ))]
 pub mod face_life;
+// The decisions of a face's sends as a value: what a publish behind a held session does, what is
+// kept for the faces it is still owed to, and the order of a publish's fan-outs.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod face_send;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket
