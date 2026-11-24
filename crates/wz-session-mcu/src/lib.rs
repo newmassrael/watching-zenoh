@@ -203,8 +203,6 @@ pub mod client_node;
 pub mod admin_status;
 // S9b — the same admin GET with no allocator: the node's state in fixed rows, the
 // reply built in a bounded arena and staged in the session's own stage.
-// Totality debt TD-219 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 pub mod admin_fixed;
 // R2837 — the node a host reaches and reconfigures at runtime: listen, the
