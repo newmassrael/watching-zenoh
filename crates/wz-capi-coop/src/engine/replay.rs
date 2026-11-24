@@ -264,14 +264,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return match kind {
                 Kind::Keyexpr => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.keyexprs().iter().nth(left);
+                    let row = tables.keyexprs().nth_live(left);
                     row.is_none_or(|(_, row)| {
                         actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
                     })
                 }
                 Kind::Subscriber => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.subscribers().iter().nth(left);
+                    let row = tables.subscribers().nth_live(left);
                     let told = row.is_none_or(|(_, row)| {
                         tables.named(row.key()).is_some_and(|key| {
                             super::SubscriberRow::declare(row.id(), key, actions)
@@ -281,13 +281,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 Kind::Interest => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.interests().iter().nth(left);
+                    let row = tables.interests().nth_live(left);
                     row.is_none_or(|(_, row)| super::send_interest(row, actions))
                 }
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.queryables().iter().nth(left);
+                    let row = tables.queryables().nth_live(left);
                     let told = row.is_none_or(|(_, row)| {
                         tables.named(row.key()).is_some_and(|key| {
                             super::QueryableRow::declare(row.id(), key, row.complete(), actions)
@@ -298,7 +298,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 #[cfg(feature = "liveliness")]
                 Kind::Token => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.tokens().iter().nth(left);
+                    let row = tables.tokens().nth_live(left);
                     let told = row.is_none_or(|(_, row)| {
                         tables.named(row.key()).is_some_and(|key| {
                             super::liveliness::declare_token(actions, row.id(), key)
@@ -309,7 +309,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 #[cfg(feature = "liveliness")]
                 Kind::LiveSub => {
                     let tables = super::tables(&self.session.registry);
-                    let row = tables.liveliness_subscribers().iter().nth(left);
+                    let row = tables.liveliness_subscribers().nth_live(left);
                     let asked = row.is_none_or(|(_, row)| {
                         super::liveliness::ask(
                             actions,
@@ -413,10 +413,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn subscriber_place(&self, handle: SubscriberHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let subscribers = tables.subscribers();
-        let rank = subscribers
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(subscribers.len());
+        let rank = subscribers.rank_of(handle).unwrap_or(subscribers.len());
         self.place(Kind::Subscriber, rank)
     }
 
@@ -451,10 +448,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn interest_place(&self, handle: InterestHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let interests = tables.interests();
-        let rank = interests
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(interests.len());
+        let rank = interests.rank_of(handle).unwrap_or(interests.len());
         self.place(Kind::Interest, rank)
     }
 
@@ -487,10 +481,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn queryable_place(&self, handle: QueryableHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let queryables = tables.queryables();
-        let rank = queryables
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(queryables.len());
+        let rank = queryables.rank_of(handle).unwrap_or(queryables.len());
         self.place(Kind::Queryable, rank)
     }
 
@@ -539,10 +530,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn keyexpr_place(&self, handle: KeyexprHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let keyexprs = tables.keyexprs();
-        let rank = keyexprs
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(keyexprs.len());
+        let rank = keyexprs.rank_of(handle).unwrap_or(keyexprs.len());
         self.place(Kind::Keyexpr, rank)
     }
 
@@ -552,10 +540,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn token_place(&self, handle: TokenHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let tokens = tables.tokens();
-        let rank = tokens
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(tokens.len());
+        let rank = tokens.rank_of(handle).unwrap_or(tokens.len());
         self.place(Kind::Token, rank)
     }
 
@@ -590,10 +575,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn liveliness_place(&self, handle: LivelinessSubscriberHandle) -> usize {
         let tables = super::tables(&self.session.registry);
         let subscribers = tables.liveliness_subscribers();
-        let rank = subscribers
-            .iter()
-            .position(|(held, _)| held == handle)
-            .unwrap_or(subscribers.len());
+        let rank = subscribers.rank_of(handle).unwrap_or(subscribers.len());
         self.place(Kind::LiveSub, rank)
     }
 
