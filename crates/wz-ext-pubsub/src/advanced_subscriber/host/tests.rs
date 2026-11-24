@@ -52,7 +52,10 @@ type Recorded = (EngineSubscriber, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u32>>>);
 /// One get the engine was asked: where, with what parameters, and the legs it minted.
 struct GetRecord {
     keyexpr: String,
+    /// The parameters as the get sends them, the reply-keyexpr-any flag included.
     parameters: String,
+    /// The parameters the host stated, which the flag rides beside rather than in.
+    stated: String,
     destination: Locality,
     legs: Vec<Arc<Mutex<Option<ReplyCallback>>>>,
     /// The key of the fan that cancels the get, when a token can.
@@ -358,7 +361,9 @@ impl SessionEngine for Script {
         self.event(format!("get {keyexpr}"));
         self.gets.lock().unwrap().push(GetRecord {
             keyexpr: keyexpr.to_owned(),
-            parameters: String::from_utf8(opts.parameters.as_deref().unwrap_or_default().to_vec())
+            parameters: String::from_utf8(opts.sent_parameters().unwrap_or_default().into_owned())
+                .expect("parameters are text"),
+            stated: String::from_utf8(opts.parameters.as_deref().unwrap_or_default().to_vec())
                 .expect("parameters are text"),
             destination: opts.allowed_destination,
             legs,
@@ -476,7 +481,14 @@ fn a_gap_asks_the_cache_and_the_get_ends_with_the_last_leg() {
             gets[0].keyexpr,
             crate::advanced_ke::recovery_get_ke("demo/data", &publisher_hex(), 7)
         );
-        assert_eq!(gets[0].parameters, "_sn=1..;_anyke");
+        assert_eq!(
+            gets[0].parameters, "_sn=1..;_anyke",
+            "the get sends the range and the reply-keyexpr-any flag after it"
+        );
+        assert_eq!(
+            gets[0].stated, "_sn=1..",
+            "the flag is not copied into the stated bytes"
+        );
         assert_eq!(gets[0].destination, Locality::SessionLocal);
         assert_eq!(gets[0].legs.len(), 2);
     }
