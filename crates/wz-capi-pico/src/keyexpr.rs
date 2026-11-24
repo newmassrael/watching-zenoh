@@ -66,10 +66,10 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 }
 
 /// The key a declaration or a get names, read where the caller holds it: `Z_ERR_INVALID` when it
-/// is null or not UTF-8, and when it is not one a zenoh-pico peer takes (not canon, or pico-unsafe),
-/// the outbound gate wz's own session applies per face. Judged here, before anything is declared or
-/// asked, because a session declares and asks per face at its best, and would swallow a refusal of
-/// one face. One body every such door calls, so the gate and its code are not copied into each.
+/// is null or not UTF-8, and otherwise refused as [`outbound_key`] refuses it. Judged here, before
+/// anything is declared or asked, because a session declares and asks per face at its best, and
+/// would swallow a refusal of one face. One body every such door calls, so the gate and its codes
+/// are not copied into each.
 ///
 /// # Safety
 /// As [`keyexpr_str`].
@@ -78,9 +78,40 @@ pub(crate) unsafe fn outbound_keyexpr<'a>(
     ke: *const z_loaned_keyexpr_t,
 ) -> Result<&'a str, ZResult> {
     let key = keyexpr_str(ke).ok_or(Z_ERR_INVALID)?;
-    wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(key)
-        .map_err(|_| Z_ERR_INVALID)?;
+    outbound_key(key)?;
     Ok(key)
+}
+
+/// The judgement of a key a declaration or a get names: refused as [`canon_key`] refuses it, and
+/// then `Z_ERR_INVALID` for a key in canon form that a zenoh-pico peer's canonizer aborts on, the
+/// outbound gate wz's own session applies per face.
+pub(crate) fn outbound_key(key: &str) -> Result<(), ZResult> {
+    canon_key(key)?;
+    wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(key).map_err(|_| Z_ERR_INVALID)
+}
+
+/// The one judgement of a caller's key text that every door making, declaring or sending a key
+/// goes through: `Z_EINVAL` for a text not in canon form, the code the checked view constructor
+/// answers (`vendor/zenoh-pico/src/api/api.c` @
+/// `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`), and
+/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for one longer than the longest key the build holds ([`fits`]).
+///
+/// A text not in canon form is refused, neither passed on nor rewritten, as upstream zenoh refuses
+/// one wherever a key is made of text (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @
+/// `fn try_from(value: &'a str) -> Result<Self, Self::Error> {`). zenoh-pico checks only its view
+/// constructor and copies the text of its owned one as given; wz does not follow that gap. A
+/// program whose text needs rewriting asks an `_autocanonize` door, or the join, which rewrite it as
+/// both originals do.
+#[inline(never)]
+pub(crate) fn canon_key(text: &str) -> Result<(), ZResult> {
+    // The bound first: whether a text past it is judged canon depends on the profile's scratch.
+    if !fits(text) {
+        Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+    } else if is_pico_canon(text) {
+        Ok(())
+    } else {
+        Err(Z_EINVAL)
+    }
 }
 
 /// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
@@ -436,10 +467,10 @@ impl DeclaredKeyexpr {
     /// refcount onto the result.
     ///
     /// Kept only while the new literal still begins with the declared prefix.
-    /// pico's concat appends raw bytes, so there it always does; wz canonizes
-    /// the joined text, which can in principle rewrite the seam, and a
-    /// declaration naming bytes the key no longer starts with would put the
-    /// wrong key on the wire.
+    /// A concatenation is taken only as it is, so there it always does; a join
+    /// canonizes the joined text, as pico's does, which can in principle
+    /// rewrite the seam, and a declaration naming bytes the key no longer
+    /// starts with would put the wrong key on the wire.
     ///
     /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
     /// refuses it.
@@ -855,6 +886,9 @@ pub unsafe extern "C" fn z_view_string_loan(
 /// its table of them is at the `MAX_DECLARED_KEYEXPRS` it opened under, or the wire's
 /// alias space is exhausted. Refusing beats wrapping: a reused id would silently
 /// re-point a peer's live alias at a different keyexpr.
+///
+/// A key not in canon form, which only an unchecked view can hold, is refused with `Z_EINVAL`
+/// before anything is declared; zenoh-pico declares whatever text the key holds.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_keyexpr(
     zs: *const z_loaned_session_t,
@@ -869,8 +903,9 @@ pub unsafe extern "C" fn z_declare_keyexpr(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        let Some(literal) = keyexpr_str(keyexpr) else {
-            return Z_ERR_INVALID;
+        let literal = match outbound_keyexpr(keyexpr) {
+            Ok(key) => key,
+            Err(code) => return code,
         };
         // The key's place is taken before it is declared, so a full pool refuses the key and
         // nothing is declared.
@@ -1066,13 +1101,17 @@ unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexp
 }
 
 /// Build an owned keyexpr from a NUL-terminated string (pico
-/// `z_keyexpr_from_str`), REJECTING a non-canon input.
+/// `z_keyexpr_from_str`), REJECTING a non-canon input with `Z_EINVAL`, as the
+/// checked view constructor rejects it.
 ///
 /// Rejecting rather than repairing is upstream's split: the `_autocanonize`
 /// siblings exist precisely because this one does not canonize. A constructor
 /// that silently canonized would make `z_keyexpr_from_str("a//b")` succeed
 /// where upstream fails, and the program would never learn its keyexpr was
-/// malformed.
+/// malformed. zenoh-pico's copies the text unjudged
+/// (`vendor/zenoh-pico/src/api/api.c` @
+/// `return _z_declared_keyexpr_from_substr(&key->_val, name, len);`), unlike its
+/// own view constructor; that gap is not followed.
 ///
 /// # Safety
 /// `keyexpr` must be valid and writable; `name` must be null or a valid
@@ -1086,7 +1125,8 @@ pub unsafe extern "C" fn z_keyexpr_from_str(
 }
 
 /// Build an owned keyexpr from an explicitly-sized substring (pico
-/// `z_keyexpr_from_substr`), rejecting a non-canon input.
+/// `z_keyexpr_from_substr`), rejecting a non-canon input as
+/// [`z_keyexpr_from_str`] does.
 ///
 /// # Safety
 /// `keyexpr` must be valid and writable; `name` must be null or point at `len`
@@ -1103,11 +1143,8 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         };
         // The canon CHECK, not the canon transform: equality with the canonical
         // form is exactly `_z_keyexpr_is_canon` returning OK.
-        if !is_pico_canon(text) {
-            return Z_ERR_INVALID;
-        }
-        if !fits(text) {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        if let Err(code) = canon_key(text) {
+            return code;
         }
         store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
         Z_OK
@@ -1165,7 +1202,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
             keyexpr,
             core::ptr::null(),
             &[text.as_bytes()],
-            CanonRefusal::Status,
+            Form::Canonized,
         ) {
             Ok(written) => {
                 *len = written;
@@ -1265,12 +1302,18 @@ pub unsafe extern "C" fn z_keyexpr_take_from_loaned(
     })
 }
 
-/// Append `right[..len]` to `left` and canonize (pico `z_keyexpr_concat`).
+/// Append `right[..len]` to `left` (pico `z_keyexpr_concat`).
 ///
 /// Concatenation is TEXTUAL, with no separator inserted — upstream appends the
 /// bytes as given, so `concat("a/b", "c")` is `a/bc` and a caller wanting a new
-/// chunk passes `"/c"`. The result is canonized because the join of two canon
-/// keyexprs need not be canon (`"a/**" + "/*"` is not).
+/// chunk passes `"/c"`. Nothing is rewritten: a `*` meeting a `*` at the seam is
+/// refused with `Z_EINVAL`, as both originals refuse it
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `if (left_data[left_len - 1] == '*' && len > 0 && right[0] == '*') {`), and so is a
+/// result not in canon form (`"a/**" + "/*"`), as upstream zenoh refuses it
+/// (`zenoh/src/api/key_expr.rs` @
+/// `key_expr: OwnedKeyExpr::try_from(format!("{self}{s}"))?,`). zenoh-pico keeps such a
+/// result as it is; wz does not follow that gap.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned
@@ -1298,11 +1341,14 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 None => return Z_ERR_INVALID,
             }
         };
+        if head.ends_with('*') && tail.starts_with('*') {
+            return Z_EINVAL;
+        }
         store_canonized(
             key,
             left,
             &[head.as_bytes(), tail.as_bytes()],
-            CanonRefusal::Invalid,
+            Form::AsGiven,
         )
         .err()
         .unwrap_or(Z_OK)
@@ -1331,10 +1377,10 @@ unsafe fn extended_from(
 /// ([`extended_from`]), a literal for a null `left`. The bound every key of this build is held to
 /// is held to the form and not to the text, as pico keeps only the form: a long text whose form is
 /// short is a key, and a form past the bound is refused as a key past pico's heap is
-/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, [`fits`]). A text no canonizing makes
-/// a key of is answered as `refusal` says. The form's length on success; `key` is left as it was
-/// on a refusal. The join takes no allocation and no copy of its
-/// text.
+/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, [`fits`]). A text no canonizing makes a key of, and under
+/// [`Form::AsGiven`] a text that is not its own form, is answered as `form` says. The form's
+/// length on success; `key` is left as it was on a refusal. The join takes no allocation and no
+/// copy of its text.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
@@ -1343,7 +1389,7 @@ unsafe fn store_canonized(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
     parts: &[&[u8]],
-    refusal: CanonRefusal,
+    form_of: Form,
 ) -> Result<usize, ZResult> {
     // Left unfilled: the walk writes the form from the room's first byte and reads no further than
     // it wrote, and a room of the bound filled first is a write of the whole bound at every call.
@@ -1359,12 +1405,15 @@ unsafe fn store_canonized(
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         }
         Err(err) => {
-            return Err(match refusal {
-                CanonRefusal::Status => pico_canon_status(&err),
-                CanonRefusal::Invalid => Z_EINVAL,
+            return Err(match form_of {
+                Form::Canonized => pico_canon_status(&err),
+                Form::AsGiven => Z_EINVAL,
             })
         }
     };
+    if matches!(form_of, Form::AsGiven) && !spelled_by(parts, form) {
+        return Err(Z_EINVAL);
+    }
     // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
     let Some(canon) = crate::abi::text_of(form) else {
         return Err(Z_ERR_INVALID);
@@ -1373,17 +1422,31 @@ unsafe fn store_canonized(
     Ok(form.len())
 }
 
-/// How a door that canonizes a text answers one no canonizing makes a key of.
+/// How a door that makes a key of the text `parts` make takes a text not in canon form.
 #[derive(Clone, Copy)]
-enum CanonRefusal {
-    /// pico's canonize status for the cause ([`pico_canon_status`]), which its join and its
-    /// canonizing constructor answer (`vendor/zenoh-pico/src/session/keyexpr.c` @
+enum Form {
+    /// Canonized, and a text no canonizing makes a key of answered with pico's canonize status for
+    /// the cause ([`pico_canon_status`]), as its join and its canonizing constructor answer
+    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @
     /// `_Z_CLEAN_RETURN_IF_ERR(_z_keyexpr_canonize((char *)key->_keyexpr._slice.start, &key->_keyexpr._slice.len),`).
-    Status,
-    /// pico's `_Z_ERR_INVALID` (`Z_EINVAL`), the one refusal its concatenation has, which
-    /// canonizes nothing (`vendor/zenoh-pico/src/session/keyexpr.c` @
-    /// `_Z_ERROR_RETURN(_Z_ERR_INVALID);`).
-    Invalid,
+    Canonized,
+    /// Taken only as it is: a text not in canon form, whatever the cause, is refused with pico's
+    /// `_Z_ERR_INVALID` (`Z_EINVAL`), the one refusal its concatenation has
+    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `_Z_ERROR_RETURN(_Z_ERR_INVALID);`).
+    AsGiven,
+}
+
+/// Whether `form` is the text `parts` make, read part by part where each lies, so the text is
+/// not copied to be compared.
+fn spelled_by(parts: &[&[u8]], form: &[u8]) -> bool {
+    let mut rest = form;
+    for part in parts {
+        match rest.strip_prefix(*part) {
+            Some(after) => rest = after,
+            None => return false,
+        }
+    }
+    rest.is_empty()
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1409,7 +1472,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
             key,
             left,
             &[l.as_bytes(), b"/".as_slice(), r.as_bytes()],
-            CanonRefusal::Status,
+            Form::Canonized,
         )
         .err()
         .unwrap_or(Z_OK)
@@ -1695,21 +1758,85 @@ mod door_reading_tests {
     }
 
     /// The key a declaration or a get names is read through one gate: a canon key is read where
-    /// it lies, and no key, an empty one and one with an empty chunk are `Z_ERR_INVALID`.
+    /// it lies; a key not in canon form is `Z_EINVAL`, whether no canonizing makes a key of it
+    /// (an empty chunk) or canonizing would rewrite it (a lone `$*` chunk, a `*` after `**`); a
+    /// canon key a pico peer's canonizer aborts on, and no key, are `Z_ERR_INVALID`. Turned red by
+    /// [`outbound_key`] without [`canon_key`], which passes the keys canonizing would rewrite.
     #[test]
     fn the_outbound_gate_reads_a_canon_key_and_refuses_the_rest() {
         let canon = unchecked(c"demo/a/**");
         let empty_chunk = unchecked(c"demo//a");
+        let lone_dollar_star = unchecked(c"demo/$*");
+        let star_after_double = unchecked(c"demo/**/*");
+        let pico_aborts = unchecked(c"**/c/*");
         // SAFETY: views of this frame, and a null pointer.
         unsafe {
             let read = outbound_keyexpr(z_view_keyexpr_loan(&canon)).expect("a canon key");
             assert_eq!(read, "demo/a/**");
             assert_eq!(read.as_ptr(), canon._start, "read where the view holds it");
+            for refused in [&empty_chunk, &lone_dollar_star, &star_after_double] {
+                assert_eq!(
+                    outbound_keyexpr(z_view_keyexpr_loan(refused)),
+                    Err(Z_EINVAL)
+                );
+            }
             assert_eq!(
-                outbound_keyexpr(z_view_keyexpr_loan(&empty_chunk)),
+                outbound_keyexpr(z_view_keyexpr_loan(&pico_aborts)),
                 Err(Z_ERR_INVALID)
             );
             assert_eq!(outbound_keyexpr(core::ptr::null()), Err(Z_ERR_INVALID));
+        }
+    }
+
+    /// The owned constructors refuse a text not in canon form with `Z_EINVAL`, the code the
+    /// checked view constructors answer, and leave the destination null; the same keys in canon
+    /// form are made. Turned red by the owned constructor copying the text unjudged, as
+    /// zenoh-pico's does, or answering another code than the view's.
+    #[test]
+    fn the_owned_constructors_refuse_a_text_not_in_canon_form() {
+        // SAFETY: owned keys of this frame, each let go of once, and C strings that outlive them.
+        unsafe {
+            for refused in [
+                c"zenoh//test",
+                c"zenoh/test/",
+                c"/zenoh/test",
+                c"a/**/*",
+                c"a/$*",
+            ] {
+                let mut view = unchecked(c"x");
+                assert_eq!(
+                    z_view_keyexpr_from_str(&mut view, refused.as_ptr()),
+                    Z_EINVAL,
+                    "{refused:?}: the view refuses it"
+                );
+                let mut key = z_owned_keyexpr_t::null_value();
+                assert_eq!(
+                    z_keyexpr_from_str(&mut key, refused.as_ptr()),
+                    Z_EINVAL,
+                    "{refused:?}"
+                );
+                assert!(!z_internal_keyexpr_check(&key), "{refused:?}: left null");
+                let text = refused.to_bytes();
+                assert_eq!(
+                    z_keyexpr_from_substr(&mut key, text.as_ptr().cast(), text.len()),
+                    Z_EINVAL,
+                    "{refused:?}"
+                );
+                assert!(!z_internal_keyexpr_check(&key), "{refused:?}: left null");
+            }
+            for made in [c"zenoh/test", c"a/*/**", c"demo/$*x"] {
+                let mut key = z_owned_keyexpr_t::null_value();
+                assert_eq!(
+                    z_keyexpr_from_str(&mut key, made.as_ptr()),
+                    Z_OK,
+                    "{made:?}"
+                );
+                assert_eq!(
+                    keyexpr_str(z_keyexpr_loan(&key)).map(str::as_bytes),
+                    Some(made.to_bytes())
+                );
+                z_keyexpr_drop(z_keyexpr_move(&mut key));
+            }
         }
     }
 
@@ -2069,49 +2196,84 @@ mod bound_tests {
         }
     }
 
-    /// A concatenation is held to the bound once it is canonized, not before: a text past the bound
-    /// whose form is under it is a key, the lone `$*` chunk canonized, and a form past the bound is
-    /// refused with the destination left null. Turned red by a bound judged on the text.
-    #[test]
-    fn a_concatenation_is_held_to_the_bound_once_it_is_canonized() {
-        unsafe {
-            let (rc, mut left) = owned(&key_of(MAX_KEYEXPR_BYTES - 10));
-            assert_eq!(rc, Z_OK);
-            let long = "/$*$*$*$*$*$*";
-            assert!(MAX_KEYEXPR_BYTES - 10 + long.len() > MAX_KEYEXPR_BYTES);
-            let mut concat = z_owned_keyexpr_t::null_value();
-            assert_eq!(
-                z_keyexpr_concat(
-                    &mut concat,
-                    z_keyexpr_loan(&left),
-                    long.as_ptr() as *const c_char,
-                    long.len(),
-                ),
-                Z_OK
-            );
-            let made = keyexpr_str(z_keyexpr_loan(&concat)).expect("a key");
-            assert_eq!(made.len(), MAX_KEYEXPR_BYTES - 10 + 2);
-            assert!(made.ends_with("/*"), "the lone `$*` chunk is canonized");
-            z_keyexpr_drop(z_keyexpr_move(&mut concat));
+    /// `left` concatenated with `tail`: the code the door answered and the key it made.
+    unsafe fn concat(left: &z_owned_keyexpr_t, tail: &str) -> (ZResult, z_owned_keyexpr_t) {
+        let mut key = z_owned_keyexpr_t::null_value();
+        let rc = z_keyexpr_concat(
+            &mut key,
+            z_keyexpr_loan(left),
+            tail.as_ptr() as *const c_char,
+            tail.len(),
+        );
+        (rc, key)
+    }
 
-            // A suffix longer than two keys of the bound is read where it lies, whatever its
-            // length: only its form is held to the bound.
+    /// A concatenation is taken only as it is: a result in canon form is the key, and one that is
+    /// not is refused with `Z_EINVAL` and the destination left null, whether canonizing would
+    /// rewrite it (a `*` after `**`, a lone `$*` chunk, a text past the bound whose form is
+    /// short) or not; a `*` meeting a `*` at the seam is refused even where the result is canon.
+    /// Turned red by a concatenation that canonizes its result, or that drops the seam rule.
+    #[test]
+    fn a_concatenation_is_taken_only_as_it_is() {
+        unsafe {
+            let (rc, mut ab) = owned("a/b");
+            assert_eq!(rc, Z_OK);
+            let (rc, mut made) = concat(&ab, "/c");
+            assert_eq!(rc, Z_OK, "CONTROL: a canon result is the key");
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&made)), Some("a/b/c"));
+            z_keyexpr_drop(z_keyexpr_move(&mut made));
+
+            let (rc, mut wild) = owned("a/**");
+            assert_eq!(rc, Z_OK);
+            let (rc, refused) = concat(&wild, "/*");
+            assert_eq!(rc, Z_EINVAL, "a/**/* is not canon, and is not rewritten");
+            assert!(
+                !z_internal_keyexpr_check(&refused),
+                "nothing is left behind"
+            );
+            let (rc, refused) = concat(&ab, "/$*");
+            assert_eq!(rc, Z_EINVAL, "a lone `$*` chunk is not rewritten");
+            assert!(
+                !z_internal_keyexpr_check(&refused),
+                "nothing is left behind"
+            );
+
+            let (rc, mut star) = owned("a/*");
+            assert_eq!(rc, Z_OK);
+            let (rc, refused) = concat(&star, "*/b");
+            assert_eq!(rc, Z_EINVAL, "a `*` meets a `*` at the seam");
+            assert!(
+                !z_internal_keyexpr_check(&refused),
+                "nothing is left behind"
+            );
+            let (rc, mut made) = concat(&star, "/b");
+            assert_eq!(rc, Z_OK, "CONTROL: a `*` before a `/` is no seam of stars");
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&made)), Some("a/*/b"));
+            z_keyexpr_drop(z_keyexpr_move(&mut made));
+
+            // A suffix longer than two keys of the bound whose form is short is not its own form.
             let (rc, mut short) = owned("a");
             assert_eq!(rc, Z_OK);
             let longer = "/**".repeat(3 * MAX_KEYEXPR_BYTES);
-            assert_eq!(
-                z_keyexpr_concat(
-                    &mut concat,
-                    z_keyexpr_loan(&short),
-                    longer.as_ptr() as *const c_char,
-                    longer.len(),
-                ),
-                Z_OK
+            let (rc, refused) = concat(&short, &longer);
+            assert_eq!(rc, Z_EINVAL);
+            assert!(
+                !z_internal_keyexpr_check(&refused),
+                "nothing is left behind"
             );
-            assert_eq!(keyexpr_str(z_keyexpr_loan(&concat)), Some("a/**"));
-            z_keyexpr_drop(z_keyexpr_move(&mut concat));
-            z_keyexpr_drop(z_keyexpr_move(&mut short));
 
+            for key in [&mut ab, &mut wild, &mut star, &mut short] {
+                z_keyexpr_drop(z_keyexpr_move(key));
+            }
+        }
+    }
+
+    /// A concatenation is held to the bound: a canon result past it is refused with
+    /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and the destination left null.
+    #[test]
+    fn a_concatenation_past_the_bound_is_refused() {
+        unsafe {
+            let mut concat = z_owned_keyexpr_t::null_value();
             let (rc, mut full) = owned(&key_of(MAX_KEYEXPR_BYTES - 1));
             assert_eq!(rc, Z_OK);
             let past = "/b";
@@ -2126,8 +2288,24 @@ mod bound_tests {
             );
             assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
             z_keyexpr_drop(z_keyexpr_move(&mut full));
-            z_keyexpr_drop(z_keyexpr_move(&mut left));
         }
+    }
+
+    /// The one judgement of a key's text answers each cause with its code: a canon key passes, a
+    /// text not in canon form is `Z_EINVAL`, and a key past the bound is out of memory in every
+    /// profile, as pico refuses what its heap cannot hold. Turned red by a refusal of either cause
+    /// folded onto the other's code, or by the bound judged after the form.
+    #[test]
+    fn the_key_judgement_answers_each_cause_with_its_code() {
+        assert_eq!(canon_key("demo/a/**"), Ok(()));
+        assert_eq!(canon_key(&key_of(MAX_KEYEXPR_BYTES)), Ok(()));
+        for refused in ["demo//a", "demo/a/", "demo/$*", "demo/**/*", "demo/**/**"] {
+            assert_eq!(canon_key(refused), Err(Z_EINVAL), "{refused}");
+        }
+        assert_eq!(
+            canon_key(&key_of(MAX_KEYEXPR_BYTES + 1)),
+            Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
     }
 
     /// The canonizing doors read a text of any length and hold only its form to the bound, as

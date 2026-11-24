@@ -42,7 +42,7 @@ use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSa
 
 use crate::abi::z_loaned_keyexpr_t;
 use crate::ffi::{guard_val, guarded};
-use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+use crate::keyexpr::{declared_of, outbound_keyexpr, DeclaredKeyexpr};
 // The engine's operations, which a build of the cooperative engine reaches as its own type; a
 // build that reaches it as the port's object calls them on that object.
 #[cfg(not(feature = "engine-tokio"))]
@@ -53,7 +53,7 @@ use crate::pubsub::{
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::refusal::{refusal_code, Door};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{engine_held, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
@@ -211,8 +211,10 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
             Ok(handle) => handle,
             Err(code) => return code,
         };
-        let Some(ke) = keyexpr_str(keyexpr) else {
-            return Z_ERR_INVALID;
+        // The gate every declaration takes: a key not in canon form is `Z_EINVAL`.
+        let ke = match outbound_keyexpr(keyexpr) {
+            Ok(key) => key,
+            Err(code) => return code,
         };
         // The token's place is taken from its session before it is declared, so a session with
         // no place left refuses the declaration and declares nothing.
@@ -379,7 +381,7 @@ unsafe fn declare_liveliness_subscriber_with(
 
     // A closed session takes no declaration; the closure consumed above runs its drop.
     let handle = crate::session::open_session_handle(zs)?;
-    let ke = keyexpr_str(keyexpr).ok_or(Z_ERR_INVALID)?;
+    let ke = outbound_keyexpr(keyexpr)?;
     // A NULL options pointer is pico's "defaults", not an error.
     let history = !options.is_null() && (*options).history;
     let engine = engine_held(handle);

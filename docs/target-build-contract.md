@@ -352,7 +352,7 @@ whether it reads the calendar. Each artifact has a door that answers one JSON ob
 
 - the zenoh-c drop-in and the Rust API, `wz_capi_c_config_device_requires`, from the
   `OpenPlan` the open runs (`crates/wz-capi-core/src/open_facilities.rs`);
-- the pico library, `wz_ext_config_device_requires` (`wz_ext.h`, `unstable-api`), from the
+- the pico library, `wz_ext_config_device_requires` (`wz_ext.h`, `device-requires`), from the
   config as `z_open` reads it: one attempt at its one locator, a listened group as its one
   transport, scouting only when no locator is given, and the code `z_open` refuses with;
 - `wz-ap-demo --device-requires <file>`, from a `--sessions` document as `--check-sessions`
@@ -1304,6 +1304,11 @@ It states, for the four bundles (the three C ABI libraries the analyzer links an
   `git`. Without it a build with no `.git` names itself `v<version>-release`, where a checkout
   build of the same commit names the commit; with it, both compose the same `zenoh::GIT_VERSION`;
 - the toolchain channel, the manifest, the lockfile and the cargo flags;
+- the directory under the cargo target directory the products are written to (`cargo.product_dir`).
+  **The consumer reads this field** and does not derive the directory from the flags, so a change
+  of the profile the bundles are built with reaches the consumer as a change of this field.
+  `--check` holds it to the directory the flags build into, and `--build` looks for the products
+  there; `offline_build.py --product-dir` prints it;
 - the system tools (`cc`, which is also the linker, `c++`, `ar`, `libclang`) with the commands each
   puts on PATH (`cc` brings `as` and `ld`, which gcc runs by name), every crate of the bundles'
   closures that has a build script with the tools that script calls, and each bundle's tools as

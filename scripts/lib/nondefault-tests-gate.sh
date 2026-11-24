@@ -429,6 +429,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The process's runtime document with the three machines that read its limits: a document
     # that lowers each limit, and each machine refusing the one past what it was lent.
     "wz-capi-pico|hook|config-document,supervision,e2e-supervision,message-catalog|config_policy::tests::a_runtime_document"
+    # The same module in a build with the key ids a config states (`shared-key-ids`): the door's
+    # reading of `wz/key-ids` against the tree reader, and the arms that capability turns on in the
+    # other tests of the module, are compiled in no other build, so no row above runs them.
+    "wz-capi-pico|hook|config-document,shared-key-ids|config_policy::tests::"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
@@ -527,6 +531,9 @@ transport-link-unixpipe,transport-link-ws|"
     # The comments a schema keeps (`wz_app_schema::proto_lex::Gap`, behind `docs`): the
     # tokenizer's tests of which comment trails a token and which leads the next.
     "wz-app-schema|hook|docs|"
+    # The crate as an image with no allocator links it (`-default` drops its default `alloc`): the
+    # message catalog's static tables alone, their test building a whole catalog as a constant.
+    "wz-app-schema|hook|-default|message_catalog_table::"
     # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
     # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
     "wz-app-frame|hook|message-payload|message_payload_tests::"

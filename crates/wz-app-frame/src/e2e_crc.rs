@@ -39,181 +39,16 @@
 //! CRC-12/UMTS, is 12 bits wide), so a mixed pair is graded against the plain
 //! bitwise reference in the tests and has no published check value.
 //!
-//! # How the table form is derived from the model
+//! # Where the parts live
 //!
-//! With `refin` set, the register is held REFLECTED (bit 0 is the highest
-//! power), so a byte is combined by XOR at the bottom and the register shifts
-//! right, with the reflected polynomial. With it clear, the register is held
-//! in the normal orientation, the byte is combined at the top and the register
-//! shifts left. At the end the register is reflected exactly when `refin` and
-//! `refout` disagree, because a register held reflected is already in the
-//! `refout` orientation when `refout` is set. The tests grade this against
-//! the model's bit-at-a-time definition on random parameter sets, so the
-//! derivation is checked rather than argued.
+//! The parameters, their checks and the table derived from them are run once,
+//! when a profile is read, and are `wz-app-schema`'s (`crc_table`), built for
+//! size; they are re-exported here at the paths they had. The digest that feeds
+//! a frame's bytes through the table runs per frame and is this module's.
 
-use core::fmt;
-
-/// The widths the engine implements.
-pub const SUPPORTED_WIDTHS: [u8; 4] = [8, 16, 32, 64];
-
-/// The six parameters of the catalogue's model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CrcParams {
-    /// 8, 16, 32 or 64.
-    pub width: u8,
-    /// The polynomial without its `x^width` term, normal orientation.
-    pub poly: u64,
-    /// The register's start value, normal orientation.
-    pub init: u64,
-    /// Whether each input byte is reflected before it enters the register.
-    pub refin: bool,
-    /// Whether the register is reflected before `xorout` is applied.
-    pub refout: bool,
-    /// XORed into the result last.
-    pub xorout: u64,
-}
-
-/// Why a set of parameters cannot drive the engine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CrcParamsError {
-    /// The width is not one of [`SUPPORTED_WIDTHS`].
-    UnsupportedWidth(u8),
-    /// A parameter has a bit set above the width.
-    DoesNotFit {
-        /// Which parameter: `poly`, `init` or `xorout`.
-        what: &'static str,
-        /// The value given.
-        value: u64,
-        /// The width it was meant to fit.
-        width: u8,
-    },
-}
-
-impl fmt::Display for CrcParamsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedWidth(w) => write!(
-                f,
-                "a CRC width of {w} bits is not supported (the engine implements 8, 16, 32 and 64)"
-            ),
-            Self::DoesNotFit { what, value, width } => write!(
-                f,
-                "the CRC {what} {value:#x} does not fit the {width}-bit width"
-            ),
-        }
-    }
-}
-
-/// The all-ones value of `width` bits.
-pub(crate) fn width_mask(width: u8) -> u64 {
-    if width >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width) - 1
-    }
-}
-
-/// `value` with its low `width` bits in reverse order. Bits above `width` must
-/// be clear.
-fn reflect(value: u64, width: u8) -> u64 {
-    value.reverse_bits() >> (64 - u32::from(width))
-}
-
-/// A CRC engine: the parameters and the 256-entry table derived from them.
-///
-/// Built per use. The table costs 2048 inner steps, which is below the cost of
-/// anything a caller does with the result, and keeping no process-wide cache
-/// is what lets the doors above stay stateless.
-#[derive(Debug, Clone)]
-pub struct Crc {
-    params: CrcParams,
-    table: [u64; 256],
-}
-
-impl Crc {
-    /// An engine for `params`, or the reason they cannot be one.
-    pub fn new(params: CrcParams) -> Result<Self, CrcParamsError> {
-        if !SUPPORTED_WIDTHS.contains(&params.width) {
-            return Err(CrcParamsError::UnsupportedWidth(params.width));
-        }
-        let mask = width_mask(params.width);
-        for (what, value) in [
-            ("poly", params.poly),
-            ("init", params.init),
-            ("xorout", params.xorout),
-        ] {
-            if value & !mask != 0 {
-                return Err(CrcParamsError::DoesNotFit {
-                    what,
-                    value,
-                    width: params.width,
-                });
-            }
-        }
-
-        let mut table = [0u64; 256];
-        if params.refin {
-            let poly = reflect(params.poly, params.width);
-            for (index, slot) in table.iter_mut().enumerate() {
-                let mut r = index as u64;
-                for _ in 0..8 {
-                    r = if r & 1 != 0 { (r >> 1) ^ poly } else { r >> 1 };
-                }
-                *slot = r;
-            }
-        } else {
-            let top = 1u64 << (params.width - 1);
-            for (index, slot) in table.iter_mut().enumerate() {
-                let mut r = (index as u64) << (params.width - 8);
-                for _ in 0..8 {
-                    r = if r & top != 0 {
-                        (r << 1) ^ params.poly
-                    } else {
-                        r << 1
-                    };
-                }
-                *slot = r & mask;
-            }
-        }
-        Ok(Self { params, table })
-    }
-
-    /// The parameters this engine was built from.
-    pub fn params(&self) -> &CrcParams {
-        &self.params
-    }
-
-    /// A running computation, to be fed the input in pieces.
-    pub fn start(&self) -> Digest<'_> {
-        let register = if self.params.refin {
-            reflect(self.params.init, self.params.width)
-        } else {
-            self.params.init
-        };
-        Digest {
-            crc: self,
-            register,
-        }
-    }
-
-    /// A computation resumed from the register an earlier digest of THIS
-    /// engine reported ([`Digest::register`]). A digest borrows its engine, so a
-    /// caller that keeps a computation across calls keeps the register instead;
-    /// feeding the rest then finishes exactly as the unbroken digest would.
-    pub fn resume(&self, register: u64) -> Digest<'_> {
-        Digest {
-            crc: self,
-            register,
-        }
-    }
-
-    /// The CRC of `data` taken in one piece.
-    pub fn checksum(&self, data: &[u8]) -> u64 {
-        let mut digest = self.start();
-        digest.update(data);
-        digest.finish()
-    }
-}
+use wz_app_schema::crc_table::reflect;
+pub(crate) use wz_app_schema::crc_table::width_mask;
+pub use wz_app_schema::crc_table::{Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
 
 /// A CRC in progress. Feeding `a` then `b` is the same as feeding `a ++ b`,
 /// which is what lets a caller take the input from several places in a fixed
@@ -224,17 +59,37 @@ pub struct Digest<'a> {
     register: u64,
 }
 
-impl Digest<'_> {
+impl<'a> Digest<'a> {
+    /// A running computation of `crc`, to be fed the input in pieces.
+    pub fn start(crc: &'a Crc) -> Self {
+        let params = crc.params();
+        let register = if params.refin {
+            reflect(params.init, params.width)
+        } else {
+            params.init
+        };
+        Self { crc, register }
+    }
+
+    /// A computation of `crc` resumed from the register an earlier digest of
+    /// THAT engine reported ([`Digest::register`]). A digest borrows its engine,
+    /// so a caller that keeps a computation across calls keeps the register
+    /// instead; feeding the rest then finishes exactly as the unbroken digest
+    /// would.
+    pub fn resume(crc: &'a Crc, register: u64) -> Self {
+        Self { crc, register }
+    }
+
     /// Feed `bytes`.
     pub fn update(&mut self, bytes: &[u8]) {
-        let table = &self.crc.table;
-        if self.crc.params.refin {
+        let table = self.crc.table();
+        if self.crc.params().refin {
             for &byte in bytes {
                 let index = ((self.register ^ u64::from(byte)) & 0xff) as usize;
                 self.register = (self.register >> 8) ^ table[index];
             }
         } else {
-            let width = self.crc.params.width;
+            let width = self.crc.params().width;
             let mask = width_mask(width);
             let shift = u32::from(width) - 8;
             for &byte in bytes {
@@ -244,7 +99,7 @@ impl Digest<'_> {
         }
     }
 
-    /// The running register, for [`Crc::resume`]. It is the computation's
+    /// The running register, for [`Digest::resume`]. It is the computation's
     /// state, not a CRC: only `finish` gives the CRC.
     pub fn register(&self) -> u64 {
         self.register
@@ -252,7 +107,7 @@ impl Digest<'_> {
 
     /// The finished CRC.
     pub fn finish(self) -> u64 {
-        let params = &self.crc.params;
+        let params = self.crc.params();
         let out = if params.refin == params.refout {
             self.register
         } else {
@@ -260,6 +115,13 @@ impl Digest<'_> {
         };
         out ^ params.xorout
     }
+}
+
+/// The CRC of `data` taken in one piece.
+pub fn checksum(crc: &Crc, data: &[u8]) -> u64 {
+    let mut digest = Digest::start(crc);
+    digest.update(data);
+    digest.finish()
 }
 
 #[cfg(test)]
@@ -370,7 +232,7 @@ mod tests {
         for (name, params, check) in published() {
             let crc = Crc::new(params).expect("a published set is valid");
             assert_eq!(
-                crc.checksum(CHECK_INPUT),
+                checksum(&crc, CHECK_INPUT),
                 check,
                 "{name}: expected the catalogue's check value {check:#x}"
             );
@@ -436,7 +298,7 @@ mod tests {
                     // xorout was already zero: not a mutant of this set.
                     continue;
                 }
-                let got = Crc::new(mutant).expect("still valid").checksum(CHECK_INPUT);
+                let got = checksum(&Crc::new(mutant).expect("still valid"), CHECK_INPUT);
                 assert_ne!(
                     got, check,
                     "{name}: the mutant `{what}` reproduced the check value"
@@ -468,7 +330,7 @@ mod tests {
             for len in [0usize, 1, 2, 7, 8, 9, 31, 64, 257] {
                 let data: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
                 assert_eq!(
-                    crc.checksum(&data),
+                    checksum(&crc, &data),
                     bitwise(&params, &data),
                     "{params:?} over {len} bytes"
                 );
@@ -493,8 +355,8 @@ mod tests {
             refout: false,
             ..base
         };
-        let a = Crc::new(base).expect("valid").checksum(CHECK_INPUT);
-        let b = Crc::new(mixed).expect("valid").checksum(CHECK_INPUT);
+        let a = checksum(&Crc::new(base).expect("valid"), CHECK_INPUT);
+        let b = checksum(&Crc::new(mixed).expect("valid"), CHECK_INPUT);
         assert_eq!(
             b,
             reflect(a, 16),
@@ -511,7 +373,7 @@ mod tests {
             .expect("in the table");
         let crc = Crc::new(params).expect("valid");
         for cut in 0..=CHECK_INPUT.len() {
-            let mut digest = crc.start();
+            let mut digest = Digest::start(&crc);
             digest.update(&CHECK_INPUT[..cut]);
             digest.update(&CHECK_INPUT[cut..]);
             assert_eq!(digest.finish(), check, "cut at {cut}");
@@ -525,9 +387,9 @@ mod tests {
         for (name, params, check) in published() {
             let crc = Crc::new(params).expect("valid");
             for cut in 0..=CHECK_INPUT.len() {
-                let mut first = crc.start();
+                let mut first = Digest::start(&crc);
                 first.update(&CHECK_INPUT[..cut]);
-                let mut resumed = crc.resume(first.register());
+                let mut resumed = Digest::resume(&crc, first.register());
                 resumed.update(&CHECK_INPUT[cut..]);
                 assert_eq!(resumed.finish(), check, "{name}, cut at {cut}");
             }

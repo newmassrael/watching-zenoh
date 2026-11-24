@@ -9,7 +9,7 @@
 // It uses only the zenoh-pico C API the upstream examples use, so the SAME source is built once against
 // zenoh-pico and once against libwz_capi_pico (scripts/pico-compare.sh nodrop).
 //
-//   paced_pub -m peer -e tcp/127.0.0.1:PORT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d]
+//   paced_pub -m peer -e tcp/127.0.0.1:PORT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-u]
 //
 // With -b the puts of one slot are one batch (`zp_batch_start` before them and `zp_batch_stop` after, which
 // flushes it), as the upstream throughput example does for its whole run: it is how zenoh-pico reaches its
@@ -35,6 +35,10 @@
 // counts was lost on the way. With -d it is Z_CONGESTION_CONTROL_DROP, as the upstream throughput example
 // sets it: what the sender cannot take it drops and still counts as put, which the subscriber's count
 // then shows.
+//
+// With -u the publisher's reliability is best effort, so a sample larger than a batch reaches its
+// subscriber in best-effort fragments; without it, reliable ones. The option is the unstable API's, and a
+// build without Z_FEATURE_UNSTABLE_API refuses -u rather than publish reliable under its name.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,12 +71,16 @@ int main(int argc, char **argv) {
     int sleep_wait = 0;
     unsigned grace_ms = 0;
     int keep_publisher = 0;
+    int best_effort = 0;
 
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:bdwn")) != -1) {
+    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:bdwnu")) != -1) {
         switch (opt) {
+            case 'u':
+                best_effort = 1;
+                break;
             case 'n':
                 keep_publisher = 1;
                 break;
@@ -107,7 +115,7 @@ int main(int argc, char **argv) {
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
             default:
-                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n]\n");
+                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n] [-u]\n");
                 return 2;
         }
     }
@@ -129,6 +137,14 @@ int main(int argc, char **argv) {
     z_publisher_options_t opts;
     z_publisher_options_default(&opts);
     opts.congestion_control = drop ? Z_CONGESTION_CONTROL_DROP : Z_CONGESTION_CONTROL_BLOCK;
+    if (best_effort) {
+#ifdef Z_FEATURE_UNSTABLE_API
+        opts.reliability = Z_RELIABILITY_BEST_EFFORT;
+#else
+        printf("paced_pub: -u needs a build with Z_FEATURE_UNSTABLE_API (the publisher's reliability)\n");
+        return 2;
+#endif
+    }
     if (z_declare_publisher(z_loan(s), &pub, z_loan(ke), &opts) < 0) {
         printf("paced_pub: unable to declare the publisher\n");
         return 1;

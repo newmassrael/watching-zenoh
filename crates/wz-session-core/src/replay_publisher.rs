@@ -365,11 +365,16 @@ impl<'a> ReplayPublisher<'a> {
             .saturating_mul(self.shape.ring_cell())
     }
 
+    // Out of line, as `latest_at` is: the record, the send and the release each
+    // reach it at several places, and every inlined copy carried the shape's
+    // saturating arithmetic.
+    #[inline(never)]
     fn defer_at(&self, slot: usize) -> usize {
         self.defer_base()
             .saturating_add(slot.saturating_mul(self.shape.defer_cell()))
     }
 
+    #[inline(never)]
     fn latest_at(&self, instance: usize) -> usize {
         self.defer_base()
             .saturating_add(

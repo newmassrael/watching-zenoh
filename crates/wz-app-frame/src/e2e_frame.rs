@@ -296,8 +296,13 @@ impl OpenedFrame {
     }
 }
 
+/// The value of `bytes`, most significant first: the inverse of `write_be`, and
+/// a copy into the tail of a value's big-endian bytes for the same reason. A
+/// field is at most 8 bytes wide (the profile refuses a wider one).
 fn read_be(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b))
+    let mut be = [0u8; 8];
+    be[8 - bytes.len()..].copy_from_slice(bytes);
+    u64::from_be_bytes(be)
 }
 
 /// Write the low `out.len()` bytes of `value`, most significant first. A field
@@ -323,13 +328,15 @@ pub(crate) fn feed(profile: &Profile, digest: &mut Digest<'_>, item: Cover, fram
 /// The CRC of `frame` as the profile feeds it: the covered pieces, in the
 /// profile's order, each as it stands on the wire.
 pub(crate) fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
-    let mut digest = profile.crc().engine.start();
+    let mut digest = Digest::start(&profile.crc().engine);
     for &item in &profile.crc().cover {
         feed(profile, &mut digest, item, frame);
     }
     digest.finish()
 }
 
+/// Out of line: every refusal of a build reaches it.
+#[inline(never)]
 fn invalid(path: String, reason: String) -> BuildError {
     BuildError::Values(DocError::invalid(path, reason))
 }

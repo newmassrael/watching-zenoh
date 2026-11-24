@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::segment_chain::{
     Carrier, Ended, Ending, KeyRef, Place, SegmentLedger, Unjoined, Verdict,
 };
-use crate::segment_profile::{Misplaced, SegmentProfile};
+use crate::segment_profile::{recognise, Misplaced, SegmentProfile};
 use crate::segment_profile_tests::{demo_piece, demo_profile};
 
 const MESSAGE: &[u8] = b"0123456789AB";
@@ -59,7 +59,7 @@ fn feed_carried(
         range.start as u32,
         &MESSAGE[range],
     );
-    let piece = profile.recognise(&bytes).expect("a piece");
+    let piece = recognise(profile, &bytes).expect("a piece");
     ledger.receive(profile, &piece, 0, Some(true), key, carrier)
 }
 
@@ -119,7 +119,7 @@ fn an_overlapping_piece_says_so_and_the_first_copy_wins() {
     altered[4] = b'x';
     altered[5] = b'y';
     let bytes = demo_piece(1, 1, 12, 4, &altered[4..8]);
-    let piece = p.recognise(&bytes).expect("a piece");
+    let piece = recognise(&p, &bytes).expect("a piece");
     let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert!(v.overlap && !v.out_of_order, "{v:?}");
     let last = feed(&mut l, &p, 1, 8..12);
@@ -158,7 +158,7 @@ fn a_piece_with_a_wrong_crc_joins_nothing_and_moves_no_state() {
     let _ = feed(&mut l, &p, 1, 0..4);
     let mut bytes = demo_piece(1, 1, 12, 4, &MESSAGE[4..8]);
     *bytes.last_mut().expect("a chunk") ^= 0x01;
-    let piece = p.recognise(&bytes).expect("still a piece");
+    let piece = recognise(&p, &bytes).expect("still a piece");
     let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!((v.unjoined, v.place), (Some(Unjoined::CrcMismatch), None));
     // The transfer still misses 4..8: the damaged copy filled nothing.
@@ -170,12 +170,12 @@ fn a_piece_with_a_wrong_crc_joins_nothing_and_moves_no_state() {
 fn a_piece_that_cannot_be_placed_or_disagrees_on_the_total_joins_nothing() {
     let (p, mut l) = (demo_profile(), SegmentLedger::new());
     let bytes = demo_piece(1, 1, 4, 2, b"abc");
-    let piece = p.recognise(&bytes).expect("a piece");
+    let piece = recognise(&p, &bytes).expect("a piece");
     let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!(v.unjoined, Some(Unjoined::Misplaced(Misplaced::PastTotal)));
     let _ = feed(&mut l, &p, 1, 0..4);
     let bytes = demo_piece(1, 1, 20, 4, b"abcd");
-    let piece = p.recognise(&bytes).expect("a piece");
+    let piece = recognise(&p, &bytes).expect("a piece");
     let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!(v.unjoined, Some(Unjoined::TotalDisagrees));
 }
@@ -255,7 +255,7 @@ fn a_reply_piece_is_judged_by_the_rules_a_published_piece_is() {
         assert_eq!(w.ended.len(), 1, "{carrier:?}");
         assert_eq!(w.ended[0].received, 4, "{carrier:?}");
         let bytes = demo_piece(1, 3, 4, 2, b"abc");
-        let piece = p.recognise(&bytes).expect("a piece");
+        let piece = recognise(&p, &bytes).expect("a piece");
         let x = l.receive(&p, &piece, 0, Some(true), key(), carrier);
         assert_eq!(
             x.unjoined,

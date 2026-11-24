@@ -2696,7 +2696,7 @@ mod enforcement {
 mod tests {
     use super::*;
     use crate::caps;
-    use crate::limit_binding::{LimitEntry, LimitSpec, Outside, Quota};
+    use crate::limit_binding::{LimitEntry, LimitSpec, LimitValue, Outside, Quota};
     use crate::policy_binding::{Driven, LimitKind, Storage};
 
     /// Every limit of `crate::caps` with its binding, by id.
@@ -2839,6 +2839,55 @@ mod tests {
                     capacity: caps::MAX_KEYEXPR_BYTES
                 }
             );
+        }
+    }
+
+    /// Every entry a statement reaches selects the field of its own limit and no other, and reads
+    /// back what it selected: the tables reach each field by the offset its `LimitField` states,
+    /// so an offset that named another field would move a neighbour or read another limit.
+    #[test]
+    fn each_entry_selects_its_own_field_and_no_other() {
+        each_entry_moves_only_itself(&SESSION_LIMITS, SessionLimits::defaults());
+        each_entry_moves_only_itself(&RUNTIME_LIMITS, RuntimeLimits::defaults());
+    }
+
+    fn each_entry_moves_only_itself<S: Copy + PartialEq + core::fmt::Debug>(
+        table: &[LimitEntry<S>],
+        defaults: S,
+    ) {
+        for entry in table.iter().filter(|entry| entry.read_from_snapshot()) {
+            let domain = entry.domain();
+            let before = entry.value_in(&defaults);
+            let ends = domain
+                .integers()
+                .map_or([None, None], |(least, most)| [Some(least), Some(most)]);
+            let other = ends
+                .into_iter()
+                .flatten()
+                .map(LimitValue::Integer)
+                .chain(domain.allows_unbounded().then_some(LimitValue::Unbounded))
+                .find(|value| *value != before);
+            // A domain of one value leaves a selection nothing to move.
+            let Some(value) = other else { continue };
+            let mut snapshot = defaults;
+            entry
+                .select(&mut snapshot, value)
+                .expect("read from the snapshot")
+                .expect("inside the domain");
+            assert_eq!(entry.value_in(&snapshot), value, "{}", entry.id());
+            assert_ne!(snapshot, defaults, "{}: no field moved", entry.id());
+            for neighbour in table
+                .iter()
+                .filter(|neighbour| neighbour.id() != entry.id())
+            {
+                assert_eq!(
+                    neighbour.value_in(&snapshot),
+                    neighbour.value_in(&defaults),
+                    "{} moved {}",
+                    entry.id(),
+                    neighbour.id()
+                );
+            }
         }
     }
 

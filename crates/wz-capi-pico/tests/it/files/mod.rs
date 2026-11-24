@@ -34,6 +34,7 @@ mod matching_multiface;
 mod message_catalog_doors;
 mod message_payload_doors;
 mod mutual_dial;
+mod noncanon_keys_refused;
 mod open_in_turn;
 mod open_refuses_a_refused_clock;
 mod open_scouts_for_a_locator;

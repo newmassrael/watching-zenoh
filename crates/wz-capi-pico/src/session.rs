@@ -457,9 +457,9 @@ pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZR
 
 /// The files [`resolve_tls_config`] reads: each of its keys that names the PEM by path, the
 /// client certificate's two only when mTLS is on, as it reads them. Read by
-/// `wz_ext_config_device_requires` only, so it is part of the unstable surface.
+/// `wz_ext_config_device_requires` only, so it is in a build with `device-requires`.
 #[cfg(all(
-    feature = "unstable-api",
+    feature = "device-requires",
     any(
         feature = "transport-link-tls",
         feature = "transport-link-quic",
@@ -485,7 +485,7 @@ pub(crate) fn tls_files_named(cfg: &ConfigState) -> Vec<String> {
 
 /// The no-TLS-backend build reads no certificate file.
 #[cfg(all(
-    feature = "unstable-api",
+    feature = "device-requires",
     not(any(
         feature = "transport-link-tls",
         feature = "transport-link-quic",

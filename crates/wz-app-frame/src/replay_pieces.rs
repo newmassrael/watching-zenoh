@@ -47,7 +47,7 @@ use alloc::sync::Arc;
 
 use crate::e2e_profile::DocError;
 use crate::segment_chain::{Carrier, KeyRef, SegmentLedger};
-use crate::segment_profile::SegmentProfile;
+use crate::segment_profile::{recognise, SegmentProfile};
 
 /// What one payload did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +119,7 @@ impl PieceJoiner {
     }
 
     fn join(&mut self, carrier: Carrier, payload: &[u8]) -> Joined {
-        let Some(piece) = self.profile.recognise(payload) else {
+        let Some(piece) = recognise(&self.profile, payload) else {
             self.unjoined = self.unjoined.saturating_add(1);
             return Joined::Unjoined;
         };

@@ -224,6 +224,9 @@
         "transport-events-listener"
       ]
     },
+    "device-requires": {
+      "reason": "the door reads a config and opens no session (crates/wz-capi-pico/src/device_requires.rs:36 takes a z_loaned_config_t); the requirement string it writes is the program's to drop"
+    },
     "e2e-receiver": {
       "families": [
         "e2e"

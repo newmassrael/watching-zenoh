@@ -1624,6 +1624,20 @@ implies = ["config-policy"]
 help = "wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
 
 [[capability]]
+id = "device-requires"
+kconfig = "WZ_CAP_DEVICE_REQUIRES"
+# On in a build that names nothing, which has had the door beside the unstable API, and off in the
+# zenoh-pico preset, as wz's other doors are. The door is part of the unstable surface, so it
+# implies unstable-api; unstable-api alone is pico's own unstable API and carries no door of wz's,
+# so a build that asks for pico's unstable API does not pay for this one. The host-peer-ext preset
+# turns it on with the other wz doors.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own)."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

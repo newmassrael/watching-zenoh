@@ -169,7 +169,9 @@ scout-datagram = [
 ]
 # The answering end of a query: a queryable, its replies (with their source info, encoding and
 # attachment, and the error reply) and a query a C program keeps past its callback. What
-# `wz-capi-core`'s `queryable` names on its runtime, named on session-core.
+# `wz-capi-core`'s `queryable` names on its runtime, named on session-core. A group's stage writes
+# a reply from its parts where it waits only under `wz-session-mcu`'s own name for the codec, so the
+# feature names it there too.
 queryable = [
     "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
@@ -184,6 +186,7 @@ queryable = [
     "wz-session-core/request-put-del",
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
+    "wz-session-mcu/codec-response",
 ]
 # Delivery to the session's own subscribers (zenoh-pico's `Z_FEATURE_LOCAL_SUBSCRIBER`): a put
 # reaches the subscribers of the session that made it, after it has gone out on the link, and a
@@ -259,10 +262,14 @@ connectivity = ["wz-runtime-coop/connectivity"]
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
+#
+# A group's stage writes a token reply where it waits only under `wz-session-mcu`'s own name for
+# the registry, so the feature names it there too.
 liveliness = [
     "wz-session-core/declare-token",
     "wz-session-core/liveliness-token",
     "wz-session-core/liveliness-subscriber",
+    "wz-session-mcu/liveliness-token",
 ]
 # The liveliness get: a snapshot of the tokens alive on a key, asked as an Interest and answered
 # with token declarations and a DeclFinal, ended by its deadline as a query is. It is a get of
