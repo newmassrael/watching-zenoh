@@ -25,6 +25,8 @@
 
 use core::net::{Ipv4Addr, SocketAddr};
 
+// A buffer a session lends exists only where the crate carries sessions.
+#[cfg(feature = "session-unicast")]
 use wz_session_core::byte_cells::ByteBuf;
 
 /// The interface a group is joined on and sent out of, in the form the group's family names one:
@@ -181,8 +183,10 @@ pub trait GroupTransport {
     /// The buffer the transport receives into, given back as the group is left, when it is one
     /// its session lent it (`LinkTables`): the session keeps the buffer while it still reads a
     /// datagram there, and its table has the buffer again once that ends. Asked after
-    /// [`Self::close`]; the transport receives nothing after it. `None`, the provided answer,
-    /// from a transport whose buffer is its own.
+    /// [`Self::close`], or as the transport is let go of without one; either way the transport
+    /// receives nothing after it. `None`, the provided answer, from a transport whose buffer is its
+    /// own. Present where the crate carries sessions (`session-unicast`), which lend buffers.
+    #[cfg(feature = "session-unicast")]
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         None
     }
@@ -204,7 +208,7 @@ pub enum GroupSend {
 /// the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
 /// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
 /// it cut one past a buffer of the transport's own.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub enum GroupRx {
     /// The transport's own, made when the group was joined.
     Own(alloc::vec::Vec<u8>),
@@ -214,7 +218,7 @@ pub enum GroupRx {
     GivenBack,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
 impl GroupRx {
     /// The buffer `lent` names, when the session lent one, or one of the transport's own of
     /// `own_len` bytes.
@@ -319,6 +323,7 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
         (**self).lends_until_next_receive()
     }
 
+    #[cfg(feature = "session-unicast")]
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         (**self).give_back_rx()
     }
@@ -381,7 +386,7 @@ mod tests {
 
     /// A buffer of the transport's own stays with it; a lent one is the session's, read and
     /// written as the transport's own is, and given back once, after which it reads as empty.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
     #[test]
     fn a_lent_group_buffer_is_given_back_once_and_an_own_one_never() {
         use wz_session_core::byte_cells::{ByteCells, ByteSource};
@@ -512,7 +517,11 @@ mod tests {
     /// a session holds it in, and gives the buffer back once. Turned red by a box that does not
     /// pass either answer on, which would leave the session copying or the buffer with the
     /// transport.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "alloc",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
     #[test]
     fn a_lent_buffer_is_told_and_given_back_through_the_box() {
         use wz_session_core::byte_cells::{ByteCells, ByteSource};
