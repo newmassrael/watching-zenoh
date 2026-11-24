@@ -358,8 +358,14 @@ impl<'a> PublishOptions<'a> {
     // silently drop it. The `timestamp` field stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-timestamp")]
     pub fn with_timestamp(mut self, timestamp: TimestampHint) -> Self {
-        self.timestamp = Some(timestamp);
+        self.set_timestamp(timestamp);
         self
+    }
+
+    /// [`Self::with_timestamp`] on options in place.
+    #[cfg(feature = "pubsub-timestamp")]
+    pub fn set_timestamp(&mut self, timestamp: TimestampHint) {
+        self.timestamp = Some(timestamp);
     }
 
     /// R232 — attach a body-level encoding (Put kind only; Del kind ignores the field per
@@ -389,8 +395,14 @@ impl<'a> PublishOptions<'a> {
     /// from its own bytes, and nothing is allocated for it.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
-        self.encoding = Some(PublishEncoding::Lent(encoding));
+        self.set_encoding_ref(encoding);
         self
+    }
+
+    /// [`Self::with_encoding_ref`] on options in place.
+    #[cfg(feature = "pubsub-encoding")]
+    pub fn set_encoding_ref(&mut self, encoding: EncodingRef<'a>) {
+        self.encoding = Some(PublishEncoding::Lent(encoding));
     }
 
     /// R232 — attach a body-level source identification. Pairs with the R231 self-echo dedup:
@@ -404,8 +416,14 @@ impl<'a> PublishOptions<'a> {
     /// `source_info` field stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-source-info")]
     pub fn with_source_info(mut self, source_info: SourceInfo) -> Self {
-        self.source_info = Some(source_info);
+        self.set_source_info(source_info);
         self
+    }
+
+    /// [`Self::with_source_info`] on options in place.
+    #[cfg(feature = "pubsub-source-info")]
+    pub fn set_source_info(&mut self, source_info: SourceInfo) {
+        self.source_info = Some(source_info);
     }
 
     /// R232 — attach a body-level attachment blob. Gated on `pubsub-attachment` (wire-data
@@ -414,8 +432,14 @@ impl<'a> PublishOptions<'a> {
     /// stability); only the populator gates.
     #[cfg(feature = "pubsub-attachment")]
     pub fn with_attachment(mut self, attachment: &'a [u8]) -> Self {
-        self.attachment = Some(attachment);
+        self.set_attachment(attachment);
         self
+    }
+
+    /// [`Self::with_attachment`] on options in place.
+    #[cfg(feature = "pubsub-attachment")]
+    pub fn set_attachment(&mut self, attachment: &'a [u8]) {
+        self.attachment = Some(attachment);
     }
 
     /// R232 — attach outer-level QoS metadata (priority / congestion control / express byte).
@@ -486,8 +510,15 @@ impl<'a> PublishOptions<'a> {
     /// below do the same.
     #[cfg(feature = "pubsub-qos")]
     pub fn with_priority(mut self, p: Priority) -> Self {
-        self.qos = Some(self.qos_base().with_priority(p));
+        self.set_priority(p);
         self
+    }
+
+    /// [`Self::with_priority`] on options in place: a caller that builds its options where they
+    /// lie sets each knob without moving the whole value through every setter.
+    #[cfg(feature = "pubsub-qos")]
+    pub fn set_priority(&mut self, p: Priority) {
+        self.qos = Some(self.qos_base().with_priority(p));
     }
 
     /// R311y255 — set the typed [`CongestionControl`] for the publish, merging it into the
@@ -509,8 +540,14 @@ impl<'a> PublishOptions<'a> {
     /// "without it the bit cannot ride the wire" claim was false in mixed subsets.
     #[cfg(feature = "pubsub-qos")]
     pub fn with_congestion_control(mut self, c: CongestionControl) -> Self {
-        self.qos = Some(self.qos_base().with_congestion(c));
+        self.set_congestion_control(c);
         self
+    }
+
+    /// [`Self::with_congestion_control`] on options in place.
+    #[cfg(feature = "pubsub-qos")]
+    pub fn set_congestion_control(&mut self, c: CongestionControl) {
+        self.qos = Some(self.qos_base().with_congestion(c));
     }
 
     /// R311y255 — set the express flag for the publish, merging it into bit 4 of the packed QoS
@@ -524,8 +561,14 @@ impl<'a> PublishOptions<'a> {
     /// it.
     #[cfg(feature = "pubsub-qos")]
     pub fn with_express(mut self, express: bool) -> Self {
-        self.qos = Some(self.qos_base().with_express(express));
+        self.set_express(express);
         self
+    }
+
+    /// [`Self::with_express`] on options in place.
+    #[cfg(feature = "pubsub-qos")]
+    pub fn set_express(&mut self, express: bool) {
+        self.qos = Some(self.qos_base().with_express(express));
     }
 
     /// R311y255 — the base byte the three per-field QoS setters merge into: the QoS already
@@ -1120,6 +1163,31 @@ mod plain_put_tests {
         );
         let text = alloc::format!("{}", PublishError::FeatureDisabled);
         assert!(text.contains("codec-push"), "{text}");
+    }
+
+    /// The QoS knobs set in place merge into the one packed byte as the builder's do: each keeps
+    /// what the others set, and the knobs left alone read as a default publish's. Turned red by
+    /// an in-place setter that writes the whole byte from a zeroed or default base.
+    #[cfg(feature = "pubsub-qos")]
+    #[test]
+    fn qos_knobs_set_in_place_keep_each_other() {
+        let mut opts = PublishOptions::put();
+        opts.set_express(true);
+        opts.set_congestion_control(CongestionControl::Block);
+        opts.set_priority(Priority::RealTime);
+        let qos = opts.qos.expect("a knob set attaches the QoS");
+        assert_eq!(qos.priority(), Priority::RealTime);
+        assert!(qos.is_express(), "the express flag set first is kept");
+        assert_eq!(qos.congestion(), CongestionControl::Block);
+        let mut alone = PublishOptions::put();
+        alone.set_express(true);
+        let qos = alone.qos.expect("a knob set attaches the QoS");
+        assert_eq!(
+            qos.priority(),
+            Priority::DEFAULT,
+            "an unset priority is the default"
+        );
+        assert_eq!(qos.congestion(), CongestionControl::Drop);
     }
 
     #[test]

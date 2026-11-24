@@ -89,7 +89,7 @@ impl CacheBytes for SessionCacheBytes {
     }
 }
 
-/// The options every plain publish of this ABI carries: reliable, and the
+/// Give `options` what every plain publish of this ABI carries: reliable, and the
 /// destination a pico put takes by default.
 ///
 /// That destination is `Locality::Remote` without `local-subscriber`, because a
@@ -99,10 +99,9 @@ impl CacheBytes for SessionCacheBytes {
 /// the composite's own `Any` regardless would deliver in-process where the plain
 /// publisher it wraps does not. A publish through a publisher then takes that
 /// publisher's own destination ([`crate::pubsub::PublisherQos`]).
-fn pico_publish(options: PublishOptions<'_>) -> PublishOptions<'_> {
-    options
-        .with_reliability(Reliability::Reliable)
-        .with_locality(crate::locality::default_locality!("local-subscriber"))
+fn pico_publish(options: &mut PublishOptions<'_>) {
+    options.reliability = Reliability::Reliable;
+    options.allowed_destination = crate::locality::default_locality!("local-subscriber");
 }
 
 impl AdvancedPublisherPlane for PicoPlane {
@@ -232,7 +231,10 @@ impl AdvancedPublisherPlane for PicoPlane {
         // count the runtime reports is the number of peers a put reached, which
         // a filter that held the sample back makes 0 — a put with no recipient,
         // and `Z_OK`.
-        match publisher.publish(payload, Some(pico_publish(options))) {
+        // Bound again so the options' borrow may be as short as the publisher's.
+        let mut options = options;
+        pico_publish(&mut options);
+        match publisher.publish(payload, Some(&mut options)) {
             code if code == Z_OK => Ok(payload.len()),
             // Dropped behind a held conduit: the same drop, so the advanced put answers it as
             // the plain one does.
@@ -248,13 +250,14 @@ impl AdvancedPublisherPlane for PicoPlane {
         payload: &[u8],
         _sporadic: bool,
     ) {
-        let mut options = pico_publish(PublishOptions::default());
+        let mut options = PublishOptions::default();
+        pico_publish(&mut options);
         options.kind = SampleKind::Put;
         match beacon {
             // Through the beacon publisher, as pico's heartbeat task does, so
             // the beacon is held back while nothing subscribes to it.
             Some(publisher) => {
-                let _ = publisher.publish(payload, Some(options));
+                let _ = publisher.publish(payload, Some(&mut options));
             }
             // An on-demand beacon from a publisher that declared none: on the
             // key itself.
