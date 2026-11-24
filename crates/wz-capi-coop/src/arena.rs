@@ -1701,6 +1701,7 @@ impl SessionArena {
     /// Lend the cells `plan` lays out for its links' drivers, their gates and their actions
     /// ([`ArenaPlan::holding_cells`]), each `None` for a plan with no such table. Refused only by
     /// an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_cells(
         &mut self,
         plan: &ArenaPlan,
