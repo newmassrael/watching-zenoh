@@ -52,7 +52,7 @@ pub fn encode_zint(out: &mut [u8], v: u64) -> usize {
     let mut len = 0usize;
     // While bits above the low 7 remain, emit a continuation byte.
     while lv >> 7 != 0 {
-        out[len] = ((lv & 0x7f) as u8) | 0x80;
+        out[len] = (lv as u8) | 0x80; // the flag overwrites the cast's eighth bit
         len += 1;
         lv >>= 7;
     }
@@ -108,6 +108,26 @@ mod tests {
             let (decoded, used) = decode_zint(&buf[..n]).expect("decodes what it encoded");
             assert_eq!(decoded, v, "round trip failed at {v:#x}");
             assert_eq!(used, n, "decoder consumed a different count at {v:#x}");
+        }
+    }
+
+    /// The bytes are pico's, not only a round trip of this encoder: a value
+    /// whose low byte has its eighth bit set keeps the seven value bits under
+    /// the continuation flag, and the ninth byte carries all eight. Turned red
+    /// by a continuation byte that toggles the flag instead of setting it.
+    #[test]
+    fn zint_writes_the_bytes_pico_writes() {
+        let cases: [(u64, &[u8]); 5] = [
+            (0x7f, &[0x7f]),
+            (0x80, &[0x80, 0x01]),
+            (0xff, &[0xff, 0x01]),
+            (300, &[0xac, 0x02]),
+            (u64::MAX, &[0xff; VLE_LEN]),
+        ];
+        for (v, want) in cases {
+            let mut buf = [0u8; VLE_LEN];
+            let n = encode_zint(&mut buf, v);
+            assert_eq!(&buf[..n], want, "the encoding of {v:#x}");
         }
     }
 

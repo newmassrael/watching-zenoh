@@ -231,4 +231,36 @@ mod tests {
         assert!(!c.matches(WhatAmI::Router));
         assert!(!c.matches(WhatAmI::Peer));
     }
+
+    /// Adding a role the set already holds keeps it: a matcher built from a
+    /// configured list that names a role twice still gossips to that role.
+    /// Turned red by an adder that toggles the role's bit instead of setting it.
+    #[test]
+    fn adding_a_role_the_matcher_holds_keeps_it() {
+        let empty = WhatAmIMatcher::empty();
+        for (twice, role) in [
+            (empty.router().router(), WhatAmI::Router),
+            (empty.peer().peer(), WhatAmI::Peer),
+            (empty.client().client(), WhatAmI::Client),
+        ] {
+            assert!(twice.matches(role), "{role} added twice is held");
+            assert!(!twice.is_empty());
+        }
+        let all = empty.router().peer().client();
+        assert_eq!(all.router().peer().client(), all);
+    }
+
+    /// The names are zenoh's own lowercase role names, which a configuration
+    /// and an admin reply spell the role with, and `Display` writes the same.
+    #[test]
+    fn each_role_is_named_as_zenoh_names_it() {
+        for (role, name) in [
+            (WhatAmI::Router, "router"),
+            (WhatAmI::Peer, "peer"),
+            (WhatAmI::Client, "client"),
+        ] {
+            assert_eq!(role.to_str(), name);
+            assert_eq!(std::format!("{role}"), name);
+        }
+    }
 }
