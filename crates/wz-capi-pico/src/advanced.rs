@@ -2876,6 +2876,81 @@ mod tests {
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
+    /// A background advanced subscriber whose four entities each stand on a name lodged in its
+    /// place (the subscription, the heartbeat subscription, the late-publisher subscription and
+    /// the detection token): the session's entries keep those names past the declaration, and the
+    /// close lets them go, so the place is given back by the time the close returns. Turned red
+    /// by a close that keeps an entry's key, whose lodged name then keeps the place, and the
+    /// place's lender the session's engine, for ever.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_background_subscribers_lodged_names_go_back_with_the_close() {
+        use crate::object_slot::{Kind, Slot};
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            z_session_loan, z_session_loan_mut, z_session_move,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        let free = |engine: &Arc<Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
+                    .collect();
+            claimed.len()
+        };
+        // SAFETY: a view is plain data, and the text is a live C string.
+        let mut view: crate::abi::z_view_keyexpr_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        let viewed = unsafe {
+            crate::keyexpr::z_view_keyexpr_from_str(&mut view, c"demo/adv/named/**".as_ptr())
+        };
+        assert_eq!(viewed, Z_OK);
+        // SAFETY: the view is live for the rest of the frame.
+        let ke = unsafe { crate::keyexpr::z_view_keyexpr_loan(&view) };
+        // SAFETY: an options struct is plain data, filled with pico's defaults here.
+        let mut options: ze_advanced_subscriber_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is live.
+        unsafe { ze_advanced_subscriber_options_default(&mut options) };
+        options.recovery.is_enabled = true;
+        options.recovery.last_sample_miss_detection.is_enabled = true;
+        options
+            .recovery
+            .last_sample_miss_detection
+            .periodic_queries_period_ms = 0;
+        options.history.is_enabled = true;
+        options.history.detect_late_publishers = true;
+        options.subscriber_detection = true;
+        let places = free(&engine);
+
+        let drops = AtomicUsize::new(0);
+        let mut callback = counted_sample_closure(&drops);
+        // SAFETY: every pointer is live.
+        let code = unsafe {
+            ze_declare_background_advanced_subscriber(loaned, ke, &mut callback, &mut options)
+        };
+        assert_eq!(code, Z_OK, "a subscriber with all four entities declares");
+        assert_eq!(free(&engine), places - 1, "held past its declaration");
+
+        // SAFETY: the session is live and owned here.
+        let code = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            free(&engine),
+            places,
+            "the close lets the entries' names go, and with them the place"
+        );
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
     /// The miss listeners' set lies in the subscriber's place: a listener's handle that outlives
     /// its subscriber keeps the place, which the subscriber's undeclare does not wait for, and the
     /// listener's undeclare gives it back. Turned red by a set that never lets its keep of the
