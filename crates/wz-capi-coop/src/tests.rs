@@ -1048,6 +1048,28 @@ fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue
     );
 }
 
+/// Each operation lets the session go as it ends, its round sealed and its lock let go in the one
+/// drop of its hold: the same operation on another thread right after takes the session at once.
+/// Turned red by a hold whose drop seals the round and leaves the lock held, where the other
+/// thread waits past the bound.
+#[test]
+fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let _ = engine.declarations_synced();
+    let other = Arc::clone(&engine);
+    let (done, finished) = channel();
+    std::thread::spawn(move || {
+        let _ = other.declarations_synced();
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "the hold before let the session go"
+    );
+    let _ = engine.declarations_synced();
+}
+
 /// A read step on a session with nothing due reads the session's clock once, after its tasks ran,
 /// and moves every face, sweeps the gets and looks for a due job by that one reading; its wait,
 /// with no deadline to work out, reads it not at all. The session's lock is taken twice: for the

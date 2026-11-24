@@ -693,6 +693,15 @@ impl Registry {
         self.sets.get(at)
     }
 
+    /// What the in-place receive cost the peers of every face the session holds, summed: among
+    /// it each key past the row a face composes keys in, refused where it lay.
+    pub(super) fn in_place_fallbacks(&self) -> wz_session_core::pubsub::InPlaceFallbacks {
+        self.faces().fold(
+            wz_session_core::pubsub::InPlaceFallbacks::default(),
+            |sum, face| sum.plus(face.peer.subscribers.in_place_fallbacks()),
+        )
+    }
+
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         HeldSets::of(&self.held, move |at: usize| self.set(at))

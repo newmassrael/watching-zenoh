@@ -922,6 +922,13 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     actions: &SessionLinkActions<R, T>,
     engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
+    // Every event this function hands the engine is a handshake's or an accepting side's; a build
+    // with neither body nor the accepting role names none.
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "session-unicast-accept"
+    ))]
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // A handshake message out of its step is judged first, before any admission,
     // check or merge below can take anything from it.
@@ -1697,22 +1704,48 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
     refuse_by_sn(actions, to_engine, priority, reliable, sn)
 }
 
-/// [`refuse_frame`] for a path that reads the message where it lies ([`dispatch_datagram`]):
-/// it holds no decoded message, so the engine takes the event of a link that ends at once.
+/// What [`admit_head_in_place`] made of the head of a `Frame` or a `Fragment`.
 #[cfg(feature = "codec-frame")]
-fn refuse_frame_in_place<R: SessionRuntime, T: TimeSource>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeadAdmission {
+    /// The head passed both gates of [`refuse_frame`]: its payload is read.
+    Admitted,
+    /// The SN gate dropped it: what follows its payload in the batch is read on.
+    Dropped,
+    /// Its link ended: nothing more of the unit is read.
+    Ended,
+}
+
+/// The head of a `Frame` or a `Fragment` read where it lies ([`dispatch_datagram`]), judged in
+/// one body for both: the unit counted and the link's receive stamp moved, then the gates of
+/// [`refuse_frame`], a refusal reported to `on_event` as the copying path reports it. The path
+/// holds no decoded message, so the engine takes the event of a link that ends at once, before the
+/// report.
+#[cfg(feature = "codec-frame")]
+fn admit_head_in_place<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     priority: crate::qos::Priority,
     reliable: bool,
     sn: u64,
-) -> Option<DriverLoopOutcome> {
+    on_event: &mut dyn crate::driver_loop::EventSink,
+) -> HeadAdmission {
+    account_unit_in_place(unit, actions);
+    actions.stamp_rx_activity();
     let mut to_engine = None;
-    let refused = refuse_frame(actions, &mut to_engine, priority, reliable, sn)?;
+    let Some(refused) = refuse_frame(actions, &mut to_engine, priority, reliable, sn) else {
+        return HeadAdmission::Admitted;
+    };
     if let Some(event) = to_engine {
         engine.process_event(event);
     }
-    Some(refused)
+    on_event.event(crate::driver_loop::IterationEvent::Poll(&refused));
+    if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
+        HeadAdmission::Dropped
+    } else {
+        HeadAdmission::Ended
+    }
 }
 
 /// The per-(priority, reliable) conduit SN gate of a `Frame` or `Fragment`: `Some` is the outcome
@@ -2632,10 +2665,6 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         resumed,
         may_stop,
     } = read;
-    if !resumed {
-        account_unit_in_place(unit, actions);
-        actions.stamp_rx_activity();
-    }
     let priority = head.priority();
     let crate::inbound::FrameHead {
         reliable,
@@ -2652,26 +2681,27 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     )))]
     let _ = chain;
-    let refused = if resumed {
-        None
+    // A resumed frame's head was admitted by the step that stopped in it.
+    let admitted = if resumed {
+        HeadAdmission::Admitted
     } else {
-        refuse_frame_in_place(actions, engine, priority, reliable, sn)
+        admit_head_in_place(unit, actions, engine, priority, reliable, sn, on_event)
     };
-    if let Some(refused) = refused {
-        on_event.event(IterationEvent::Poll(&refused));
+    match admitted {
+        HeadAdmission::Admitted => {}
         // A frame the SN gate refused is dropped with its records, and the batch goes on behind
         // them: a frame of the other reliability may follow it in the same batch. Upstream drains
         // the refused frame's reader and reads on (`commons/zenoh-codec/src/transport/frame.rs` @
-        // `impl<R: BacktrackableReader> Drop for FrameReader<'_, R> {`). A refusal that ends
-        // the link reads nothing more.
-        let end = match refused {
-            DriverLoopOutcome::RxSnRejected { .. } => records_at.saturating_add(
+        // `impl<R: BacktrackableReader> Drop for FrameReader<'_, R> {`).
+        HeadAdmission::Dropped => {
+            let end = records_at.saturating_add(
                 unit.get(records_at..)
                     .map_or(0, |records| frame_records_extent(records, record)),
-            ),
-            _ => unit.len(),
-        };
-        return (DatagramPath::InPlace, end, false);
+            );
+            return (DatagramPath::InPlace, end, false);
+        }
+        // A refusal that ends the link reads nothing more.
+        HeadAdmission::Ended => return (DatagramPath::InPlace, unit.len(), false),
     }
     let carrier = RecordCarrier {
         reliable,
@@ -3063,8 +3093,6 @@ where
 {
     let actions = hand.actions;
     let now_ms = hand.now_ms;
-    account_unit_in_place(unit, actions);
-    actions.stamp_rx_activity();
     let priority = head.priority();
     let markers = head.markers();
     let crate::inbound::FragmentHead {
@@ -3073,8 +3101,9 @@ where
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
     // reaches the hand-off, which clears the channel's chain, and whose report is
     // the one instance every receive reaches.
-    if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
-        crate::driver_loop::EventSink::event(hand, IterationEvent::Poll(&refused));
+    if admit_head_in_place(unit, actions, engine, priority, reliable, sn, hand)
+        != HeadAdmission::Admitted
+    {
         return DatagramPath::FragmentInPlace;
     }
     // Every other event of the fragment goes to the caller's own sink as it is.

@@ -130,19 +130,10 @@ impl<T> Slot<T> {
     /// tokio engine it is a place of the kind's pool ([`Self::take`]).
     #[cfg(not(feature = "engine-tokio"))]
     pub(crate) fn take_entity(engine: &Arc<crate::session::Engine>, kind: Kind) -> Option<Self> {
-        let (entity, laid) = entity_place(kind)?;
-        let needed = InSession::<T>::LAYOUT;
-        if needed.size() > laid.size() || needed.align() > laid.align() {
-            return None;
-        }
-        // The cooperative engine lends places itself, reached as its own type.
-        let place = wz_capi_port::PlaceLender::claim_place(Arc::as_ref(engine), entity)?;
+        let lender = Lender::lend(engine, kind, InSession::<T>::LAYOUT)?;
         Some(Self {
-            place: place.as_ptr().cast(),
-            lender: Some(Lender {
-                place,
-                engine: Arc::clone(engine),
-            }),
+            place: lender.place.as_ptr().cast(),
+            lender: Some(lender),
         })
     }
 
@@ -218,6 +209,28 @@ pub(crate) enum Lender {}
 
 #[cfg(not(feature = "engine-tokio"))]
 impl Lender {
+    /// A place of `engine`'s arena for an entity of `kind` whose object, with its lender, is laid
+    /// out by `needed`: `None` when every place of the kind is held, or the kind or the layout is
+    /// not one the open laid places out for. One body for every kind of entity, out of the line of
+    /// each declare, so the layout is a value rather than each object's own copy of the take.
+    #[inline(never)]
+    fn lend(
+        engine: &Arc<crate::session::Engine>,
+        kind: Kind,
+        needed: core::alloc::Layout,
+    ) -> Option<Self> {
+        let (entity, laid) = entity_place(kind)?;
+        if needed.size() > laid.size() || needed.align() > laid.align() {
+            return None;
+        }
+        // The cooperative engine lends places itself, reached as its own type.
+        let place = wz_capi_port::PlaceLender::claim_place(Arc::as_ref(engine), entity)?;
+        Some(Self {
+            place,
+            engine: Arc::clone(engine),
+        })
+    }
+
     /// Keep this lender beside the value at `place`.
     ///
     /// # Safety
@@ -780,6 +793,46 @@ mod tests {
         unsafe { release(object) };
         assert_eq!(drops.get(), 1);
     }
+
+    /// An object that does not fit the place its kind is laid out with, by size or by alignment, is
+    /// lent none. The CONTROL is a word, which fits. Turned red by a take that hands out a place
+    /// for whatever object asks.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn an_object_larger_or_stricter_than_its_kinds_place_is_lent_none() {
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        const PAST_THE_PLACE: usize = match entity_place(Kind::Publisher) {
+            Some((_, laid)) => laid.size() + 1,
+            None => 1,
+        };
+        #[repr(align(4096))]
+        struct Strict;
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        assert!(
+            Slot::<[u8; PAST_THE_PLACE]>::take_entity(&engine, Kind::Publisher).is_none(),
+            "larger than the place"
+        );
+        assert!(
+            Slot::take_entity(&engine, Kind::Publisher)
+                .map(|slot| slot.fill(Strict))
+                .is_none(),
+            "aligned past the place"
+        );
+        let word = Slot::<u64>::take_entity(&engine, Kind::Publisher);
+        assert!(word.is_some(), "CONTROL: a word fits");
+        drop((word, engine));
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
     /// A session lends the objects of its entities places of its own arena, one for each its limit
     /// admits: every one is lent, the one past them is refused, another session's are its own and
     /// untouched by it, a released object's place and an unfilled slot's go back to the session

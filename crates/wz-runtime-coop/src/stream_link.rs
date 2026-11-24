@@ -788,10 +788,15 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         };
         let mut start = self.spent.get();
         let mut held = self.held.get();
-        let lent = loop {
+        // Once a batch is lent, the front is read once more and only to say whether a whole batch
+        // lies behind it for the next receive (`ready`): one reading of the front serves both.
+        let mut lent = false;
+        let ready = loop {
             // `start` and `held` are places of the buffer, `start` the earlier, and a batch `front`
             // answered lies whole between them: the sums below stay inside it.
             match front(bytes.get(start..held).unwrap_or_default(), self.rx_len) {
+                Front::Batch(_) if lent => break true,
+                _ if lent => break false,
                 Front::Batch(0) => start = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES),
                 Front::Batch(len) => {
                     let body = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES);
@@ -803,7 +808,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                     if !self.keeping.replace(false) {
                         start = end;
                     }
-                    break true;
+                    lent = true;
                 }
                 Front::TooLong => {
                     self.end(LostCause::PeerClosed);
@@ -841,10 +846,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         };
         self.spent.set(start);
         self.held.set(held);
-        self.ready.set(matches!(
-            front(bytes.get(start..held).unwrap_or_default(), self.rx_len),
-            Front::Batch(_)
-        ));
+        self.ready.set(ready);
         // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
         // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
         // this link's (`held`, `spent`), so its buffer stays its own while one is there.
@@ -1744,6 +1746,41 @@ mod tests {
             3,
             "the part of the third batch, moved once before the read"
         );
+    }
+
+    /// A receive says whether a whole batch lies behind what it lent, from the one reading of the
+    /// front that follows the lend: an empty batch is one (the next receive passes it over), a
+    /// batch kept is one (lent again), and a length past the buffer is none, the link ending at
+    /// the receive that reads that length and not at the one before it.
+    #[test]
+    fn a_receive_says_whether_a_whole_batch_lies_behind_what_it_lent() {
+        let empty = link();
+        let mut wire = batch(b"one");
+        wire.extend(batch(b""));
+        queue(&empty, &wire);
+        assert_eq!(received(&empty).as_deref(), Some(&b"one"[..]));
+        assert!(empty.holds_input(), "an empty batch is a whole one");
+        assert_eq!(received(&empty), None, "passed over, and nothing behind it");
+        assert!(!empty.holds_input());
+
+        let kept = link();
+        queue(&kept, &batch(b"two"));
+        assert!(kept.recv_with(&mut |_| kept.keep()));
+        assert!(kept.holds_input(), "the batch kept is lent again");
+
+        let long = link();
+        let mut wire = batch(b"one");
+        wire.extend([0xff, 0x00]);
+        queue(&long, &wire);
+        assert_eq!(received(&long).as_deref(), Some(&b"one"[..]));
+        assert!(!long.holds_input(), "a length past the buffer is no batch");
+        assert_eq!(
+            long.lost(),
+            None,
+            "not ended by the receive that lent a batch"
+        );
+        assert_eq!(received(&long), None);
+        assert_eq!(long.lost(), Some(LostCause::PeerClosed));
     }
 
     #[test]

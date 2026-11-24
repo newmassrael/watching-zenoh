@@ -1238,9 +1238,13 @@ where
                 return outcome;
             }
         }
-        match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.ingest_continuation(idx, frag, ring, now_ms, hand, deliver),
-            None => self.ingest_chain_start(frag, now_ms, hand, deliver),
+        let admitted = match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
+            Some(idx) => self.admit_continuation(idx, &frag, ring, now_ms),
+            None => self.admit_chain_start(&frag, now_ms),
+        };
+        match admitted {
+            Ok((idx, starts)) => self.drive_open_chain(idx, frag, starts, hand, deliver),
+            Err(outcome) => outcome,
         }
     }
 
@@ -1527,24 +1531,26 @@ where
             .count() as u16
     }
 
-    fn ingest_chain_start<F: FnOnce(ChainBytes<'_>)>(
+    /// Open a chain for `frag`, the first fragment of one: a slot found or made, the chain's
+    /// staging reserved, and the chain set open in the slot before its machine is told of it, so
+    /// that [`Self::drive_open_chain`] drives a first fragment and a continuation alike. The slot
+    /// and that it starts a chain, or the outcome of a start refused before the machine is driven.
+    fn admit_chain_start(
         &mut self,
-        frag: Fragment<'_>,
+        frag: &Fragment<'_>,
         now_ms: u64,
-        hand: Hand,
-        deliver: F,
-    ) -> IngestOutcome {
+    ) -> Result<(usize, bool), IngestOutcome> {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
         // while free slots remain for honest peers.
         if self.peer_chain_count(frag.peer_key) >= self.config.per_peer_quota {
-            return IngestOutcome::Refused(RefuseReason::PeerQuota);
+            return Err(IngestOutcome::Refused(RefuseReason::PeerQuota));
         }
         let idx = match self.slots.iter().position(Slot::is_free) {
             Some(i) => i,
             None => match self.make_room() {
                 Some(i) => i,
-                None => return IngestOutcome::Refused(RefuseReason::PoolExhausted),
+                None => return Err(IngestOutcome::Refused(RefuseReason::PoolExhausted)),
             },
         };
 
@@ -1555,48 +1561,24 @@ where
         // the two dims are an invariant between two numbers, and reporting
         // exhaustion is the honest answer if they ever disagree.
         // `PoolExhausted` is already the Router's word for it. The reservation
-        // is held here until `begin_chain` binds it to the slot.
+        // is held by the open chain from here; a machine that does not begin
+        // the chain gives it back with the slot ([`Slot::replace`]).
         let deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
         let max_message_bytes = self.config.max_message_bytes;
         let opened = self.opened;
         let Self { slots, staging, .. } = self;
         let Some(slot) = slots.get_mut(idx) else {
-            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+            return Err(IngestOutcome::Refused(RefuseReason::PoolExhausted));
         };
         let Some(chain) = staging.acquire() else {
-            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+            return Err(IngestOutcome::Refused(RefuseReason::PoolExhausted));
         };
         // A first fragment wider than the bound never reaches the machine: no
         // transition of `Empty` refuses a chunk, so the chain ends here.
         if !Self::chain_admits(staging, &chain, frag.payload.len(), max_message_bytes) {
             staging.release(chain);
             self.note_capacity_overflow(frag.payload.len());
-            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
-        }
-
-        // Empty --fragment.chunk--> { Receiving | Complete }, the slot FSM's
-        // `more` guard deciding. A well-formed chain's first fragment has
-        // M=1 (a single-fragment message rides T_MID_FRAME, not
-        // T_MID_FRAGMENT) and lands in Receiving -> Begun. A lone M=0 first
-        // fragment — stranded when a duplicate mid-chain fragment trips the
-        // channel SN gate ([`Self::abort_channel`] clears the chain) and the
-        // trailing final fragment then arrives as a fresh start — completes
-        // in ONE step: deliver it immediately and reclaim the slot
-        // (zenoh-pico rx.c `if (!more) decode` parity). Completing it rather
-        // than parking a stuck Receiving orphan is what stops the next
-        // in-order message from being appended onto the orphan's tail and
-        // delivered as one merged blob (R311oo dup-fragment merge bug). The
-        // delivered lone tail is a chain remnant, not a whole frame, so the
-        // upstream frame decode drops it — exactly pico's outcome.
-        let duties = slot.drive_chunk(frag.more);
-        if duties & duty::BEGIN == 0 {
-            // `Empty` answers every chunk with `begin_chain`, so this machine
-            // was not in `Empty` while the Router held its slot free: the two
-            // disagree, and the slot is given a fresh machine for the next
-            // start rather than this one bound to a chain it never began.
-            staging.release(chain);
-            slot.replace(staging);
-            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+            return Err(IngestOutcome::Aborted(AbortReason::CapacityOverflow));
         }
         slot.open = Some(OpenChain {
             key: ChainKey::new(frag.peer_key, frag.reliable, frag.priority),
@@ -1605,20 +1587,7 @@ where
             opened,
             chain,
         });
-        self.opened = P::after(self.opened);
-        // On `more == 0` the same transition also ran `finalize_message`,
-        // which stages the one payload this chain has.
-        if duties & duty::FINALIZE != 0 {
-            return self.finish(idx, frag.sn, frag.payload, hand, deliver);
-        }
-        if !self.stage(idx, frag.sn, frag.payload) {
-            return self.abort(
-                idx,
-                ReassemblySlotEvent::CodecError,
-                AbortReason::CapacityOverflow,
-            );
-        }
-        IngestOutcome::Begun
+        Ok((idx, true))
     }
 
     /// A slot for a chain start that found none free, by the pool's
@@ -1675,19 +1644,20 @@ where
         true
     }
 
-    fn ingest_continuation<F: FnOnce(ChainBytes<'_>)>(
+    /// Admit `frag` as the next fragment of the chain open in `idx`: the slot and that it does
+    /// not start a chain, or the outcome of a continuation the chain cannot take, the chain
+    /// ended. A slot that holds no chain makes the fragment a start.
+    fn admit_continuation(
         &mut self,
         idx: usize,
-        frag: Fragment<'_>,
+        frag: &Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
-        hand: Hand,
-        deliver: F,
-    ) -> IngestOutcome {
+    ) -> Result<(usize, bool), IngestOutcome> {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
         let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
-            return self.ingest_chain_start(frag, now_ms, hand, deliver);
+            return self.admit_chain_start(frag, now_ms);
         };
         let last_sn = open.last_sn;
         // A payload the chain cannot hold is a codec error for the machine,
@@ -1711,25 +1681,85 @@ where
         // than as the judgement it cannot make; the slot FSM's one abort arm for
         // "this continuation cannot be admitted" serves both words.
         if let Err(reason) = ring.admits(last_sn, frag.sn) {
-            return self.abort(idx, ReassemblySlotEvent::FragmentOoo, reason);
+            return Err(self.abort(idx, ReassemblySlotEvent::FragmentOoo, reason));
         }
         if !fits {
             self.note_capacity_overflow(staged.saturating_add(frag.payload.len()));
-            return self.abort(
+            return Err(self.abort(
                 idx,
                 ReassemblySlotEvent::CodecError,
                 AbortReason::CapacityOverflow,
-            );
+            ));
         }
+        Ok((idx, false))
+    }
 
-        // The slot FSM's `more` guard decides Continue vs Final.
-        // No slot in `idx` is no machine to drive, and the chain is given up below as one whose
-        // machine answered neither duty.
+    /// Drive the chunk of `frag` into the chain open in `idx` and do what its transition asked.
+    /// `starts` says the chain was opened for this fragment ([`Self::admit_chain_start`]).
+    ///
+    /// The one place a chunk is driven: a first fragment and a continuation differ only in
+    /// the duty that stages a payload (`begin_chain`, `append_fragment_payload`) and in
+    /// what a machine that answers neither costs.
+    fn drive_open_chain<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        idx: usize,
+        frag: Fragment<'_>,
+        starts: bool,
+        hand: Hand,
+        deliver: F,
+    ) -> IngestOutcome {
+        // `Empty --fragment.chunk--> { Receiving | Complete }` for a first fragment and
+        // `Receiving --fragment.chunk--> { Receiving | Complete }` for a continuation, the slot
+        // FSM's `more` guard deciding. A well-formed chain's first fragment has M=1 (a
+        // single-fragment message rides T_MID_FRAME, not T_MID_FRAGMENT) and lands in
+        // Receiving -> Begun. A lone M=0 first fragment — stranded when a duplicate mid-chain
+        // fragment trips the channel SN gate ([`Self::abort_channel`] clears the chain) and the
+        // trailing final fragment then arrives as a fresh start — completes in ONE step: deliver
+        // it immediately and reclaim the slot (zenoh-pico rx.c `if (!more) decode` parity).
+        // Completing it rather than parking a stuck Receiving orphan is what stops the next
+        // in-order message from being appended onto the orphan's tail and delivered as one
+        // merged blob (R311oo dup-fragment merge bug). The delivered lone tail is a chain
+        // remnant, not a whole frame, so the upstream frame decode drops it — exactly pico's
+        // outcome. No slot in `idx` is no machine to drive, and the chain is given up below as
+        // one whose machine answered neither duty.
         let duties = self
             .slots
             .get_mut(idx)
             .map_or(0, |slot| slot.drive_chunk(frag.more));
-        if duties & duty::APPEND != 0 {
+        let finalizes = duties & duty::FINALIZE != 0;
+        // `Empty` answers every chunk with `begin_chain`, and `Receiving` with one of
+        // `append_fragment_payload` and `finalize_message`. A machine that did not was not in
+        // the state the Router held its slot in: the two disagree, and the slot is given a
+        // fresh machine (and the chain's staging back to the arena) rather than one bound to a
+        // chain it never began or kept.
+        let disagrees = if starts {
+            duties & duty::BEGIN == 0
+        } else {
+            duties & (duty::APPEND | duty::FINALIZE) == 0
+        };
+        if disagrees {
+            let Self { slots, staging, .. } = self;
+            if let Some(slot) = slots.get_mut(idx) {
+                slot.replace(staging);
+            }
+            return if starts {
+                IngestOutcome::Refused(RefuseReason::PoolExhausted)
+            } else {
+                IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+            };
+        }
+        if starts {
+            self.opened = P::after(self.opened);
+        }
+        // A continuation stages its payload when its transition appended it, which it does
+        // before finalizing; a first fragment does unless the same transition finalized the
+        // chain, whose `finalize_message` stages the one payload it has.
+        let stages = if starts {
+            !finalizes
+        } else {
+            duties & duty::APPEND != 0
+        };
+        if stages {
             if !self.stage(idx, frag.sn, frag.payload) {
                 return self.abort(
                     idx,
@@ -1737,19 +1767,13 @@ where
                     AbortReason::CapacityOverflow,
                 );
             }
-            return IngestOutcome::Continued;
+            return if starts {
+                IngestOutcome::Begun
+            } else {
+                IngestOutcome::Continued
+            };
         }
-        if duties & duty::FINALIZE != 0 {
-            return self.finish(idx, frag.sn, frag.payload, hand, deliver);
-        }
-        // `Receiving` answers every chunk with one of the two, so this machine
-        // was not in `Receiving` while the Router held its chain open: the
-        // chain is given up and the slot gets a fresh machine.
-        let Self { slots, staging, .. } = self;
-        if let Some(slot) = slots.get_mut(idx) {
-            slot.replace(staging);
-        }
-        IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        self.finish(idx, frag.sn, frag.payload, hand, deliver)
     }
 
     /// Send the open chain in `idx` an abort `event` and report it ended for
