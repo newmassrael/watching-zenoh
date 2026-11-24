@@ -26,9 +26,20 @@
 //! them). Wakers fire outside the critical section, so a wake that re-enters the runtime does not
 //! deadlock. A sleep dropped before its deadline leaves its entry, which wakes its task once for
 //! nothing when the deadline passes and is freed then.
+//!
+//! ## A runtime nothing sleeps on
+//!
+//! A pass and a look at the next deadline walk the entries only once a deadline has been placed
+//! in one (`TableWalk`): until then the table is empty and they answer at once. The walk is
+//! reached only through the entry `register` places, so a build in which no task sleeps (an
+//! engine whose sessions keep their few deadlines, the lease, the keep-alive, the next dial and
+//! the idle wait, in fixed places of their own and read them off the clock at each step) links
+//! no walk of a table at all.
 
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
+
+use crate::atomic::{AtomicPtr, Ordering};
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
@@ -124,6 +135,10 @@ pub struct TimerQueue {
     slots: Slots,
     next_seq: Mutex<Cell<u64>>,
     refused: Mutex<Cell<u32>>,
+    /// The walk of the entries, once a deadline has been placed in one: null until then, and
+    /// `TABLE_WALK` from then on. Only `register` names the walk, so a build that registers
+    /// no deadline links none of it.
+    walk: AtomicPtr<TableWalk>,
     /// Places a deadline no entry holds in an entry of its own: a table that grows has it
     /// (`grow_by_one`), and only that table names it, so a runtime whose table is reserved links
     /// none of the growth.
@@ -135,12 +150,27 @@ pub struct TimerQueue {
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 type GrowFn = fn(&mut Vec<TimerSlot>, TimerEntry);
 
+/// What a pass and a look ahead do over the entries of a table a deadline has been placed in.
+struct TableWalk {
+    /// Wake every entry due at the time given ([`TimerQueue::pop_expired`]).
+    pass: fn(&TimerQueue, u64),
+    /// The earliest deadline held ([`TimerQueue::next_deadline_us`]).
+    next: fn(&TimerQueue) -> Option<u64>,
+}
+
+/// The one walk of a table, which every queue points at once it holds a deadline.
+static TABLE_WALK: TableWalk = TableWalk {
+    pass: TimerQueue::wake_due,
+    next: TimerQueue::earliest_deadline,
+};
+
 impl TimerQueue {
     fn over(slots: Slots) -> Self {
         Self {
             slots,
             next_seq: Mutex::new(Cell::new(0)),
             refused: Mutex::new(Cell::new(0)),
+            walk: AtomicPtr::new(core::ptr::null_mut()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             grow: None,
         }
@@ -161,6 +191,20 @@ impl TimerQueue {
         Self::over(Slots::Owned(Mutex::new(RefCell::new(
             empty_slots(timers).into_vec(),
         ))))
+    }
+
+    /// The table of a runtime made for `timers` deadlines at once: a table of no entries for 0,
+    /// made with no reservation at all, and [`Self::reserved`] otherwise. Always inlined, so a
+    /// runtime whose maker states its count as a constant links only the making of that count: a
+    /// build in which no task sleeps reserves no entry and links no reservation of entries.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[inline(always)]
+    pub(crate) fn of_rows(timers: usize) -> Self {
+        if timers == 0 {
+            Self::over(Slots::Owned(Mutex::new(RefCell::new(Vec::new()))))
+        } else {
+            Self::reserved(timers)
+        }
     }
 
     /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
@@ -201,11 +245,13 @@ impl TimerQueue {
                 }
             });
             let Some(entry) = unplaced else {
+                self.hold_walk();
                 return true;
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             if let (Some(grow), Slots::Owned(owned)) = (self.grow, &self.slots) {
                 grow(&mut owned.borrow(cs).borrow_mut(), entry);
+                self.hold_walk();
                 return true;
             }
             // The entry was not placed: its waker goes with it.
@@ -216,15 +262,36 @@ impl TimerQueue {
         })
     }
 
+    /// A deadline is placed: from now on a pass and a look ahead walk the entries.
+    fn hold_walk(&self) {
+        self.walk.store(
+            core::ptr::from_ref(&TABLE_WALK).cast_mut(),
+            Ordering::Release,
+        );
+    }
+
+    /// The walk of the entries, once a deadline has been placed in one.
+    fn walk(&self) -> Option<&'static TableWalk> {
+        // SAFETY: the pointer is null or `TABLE_WALK`'s (`hold_walk`), a `static`.
+        unsafe { self.walk.load(Ordering::Acquire).as_ref() }
+    }
+
     /// Wake every entry whose `deadline_us <= now_us`, earliest first. Wakers fire
-    /// outside the critical section.
+    /// outside the critical section. Nothing for a queue no deadline was ever placed in.
+    pub fn pop_expired(&self, now_us: u64) {
+        if let Some(walk) = self.walk() {
+            (walk.pass)(self, now_us);
+        }
+    }
+
+    /// [`Self::pop_expired`] over a table a deadline was placed in.
     ///
     /// The due entries are taken out `WAKE_BATCH` at a time, earliest first, in one section
     /// each, so a pass that finds none or a few due takes one section. An entry a waker registers
     /// while this wakes, already due, is woken no later than the next pass. Out of line: the batch is on this
     /// call's frame, which is gone before the executor polls the tasks it woke.
     #[inline(never)]
-    pub fn pop_expired(&self, now_us: u64) {
+    fn wake_due(&self, now_us: u64) {
         loop {
             let mut due: [Option<Waker>; WAKE_BATCH] = [const { None }; WAKE_BATCH];
             let taken = crate::cs::with(|cs| {
@@ -261,6 +328,11 @@ impl TimerQueue {
     /// Diagnostic: earliest deadline currently registered, or `None` if the table
     /// is empty.
     pub fn next_deadline_us(&self) -> Option<u64> {
+        self.walk().and_then(|walk| (walk.next)(self))
+    }
+
+    /// [`Self::next_deadline_us`] over a table a deadline was placed in.
+    fn earliest_deadline(&self) -> Option<u64> {
         crate::cs::with(|cs| {
             self.with_slots(cs, |slots| {
                 earliest(slots, u64::MAX).map(|(_, deadline_us)| deadline_us)
@@ -387,5 +459,62 @@ mod tests {
         assert!(growing.register(2, noop_waker()));
         assert_eq!((growing.capacity(), growing.refusals()), (2, 0));
         assert_eq!(growing.pending_count(), 2);
+    }
+
+    /// A table made for no deadline has no entry and refuses a sleep one, counted, which then ends
+    /// by polling; one made for some has as many.
+    ///
+    /// # Control
+    ///
+    /// A making that reserved entries for a count of 0 reds the capacity of the first.
+    #[test]
+    fn a_table_made_for_no_deadline_has_no_entry_and_refuses_a_sleep_one() {
+        let none = TimerQueue::of_rows(0);
+        assert_eq!(none.capacity(), 0);
+        assert!(!none.register(5, noop_waker()));
+        assert_eq!(none.refusals(), 1);
+        assert_eq!(none.next_deadline_us(), None);
+        let some = TimerQueue::of_rows(3);
+        assert_eq!(some.capacity(), 3);
+        assert!(some.register(5, noop_waker()));
+        assert_eq!(some.next_deadline_us(), Some(5));
+    }
+
+    /// A queue no deadline was placed in walks no table: a pass and a look ahead answer at once,
+    /// with nothing. The first deadline placed, in a reserved entry or a grown one, is seen by
+    /// both; one refused for want of an entry leaves the queue as it was.
+    ///
+    /// # Control
+    ///
+    /// A `register` that placed its deadline without holding the walk reds the look ahead after
+    /// the first placement; one that held it for a refused deadline reds the first assertions.
+    #[test]
+    fn a_queue_walks_its_entries_only_once_a_deadline_is_placed() {
+        let none = TimerQueue::reserved(0);
+        assert!(!none.register(5, noop_waker()));
+        assert!(none.walk().is_none(), "a refused deadline holds no walk");
+        assert_eq!(none.next_deadline_us(), None);
+        let queue = TimerQueue::reserved(2);
+        assert!(queue.walk().is_none());
+        assert_eq!(queue.next_deadline_us(), None);
+        queue.pop_expired(u64::MAX);
+        assert!(queue.register(30, noop_waker()));
+        assert_eq!(queue.next_deadline_us(), Some(30));
+        queue.pop_expired(10);
+        assert_eq!(queue.pending_count(), 1, "not yet due");
+        queue.pop_expired(30);
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(
+            queue.next_deadline_us(),
+            None,
+            "the walk stays, over an empty table"
+        );
+        let growing = TimerQueue::growing();
+        assert!(growing.register(7, noop_waker()));
+        assert_eq!(
+            growing.next_deadline_us(),
+            Some(7),
+            "a grown entry holds the walk too"
+        );
     }
 }

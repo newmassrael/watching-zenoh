@@ -464,6 +464,7 @@ fn open_counted(source: impl OpenSource) -> u64 {
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
                 held: crate::arena::HeldPlaces::NONE,
+                plan: crate::arena::PlanFrom::Config,
             },
         )
         .err();

@@ -144,7 +144,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (mut early, code) = payload(c"made before any reservation");
         assert_eq!(code, Z_OK);
         assert!(slots() > 0, "the first object reserved the build's pools");
-        assert_eq!(in_use(), 1, "and lies in them");
+        assert_eq!(in_use(), 2, "its slot and its payload block lie in them");
         let unused = wz_ext_object_pool_counts_t {
             bytes: 1,
             ..Default::default()
@@ -189,8 +189,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         }
         assert_eq!(slots(), 0, "a refused plan reserves nothing");
 
-        // ARM 3: one of each entity for one session, two payloads and the bytes of four short
-        // ones, and the config each open of the arms below is made from, one at a time.
+        // ARM 3: one of each entity for one session, two payloads and four small payload blocks,
+        // and the config each open of the arms below is made from, one at a time.
         let counts = wz_ext_object_pool_counts_t {
             sessions: 1,
             publishers: 1,
@@ -200,25 +200,39 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             liveliness_subscribers: 1,
             bytes: 2,
             configs: 1,
-            payload_bytes: 128,
+            small_payload_blocks: 4,
             queriers: 1,
             keyexprs: 1,
             ..Default::default()
         };
         let mut bytes = 0usize;
         assert_eq!(wz_ext_object_pool_bytes(&counts, &mut bytes), Z_OK);
-        // The payloads' area lies beside the slots, and no class reports it.
-        let without_area = wz_ext_object_pool_counts_t {
-            payload_bytes: 0,
+        // The payload blocks lie beside the kinds' slots, each a whole block of the small pool.
+        let without_blocks = wz_ext_object_pool_counts_t {
+            small_payload_blocks: 0,
             ..counts
         };
         let mut slots_only = 0usize;
         assert_eq!(
-            wz_ext_object_pool_bytes(&without_area, &mut slots_only),
+            wz_ext_object_pool_bytes(&without_blocks, &mut slots_only),
             Z_OK
         );
-        let area = bytes - slots_only;
-        assert!(area >= 128, "the area and its marks: {area}");
+        let blocks = bytes - slots_only;
+        assert!(
+            blocks >= 4 * 32 && blocks % 64 == 0,
+            "four blocks of at least 32 bytes, each a multiple of 16: {blocks}"
+        );
+        // Bytes of payload are no count of blocks, and are refused rather than read as one.
+        let stating_bytes = wz_ext_object_pool_counts_t {
+            payload_bytes: 128,
+            ..counts
+        };
+        let mut refused_bytes = 7usize;
+        assert_eq!(
+            wz_ext_object_pool_bytes(&stating_bytes, &mut refused_bytes),
+            Z_EINVAL
+        );
+        assert_eq!(refused_bytes, 0);
         // A config's slot is its own size where the build's config is larger than the largest
         // class, and no class reports it then.
         let without_configs = wz_ext_object_pool_counts_t {
@@ -244,17 +258,18 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
                 + 2 * usize::from(cfg!(feature = "liveliness"))
                 + usize::from(cfg!(feature = "query")));
         // The session, the publisher and the subscriber where they are pooled, the planes', the
-        // two payloads, the declared key expression and the config.
-        let reported = 1 + 2 * pooled + held_by_plane + 2 + 1 + configs_reported;
+        // two payloads, the declared key expression, the config and the four payload blocks.
+        let reported = 1 + 2 * pooled + held_by_plane + 2 + 1 + configs_reported + 4;
         assert_eq!(slots(), reported);
         let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
-            laid + (1 - configs_reported) * config_slot + area,
+            laid + (1 - configs_reported) * config_slot,
             bytes,
             "the reservation is the bytes the door answered"
         );
 
-        // ARM 4: two payloads fit, the third is refused, counted, and left null.
+        // ARM 4: two payloads fit, each a slot and a block; the third is refused, counted, and left
+        // null, the block it took first given back.
         let (mut first, code) = payload(c"first");
         assert_eq!(code, Z_OK);
         let (mut second, code) = payload(c"second");
@@ -262,10 +277,11 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (third, code) = payload(c"third");
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert!(!z_internal_bytes_check(&third));
-        assert_eq!((in_use(), refused()), (2, 1));
+        assert_eq!((in_use(), refused()), (4, 1));
 
-        // ARM 4b: a payload whose bytes the area has no block for is refused before it takes a
-        // place, and left null; the program's buffer is its own still.
+        // ARM 4b: a payload no pool of payload blocks has a block for (the small blocks are too
+        // small, and the counts state no larger ones) is refused before it takes a place, the
+        // refusal counted, and left null; the program's buffer is its own still.
         let source = [0x5Au8; 200];
         let mut large: z_owned_bytes_t = std::mem::zeroed();
         assert_eq!(
@@ -273,7 +289,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
         assert!(!z_internal_bytes_check(&large));
-        assert_eq!((in_use(), refused()), (2, 1), "no place was taken for it");
+        assert_eq!((in_use(), refused()), (4, 2), "no place was taken for it");
         assert!(source.iter().all(|&byte| byte == 0x5A));
 
         // ARM 5: the pools are kept while they hold an object.
@@ -282,10 +298,10 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
 
         // ARM 6: a pooled payload let go makes room for the next.
         z_bytes_drop(z_bytes_move(&mut second));
-        assert_eq!(in_use(), 1);
+        assert_eq!(in_use(), 2);
         let (mut again, code) = payload(c"again");
         assert_eq!(code, Z_OK);
-        assert_eq!(in_use(), 2);
+        assert_eq!(in_use(), 4);
 
         // ARM 7: the one session's place is taken; a second open is refused before it dials, and
         // consumes its config.
@@ -295,7 +311,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
             Z_OK
         );
-        assert_eq!(in_use(), 3);
+        assert_eq!(in_use(), 5);
         let mut refused_cfg = config(Z_CONFIG_CONNECT_KEY);
         let mut second_session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
@@ -307,7 +323,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
         assert!(!z_internal_session_check(&second_session));
-        assert_eq!(in_use(), 3);
+        assert_eq!(in_use(), 5);
 
         // ARM 8: each publisher's place is taken, the pool's one on the tokio engine and on the
         // cooperative engine those of the session's own arena, as many as its limit admits, which
@@ -333,13 +349,13 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (redeclared, code) = publisher(&session, c"wz/pool/b");
         assert_eq!(code, Z_OK);
         declared.push(redeclared);
-        assert_eq!(in_use(), 3 + pooled);
+        assert_eq!(in_use(), 5 + pooled);
 
         // ARM 8b: the one declared key expression's place is taken; a second declaration is
         // refused, left null, and the place of an undeclared one goes back.
         let (mut key, code) = declared_keyexpr(&session, c"wz/pool/key/a");
         assert_eq!(code, Z_OK);
-        assert_eq!(in_use(), 4 + pooled);
+        assert_eq!(in_use(), 6 + pooled);
         let (refused_key, code) = declared_keyexpr(&session, c"wz/pool/key/b");
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert!(!wz_capi_pico::z_internal_keyexpr_check(&refused_key));
@@ -352,7 +368,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         );
         assert_eq!(
             in_use(),
-            3 + pooled,
+            5 + pooled,
             "an undeclared key gives its place back"
         );
 
@@ -371,7 +387,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
                     querier
                 })
                 .collect();
-            assert_eq!(in_use(), 3 + 2 * pooled);
+            assert_eq!(in_use(), 5 + 2 * pooled);
             let (refused_querier, code) = declared_querier(&session, c"wz/pool/ask/b");
             assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
             assert!(!wz_capi_pico::z_internal_querier_check(&refused_querier));
@@ -383,7 +399,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             }
             assert_eq!(
                 in_use(),
-                3 + pooled,
+                5 + pooled,
                 "an undeclared querier gives its place back"
             );
         }
@@ -411,7 +427,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             })
             .collect();
         assert!(slots() > 0, "the build's pools are reserved again");
-        assert_eq!(in_use(), 3);
+        assert_eq!(in_use(), 6, "three slots and three blocks");
         for bytes in &mut after {
             z_bytes_drop(z_bytes_move(bytes));
         }
@@ -436,7 +452,7 @@ unsafe fn region_arms() {
     let base = region.0.as_mut_ptr();
     let counts = wz_ext_object_pool_counts_t {
         bytes: 2,
-        payload_bytes: 64,
+        small_payload_blocks: 2,
         ..Default::default()
     };
     let mut needed = 0usize;

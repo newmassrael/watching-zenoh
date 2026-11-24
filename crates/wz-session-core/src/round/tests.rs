@@ -51,9 +51,9 @@ impl RoundCall for Call {
 }
 
 impl SampleCall for Call {
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         self.log
-            .note(format!("{} sample {}", self.row, sample.keyexpr()));
+            .note(format!("{} sample {}", self.row, sample.keyexpr));
     }
 }
 
@@ -141,15 +141,15 @@ impl RoundCalls for Lean {
 #[repr(C, align(16))]
 struct Block([u8; ARENA_ALIGN]);
 
-/// A round of a few records, its tables lent from an arena over memory the test process leaks,
-/// so it outlives the round.
-pub(crate) fn round<C: RoundCalls>() -> Arc<Round<C>> {
+/// A round of a few records, placed with its tables in an arena over memory the test process
+/// leaks, so the memory outlives the round, which its owner drops.
+pub(crate) fn round<C: RoundCalls>() -> Placed<Round<C>> {
     round_of(4, 4)
 }
 
 /// A round of `records` records owing `callbacks` callbacks at most, each no more than the build's
 /// bound, as [`round`] makes one.
-fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
+fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(records),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(callbacks),
@@ -159,6 +159,7 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
         Arena::table_bytes::<Entry<C>>(counts.records),
         Arena::table_bytes::<Owed<C>>(counts.callbacks),
         Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<Round<C>>(1),
     ]
     .into_iter()
     .map(|bytes| bytes.expect("in the address space"))
@@ -166,9 +167,47 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
     let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
     let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
     // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
-    // bytes, and is leaked, so nothing else uses it and it outlives every lent table.
+    // bytes, and is leaked, so nothing else uses it and it outlives the round and its tables.
     let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) };
-    Round::shared_over(RoundRows::lent(&mut arena, counts).expect("the arena has the rows"))
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    Round::placed_over(&mut arena, rows).expect("the arena has the round")
+}
+
+/// A round placed in its session's arena is built there whole: nothing owed and no datagram lent,
+/// beside the rows it reads. Turned red by a placed round whose fields are not all written, or one
+/// placed past what the arena has.
+#[test]
+fn a_round_placed_in_an_arena_is_built_there_whole() {
+    let counts = RoundRowCounts {
+        records: caps::DELIVERY_LANE_EVENTS.min(4),
+        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
+        longest_key: caps::MAX_KEYEXPR_BYTES,
+    };
+    let bytes: usize = [
+        Arena::table_bytes::<Entry<Kept>>(counts.records),
+        Arena::table_bytes::<Owed<Kept>>(counts.callbacks),
+        Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<Round<Kept>>(1),
+    ]
+    .into_iter()
+    .map(|bytes| bytes.expect("in the address space"))
+    .sum();
+    let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+    let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+    let base = NonNull::from(region).cast::<u8>();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
+    // bytes, and is leaked, so nothing else uses it and it outlives the round and its rows.
+    let mut arena = unsafe { Arena::over(base, bytes) };
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    let round = Round::<Kept>::placed_over(&mut arena, rows).expect("the arena has the round");
+    assert!(!round.owes(), "nothing owed");
+    assert!(!round.lends_a_datagram(), "no datagram lent");
+    let start = base.as_ptr() as usize;
+    let at = core::ptr::from_ref::<Round<Kept>>(&round) as usize;
+    assert!(
+        (start..start + bytes).contains(&at),
+        "the round lies in the session's arena"
+    );
 }
 
 /// A sample on `key` with no payload.
@@ -506,9 +545,7 @@ fn a_sample_with_no_room_or_no_place_is_refused_and_its_call_ended() {
 fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     let log = Arc::new(Log::default());
     let mut kept = round::<Kept>();
-    Arc::get_mut(&mut kept)
-        .expect("not shared yet")
-        .calls_legs_of(Arc::new(OneLeg(log.clone())));
+    kept.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
         kept.offer_reply(4, &Reply("r/1"));
@@ -523,9 +560,7 @@ fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     );
 
     let mut lean = round::<Lean>();
-    Arc::get_mut(&mut lean)
-        .expect("not shared yet")
-        .calls_legs_of(Arc::new(OneLeg(log.clone())));
+    lean.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
     // SAFETY: as above.
     unsafe {
         lean.offer_reply(4, &Reply("r/2"));

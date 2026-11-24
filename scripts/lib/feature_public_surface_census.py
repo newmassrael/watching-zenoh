@@ -445,12 +445,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "counters, a Rust surface neither C ABI reports, which the crate's own "
         "`tests::congestion` reads; `time-base` gates `ClockMoves`, the word of a clock the "
         "program moves that ends a read's wait, which the pico ABI's time base hands the engine "
-        "and the crate's own `clock_moves_tests` run",
+        "and the crate's own `clock_moves_tests` run; `runtime-plan` gates `ArenaPlan::rows`, "
+        "the plan of a session's arena read row by row, `PlanFrom::Config` and `CoopEngine::open` "
+        "with the opens beside it, the plan laid out from the config at the open, which the "
+        "crate's own tests run whatever it says (`tests::arena` and every engine test) and the "
+        "pico ABI's `peer` and `config-policy` builds open through",
         frozenset(
             {
                 "app-transport",
                 "group-host",
                 "listen",
+                "runtime-plan",
                 "scout",
                 "scout-datagram",
                 "shared-key-ids",

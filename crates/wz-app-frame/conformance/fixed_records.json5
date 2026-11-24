@@ -2,7 +2,7 @@
 // builds from its values, the record a receiver opens from its bytes (`e2e_opened`), the values a
 // layout refuses, and the policy a receiver judges by (`e2e_policy`). README.md beside this file
 // states the format; src/fixed_records_tests.rs runs every vector through the hand-written builder
-// and opener, and through a generated codec of the same layouts behind `sce-generated-codec`.
+// and opener.
 //
 // Every layout, width, mask, constant and name is made up for the corpus and unlike any
 // deployment's. The CRCs are published catalogue entries (CRC-8/DVB-S2, CRC-32/ISCSI, CRC-16/ARC).

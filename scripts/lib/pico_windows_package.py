@@ -10,6 +10,7 @@ width of Windows: x64 and x86.
     pico_windows_package.py --measure [--arch x64|x86]
     pico_windows_package.py --size-plan ZIP PLAN
     pico_windows_package.py --size-judge ZIP READING-DIR
+    pico_windows_package.py --size-features READING-DIR
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
     pico_windows_package.py --release DIR TAG
@@ -70,6 +71,17 @@ neither does, and the reference's CMake cache holds every argument the plan aske
 is a finding and no figure. A switch zenoh-pico built otherwise than asked is printed, as on Linux.
 The Platform workflow's package job runs the three steps for each width on the package it built;
 the header of the PowerShell script gives the same run on a Windows host by hand.
+
+`--size-features` is the like-for-like verdict of the same reading. The release DLL carries wz's
+own doors (`RELEASE_DOORS`) beside the zenoh-pico features its reference is built with, and no
+door has a switch of zenoh-pico's, so the release row counts every door's bytes on wz's side
+alone. On the Windows host that made the reading in `READING-DIR`, it builds, as the release DLL
+is built (without `std`, the `capi-nostd` profile and configuration, the same link), the library
+of the release profile without its doors (`LIKE_PROFILE`) and each door over that library alone,
+and grades each against the reading's zenoh-pico by its row (`FEATURE_CASES`), printing each
+door's bytes over the library without it. It refuses a reading whose zenoh-pico is not the same
+build of a library it builds (a door that turns a switch of zenoh-pico's on), and the release's
+features that are not `LIKE_PROFILE`'s and exactly `RELEASE_DOORS` are a finding.
 
 `--verify` re-hashes a package (a directory, or a zip it extracts first) against its manifest: a
 file that differs, one the manifest names that is missing, and one it does not name are each a
@@ -191,6 +203,26 @@ SIZE_CASES = (
 # The DLL a release ships, of each width, held under zenoh-pico by its row of
 # `deploy/pico_host_ceiling.json`: the case -> its width.
 CEILING_CASES = {f"pico-release-windows-{arch}": arch for arch in ARCHES}
+# The release DLL's zenoh-pico features alone: the release profile without wz's own doors, so the
+# reference derived from its features is the release DLL's and nothing of the library is a plane
+# zenoh-pico has no switch of. Its row is the like-for-like verdict (docs/upstream-parity.md D9).
+LIKE_PROFILE = "host-peer"
+# The features the release DLL has over `LIKE_PROFILE`, as both profiles resolve: each is held
+# apart by a row of the library without the doors and that one door, as capability_cost_gate.py
+# pairs a capability with the build without it. `--size-features` holds the release's features to
+# this list, so a door the release gains without its rows is a finding where they are read.
+RELEASE_DOORS = (
+    "app-transport", "config-document", "config-policy", "conformance-digest", "device-requires",
+    "e2e-receiver", "e2e-sender", "e2e-sender-demux", "e2e-supervision", "instance-key",
+    "message-catalog", "message-payload", "remote-declaration-watch", "replay-cache", "shared-key-ids",
+)
+# The like-for-like library of each width and each door over it, each held under the release
+# reading's zenoh-pico by its row of `deploy/pico_host_ceiling.json`: the case -> (its width, its
+# door, or None for the library without any).
+FEATURE_CASES = {
+    **{f"pico-api-windows-{arch}": (arch, None) for arch in ARCHES},
+    **{f"pico-api-windows-{arch}-with-{door}": (arch, door) for arch in ARCHES for door in RELEASE_DOORS},
+}
 # The machine a DLL of each width states in its COFF header, and the platform CMake's Visual Studio
 # generator builds that width for (`-A`).
 MACHINES = {"x64": 0x8664, "x86": 0x014C}
@@ -764,19 +796,61 @@ def size_facts(manifest: dict, table: dict, decl: dict) -> dict:
     features = manifest.get("features")
     if not isinstance(features, list) or not features or not all(isinstance(f, str) for f in features):
         raise Refusal("the package's manifest lists no features of its build")
+    return {"case": ceiling_case(arch), **reference_facts(arch, features, table, decl)}
+
+
+def reference_facts(arch: str, features: list[str], table: dict, decl: dict) -> dict:
+    """The width `arch` of a DLL of `features` and zenoh-pico built as its same build: every
+    switch `wz_config.pico_reference` derives from the features, with the CMake platform of the
+    width and `REFERENCE_CMAKE`. `table` is the feature table of wz-capi-pico, `decl` the
+    declaration. A feature the crate does not have is refused."""
     try:
         enabled = wz_config.enabled_features(table, features)
     except KeyError as err:
-        raise Refusal(f"the package names a feature this tree's {CRATE} does not have: {err}") from None
-    return {"case": ceiling_case(arch), "arch": arch, "vcvars": ARCHES[arch][1],
-            "cmake_platform": CMAKE_PLATFORMS[arch], "features": sorted(features),
-            "reference_switches": wz_config.pico_reference(decl, enabled),
+        raise Refusal(f"the build names a feature this tree's {CRATE} does not have: {err}") from None
+    return {"arch": arch, "vcvars": ARCHES[arch][1], "cmake_platform": CMAKE_PLATFORMS[arch],
+            "features": sorted(features), "reference_switches": wz_config.pico_reference(decl, enabled),
             "reference_cmake": list(REFERENCE_CMAKE), "reference_config": REFERENCE_CONFIG}
 
 
 def plan_mismatch(plan: dict, facts: dict) -> list[str]:
     """The entries of a plan that differ from what this tree derives for its package (`size_facts`)."""
     return sorted(key for key, value in facts.items() if plan.get(key) != value)
+
+
+# What of a plan is its reference: the width and the build of zenoh-pico, and not the case or the
+# features of the DLL it was made for. A DLL is judged against a reading made for another only when
+# these are the same for it.
+REFERENCE_KEYS = ("arch", "vcvars", "cmake_platform", "reference_switches", "reference_cmake",
+                  "reference_config")
+
+
+def reference_mismatch(plan: dict, facts: dict) -> list[str]:
+    """The entries of the reference `plan` was made with that differ from the one `facts`
+    (`reference_facts` of another DLL) derive: none when that reading is a same build of it."""
+    return sorted(key for key in REFERENCE_KEYS if plan.get(key) != facts.get(key))
+
+
+def feature_builds(arch: str, like: list[str]) -> list[tuple[str, str | None, list[str]]]:
+    """The libraries `--size-features` builds for the width `arch`, in `FEATURE_CASES`' order:
+    (case, door, features), the like-for-like library of the features `like` first, with no door,
+    then each door of `RELEASE_DOORS` over it alone."""
+    return [(case, door, like if door is None else like + [door])
+            for case, (width, door) in FEATURE_CASES.items() if width == arch]
+
+
+def door_findings(release: list[str], like: list[str]) -> list[str]:
+    """What keeps the release DLL's features `release` from being the like-for-like library's
+    `like` and exactly the doors of `RELEASE_DOORS`: a feature of the like-for-like library the
+    release has not, a door the release has with no rows, and a door with rows it has not."""
+    doors = [feature for feature in release if feature not in like]
+    findings = [f"{LIKE_PROFILE} has {feature}, which the release DLL has not: it is no release "
+                f"DLL without its doors" for feature in like if feature not in release]
+    findings += [f"the release DLL has {door} over {LIKE_PROFILE}, a door with no rows: add it to "
+                 f"RELEASE_DOORS with a row of each width" for door in doors if door not in RELEASE_DOORS]
+    findings += [f"{door} has rows, and the release DLL does not have it over {LIKE_PROFILE}: take "
+                 f"it out of RELEASE_DOORS with its rows" for door in RELEASE_DOORS if door not in doors]
+    return findings
 
 
 def size_findings(facts: dict, wz_image: bytes, pico_image: bytes, header: str,
@@ -1233,22 +1307,46 @@ def size_plan(package: pathlib.Path) -> dict:
             "reference_pin": git("rev-parse", f"{commit}:vendor/zenoh-pico")}
 
 
-def size_judge(package: pathlib.Path, reading_dir: pathlib.Path) -> int:
-    """Grade the release DLL of the package zip `package` against the reference a run of
-    scripts/host-bench/windows/size_ceiling.ps1 left in `reading_dir` (`--size-judge`), by the
-    case's row of the ceiling table: 0 when it holds, 1 on a finding."""
+def read_reading(reading_dir: pathlib.Path) -> tuple[dict, dict]:
+    """The plan and the reading a run of scripts/host-bench/windows/size_ceiling.ps1 left in
+    `reading_dir`, each of its schema, the reading stating its toolchain, date and CMake cache."""
     plan = json.loads((reading_dir / SIZE_PLAN).read_text(encoding="utf-8"))
     reading = json.loads((reading_dir / SIZE_READING).read_text(encoding="utf-8"))
     if plan.get("schema") != SIZE_PLAN_SCHEMA:
         raise Refusal(f"{reading_dir.name}/{SIZE_PLAN} is not a plan of schema {SIZE_PLAN_SCHEMA}")
     if reading.get("schema") != SIZE_READING_SCHEMA:
         raise Refusal(f"{reading_dir.name}/{SIZE_READING} is not a reading of schema {SIZE_READING_SCHEMA}")
-    if hashlib.sha256(package.read_bytes()).hexdigest() != (plan.get("package") or {}).get("sha256"):
-        raise Refusal(f"{package.name} is not the package the plan was made from")
     toolchain, date, cache = reading.get("toolchain"), reading.get("date"), reading.get("reference_cache")
     if not (isinstance(toolchain, str) and toolchain and isinstance(date, str) and date
             and isinstance(cache, dict)):
         raise Refusal(f"{reading_dir.name}/{SIZE_READING} states no toolchain, date or CMake cache")
+    return plan, reading
+
+
+def ceiling_grade(case: str, point: dict, where: str, remeasure: str) -> tuple[list[str], list[str]]:
+    """The findings and the notes of the reading `point` of `case` against its row of the ceiling
+    table, the row the reading sets printed first; a case with no row, or with a malformed one, is a
+    finding. `remeasure` names the command that prints the row again."""
+    row = ceiling.ceiling_rows(ceiling.load_ceiling()).get(case)
+    debt = row.get("debt") if isinstance(row, dict) else None
+    say(f"{where}: the row this reading sets: "
+        f"{ceiling.format_row(case, ceiling.ceiling_row(point, debt if isinstance(debt, str) else None))}")
+    if row is None:
+        return [f"{case} has no row in {ceiling.HOST_CEILING.relative_to(ROOT).as_posix()}"], []
+    shape = ceiling.row_findings(case, row)
+    if shape:
+        return shape, []
+    return ceiling.grade_ceiling(case, row, point, remeasure)
+
+
+def size_judge(package: pathlib.Path, reading_dir: pathlib.Path) -> int:
+    """Grade the release DLL of the package zip `package` against the reference a run of
+    scripts/host-bench/windows/size_ceiling.ps1 left in `reading_dir` (`--size-judge`), by the
+    case's row of the ceiling table: 0 when it holds, 1 on a finding."""
+    plan, reading = read_reading(reading_dir)
+    if hashlib.sha256(package.read_bytes()).hexdigest() != (plan.get("package") or {}).get("sha256"):
+        raise Refusal(f"{package.name} is not the package the plan was made from")
+    toolchain, date, cache = reading["toolchain"], reading["date"], reading["reference_cache"]
     manifest, wz_image = read_package(package)
     facts = package_facts(manifest)
     differ = plan_mismatch(plan, facts)
@@ -1266,26 +1364,107 @@ def size_judge(package: pathlib.Path, reading_dir: pathlib.Path) -> int:
     say(f"{where}: zenoh-pico {pin} as the same build {size_line(pico_image)}")
     say(f"{where}: wz text {wz_text} against {pico_text}, {wz_text / pico_text:.4f} times it ({toolchain})")
     if not findings:
-        point = ceiling.ceiling_reading(wz_text, pico_text, pin, toolchain, date)
-        row = ceiling.ceiling_rows(ceiling.load_ceiling()).get(case)
-        debt = row.get("debt") if isinstance(row, dict) else None
-        say(f"{where}: the row this reading sets: "
-            f"{ceiling.format_row(case, ceiling.ceiling_row(point, debt if isinstance(debt, str) else None))}")
-        if row is None:
-            findings.append(f"{case} has no row in {ceiling.HOST_CEILING.relative_to(ROOT).as_posix()}")
-        elif shape := ceiling.row_findings(case, row):
-            findings += shape
-        else:
-            graded, more = ceiling.grade_ceiling(
-                case, row, point, f"`pico_windows_package.py --size-judge` on a reading of {arch}")
-            findings += graded
-            notes += more
+        graded, more = ceiling_grade(case, ceiling.ceiling_reading(wz_text, pico_text, pin, toolchain, date),
+                                     where, f"`pico_windows_package.py --size-judge` on a reading of {arch}")
+        findings += graded
+        notes += more
     for note in notes:
         say(f"{where}: {note}")
     for finding in findings:
         say(f"{where}: FAIL: {finding}")
     say(f"{where}: {'FAIL' if findings else 'PASS'}")
     return 1 if findings else 0
+
+
+def size_features(reading_dir: pathlib.Path) -> int:
+    """Build the like-for-like library and each door over it (`feature_builds`) for the width of
+    the reading `size_ceiling.ps1` left in `reading_dir`, each as the release DLL is built, and
+    grade each against that reading's zenoh-pico by its row of the ceiling table (`--size-features`),
+    each door's bytes over the library without it printed: 0 when every row holds, 1 on a finding.
+    The reading is the release DLL's (`--size-plan` makes its plan from the package), so it is a
+    same build of each library only while no door turns a switch of zenoh-pico's on, which is held
+    here library by library."""
+    if sys.platform != "win32":
+        raise Refusal("the libraries are built on a Windows host: their DLLs are the MSVC toolchain's")
+    stated = stated_in_environment(dict(os.environ))
+    if stated:
+        raise Refusal(f"the environment states {', '.join(stated)}; the libraries are built with their "
+                      "profile's limits and policies alone, so unset them")
+    plan, reading = read_reading(reading_dir)
+    toolchain, date, cache = reading["toolchain"], reading["date"], reading["reference_cache"]
+    arch, release = plan.get("arch"), plan.get("features")
+    if arch not in ARCHES:
+        raise Refusal(f"{reading_dir.name}/{SIZE_PLAN} names no width a package is made for")
+    if not isinstance(release, list) or not release or not all(isinstance(f, str) for f in release):
+        raise Refusal(f"{reading_dir.name}/{SIZE_PLAN} lists no features of the release DLL")
+    decl = wz_config.load_decl()
+    table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+    like_plan = resolve_profile(decl, LIKE_PROFILE)
+    like = nostd_features(like_plan["features"], table)
+    where = f"pico-size-ceiling on Windows {arch}"
+    findings = door_findings(release, like)
+    if findings:
+        for finding in findings:
+            say(f"{where}: FAIL: {finding}")
+        say(f"{where}: the like-for-like library and its doors: FAIL")
+        return 1
+    pico_image = (reading_dir / REFERENCE_DLL).read_bytes()
+    header = (reading_dir / REFERENCE_HEADER).read_text(encoding="utf-8")
+    pin = str(plan.get("reference_pin", ""))[:12]
+    pico_text = pe_sizes(pico_image)["text"]
+    say(f"{where}: zenoh-pico {pin} as the release DLL's same build {size_line(pico_image)}")
+    # Built as the package's release DLL is, in its target directory, so what the package's build
+    # compiled of the crates beneath is not compiled again.
+    metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps"], CRATES))
+    target_dir = pathlib.Path(metadata["target_directory"]) / "pico-nostd"
+    env = {**os.environ, **like_plan["env"], **DEBUG_INFO_ENV}
+    like_text: int | None = None
+    failed = False
+    for case, door, features in feature_builds(arch, like):
+        said = f"{where}: {case}"
+        facts = reference_facts(arch, features, table, decl)
+        differ = reference_mismatch(plan, facts)
+        if differ:
+            say(f"{said}: FAIL: its zenoh-pico differs from the reading's in {', '.join(differ)}, so the "
+                f"reading is no same build of it")
+            failed = True
+            continue
+        try:
+            report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", ARCHES[arch][0],
+                          "--no-default-features", "--features", ",".join(features),
+                          *dict(NOSTD_BUILDS)["release"], "--target-dir", str(target_dir),
+                          "--message-format=json-render-diagnostics", "--", *LINK_ARGS], CRATES, env)
+        except Refusal as err:
+            say(f"{said}: FAIL: {err}")
+            failed = True
+            continue
+        dll = pick(artifact_files(report, LIBRARY), ".dll")
+        if dll is None:
+            say(f"{said}: FAIL: cargo reported no single DLL of {LIBRARY}")
+            failed = True
+            continue
+        image = dll.read_bytes()
+        found, notes = size_findings(facts, image, pico_image, header, cache)
+        wz_text = pe_sizes(image)["text"]
+        say(f"{said}: {size_line(image)}")
+        say(f"{said}: wz text {wz_text} against {pico_text}, {wz_text / pico_text:.4f} times it ({toolchain})")
+        if door is None:
+            like_text = wz_text
+        elif like_text is not None:
+            say(f"{said}: {door} adds {wz_text - like_text:+d} bytes of text to {LIKE_PROFILE}, and "
+                f"nothing to zenoh-pico, which has no switch of it")
+        if not found:
+            graded, more = ceiling_grade(case, ceiling.ceiling_reading(wz_text, pico_text, pin, toolchain, date),
+                                         said, f"`pico_windows_package.py --size-features` on a reading of {arch}")
+            found += graded
+            notes += more
+        for note in notes:
+            say(f"{said}: {note}")
+        for finding in found:
+            say(f"{said}: FAIL: {finding}")
+        failed = failed or bool(found)
+    say(f"{where}: the like-for-like library and its doors: {'FAIL' if failed else 'PASS'}")
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1921,6 +2100,15 @@ def selftest() -> int:
     expect("a plan whose switches or width were changed is named by those entries",
            plan_mismatch({**plan, "reference_switches": {**asked, "Z_FEATURE_QUERY": 0}, "arch": "x86"}, facts)
            == ["arch", "reference_switches"])
+    expect("another DLL of the reading's reference differs from its plan in nothing the reference is, "
+           "whatever its case and features",
+           reference_mismatch(plan, {**facts, "case": "pico-api-windows-x64", "features": ["os-windows"]}) == [])
+    expect("another DLL whose zenoh-pico or width is not the reading's is named by those entries",
+           reference_mismatch(plan, {**facts, "reference_switches": {**asked, "Z_FEATURE_QUERY": 0},
+                                     "cmake_platform": "Win32"}) == ["cmake_platform", "reference_switches"])
+    expect("the reference of a DLL is derived from its features as the release package's is",
+           reference_facts("x64", ["query", "os-windows"], feature_table, switch_rows)
+           == {key: value for key, value in facts.items() if key != "case"})
     built = "\n".join(f"#define {s} {v}" for s, v in asked.items()) + "\n"
     asked_cache = dict(a.removeprefix("-D").split("=", 1) for a in REFERENCE_CMAKE)
     expect("a reading of one machine, one linker, both unwind tables and the asked build is a figure",
@@ -1952,6 +2140,32 @@ def selftest() -> int:
     expect("the committed ceiling table has a well-formed row for the release DLL of each width",
            all(case in committed_rows and ceiling.row_findings(case, committed_rows[case]) == []
                for case in CEILING_CASES))
+    expect("the committed ceiling table has a well-formed row for the like-for-like library and for "
+           "each door over it, of each width",
+           all(case in committed_rows and ceiling.row_findings(case, committed_rows[case]) == []
+               for case in FEATURE_CASES))
+    expect("one like-for-like case of each width and one of each door and width, none a release case",
+           len(FEATURE_CASES) == len(ARCHES) * (1 + len(RELEASE_DOORS))
+           and FEATURE_CASES["pico-api-windows-x86"] == ("x86", None)
+           and FEATURE_CASES["pico-api-windows-x64-with-replay-cache"] == ("x64", "replay-cache")
+           and not set(FEATURE_CASES) & set(CEILING_CASES)
+           and len(set(RELEASE_DOORS)) == len(RELEASE_DOORS))
+    like = ["os-windows", "link-udp", "peer"]
+    builds = feature_builds("x86", like)
+    expect("the like-for-like library is built first, then each door over it alone, all of the width asked",
+           builds[0] == ("pico-api-windows-x86", None, like)
+           and [door for _, door, _ in builds[1:]] == list(RELEASE_DOORS)
+           and all(features == like + [door] for _, door, features in builds[1:])
+           and all(FEATURE_CASES[case] == ("x86", door) for case, door, _ in builds))
+    release = like + list(RELEASE_DOORS)
+    expect("a release that is the like-for-like library and exactly the doors with rows is no finding",
+           door_findings(release, like) == [] and door_findings(list(reversed(release)), like) == [])
+    for features, base, word in ((release + ["proto-text"], like, "proto-text"),
+                                 (release[:-1], like, RELEASE_DOORS[-1]),
+                                 (release, like + ["admin-space"], "admin-space")):
+        found = door_findings(features, base)
+        expect(f"a door with no rows, rows of no door and a like-for-like feature the release has not "
+               f"are each one finding naming it ({word}: {found})", len(found) == 1 and word in found[0])
     two = render_notices("p", "x86_64-pc-windows-msvc", [], [],
                          {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
                           "notice": "COPYRIGHT-library.html"},
@@ -2102,6 +2316,8 @@ def main(argv: list[str]) -> int:
             return 0
         if len(argv) == 4 and argv[1] == "--size-judge":
             return size_judge(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
+        if len(argv) == 3 and argv[1] == "--size-features":
+            return size_features(pathlib.Path(argv[2]))
         if len(argv) == 3 and argv[1] == "--verify":
             target = pathlib.Path(argv[2])
             with tempfile.TemporaryDirectory() as tmp:

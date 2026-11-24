@@ -51,8 +51,16 @@ pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"
 pub(super) const HELD_PAYLOADS: usize = limit(option_env!("WZ_LIMIT_HELD_PAYLOADS"), 32);
 pub(super) const HELD_CONFIGS: usize = limit(option_env!("WZ_LIMIT_HELD_CONFIGS"), 8);
 pub(super) const HELD_HELLOS: usize = limit(option_env!("WZ_LIMIT_HELD_HELLOS"), 16);
-pub(super) const HELD_PAYLOAD_BYTES: usize =
-    limit(option_env!("WZ_LIMIT_HELD_PAYLOAD_BYTES"), 131072);
+pub(super) const PAYLOAD_SMALL_BLOCK_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES"), 64);
+pub(super) const PAYLOAD_MEDIUM_BLOCK_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES"), 1040);
+pub(super) const HELD_SMALL_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS"), 256);
+pub(super) const HELD_MEDIUM_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS"), 32);
+pub(super) const HELD_LARGE_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS"), 20);
 pub(super) const HELD_ENCODINGS: usize = limit(option_env!("WZ_LIMIT_HELD_ENCODINGS"), 16);
 pub(super) const MAX_ENCODING_SCHEMA_BYTES: usize =
     limit(option_env!("WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES"), 255);

@@ -270,7 +270,7 @@ LIMIT_KEYS = frozenset(
         "pending_declares",  # EXISTING caps::MAX_PENDING_DECLARES
         "keyexpr_bytes",  # EXISTING caps::MAX_KEYEXPR_BYTES
         # Per-session limits with no constant today.
-        "tx_lend_slots",  # EXISTING wz-session-lwip driver.rs LENT_MAX (private)
+        "tx_lend_slots",  # EXISTING wz-session-lwip LENT_MAX: MTU slots a link
         "peer_keyexpr_aliases",  # NEW: the peer alias table is an unbounded HashMap
         "remote_decls",  # NEW: the remote declaration tables are unbounded HashMaps
         "pending_replies",  # NEW

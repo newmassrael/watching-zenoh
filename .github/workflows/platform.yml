@@ -1419,6 +1419,22 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/host-bench/windows/size_ceiling.ps1 -Plan "$(cygpath -w "$work/plan.json")" -PicoSource "$(cygpath -w "$work/zenoh-pico.zip")" -Work "$(cygpath -w "$work/build")" -Out "$(cygpath -w "$work/reading")"
           python scripts/lib/pico_windows_package.py --size-judge "$zip" "$(cygpath -w "$work/reading")"
 
+      # The like-for-like verdict of the same DLL (docs/upstream-parity.md D9): the release DLL counts
+      # wz's own doors, which zenoh-pico has no switch of, on wz's side alone. The release profile
+      # without its doors (`configs/profiles/host-peer.conf`) and each door over it alone are built as
+      # the release DLL is, in its target directory, and each is held to its row against the reading
+      # the step above left, which is a same build of each while no door turns a switch of zenoh-pico's
+      # on (the judge holds it). It runs whatever the step above found, so a red release row still
+      # reads the rows that say where the bytes are; a reading the step above did not leave fails it.
+      - name: the release DLL's zenoh-pico features and each door over them, held to their ceiling rows (gated)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        shell: bash
+        env:
+          WZ_PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          work="$(cygpath -u "$RUNNER_TEMP")/pico-size-$WZ_PACKAGE_ARCH"
+          python scripts/lib/pico_windows_package.py --size-features "$(cygpath -w "$work/reading")"
+
   # zenoh-pico's own API tests and example programs on the DLL a release ships
   # (scripts/lib/pico_upstream_programs.py; docs/release-proof-pico-windows.md, item W03): the
   # package without `std` of each width, as `package-windows` built it and its regression test

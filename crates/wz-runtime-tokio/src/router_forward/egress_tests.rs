@@ -1013,6 +1013,7 @@ async fn a_real_write_queue_tells_the_router_when_its_writer_makes_room() {
     let (tx, mut rx) = crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
     let link = Arc::new(QueueLink { tx });
     let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
+    dest.enter_established();
     dest.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(zid(0xCC).as_slice())
