@@ -324,6 +324,30 @@ impl Word {
     }
 }
 
+/// A sample as its view hands it, read once: what an offer compares with the record the table
+/// holds last and, when it does not join that record, places.
+struct Offered<'s> {
+    kind: SampleKind,
+    reliability: Reliability,
+    qos: Option<QosLevel>,
+    key: &'s [u8],
+    payload: &'s [u8],
+    rest: Parts<'s>,
+}
+
+impl<'s> Offered<'s> {
+    fn of(sample: &'s dyn SampleView) -> Self {
+        Self {
+            kind: sample.kind(),
+            reliability: sample.reliability(),
+            qos: sample.qos(),
+            key: sample.keyexpr().as_bytes(),
+            payload: sample.payload(),
+            rest: Parts::of(sample),
+        }
+    }
+}
+
 /// The parts of a sample, as a view hands them or as the table holds them.
 struct Parts<'s> {
     attachment: Option<&'s [u8]>,
@@ -1162,7 +1186,8 @@ impl Round {
             debug_assert!(kept, "a session's subscribers fit the table of them");
             return;
         }
-        let holds_sender = holds_its_sender(sample.reliability(), sample.qos());
+        let sample = Offered::of(sample);
+        let holds_sender = holds_its_sender(sample.reliability, sample.qos);
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
@@ -1171,7 +1196,7 @@ impl Round {
             self.released.end(call);
             return;
         };
-        let call = match self.join_sample(table, call, sample) {
+        let call = match self.join_sample(table, call, &sample) {
             Ok(()) => {
                 self.filled(table);
                 return;
@@ -1183,7 +1208,7 @@ impl Round {
             self.released.end(call);
             return;
         }
-        let Some((key, payload, rest)) = Self::place_sample(table, sample, lending) else {
+        let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
             self.refuse(holds_sender);
             self.released.end(call);
             return;
@@ -1192,9 +1217,9 @@ impl Round {
         let entry = table.entries.push(Entry::owing_one(
             Held::Sample {
                 head: Head {
-                    kind: sample.kind(),
-                    reliability: sample.reliability(),
-                    qos: sample.qos(),
+                    kind: sample.kind,
+                    reliability: sample.reliability,
+                    qos: sample.qos,
                     key,
                     payload,
                 },
@@ -1229,12 +1254,12 @@ impl Round {
     /// room.
     fn place_sample(
         table: &mut Table,
-        sample: &dyn SampleView,
+        sample: &Offered<'_>,
         lending: Option<(*const u8, usize)>,
     ) -> Option<(Span, Span, Option<Rest>)> {
-        let key = table.place_key(sample.keyexpr().as_bytes(), lending)?;
-        let payload = table.place(sample.payload(), lending)?;
-        let rest = table.place_parts(&Parts::of(sample), lending)?;
+        let key = table.place_key(sample.key, lending)?;
+        let payload = table.place(sample.payload, lending)?;
+        let rest = table.place_parts(&sample.rest, lending)?;
         Some((key, payload, rest))
     }
 
@@ -1244,7 +1269,7 @@ impl Round {
         &self,
         table: &mut Table,
         call: SubscriberCall,
-        sample: &dyn SampleView,
+        sample: &Offered<'_>,
     ) -> Result<(), SubscriberCall> {
         let Some(
             entry @ Entry {
@@ -1255,12 +1280,12 @@ impl Round {
         else {
             return Err(call);
         };
-        let joins = head.kind == sample.kind()
-            && head.reliability == sample.reliability()
-            && head.qos == sample.qos()
-            && same(table.bytes(head.key), sample.keyexpr().as_bytes())
-            && same(table.bytes(head.payload), sample.payload())
-            && table.parts(rest.as_ref()).same(&Parts::of(sample))
+        let joins = head.kind == sample.kind
+            && head.reliability == sample.reliability
+            && head.qos == sample.qos
+            && same(table.bytes(head.key), sample.key)
+            && same(table.bytes(head.payload), sample.payload)
+            && table.parts(rest.as_ref()).same(&sample.rest)
             && !table
                 .owed(entry)
                 .iter()
