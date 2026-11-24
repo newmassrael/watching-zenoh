@@ -3874,8 +3874,11 @@ mod tests {
         };
         let mut found = Found::default();
         let context = (&mut found as *mut Found).cast::<c_void>();
-        let mut callback =
-            make_subscriber_callback(Arc::new(CClosure::new(context, Some(note_where), None)));
+        let mut callback = make_subscriber_callback(Arc::new(CClosure::uncounted(
+            context,
+            Some(note_where),
+            None,
+        )));
         callback(&view);
         drop(callback);
         assert_eq!(found.key, view.key.as_ptr() as usize);

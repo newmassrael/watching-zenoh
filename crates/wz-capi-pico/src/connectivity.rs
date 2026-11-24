@@ -2452,11 +2452,11 @@ pub(crate) mod tests {
     }
 
     fn transport_closure(log: &'static Log) -> CClosure<Callback<z_loaned_transport_event_t>> {
-        CClosure::new(ctx(log), Some(on_transport), Some(released))
+        CClosure::uncounted(ctx(log), Some(on_transport), Some(released))
     }
 
     fn link_closure(log: &'static Log) -> CClosure<Callback<z_loaned_link_event_t>> {
-        CClosure::new(ctx(log), Some(on_link), Some(released))
+        CClosure::uncounted(ctx(log), Some(on_link), Some(released))
     }
 
     /// The key of the transport `transport_with_zid(first)` reports.

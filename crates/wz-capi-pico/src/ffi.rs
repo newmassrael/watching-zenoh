@@ -19,15 +19,7 @@
 //!    callback fires from the read task, the `drop` from teardown — never
 //!    concurrently).
 
-// A closure's own latch is an allocation, made only where a closure is adopted with one.
-#[cfg(any(test, feature = "advanced"))]
-use alloc::sync::Arc;
-
 use wz_capi_port::os::{Condvar, Mutex};
-
-// What the list of latches the advanced plane waits on is made of.
-#[cfg(feature = "advanced")]
-use crate::prelude::*;
 
 // The guard and the thread-crossing pointer are compiled by every library of the ABI for itself.
 mod boundary;
@@ -60,19 +52,10 @@ pub(crate) struct CClosure<C> {
     pub(crate) context: SendPtr,
     pub(crate) call: C,
     pub(crate) drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
-    released: Released,
-}
-
-/// What a closure tells when its `drop(context)` has run: a latch of its own, which an owner keeps
-/// to wait on, or the count of open closures of the owner it was adopted under
-/// ([`OpenClosures`]), which takes no memory of its own.
-enum Released {
-    /// A latch of the closure's own ([`CClosure::new`]).
-    #[cfg(any(test, feature = "advanced"))]
-    Latch(Arc<ReleaseLatch>),
-    /// The owner it is counted in, none while it is counted in none
-    /// ([`CClosure::uncounted`], [`CClosure::count_in`]).
-    Counted(Option<HeldIn>),
+    /// The owner it is counted in, none while it is counted in none ([`CClosure::uncounted`],
+    /// [`CClosure::count_in`]): told when its `drop(context)` has run, which takes no memory of
+    /// its own.
+    released: Option<HeldIn>,
 }
 
 /// The owner a closure is counted in: the count of the closures it answers for, which lies in the
@@ -179,25 +162,9 @@ impl Drop for HeldIn {
 impl<C> CClosure<C> {
     /// Adopt a moved C closure's fields. The caller nulls the source (pico's
     /// consume-on-all-paths contract): from here this value owns the
-    /// responsibility to run `drop(context)`. Its holders are the advanced plane's, so it exists
-    /// where they do.
-    #[cfg(any(test, feature = "advanced"))]
-    pub(crate) fn new(
-        context: *mut core::ffi::c_void,
-        call: C,
-        drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
-    ) -> Self {
-        Self {
-            context: SendPtr(context),
-            call,
-            drop,
-            released: Released::Latch(Arc::new(ReleaseLatch::default())),
-        }
-    }
-
-    /// Adopt a moved C closure's fields, as [`Self::new`] does, with no latch: counted in no owner
-    /// until [`Self::count_in`], so a closure dropped before it (a call refused before its session
-    /// is read) runs its `drop(context)` and tells nobody.
+    /// responsibility to run `drop(context)`. Counted in no owner until [`Self::count_in`], so a
+    /// closure dropped before it (a call refused before its session is read) runs its
+    /// `drop(context)` and tells nobody.
     pub(crate) fn uncounted(
         context: *mut core::ffi::c_void,
         call: C,
@@ -207,33 +174,16 @@ impl<C> CClosure<C> {
             context: SendPtr(context),
             call,
             drop,
-            released: Released::Counted(None),
+            released: None,
         }
     }
 
     /// Count this closure in `owner` until its `drop(context)` has run, so the owner waits for it
-    /// ([`OpenClosures::wait_none`]) and its place stands until then. A closure made with a latch
-    /// of its own, or counted already, is left as it is.
+    /// ([`OpenClosures::wait_none`]) and its place stands until then. A closure counted already
+    /// is left as it is.
     pub(crate) fn count_in(&mut self, owner: CountIn) {
-        if let Released::Counted(counted @ None) = &mut self.released {
-            *counted = Some(owner.hold());
-        }
-    }
-
-    /// The latch that opens once this closure's `drop(context)` has run. An entity that owns the
-    /// closure takes it before the closure moves into the engine, and waits on it after the
-    /// engine let go, which is how an undeclare returns only when the callback is finished. A
-    /// closure an owner counts ([`Self::count_in`]) is waited on through the count, and its latch
-    /// is open from the start.
-    #[cfg(feature = "advanced")]
-    pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
-        match &self.released {
-            Released::Latch(latch) => latch.clone(),
-            Released::Counted(_) => {
-                let latch = Arc::new(ReleaseLatch::default());
-                latch.open();
-                latch
-            }
+        if self.released.is_none() {
+            self.released = Some(owner.hold());
         }
     }
 }
@@ -248,13 +198,9 @@ impl<C> Drop for CClosure<C> {
                 dropfn(ctx);
             });
         }
-        match &mut self.released {
-            #[cfg(any(test, feature = "advanced"))]
-            Released::Latch(latch) => latch.open(),
-            // The hold is let go of after the drop above has run, and may give back the place the
-            // count lies in.
-            Released::Counted(held) => drop(held.take()),
-        }
+        // The hold is let go of after the drop above has run, and may give back the place the
+        // count lies in.
+        drop(self.released.take());
     }
 }
 
@@ -338,8 +284,8 @@ impl OpenClosures {
     }
 
     /// Block until no closure counted here is held, unless this thread is inside one of the
-    /// program's callbacks: that callback holds a closure, so waiting would wait for itself, as
-    /// [`ReleaseLatch::wait`] says.
+    /// program's callbacks: that callback holds a closure, so waiting would wait for itself; the
+    /// closure is then released when the callback returns.
     pub(crate) fn wait_none(&self) {
         self.wait_at_most(0);
     }
@@ -355,99 +301,6 @@ impl OpenClosures {
         while state.held > kept {
             state = self.none_open.wait(state);
         }
-    }
-}
-
-/// Opens once, when the last holder of a closure has let go of it and its `drop(context)` has
-/// run. Zenoh-pico's undeclare waits for the callbacks in flight and then runs the closure's
-/// drop before it returns (`_z_sync_group_wait`), so a program may free what the callback reads
-/// the moment an undeclare returns; this is what gives a call here the same word.
-#[cfg(any(test, feature = "advanced"))]
-#[derive(Default)]
-pub(crate) struct ReleaseLatch {
-    open: Mutex<bool>,
-    opened: Condvar,
-}
-
-#[cfg(any(test, feature = "advanced"))]
-impl ReleaseLatch {
-    fn open(&self) {
-        *self.open.lock() = true;
-        self.opened.notify_all();
-    }
-
-    /// Block until the closure is released, unless this thread is inside one of the program's
-    /// callbacks: that callback holds the closure, so waiting would wait for itself. The
-    /// closure is then released when the callback returns, as it was before there was a wait.
-    #[cfg(feature = "advanced")]
-    pub(crate) fn wait(&self) {
-        if InCallback::here() {
-            return;
-        }
-        let mut open = self.open.lock();
-        while !*open {
-            open = self.opened.wait(open);
-        }
-    }
-}
-
-#[cfg(feature = "advanced")]
-impl ReleaseLatch {
-    fn is_open(&self) -> bool {
-        *self.open.lock()
-    }
-}
-
-/// Waits for a closure's release when it is dropped. A struct that holds what the closure's
-/// callbacks run through declares this LAST: fields drop in declaration order, so the wait comes
-/// after everything before it has let go, which a `Drop::drop` body cannot say.
-///
-/// Its holder is an advanced subscriber's sample-miss listener, so it exists where that does; a
-/// build without `advanced` (the client-only and reduced builds) would carry it unused.
-#[cfg(feature = "advanced")]
-pub(crate) struct AwaitRelease(LatchList);
-
-#[cfg(feature = "advanced")]
-impl AwaitRelease {
-    pub(crate) fn new(latch: Arc<ReleaseLatch>) -> Self {
-        let list = LatchList::default();
-        list.keep(latch);
-        Self(list)
-    }
-}
-
-#[cfg(feature = "advanced")]
-impl Drop for AwaitRelease {
-    fn drop(&mut self) {
-        self.0.wait_all();
-    }
-}
-
-/// The latches of the closures an owner is answerable for, to wait on together, keeping only the
-/// ones still closed, so the list is as long as what is still running and not as what ever ran.
-/// Its one holder is [`AwaitRelease`], so it exists where that does.
-#[cfg(feature = "advanced")]
-#[derive(Default)]
-pub(crate) struct LatchList(Mutex<Vec<Arc<ReleaseLatch>>>);
-
-#[cfg(feature = "advanced")]
-impl LatchList {
-    pub(crate) fn keep(&self, latch: Arc<ReleaseLatch>) {
-        let mut list = self.0.lock();
-        list.retain(|kept| !kept.is_open());
-        list.push(latch);
-    }
-
-    /// Block until every kept closure has run its `drop(context)`. The list is emptied first, so
-    /// a waiter holds nothing a callback running meanwhile could need.
-    pub(crate) fn wait_all(&self) {
-        for latch in self.take_all() {
-            latch.wait();
-        }
-    }
-
-    pub(crate) fn take_all(&self) -> Vec<Arc<ReleaseLatch>> {
-        core::mem::take(&mut *self.0.lock())
     }
 }
 
