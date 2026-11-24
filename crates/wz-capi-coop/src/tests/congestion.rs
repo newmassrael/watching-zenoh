@@ -461,13 +461,13 @@ mod stalled_link {
         );
     }
 
-    /// Under zenoh's profile, a droppable publish that finds the session held by a blocking one
-    /// waiting for room on the full link asks the link for room and is dropped, and allocates
-    /// nothing of the heap doing so: what a session does after its open takes no memory. CONTROL:
-    /// the publish was dropped, the ask made. Turned red by an ask that copies the faces it asks
-    /// out of their table, or a drop that lists the faces it was dropped on on the heap.
-    #[test]
-    fn a_droppable_publish_behind_a_held_session_allocates_nothing() {
+    /// What a droppable publish with `options` did under zenoh's profile while a blocking one held
+    /// the session waiting for room on the full link: its answer, whether the blocking one still
+    /// held the session when it returned, and what the publishing thread allocated while it ran.
+    /// The publish's options are made before it is counted, as a program makes them before its put.
+    fn counted_behind_a_held_session(
+        options: &PublishOptions<'_>,
+    ) -> (Option<Result<usize, FanoutError>>, bool, u64) {
         let peer = open_with(CoopConfig {
             whatami: WhatAmI::Peer,
             zid: Some(vec![0xa8; 4]),
@@ -497,24 +497,12 @@ mod stalled_link {
         SessionDrive::stop_read_task(&*peer).expect("the peer's read task stops");
         let blocking = hold_with_a_blocking_publish(&publisher);
 
-        let (key, options) = (WireKey::literal(), publish(CongestionControl::Drop));
+        let key = WireKey::literal();
         let mut dropped = None;
         let allocations = super::super::redial_heap::counted(|| {
-            dropped = Some(publisher.publish_on_wire_all("demo/stall", &key, b"dropped", &options));
+            dropped = Some(publisher.publish_on_wire_all("demo/stall", &key, b"dropped", options));
         });
-        assert_eq!(
-            dropped,
-            Some(Ok(0)),
-            "CONTROL: the publish found the session held and was dropped"
-        );
-        assert!(
-            !blocking.is_finished(),
-            "CONTROL: the blocking publish still held the session"
-        );
-        assert_eq!(
-            allocations, 0,
-            "a droppable publish behind a held session allocated"
-        );
+        let still_held = !blocking.is_finished();
 
         let _ = blocking.join();
         until(
@@ -523,6 +511,59 @@ mod stalled_link {
             || SessionDrive::is_closed(&*publisher),
         );
         SessionDrive::close(&*peer);
+        (dropped, still_held, allocations)
+    }
+
+    /// Under zenoh's profile, a droppable publish that finds the session held by a blocking one
+    /// waiting for room on the full link asks the link for room and is dropped, and allocates
+    /// nothing of the heap doing so: what a session does after its open takes no memory. CONTROL:
+    /// the publish was dropped, the ask made. Turned red by an ask that copies the faces it asks
+    /// out of their table, or a drop that lists the faces it was dropped on on the heap.
+    #[test]
+    fn a_droppable_publish_behind_a_held_session_allocates_nothing() {
+        let (dropped, still_held, allocations) =
+            counted_behind_a_held_session(&publish(CongestionControl::Drop));
+        assert_eq!(
+            dropped,
+            Some(Ok(0)),
+            "CONTROL: the publish found the session held and was dropped"
+        );
+        assert!(
+            still_held,
+            "CONTROL: the blocking publish still held the session"
+        );
+        assert_eq!(
+            allocations, 0,
+            "a droppable publish behind a held session allocated"
+        );
+    }
+
+    /// The same publish carrying an encoding with a schema and an attachment allocates nothing
+    /// either: what the session keeps of it for its other faces is kept whole, in memory the open
+    /// took. CONTROL as above. Turned red by an encoding whose schema the kept publish copies onto
+    /// the heap, or an attachment it copies there.
+    #[test]
+    fn a_droppable_publish_with_a_schema_behind_a_held_session_allocates_nothing() {
+        let options = publish(CongestionControl::Drop)
+            .with_encoding(wz_session_core::sample::EncodingHint {
+                packed_id: 7,
+                schema: Some(b"text".to_vec()),
+            })
+            .with_attachment(b"att");
+        let (dropped, still_held, allocations) = counted_behind_a_held_session(&options);
+        assert_eq!(
+            dropped,
+            Some(Ok(0)),
+            "CONTROL: the publish found the session held and was dropped"
+        );
+        assert!(
+            still_held,
+            "CONTROL: the blocking publish still held the session"
+        );
+        assert_eq!(
+            allocations, 0,
+            "a droppable publish with a schema behind a held session allocated"
+        );
     }
 
     /// Under the pico profile, read when the session was opened, a droppable publish that finds
