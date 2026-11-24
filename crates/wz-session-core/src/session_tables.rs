@@ -173,6 +173,132 @@ pub trait RowCallbacks {
     type Matching: RowCallback;
     /// A pending get's: what each of its replies is handed to, and its end.
     type Reply: RowCallback;
+    /// Whether the tables keep queryables at all: [`Present`], or [`Absent`] for a session that
+    /// answers no query, whose table of them is no value and whose every use is left out.
+    type QueryablePresence: Presence;
+}
+
+/// Whether a kind of row has a table in a session's tables. A build that keeps none of a kind
+/// names it [`Absent`]: the table is a value of no size and nothing to drop, every read of it finds
+/// nothing and every declaration on it is refused, each answered where the compiler sees it, so
+/// the code that would walk, lend or drop the table is not in the build.
+pub trait Presence {
+    /// The table of a kind whose table is `T`.
+    type Table<T>;
+
+    /// The table of no rows, as `T`'s `Default` makes it where the kind is kept.
+    fn empty<T: Default>() -> Self::Table<T>;
+
+    /// The table, to read, where the kind is kept.
+    fn get<T>(table: &Self::Table<T>) -> Option<&T>;
+
+    /// The table, to write, where the kind is kept.
+    fn get_mut<T>(table: &mut Self::Table<T>) -> Option<&mut T>;
+
+    /// The table lent by `lend`, `rows` rows of it, where the kind is kept; nothing is lent where
+    /// it is not.
+    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> Self::Table<T>;
+
+    /// The bytes of an arena [`Self::lent_from`] takes for `rows`. `None` past the address space.
+    fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize>;
+}
+
+/// A table a session's arena lends at its open, `rows` rows of it ([`Presence::lent_from`]).
+pub trait LentTable {
+    /// The table of `rows` rows `lend` lends.
+    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self;
+
+    /// The bytes of an arena [`Self::lent_from`] takes for `rows`. `None` past the address space.
+    fn arena_bytes(rows: usize) -> Option<usize>;
+}
+
+impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
+    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
+        SlotMap::lent_from(lend, rows)
+    }
+
+    fn arena_bytes(rows: usize) -> Option<usize> {
+        SlotMap::<K, T, N, Lent>::arena_bytes(rows)
+    }
+}
+
+/// A kind the tables keep: its table is the table itself.
+#[derive(Debug)]
+pub enum Present {}
+
+impl Presence for Present {
+    type Table<T> = T;
+
+    fn empty<T: Default>() -> T {
+        T::default()
+    }
+
+    fn get<T>(table: &T) -> Option<&T> {
+        Some(table)
+    }
+
+    fn get_mut<T>(table: &mut T) -> Option<&mut T> {
+        Some(table)
+    }
+
+    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> T {
+        T::lent_from(lend, rows)
+    }
+
+    fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize> {
+        T::arena_bytes(rows)
+    }
+}
+
+/// A kind the tables keep none of: its table is [`AbsentTable`].
+#[derive(Debug)]
+pub enum Absent {}
+
+/// The table of a kind the tables keep none of: no row, no byte and nothing to drop.
+pub struct AbsentTable<T>(core::marker::PhantomData<fn() -> T>);
+
+impl<T> AbsentTable<T> {
+    /// The table of a kind kept by none: what a path that needs a table of the kind is handed
+    /// where the tables keep none, so it finds no row in it.
+    pub const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<T> Default for AbsentTable<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> fmt::Debug for AbsentTable<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AbsentTable")
+    }
+}
+
+impl Presence for Absent {
+    type Table<T> = AbsentTable<T>;
+
+    fn empty<T: Default>() -> AbsentTable<T> {
+        AbsentTable::new()
+    }
+
+    fn get<T>(_table: &AbsentTable<T>) -> Option<&T> {
+        None
+    }
+
+    fn get_mut<T>(_table: &mut AbsentTable<T>) -> Option<&mut T> {
+        None
+    }
+
+    fn lent_from<T: LentTable>(_lend: &mut TableLender<'_>, _rows: usize) -> AbsentTable<T> {
+        AbsentTable::new()
+    }
+
+    fn arena_bytes<T: LentTable>(_rows: usize) -> Option<usize> {
+        Some(0)
+    }
 }
 
 /// What the faces' tables answer about what their peers declared.
@@ -588,6 +714,10 @@ pub type Subscribers<F, P> =
 pub type Queryable<F, P> = QueryableRow<<P as Storage>::Key, <F as RowCallbacks>::Queryable>;
 /// The queryables' table.
 pub type Queryables<F, P> = SlotMap<kind::Queryable, Queryable<F, P>, { caps::MAX_QUERYABLES }, P>;
+/// The queryables' table where the tables keep one ([`RowCallbacks::QueryablePresence`]): the
+/// table itself, or nothing.
+pub type QueryablesKept<F, P> =
+    <<F as RowCallbacks>::QueryablePresence as Presence>::Table<Queryables<F, P>>;
 /// The liveliness tokens' table.
 pub type Tokens<P> =
     SlotMap<kind::Token, TokenRow<<P as Storage>::Key>, { caps::MAX_LOCAL_TOKENS }, P>;
@@ -756,7 +886,7 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     memo: MatchMemo<P>,
     keyexprs: Keyexprs<P>,
     subscribers: Subscribers<F, P>,
-    queryables: Queryables<F, P>,
+    queryables: QueryablesKept<F, P>,
     tokens: Tokens<P>,
     liveliness_subscribers: LivelinessSubscribers<F, P>,
     interests: Interests<P>,
@@ -1000,7 +1130,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             ),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
-            queryables: SlotMap::new(),
+            queryables: <F::QueryablePresence as Presence>::empty::<Queryables<F, P>>(),
             tokens: SlotMap::new(),
             liveliness_subscribers: SlotMap::new(),
             interests: SlotMap::new(),
@@ -1031,7 +1161,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn limit_to(&mut self, rows: &TableRows) {
         self.keyexprs.limit_to(rows.keyexprs);
         self.subscribers.limit_to(rows.subscribers);
-        self.queryables.limit_to(rows.queryables);
+        if let Some(queryables) = self.kept_queryables_mut() {
+            queryables.limit_to(rows.queryables);
+        }
         self.tokens.limit_to(rows.tokens);
         self.liveliness_subscribers
             .limit_to(rows.liveliness_subscribers);
@@ -1277,13 +1409,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         form: KeyForm,
         callback: F::Queryable,
     ) -> Result<Declared<kind::Queryable>, Refused<F::Queryable>> {
+        // Tables that keep no queryable have no room for one.
+        let Some(queryables) =
+            <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)
+        else {
+            return Err(Refused {
+                why: RegisterError::TableFull,
+                callback,
+            });
+        };
         Declaring {
             keys: &self.keys,
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
         .declare(
-            &mut self.queryables,
+            queryables,
             key,
             form,
             callback,
@@ -1304,7 +1445,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: QueryableHandle,
     ) -> Option<Undeclared<Queryable<F, P>>> {
-        undeclare_entity(&mut self.queryables, &mut self.keyexprs, handle)
+        let queryables =
+            <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)?;
+        undeclare_entity(queryables, &mut self.keyexprs, handle)
     }
 
     /// Declare a liveliness token on `key`.
@@ -1548,10 +1691,14 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             Plane::Subscribers => self.subscribers.iter().any(|(_, row)| {
                 row.origin.allows_local() && keyexpr_intersects(text(&row.key.key), key)
             }),
-            Plane::Queryables { complete_required } => self.queryables.iter().any(|(_, row)| {
-                row.origin.allows_local()
-                    && answers(text(&row.key.key), row.complete, key, complete_required)
-            }),
+            Plane::Queryables { complete_required } => {
+                self.kept_queryables().is_some_and(|queryables| {
+                    queryables.iter().any(|(_, row)| {
+                        row.origin.allows_local()
+                            && answers(text(&row.key.key), row.complete, key, complete_required)
+                    })
+                })
+            }
         }
     }
 
@@ -1795,9 +1942,12 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         key: &'a str,
         local: bool,
     ) -> impl Iterator<Item = (QueryableHandle, &'a Queryable<F, P>)> + 'a {
-        self.queryables.iter().filter(move |(_, row)| {
-            admits(row.origin, local) && keyexpr_intersects(text(&row.key.key), key)
-        })
+        self.kept_queryables()
+            .into_iter()
+            .flat_map(|queryables| queryables.iter())
+            .filter(move |(_, row)| {
+                admits(row.origin, local) && keyexpr_intersects(text(&row.key.key), key)
+            })
     }
 
     /// The liveliness subscribers a token on `key` reaches.
@@ -1852,13 +2002,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        self.queryables.get(handle)?.callback.begin()
+        self.kept_queryables()?.get(handle)?.callback.begin()
     }
 
     /// Let go of the queryable `handle` named, undeclared while a call of it ran, once that call
     /// ended last: its row, to drop where no lock is held.
     pub fn release_queryable(&mut self, handle: QueryableHandle) -> Option<Queryable<F, P>> {
-        self.queryables.release(handle)
+        self.kept_queryables_mut()?.release(handle)
     }
 
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
@@ -1915,9 +2065,20 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &self.subscribers
     }
 
-    /// The queryables.
-    pub fn queryables(&self) -> &Queryables<F, P> {
+    /// The queryables, as the tables keep them: the table, for rows whose callbacks keep
+    /// queryables ([`RowCallbacks::QueryablePresence`]).
+    pub fn queryables(&self) -> &QueryablesKept<F, P> {
         &self.queryables
+    }
+
+    /// The queryables' table, where the tables keep one.
+    pub fn kept_queryables(&self) -> Option<&Queryables<F, P>> {
+        <F::QueryablePresence as Presence>::get::<Queryables<F, P>>(&self.queryables)
+    }
+
+    /// The queryables' table, to write, where the tables keep one.
+    pub fn kept_queryables_mut(&mut self) -> Option<&mut Queryables<F, P>> {
+        <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)
     }
 
     /// The queryables to ask, with the key expressions the session declared beside them as its
@@ -1926,7 +2087,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     #[cfg(feature = "storage-profile")]
     pub fn queries_mut(
         &mut self,
-    ) -> (crate::wireexpr_resolve::OwnSpace<'_>, &mut Queryables<F, P>) {
+    ) -> (
+        crate::wireexpr_resolve::OwnSpace<'_>,
+        &mut QueryablesKept<F, P>,
+    ) {
         (P::own_space(&self.keyexprs), &mut self.queryables)
     }
 
@@ -1988,7 +2152,7 @@ impl<F: RowCallbacks, P: Storage> fmt::Debug for SessionTables<F, P> {
         f.debug_struct("SessionTables")
             .field("keyexprs", &self.keyexprs)
             .field("subscribers", &self.subscribers)
-            .field("queryables", &self.queryables)
+            .field("queryables", &self.kept_queryables())
             .field("tokens", &self.tokens)
             .field("liveliness_subscribers", &self.liveliness_subscribers)
             .field("interests", &self.interests)
@@ -2018,7 +2182,10 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             memo: MatchMemo::new(0),
             keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
             subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
-            queryables: SlotMap::lent_from(&mut lend, rows.queryables),
+            queryables: <F::QueryablePresence as Presence>::lent_from::<Queryables<F, Lent>>(
+                &mut lend,
+                rows.queryables,
+            ),
             tokens: SlotMap::lent_from(&mut lend, rows.tokens),
             liveliness_subscribers: SlotMap::lent_from(&mut lend, rows.liveliness_subscribers),
             interests: SlotMap::lent_from(&mut lend, rows.interests()),
@@ -2038,7 +2205,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
         let parts = [
             <Keyexprs<Lent>>::arena_bytes(rows.keyexprs),
             <Subscribers<F, Lent>>::arena_bytes(rows.subscribers),
-            <Queryables<F, Lent>>::arena_bytes(rows.queryables),
+            <F::QueryablePresence as Presence>::arena_bytes::<Queryables<F, Lent>>(rows.queryables),
             <Tokens<Lent>>::arena_bytes(rows.tokens),
             <LivelinessSubscribers<F, Lent>>::arena_bytes(rows.liveliness_subscribers),
             <Interests<Lent>>::arena_bytes(rows.interests()),
@@ -2279,6 +2446,40 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage> QueryableRows
                 complete: row.complete,
             })
         })
+    }
+}
+
+/// The queryables of tables that keep none: a peer's query finds none of them, and is ended as one
+/// that reaches no queryable is.
+impl<T: crate::query::LocalQueryables> crate::query::LocalQueryables for AbsentTable<T> {
+    type Sink = T::Sink;
+    type RowId = T::RowId;
+
+    #[cfg(feature = "storage-profile")]
+    fn has_local_queryable(&self, _query_keyexpr: &str, _require_complete: bool) -> bool {
+        false
+    }
+
+    #[cfg(feature = "alloc")]
+    fn respond_to_queryable_interest(
+        &self,
+        _interest_id: u64,
+        _pattern: Option<&str>,
+        _aggregate: bool,
+        _staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
+    ) -> usize {
+        0
+    }
+
+    fn fire_matching_queryables<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
+        &mut self,
+        _keyexpr: &str,
+        _keyexpr_facts: KeyFacts,
+        _is_remote: bool,
+        _target: Option<crate::query_mode::QueryTarget>,
+        _deliver: D,
+    ) -> usize {
+        0
     }
 }
 

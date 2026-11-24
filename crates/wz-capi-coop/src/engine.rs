@@ -1144,6 +1144,11 @@ impl RowCallbacks for CoopRows {
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
+    // A session that answers no query keeps no table of queryables.
+    #[cfg(feature = "queryable")]
+    type QueryablePresence = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "queryable"))]
+    type QueryablePresence = wz_session_core::session_tables::Absent;
 }
 
 /// The session's one table set, its rows lent from the session's arena: the application's tables

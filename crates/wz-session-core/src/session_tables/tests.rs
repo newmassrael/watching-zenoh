@@ -49,6 +49,7 @@ impl RowCallbacks for Latched {
     type LivelinessSubscriber = CClosure<u32>;
     type Matching = CClosure<u32>;
     type Reply = CClosure<u32>;
+    type QueryablePresence = Present;
 }
 
 /// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
@@ -76,6 +77,7 @@ impl RowCallbacks for Calls {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
 }
 
 type Tables = SessionTables<Calls>;
@@ -976,6 +978,59 @@ fn a_refused_table_leaves_the_tables_after_it_unlent() {
     assert_eq!(whole.high_water(), bytes, "CONTROL: every table is lent");
 }
 
+/// The rows of a session that keeps no queryable.
+struct NoQueryables;
+
+impl RowCallbacks for NoQueryables {
+    type Subscriber = u32;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+    type QueryablePresence = Absent;
+}
+
+/// Tables that keep no queryable lend no table of them, find none and refuse one, handing its
+/// callback back. The CONTROL is the same rows on tables that keep queryables, which lend the
+/// queryables' table and take the declaration.
+#[test]
+fn tables_that_keep_no_queryable_lend_none_and_refuse_one() {
+    let rows = small_rows();
+    let kept = SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap();
+    let absent = SessionTables::<NoQueryables, Lent>::arena_bytes(&rows).unwrap();
+    assert_eq!(
+        kept - absent,
+        <Queryables<Calls, Lent>>::arena_bytes(rows.queryables).unwrap(),
+        "the queryables' table is all the difference"
+    );
+    let mut lent = arena(absent);
+    let mut tables =
+        SessionTables::<NoQueryables, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(lent.high_water(), absent);
+    assert!(tables.kept_queryables().is_none());
+    let refused = tables
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 7)
+    );
+    assert!(!tables.local_declares(
+        Plane::Queryables {
+            complete_required: false
+        },
+        "q"
+    ));
+    let mut whole = arena(kept);
+    let mut control = SessionTables::<Calls, Lent>::lent(&mut whole, keys(256), &rows).unwrap();
+    assert!(
+        control
+            .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+            .is_ok(),
+        "CONTROL: tables that keep queryables take one"
+    );
+}
+
 #[test]
 fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     let mut tables = Tables::new();
@@ -1105,6 +1160,7 @@ impl RowCallbacks for Sinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
 }
 
 #[test]
@@ -1449,6 +1505,7 @@ impl RowCallbacks for FrameSinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
 }
 
 /// The end of a plain frame is told to every subscriber, whatever it hears.

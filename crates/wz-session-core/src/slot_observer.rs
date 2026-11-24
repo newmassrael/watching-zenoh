@@ -543,19 +543,19 @@ pub trait QueryTables<Sink, Id> {
     #[cfg(feature = "query-queryable")]
     type Queryables: LocalQueryables<Sink = Sink, RowId = Id>;
 
-    /// The queryables, to read.
+    /// The queryables, to read, where the tables keep them.
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &Self::Queryables;
+    fn queryables(&self) -> Option<&Self::Queryables>;
 
-    /// The queryables to ask, with our own id space beside them where the tables hold the key
-    /// expressions the session declared: a peer's query names its key through the one while the
-    /// other is asked, so the two are borrowed apart.
+    /// The queryables to ask where the tables keep them, with our own id space beside them where
+    /// the tables hold the key expressions the session declared: a peer's query names its key
+    /// through the one while the other is asked, so the two are borrowed apart.
     #[cfg(feature = "query-queryable")]
     fn queries_mut(
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut Self::Queryables,
+        Option<&mut Self::Queryables>,
     );
 }
 
@@ -739,8 +739,8 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> QueryTables<Q, crate::query::Que
     type Queryables = QueryableRegistry<Q, P>;
 
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &QueryableRegistry<Q, P> {
-        &self.queryables
+    fn queryables(&self) -> Option<&QueryableRegistry<Q, P>> {
+        Some(&self.queryables)
     }
 
     #[cfg(feature = "query-queryable")]
@@ -748,11 +748,11 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> QueryTables<Q, crate::query::Que
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut QueryableRegistry<Q, P>,
+        Option<&mut QueryableRegistry<Q, P>>,
     ) {
         (
             LocalSubscribers::own_space(&self.subscribers),
-            &mut self.queryables,
+            Some(&mut self.queryables),
         )
     }
 }
@@ -825,8 +825,8 @@ impl<F: RowCallbacks, P: Storage> QueryTables<F::Queryable, crate::session_table
     type Queryables = crate::session_tables::Queryables<F, P>;
 
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &Self::Queryables {
-        SessionTables::queryables(self)
+    fn queryables(&self) -> Option<&Self::Queryables> {
+        SessionTables::kept_queryables(self)
     }
 
     #[cfg(feature = "query-queryable")]
@@ -834,10 +834,15 @@ impl<F: RowCallbacks, P: Storage> QueryTables<F::Queryable, crate::session_table
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut Self::Queryables,
+        Option<&mut Self::Queryables>,
     ) {
         let (own, queryables) = SessionTables::queries_mut(self);
-        (Some(own), queryables)
+        (
+            Some(own),
+            <F::QueryablePresence as crate::session_tables::Presence>::get_mut::<
+                crate::session_tables::Queryables<F, P>,
+            >(queryables),
+        )
     }
 }
 
@@ -1313,14 +1318,29 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "query-queryable")]
         {
             let (own, queryables) = self.tables.queries_mut();
-            peers.queries.dispatch_iteration_event(
-                queryables,
-                cx,
-                event,
-                peers.subscribers.mapping_spaces_over(own),
-                &mut peers.replies,
-                &mut peers.finals,
-            );
+            let spaces = peers.subscribers.mapping_spaces_over(own);
+            match queryables {
+                Some(queryables) => peers.queries.dispatch_iteration_event(
+                    queryables,
+                    cx,
+                    event,
+                    spaces,
+                    &mut peers.replies,
+                    &mut peers.finals,
+                ),
+                // Tables that keep no queryable still end a peer's query, as one no queryable
+                // answers.
+                None => peers.queries.dispatch_iteration_event(
+                    &mut crate::session_tables::AbsentTable::<
+                        <K::Tables<P> as QueryTables<K::Queryable, K::QueryableId>>::Queryables,
+                    >::new(),
+                    cx,
+                    event,
+                    spaces,
+                    &mut peers.replies,
+                    &mut peers.finals,
+                ),
+            }
         }
         // A peer's token is resolved through both id spaces while the liveliness subscribers are
         // told, so the tables lend the two apart. A `Declare(DeclToken)` whose outer
@@ -1379,7 +1399,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 peer_table,
                 &|c| {
                     (c.locality.allows_local()
-                        && queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required))
+                        && queryables.is_some_and(|queryables| {
+                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                        }))
                         || others.answers(c)
                 },
             );
@@ -1622,7 +1644,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 &mut peers.remote_queryables,
                 &|c| {
                     (c.locality.allows_local()
-                        && queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required))
+                        && queryables.is_some_and(|queryables| {
+                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                        }))
                         || others.answers(c)
                 },
             );
@@ -2141,6 +2165,7 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
     }
 
     /// The callbacks of a table set whose queryables hold no callback.
@@ -2154,6 +2179,7 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
     }
 
     /// A delivery context that records the handle of each queryable row it is asked through and
@@ -2323,6 +2349,7 @@ mod tests {
         type LivelinessSubscriber = AskedRow;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
     }
 
     /// A delivery context that records the handle of each liveliness subscriber's row it is told
@@ -2659,6 +2686,7 @@ mod lent_tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
     }
 
     /// An observer whose subscriptions are kept in the session's one table set.

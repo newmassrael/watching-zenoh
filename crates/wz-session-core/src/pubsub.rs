@@ -4917,6 +4917,7 @@ mod tests {
             type LivelinessSubscriber = u32;
             type Matching = u32;
             type Reply = u32;
+            type QueryablePresence = crate::session_tables::Present;
         }
         let counter = Arc::new(AtomicUsize::new(0));
         let counted = counter.clone();
