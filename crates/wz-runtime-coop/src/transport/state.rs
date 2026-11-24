@@ -1,0 +1,712 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! The transport's part of a session ([`TransportState`]): its links, the ports it listens on and
+//! the groups it joined, and the reads and refusals that touch nothing else of the session. What a
+//! link coming up or going does to the session's tables, its replay and its watchers is the
+//! session's to carry out, with the values these answer ([`FaceStep`], [`DialRow`]).
+//!
+//! The session's own records of a face and of a group are its engine's; the transport reads them
+//! through [`FaceRecord`], [`TransportSession`] and [`GroupRecord`], named together by
+//! [`TransportFaces`]. What the engine listens on, joins, answers and reports is the engine's
+//! features of the same names, which it forwards to this crate.
+
+#[cfg(feature = "group")]
+use alloc::boxed::Box;
+#[cfg(feature = "listen")]
+use alloc::sync::Arc;
+#[cfg(any(feature = "group", feature = "connectivity"))]
+use alloc::vec::Vec;
+
+use wz_session_core::byte_cells::LentByteCells;
+#[cfg(feature = "group")]
+use wz_session_core::caps;
+use wz_session_core::driver_loop::{DriverOutcome, EventSink};
+#[cfg(feature = "connectivity")]
+use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+#[cfg(feature = "listen")]
+use wz_session_core::link_admission::LinkAdmission;
+#[cfg(feature = "queryable")]
+use wz_session_core::response_sink::ResponseSink;
+use wz_session_core::session_actions::SessionLinkActions;
+use wz_session_core::session_zid::SessionZid;
+#[cfg(feature = "shared-key-ids")]
+use wz_session_core::shared_key_ids::LinkKeyForms;
+use wz_session_core::unicast_rx::RouterLend;
+
+#[cfg(feature = "group")]
+use super::GroupRecord;
+use super::{EndpointRefusal, Refusal, TransportRefusal, TransportSession};
+use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
+#[cfg(feature = "listen")]
+use crate::faces::Accepted;
+use crate::faces::{
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FaceRead, FaceRecord, IdleWait, Link,
+    LinkSupervisor,
+};
+#[cfg(feature = "group")]
+use crate::group_transport::GroupTransport;
+use crate::link_cells::CellRc;
+#[cfg(feature = "listen")]
+use crate::locator_text::parse_listen_locator;
+use crate::locator_text::parse_locator;
+use crate::reassembly_rx::SessionReassembly;
+use crate::session_drive::{
+    spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PendingDial, PumpFields,
+    SessionDatagramLink, SessionLinks, SessionRole,
+};
+use crate::session_runtime::SessionHandle;
+use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+
+/// What a session's transport is made of: the session's clock, the network its links are opened
+/// on, and the engine's records of the session's half of a link, of a face and of a group it
+/// joined (`group`).
+pub trait TransportFaces {
+    /// The clock the session's links run on.
+    type Clock: ClockSource + Clone + 'static;
+    /// The network the session's links, ports and groups are opened on.
+    type Links: SessionLinks + 'static;
+    /// The session's half of one link.
+    type Session: TransportSession<Self::Clock>;
+    /// The engine's record of one face.
+    type Face: FaceRecord<
+        Session = Self::Session,
+        Pump = <Self::Links as SessionLinks>::Pump,
+        Dial = <Self::Links as SessionLinks>::Dial,
+    >;
+    /// The engine's record of one group the session joined.
+    #[cfg(feature = "group")]
+    type Group: GroupRecord;
+}
+
+/// A dial under way over the network of `T`.
+type DialOf<T> = <<T as TransportFaces>::Links as SessionLinks>::Dial;
+/// What the drive loop pumps for a link over the network of `T`.
+type PumpOf<T> = <<T as TransportFaces>::Links as SessionLinks>::Pump;
+
+/// The transport of a session over the faces of [`crate::faces`]: the session's links and what
+/// their handshakes and receives are handed. What a link coming up or going does to the session's
+/// tables, its replay and its watchers is the session's to carry out, with the values this
+/// answers.
+pub struct TransportState<T: TransportFaces> {
+    /// Whether the links' pool of outbound slots is smaller than the links (`TX_POOL_SLOTS`), so
+    /// that a link may find every slot held by another link's frame its stream has not finished:
+    /// a publish that may not be dropped then waits for a slot with nothing of the session held
+    /// (the engine's publish to a link).
+    #[cfg(feature = "listen")]
+    pub tx_pool_short: bool,
+    /// The session's faces, the dial role's first, which is never removed, then the others in the
+    /// order they came, over the network their links are opened on: the faces' links, the dials
+    /// under way, the ports listened on and a read's waits are the driver's
+    /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
+    /// asked of each.
+    pub links: LinkSupervisor<T::Links, T::Face>,
+    /// The texts of the endpoints the session dials and listens on, written once when it opened
+    /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
+    /// copies went with the open.
+    pub endpoints: EndpointTexts,
+    /// The multicast groups the session joined, each a face of its own (`group`).
+    #[cfg(feature = "group")]
+    pub groups: Vec<T::Group>,
+    /// The zid in its wire form, which every handshake of the session announces.
+    pub wire_zid: SessionZid,
+    /// The session's say on a link to a node it holds a link to, asked while the link's handshake
+    /// runs (`install_link_admission`, `listen`).
+    #[cfg(feature = "listen")]
+    pub admission: Arc<dyn LinkAdmission>,
+    /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
+    /// lent from the arena; none for a plan that laid out none.
+    pub gate_cells: Option<LentByteCells>,
+    /// The cells each link's actions are placed in when the session makes the link, lent from the
+    /// arena; none for a plan that laid out none.
+    pub actions_cells: Option<LentByteCells>,
+    /// The key-wire form of each link the session opens: the session's, and the one stated for an
+    /// endpoint apart from it (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub key_forms: LinkKeyForms,
+    /// The one reassembly Router of the session, which its links share: its chains are keyed by
+    /// their peers, and staged in the session's buffers for them, each claimed by a chain while it
+    /// is open, lent from the arena (`ArenaPlan::reassembly`). The session sweeps it and ends a
+    /// lost peer's chains; its links' receives reach it only while the session's pass of its tasks
+    /// lends it ([`RouterLend::lend_for`]).
+    pub router: SessionReassembly,
+    /// Where the session lends its Router to its links' receives, each link's task holding the
+    /// place: lent for the length of a pass of the tasks and at no other time.
+    pub lend: RouterLend<SessionReassembly>,
+}
+
+/// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
+/// value, what the session does about its link, and the answer of its dial when one was asked.
+pub struct FaceStep<P> {
+    /// The face's value, read at the step.
+    pub life: FaceLife,
+    /// What the session does about the face's link.
+    pub effect: FaceEffect,
+    /// The answer of the face's dial, when one was asked.
+    pub answer: DialAnswer<P>,
+}
+
+/// A dial of one of the session's endpoints, asked once as it is begun
+/// ([`TransportState::dial_row`]).
+pub enum DialRow<D, P> {
+    /// Not answered yet: the steps that follow ask it.
+    Pending(Dial<D>),
+    /// Answered at once: the link it made, or why it was refused.
+    Answered(Result<OpenedLink<P>, LinkOpenError>),
+}
+
+impl<T: TransportFaces> TransportState<T> {
+    /// The dial role's face, which the session holds for its whole life: the first of the faces,
+    /// placed by the open, so `None` is a session no open made.
+    pub fn dial(&self) -> Option<&T::Face> {
+        self.links.faces().first()
+    }
+
+    /// The actions of every face whose link is up, which is what the session sends through. A
+    /// face whose link is dialled or waits to be is not among them: what is declared then is
+    /// declared when it comes up.
+    pub fn ups(&self) -> impl Iterator<Item = &SessionHandle<T::Clock>> {
+        self.links
+            .faces()
+            .iter()
+            .filter_map(|face| match face.link() {
+                Link::Up(wire) => Some(wire.actions()),
+                _ => None,
+            })
+    }
+
+    /// [`Self::ups`], each with the id of its face.
+    pub fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &SessionHandle<T::Clock>)> {
+        self.links
+            .faces()
+            .iter()
+            .filter_map(|face| match face.link() {
+                Link::Up(wire) => Some((face.id(), wire.actions())),
+                _ => None,
+            })
+    }
+
+    /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:
+    /// how a get walks the faces it asks one at a time, taking the session's lock for each and
+    /// keeping no list of them. A face that comes up during the walk with a greater id is asked
+    /// too, and one that goes is not.
+    #[cfg(feature = "query")]
+    pub fn next_up_face(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
+        self.links
+            .faces()
+            .iter()
+            .filter(|face| matches!(face.link(), Link::Up(_)))
+            .map(FaceRecord::id)
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
+    }
+
+    /// The group of the least id past `after` (any, for none) the session asks queries of
+    /// (`GroupDeclarations::asks_queries`), when `remote`: how a get walks its groups as it walks
+    /// its faces ([`Self::next_up_face`]).
+    #[cfg(all(feature = "query", feature = "group"))]
+    pub fn next_group_to_ask(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
+        self.groups
+            .iter()
+            .filter(|group| group.asks_queries())
+            .map(GroupRecord::id)
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
+    }
+
+    /// The actions of face `id` while its link is up.
+    #[cfg(feature = "query")]
+    pub fn up_actions(&self, id: FaceId) -> Option<&SessionHandle<T::Clock>> {
+        self.links
+            .faces()
+            .iter()
+            .find_map(|face| match face.link() {
+                Link::Up(wire) if face.id() == id => Some(wire.actions()),
+                _ => None,
+            })
+    }
+
+    /// Where an answer to a query that came in under `generation` goes: the link of that
+    /// generation while it is up, or the group the query came on while its session runs
+    /// (`group`). Either is the sink a reply and a Final are sent through.
+    #[cfg(feature = "queryable")]
+    pub fn answer_route(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        #[cfg(feature = "group")]
+        if let Some(sink) = self
+            .groups
+            .iter()
+            .find_map(|group| group.answer_sink(generation))
+        {
+            return Some(sink);
+        }
+        self.links
+            .faces()
+            .iter()
+            .find_map(|face| match face.link() {
+                Link::Up(wire) if wire.answers_as(generation) => {
+                    Some(&**wire.actions() as &dyn ResponseSink)
+                }
+                _ => None,
+            })
+    }
+
+    /// Write on its group what the answers to a query that came in under `generation` put on the
+    /// group's stage, on this thread, as a put on the group is written by the thread that puts it.
+    /// Nothing is done for a query that came in on a link.
+    #[cfg(all(feature = "queryable", feature = "group"))]
+    pub fn write_answers(&self, generation: u64) {
+        if let Some(group) = self
+            .groups
+            .iter()
+            .find(|group| group.answer_sink(generation).is_some())
+        {
+            group.write_staged();
+        }
+    }
+
+    /// Begin a dial of `endpoint`, which the network answers later
+    /// (`SessionLinks::begin_initiator`). [`TransportRefusal::Unreachable`] when the endpoint
+    /// does not parse or the network refuses the dial at once. Out of line: the dial role and a
+    /// face added by the program each begin a dial.
+    #[inline(never)]
+    pub fn begin_dial(&self, endpoint: &str) -> Result<DialOf<T>, TransportRefusal> {
+        let to = parse_locator(endpoint).map_err(|refused| {
+            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
+        })?;
+        self.links.begin_dial(to).map_err(|refused| {
+            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
+        })
+    }
+
+    /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial
+    /// named; empty for none.
+    pub fn endpoint_text<'a>(&'a self, endpoint: Option<&'a DialEndpoint>) -> &'a str {
+        endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
+    }
+
+    /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
+    /// stack's buffers is. Out of line: each part of a link a cell holds is refused by it.
+    #[cold]
+    #[inline(never)]
+    pub fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> TransportRefusal {
+        TransportRefusal::Unreachable(EndpointRefusal::new(
+            self.endpoint_text(endpoint),
+            Refusal::Link(LinkOpenError::Exhausted),
+        ))
+    }
+
+    /// The actions of a link the session makes, placed in their cell of the session's table: a
+    /// link past the cells is refused as one past the stack's buffers is. With `listen` the link
+    /// has its place in the session's admission before its handshake runs, which asks it once the
+    /// remote's zid is known: a second link to a node the session holds is refused there, with
+    /// nothing declared over it by either end, and not closed after it came up.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn place_actions(
+        &self,
+        actions: SessionLinkActions<CoopRuntime<T::Clock>, CoopTime<T::Clock>>,
+        role: SessionRole,
+        endpoint: Option<&DialEndpoint>,
+    ) -> Result<SessionHandle<T::Clock>, TransportRefusal> {
+        let actions: SessionHandle<T::Clock> =
+            CellRc::in_cells(self.actions_cells.as_ref(), actions)
+                .map_err(|_| self.cells_exhausted(endpoint))?;
+        #[cfg(feature = "listen")]
+        actions.install_link_admission(
+            Arc::clone(&self.admission),
+            matches!(role, SessionRole::Initiator),
+        );
+        #[cfg(not(feature = "listen"))]
+        let _ = role;
+        Ok(actions)
+    }
+
+    /// The key-wire form of a link dialled to or taken on `endpoint`: the one stated for the
+    /// endpoint apart from the session's, or the session's (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub fn key_form_of(
+        &self,
+        endpoint: Option<&DialEndpoint>,
+    ) -> wz_session_core::policy::KeyWireForm {
+        self.key_forms
+            .form_of(endpoint.map(|endpoint| endpoint.text(&self.endpoints)))
+    }
+
+    /// A link's gates placed in their cell of the session's table, as the link's driver is in one
+    /// of the stack's: a link past the cells is refused as one past the buffers is.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn place_gate<Gate: SessionDatagramLink + 'static>(
+        &self,
+        gate: Gate,
+        endpoint: Option<&DialEndpoint>,
+    ) -> Result<CellRc<dyn SessionDatagramLink>, TransportRefusal> {
+        Ok(CellRc::in_cells(self.gate_cells.as_ref(), gate)
+            .map_err(|_| self.cells_exhausted(endpoint))?
+            .into_link())
+    }
+
+    /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged
+    /// by the session's one Router, which its links share, keyed by their peers, in buffers of the
+    /// session's one table: a chain claims one when its first fragment arrives and gives it back
+    /// when it ends, and a chain that finds none free is refused and counted. The link's task
+    /// holds the place the Router is lent in. The runtime's cells were reserved at the open, one
+    /// for each link the config admits: a link past them has no task to run its session.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn spawn_link<P, D>(
+        &self,
+        local: &CoopLocalSet<T::Clock>,
+        fields: PumpFields<T::Clock, P>,
+        dispatch: D,
+    ) -> Result<CoopLocalJoinHandle<DriverOutcome>, TransportRefusal>
+    where
+        P: SessionDatagramLink + 'static,
+        D: EventSink + 'static,
+    {
+        spawn_session_with_router(local, fields, self.lend.clone(), dispatch)
+            .map_err(TransportRefusal::NoTask)
+    }
+
+    /// Open the link of the group `endpoint` names (`group`). A member's link is reported by the
+    /// endpoint the group was joined by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one
+    /// is refused before the group is joined, so no row of this engine is held on the heap.
+    #[cfg(feature = "group")]
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, TransportRefusal> {
+        if endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
+            return Err(TransportRefusal::Group(EndpointRefusal::new(
+                endpoint,
+                Refusal::GroupEndpointTooLong,
+            )));
+        }
+        self.links.links().open_group(endpoint).map_err(|why| {
+            TransportRefusal::Group(EndpointRefusal::new(endpoint, Refusal::Link(why)))
+        })
+    }
+
+    /// Hold the group the session joined as the face whose id was the next (`group`).
+    #[cfg(feature = "group")]
+    pub fn add_group(&mut self, group: T::Group) {
+        self.links.advance_face_id();
+        self.groups.push(group);
+    }
+
+    /// The node a handshake that is over reached, when another face holds it or brings a link to
+    /// it up: what the dial role's face stands by for. Read before the link's task is ended.
+    #[cfg(feature = "listen")]
+    pub fn stood_by(&self, at: usize, id: FaceId, turn: &Turn) -> Option<SessionZid> {
+        if !matches!(turn, Turn::HandshakeOver { .. }) {
+            return None;
+        }
+        self.links.held_node(at, id)
+    }
+
+    /// A session that takes no face besides its dial never finds its node held by another.
+    #[cfg(not(feature = "listen"))]
+    pub fn stood_by(&self, _at: usize, _id: FaceId, _turn: &Turn) -> Option<SessionZid> {
+        None
+    }
+
+    /// Whether the session holds a transport, as zenoh-pico's `_z_transport_get_common` finds
+    /// one: a link that is up, a port it listens on (a peer's unicast transport stands before any
+    /// peer comes), or a group it joined. A client whose router went away holds none until a dial
+    /// of it succeeds again.
+    pub fn holds_transport(&self) -> bool {
+        #[cfg(feature = "group")]
+        if !self.groups.is_empty() {
+            return true;
+        }
+        self.ups().next().is_some() || self.listens()
+    }
+
+    /// Whether the session listens on any port.
+    pub fn listens(&self) -> bool {
+        self.links.listens()
+    }
+
+    /// Listen on every endpoint the config lists. [`TransportRefusal::Listen`] for the first that
+    /// does not parse, that the network opens no listener for, or whose port is taken; a build
+    /// without `listen` answers every endpoint so.
+    pub fn listen_on_config(&mut self) -> Result<(), TransportRefusal> {
+        #[cfg(feature = "listen")]
+        for row in 0..self.endpoints.listens() {
+            let endpoint = self.endpoints.listen_text(row);
+            let refused = |why| TransportRefusal::Listen(EndpointRefusal::new(endpoint, why));
+            let at =
+                parse_listen_locator(endpoint).map_err(|why| refused(Refusal::Locator(why)))?;
+            // The key-wire form of a link taken on the port is the one stated for its endpoint
+            // (`shared-key-ids`), which the port names by its row.
+            #[cfg(feature = "shared-key-ids")]
+            let named = Some(row);
+            #[cfg(not(feature = "shared-key-ids"))]
+            let named = None;
+            self.links
+                .listen(at, named)
+                .map_err(|why| refused(Refusal::Link(why)))?;
+        }
+        #[cfg(not(feature = "listen"))]
+        if self.endpoints.listens() > 0 {
+            return Err(TransportRefusal::Listen(EndpointRefusal::new(
+                self.endpoints.listen_text(0),
+                Refusal::ListeningNotBuilt,
+            )));
+        }
+        Ok(())
+    }
+
+    /// The row at cursor `at` of the links of the faces that stand, in the order
+    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends and a group
+    /// member's are written into the row with nothing allocated.
+    #[cfg(feature = "connectivity")]
+    pub fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        for face in self.links.faces() {
+            let Link::Up(wire) = face.link() else {
+                continue;
+            };
+            if !wire.actions().is_established() {
+                continue;
+            }
+            // Past this face's links the cursor moves on by them; within them it is the row.
+            match at.checked_sub(FaceLinkRow::links_of(&**wire.actions())) {
+                Some(rest) => at = rest,
+                None => return FaceLinkRow::of_actions(&**wire.actions(), at),
+            }
+        }
+        #[cfg(feature = "group")]
+        for group in &self.groups {
+            match at.checked_sub(group.member_rows()) {
+                Some(rest) => at = rest,
+                None => return group.member_row(at),
+            }
+        }
+        None
+    }
+
+    /// The faces that stand: those whose links have completed their handshakes.
+    #[cfg(feature = "connectivity")]
+    pub fn standing_faces(&self) -> Vec<FaceSnapshot> {
+        let links = self
+            .links
+            .faces()
+            .iter()
+            .filter_map(|face| match face.link() {
+                Link::Up(wire) if wire.actions().is_established() => {
+                    FaceSnapshot::of_actions(&**wire.actions())
+                }
+                _ => None,
+            });
+        // And each member of a group the session joined, a transport of its own as both
+        // upstreams report it (`group`).
+        #[cfg(feature = "group")]
+        let links = links.chain(self.groups.iter().flat_map(GroupRecord::member_snapshots));
+        links.collect()
+    }
+
+    /// Whether a link of the session holds input it has already taken from its stack, or a group
+    /// took a datagram its next step reads: what makes a read's wait none ([`Self::idle_wait`]).
+    pub fn holds_input(&self) -> bool {
+        #[cfg(feature = "group")]
+        if self.group_took_input() {
+            return true;
+        }
+        self.links.holds_input()
+    }
+
+    /// Whether the dial role's face has what an open waits for: its link is up, or the node it
+    /// reached is held by another face (`Link::Held`, with `listen`).
+    pub fn dial_settled(&self) -> bool {
+        match self.dial().map(|face| face.link()) {
+            Some(Link::Up(_)) => true,
+            #[cfg(feature = "listen")]
+            Some(Link::Held { .. }) => true,
+            _ => false,
+        }
+    }
+
+    /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us`, and
+    /// what the face does about it (`FaceLife`), `redials` when the session dials its endpoints
+    /// again: the session carries it out, with the answer of the dial when one was asked. A dial
+    /// that is over is let go of here, with what it held for its link (a socket, the link's
+    /// buffers), before the face is dialled anew.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn face_step(
+        &mut self,
+        at: usize,
+        id: FaceId,
+        role: FaceRole,
+        redials: bool,
+        now_us: u64,
+    ) -> FaceStep<PumpOf<T>> {
+        let FaceRead {
+            phase,
+            signals,
+            answer,
+        } = self.links.read_face(at, id);
+        let life = FaceLife::new(id, role, phase);
+        let turn = life.turn(now_us, signals);
+        if matches!(turn, Turn::DialOver { .. }) {
+            self.links.put_link(at, Link::Waiting { at_us: now_us });
+        }
+        let stood_by = self.stood_by(at, id, &turn);
+        let effect = life.effect(turn, redials, stood_by);
+        FaceStep {
+            life,
+            effect,
+            answer,
+        }
+    }
+
+    /// End the handshake of the face at `at` that failed, and say why: the Close its peer sent,
+    /// its task's end, or its deadline. Its task is told to stop, and ends in the session's next
+    /// pass of its tasks, before [`Self::handshake_failed`] lets the link go.
+    pub fn end_handshake(&self, at: usize) -> Refusal {
+        let why = Refusal::from(self.links.handshake_end(at));
+        self.links.abort_link(at);
+        why
+    }
+
+    /// Let go of the link of the face at `at`, whose handshake failed for `why` and whose task
+    /// ended, the face waiting from `now_us`: the reason the face's next step (`then`) goes on
+    /// with, which names the endpoint dialled last when the face dials the next one.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn handshake_failed(
+        &mut self,
+        at: usize,
+        then: &Next,
+        why: Refusal,
+        now_us: u64,
+    ) -> TransportRefusal {
+        self.links.put_link(at, Link::Waiting { at_us: now_us });
+        match then {
+            Next::DialFrom { from } => TransportRefusal::Unreachable(EndpointRefusal::new(
+                self.endpoints.dial_text(from.saturating_sub(1)),
+                why,
+            )),
+            _ => TransportRefusal::NoEndpoint,
+        }
+    }
+
+    /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
+    /// answered yet is handed back under way, and one answered at once with its answer.
+    /// [`TransportRefusal::Unreachable`] when the endpoint does not parse or the network refuses
+    /// the dial at once.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn dial_row(&self, at: usize) -> Result<DialRow<DialOf<T>, PumpOf<T>>, TransportRefusal> {
+        let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
+        // A dial that answered has handed out all it held (the socket, the link's buffers, the
+        // program's link), and keeps only handles that own nothing, so it is let go of here,
+        // before its link is opened, with nothing to observe: every stack's dial takes those out
+        // as it answers (`Dialled`, `ip_stack::IpDial`, `app_link::AppDial`).
+        Ok(match pending.poll() {
+            None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
+            Some(answer) => DialRow::Answered(answer),
+        })
+    }
+
+    /// End the chains the peer of the face at `at` has under way in the session's Router, as its
+    /// link is lost: the Router the session's links share would otherwise splice the fragments of
+    /// the peer's next link onto them.
+    pub fn end_peer_chains(&mut self, at: usize) {
+        let peer = self
+            .links
+            .faces()
+            .get(at)
+            .and_then(|face| face.link().wire())
+            .and_then(|wire| wire.actions().peer_zid());
+        if let Some(zid) = peer {
+            self.router.abort_peer(&zid);
+        }
+    }
+
+    /// The next connection that waits on the ports the session listens on, from port `*at` on,
+    /// with the endpoint its port is stated for. A port that had no socket or buffer for one just
+    /// now is passed, and looked at again on the next step; one that is broken for good is let
+    /// go of, and the port after it is at `*at` then. `None` once every port was looked at.
+    #[cfg(feature = "listen")]
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn next_accepted(
+        &mut self,
+        at: &mut usize,
+    ) -> Option<(OpenedLink<PumpOf<T>>, Option<DialEndpoint>)> {
+        while let Some(accepted) = self.links.accept_at(*at) {
+            match accepted {
+                Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),
+                Accepted::Idle => *at = at.saturating_add(1),
+                Accepted::Broken => {}
+            }
+        }
+        None
+    }
+
+    /// Whether a group took a datagram its next step reads (`group`): it is stepped again at
+    /// once, its task taking one a step.
+    #[cfg(feature = "group")]
+    pub fn group_took_input(&self) -> bool {
+        self.groups.iter().any(GroupRecord::took_input)
+    }
+
+    /// When a group's session is next due with nothing arriving, in whole milliseconds of the
+    /// session's clock rounded up (`group`): its beacon, its sweep, what the session pushed onto
+    /// it, its join again.
+    #[cfg(feature = "group")]
+    pub fn groups_due_ms(&self) -> Option<u64> {
+        self.groups
+            .iter()
+            .filter_map(GroupRecord::due_us)
+            .min()
+            .map(|due_us| due_us.div_ceil(1_000))
+    }
+
+    /// Whether a group's stack gives no wait for its input, so the group is looked at on its tick
+    /// (`group`).
+    #[cfg(feature = "group")]
+    pub fn group_unwaited(&self) -> bool {
+        self.groups.iter().any(GroupRecord::unwaited)
+    }
+
+    /// What a read waits on for at most `most` milliseconds: the input of every link and port, and
+    /// each group's after them, since a wait over several is made by the first and a link's names a
+    /// group's socket to the platform beside its own; `beside` ends it as well. `now_us` reads the
+    /// session's clock, once, and only for a face with a time to be looked at again.
+    pub fn idle_wait(
+        &mut self,
+        most: u32,
+        now_us: &mut dyn FnMut() -> u64,
+        beside: Option<LinkWait>,
+    ) -> IdleWait {
+        #[cfg(feature = "group")]
+        let others = self.groups.iter().filter_map(GroupRecord::input);
+        #[cfg(not(feature = "group"))]
+        let others = core::iter::empty();
+        self.links.idle_wait(most, now_us, others, beside)
+    }
+
+    /// Ask each group's session to stop, so that its next step tells the group it leaves and lets
+    /// the group's link go; whether the session joined any (`group`).
+    #[cfg(feature = "group")]
+    pub fn stop_groups(&self) -> bool {
+        for group in &self.groups {
+            group.stop();
+        }
+        !self.groups.is_empty()
+    }
+}
