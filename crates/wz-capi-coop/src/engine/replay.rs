@@ -252,8 +252,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Interest => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.interests().iter().nth(left);
-                    let told = row.map_or(true, |(_, row)| super::send_interest(row, actions));
-                    told
+                    row.map_or(true, |(_, row)| super::send_interest(row, actions))
                 }
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {

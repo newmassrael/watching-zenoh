@@ -398,6 +398,38 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     );
 }
 
+/// A write filter that asks the peers nothing spends an entity id of its own: one that finds none
+/// left is refused for it and gives its row back, so with ids again the next filter takes that row
+/// in a table of one. Turned red by a refusal that keeps the row, which refuses the next one as a
+/// full table.
+#[test]
+fn a_filter_that_finds_no_id_left_gives_its_row_back() {
+    let limits = lowered(|l| l.select_max_publishers(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    fn quiet(engine: &Engine) -> Result<FilterId, Refusal> {
+        engine.declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/quiet/1",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+    }
+    engine.entity_ids_from(None);
+    assert_eq!(quiet(&engine), Err(Refusal::NoEntityId));
+    engine.entity_ids_from(Some(7));
+    assert!(
+        quiet(&engine).is_ok(),
+        "the refused filter gave its row back"
+    );
+    assert_eq!(
+        quiet(&engine),
+        Err(Refusal::TableFull),
+        "CONTROL: the table holds one filter"
+    );
+}
+
 /// The matching listeners' table at its limit refuses one more as a full table, before its Interest
 /// is asked; its sink goes with the refusal.
 #[test]

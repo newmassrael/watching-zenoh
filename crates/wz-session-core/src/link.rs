@@ -1267,9 +1267,8 @@ pub trait BoxedLinkDriver {
     /// nine advertise sites emitting a scheme no zenoh peer — and in one case not
     /// even wz's own parser — could dial, because they reused a transport's log
     /// name as its scheme. This accessor feeds an admin surface a foreign client
-    /// reads, so it inherits that contract: build the string through
-    /// [`crate::link::LinkEndpoints::new`]'s callers in the runtime's
-    /// `link_interfaces` helpers, which state the scheme explicitly.
+    /// reads, so it inherits that contract: build the string through the
+    /// runtime's `link_interfaces` helpers, which state the scheme explicitly.
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         None
     }
@@ -1412,12 +1411,33 @@ pub struct LinkEndpoints {
 
 /// A locator's text as a link holds it: a `String`, or under `session-slot`
 /// (fixed-memory step S5) text of at most [`crate::caps::MAX_LOCATOR_LEN`] bytes
-/// held in the link itself, so a driver names its two ends without allocating.
+/// held in the link itself, so a driver names its two ends without allocating; a
+/// link whose end is longer is refused where it is admitted ([`LocatorTooLong`]).
 #[cfg(not(feature = "session-slot"))]
 pub type LocatorText = String;
 /// See the `String` form of this alias.
 #[cfg(feature = "session-slot")]
 pub type LocatorText = heapless::String<{ crate::caps::MAX_LOCATOR_LEN }>;
+
+/// A locator longer than a link of this build holds one, [`crate::caps::MAX_LOCATOR_LEN`]
+/// bytes under `session-slot`: the link whose end it is cannot name that end, so it is
+/// refused where it is admitted, never kept with a blank or cut end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocatorTooLong {
+    /// The locator's length in bytes.
+    pub len: usize,
+}
+
+impl core::fmt::Display for LocatorTooLong {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a locator of {} bytes is longer than MAX_LOCATOR_LEN ({})",
+            self.len,
+            crate::caps::MAX_LOCATOR_LEN
+        )
+    }
+}
 
 impl LinkEndpoints {
     /// Build a pair from two already-rendered locator strings.
@@ -1429,16 +1449,26 @@ impl LinkEndpoints {
         }
     }
 
-    /// Build a pair from two already-rendered locator strings. A locator longer
-    /// than [`crate::caps::MAX_LOCATOR_LEN`] is not stored: that end reads blank,
-    /// the answer for an end the link cannot name, rather than a cut locator
-    /// nobody could dial.
+    /// Build a pair from two already-rendered locator strings, for a driver compiled under
+    /// either form of [`LocatorText`]: a `String` holds any locator, so this form never
+    /// refuses.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn try_new(src: &str, dst: &str) -> Result<Self, LocatorTooLong> {
+        Ok(Self::new(src, dst))
+    }
+
+    /// Build a pair from two already-rendered locator strings, each held in the link itself:
+    /// a locator longer than [`crate::caps::MAX_LOCATOR_LEN`] is refused, and the driver that
+    /// builds the pair refuses its link.
     #[cfg(feature = "session-slot")]
-    pub fn new(src: impl AsRef<str>, dst: impl AsRef<str>) -> Self {
-        Self {
-            src: LocatorText::try_from(src.as_ref()).unwrap_or_default(),
-            dst: LocatorText::try_from(dst.as_ref()).unwrap_or_default(),
-        }
+    pub fn try_new(src: &str, dst: &str) -> Result<Self, LocatorTooLong> {
+        let held = |text: &str| {
+            LocatorText::try_from(text).map_err(|_| LocatorTooLong { len: text.len() })
+        };
+        Ok(Self {
+            src: held(src)?,
+            dst: held(dst)?,
+        })
     }
 
     /// The two ends as owned `String`s, for a consumer that renders them (the
@@ -2583,6 +2613,36 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pair of ends held in the link itself keeps a locator of the bound whole and refuses
+    /// one byte more, naming its length, so no link of the build stands with a blank or cut end.
+    /// Turned red by a constructor that keeps a blank end (the form before refusal).
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_pair_held_in_the_link_refuses_an_end_past_the_bound() {
+        let at_bound = "t".repeat(crate::caps::MAX_LOCATOR_LEN);
+        let past = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        let kept = LinkEndpoints::try_new(&at_bound, "udp/10.0.0.1:7447").expect("at the bound");
+        assert_eq!(kept.src.as_str(), at_bound);
+        assert_eq!(
+            LinkEndpoints::try_new("udp/10.0.0.1:7447", &past),
+            Err(LocatorTooLong { len: past.len() })
+        );
+        assert_eq!(
+            LinkEndpoints::try_new(&past, "udp/10.0.0.1:7447"),
+            Err(LocatorTooLong { len: past.len() })
+        );
+    }
+
+    /// A pair of `String`s holds any locator, so the constructor every driver shares refuses
+    /// none: the heap engines keep a unix socket path of upstream's length whole.
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn a_pair_of_strings_holds_a_locator_past_the_row_bound() {
+        let past = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        let kept = LinkEndpoints::try_new(&past, "udp/10.0.0.1:7447").expect("never refused");
+        assert_eq!(kept.src, past);
+    }
 
     /// A droppable ask meets the mark before anything else and lowers nothing; a lane with room
     /// answers any ask and lowers the mark; a full lane raises it for an ask that may not wait,

@@ -71,9 +71,11 @@ use crate::stream_link::StreamListen;
 use crate::stream_link::STREAM_RX_CAPACITY;
 use crate::stream_link::{NoStream, StreamSocket};
 #[cfg(feature = "session-slot")]
+use crate::udp_link::ends_fit;
+#[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::udp_link::{bind_refused, dial_bind, UDP_RX_CAPACITY};
+use crate::udp_link::{bind_refused, dial_bind, EndsFit, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use crate::udp_link::{PortPeer, UdpPort};
@@ -121,8 +123,13 @@ pub(crate) fn heap_link<K>(
     driver: K,
 ) -> Result<OpenedLink<HeapLink>, LinkOpenError>
 where
-    K: BoxedLinkDriver + SessionDatagramLink + 'static,
+    K: BoxedLinkDriver + SessionDatagramLink + EndsFit + 'static,
 {
+    // A link whose ends no row of the build names is refused before it is placed, so a session
+    // never stands on a link its faces' rows would have to hold on the heap.
+    if !driver.ends_fit() {
+        return Err(LinkOpenError::Unsupported);
+    }
     // A session that lent its links cells places each in one: past them the link is refused, as
     // one past the session's buffers is, and none is placed on the heap.
     let driver =
@@ -1025,13 +1032,13 @@ where
             }
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
-                let socket = self.dial.dial(to.at)?;
+                let socket = named(self.dial.dial(to.at)?)?;
                 out.write(IpDriver::Tcp(link_over(socket, rx, tx)));
             }
             LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
-                let channel = self.tls.dial(to.at)?;
+                let channel = named(self.tls.dial(to.at)?)?;
                 out.write(IpDriver::Tls(link_over(channel, rx, tx)));
             }
         }
@@ -1043,6 +1050,17 @@ where
         let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
         let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
         Ok((rx, tx))
+    }
+}
+
+/// `stream`, when the rows of the build name both its ends ([`ends_fit`]); otherwise it is closed
+/// and the link refused as [`LinkOpenError::Unsupported`], before a session stands on it.
+#[cfg(feature = "session-slot")]
+fn named<S: StreamSocket>(stream: S) -> Result<S, LinkOpenError> {
+    if ends_fit(S::PROTO, stream.local(), stream.peer()) {
+        Ok(stream)
+    } else {
+        Err(LinkOpenError::Unsupported)
     }
 }
 
@@ -1114,6 +1132,7 @@ where
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
+        let stream = named(stream)?;
         let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
@@ -1167,6 +1186,7 @@ where
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
+        let stream = named(stream)?;
         let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);

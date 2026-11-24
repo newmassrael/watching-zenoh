@@ -63,7 +63,7 @@ use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
     InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, Plane, RowCallbacks,
-    SessionTables, SubscriberHandle,
+    SessionTables, SubscriberHandle, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -504,6 +504,9 @@ pub enum Refusal {
     /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
     /// bytes.
     TextTooLong,
+    /// The group's endpoint is longer than the row a member's link is reported in,
+    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
+    GroupEndpointTooLong,
 }
 
 impl core::fmt::Display for EndpointRefusal {
@@ -526,6 +529,9 @@ impl core::fmt::Display for EndpointRefusal {
                 f.write_str("the session holds as many faces as max_faces admits")
             }
             Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
+            Refusal::GroupEndpointTooLong => {
+                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
+            }
         }
     }
 }
@@ -2227,6 +2233,15 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
         .position(|(held, _)| held == handle)
 }
 
+/// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
+/// of there: the id of the Interest it held last, `None` when no filter is there. Every caller
+/// passes this one closure, so the tables' walk is built once.
+fn unwatch_filter(tables: &mut CoopTables, handle: WriteFilterHandle) -> Option<Option<EntityId>> {
+    tables
+        .undeclare_write_filter(handle, |_, _| {})
+        .map(|unwatched| unwatched.interest_final)
+}
+
 /// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
 /// listener: only for one that asked them to, and in a build that delivers to them locally.
 fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
@@ -3557,6 +3572,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         id: FaceId,
         join: GroupJoin,
     ) -> Result<GroupFace<L::Waits>, OpenError> {
+        // A member's link is reported by the endpoint the group was joined by, in a row of
+        // `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one is refused before the group is joined, so
+        // no row of this engine is held on the heap.
+        if join.endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
+            return Err(OpenError::Group(EndpointRefusal::new(
+                &join.endpoint,
+                Refusal::GroupEndpointTooLong,
+            )));
+        }
         let transport = self
             .transport
             .links
@@ -3795,8 +3819,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The row at cursor `at` of the links of the faces that stand, in the order
-    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends are written
-    /// into the row with nothing allocated. A group's members are read off their snapshots.
+    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends and a group
+    /// member's are written into the row with nothing allocated.
     #[cfg(feature = "connectivity")]
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         let mut at = at;
@@ -3814,11 +3838,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             at -= links;
         }
         #[cfg(feature = "group")]
-        for member in self.groups.iter().flat_map(GroupFace::member_snapshots) {
-            if at < member.links.len() {
-                return FaceLinkRow::of_snapshot(&member, at);
+        for group in &self.groups {
+            let rows = group.member_rows();
+            if at < rows {
+                return group.member_row(at);
             }
-            at -= member.links.len();
+            at -= rows;
         }
         None
     }
@@ -6077,11 +6102,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// lock hands it: after a step that wrote the faces' tables, and after each declaration of the
     /// session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
-        let mut registry = core.session.registry.borrow_mut();
+        let registry = core.session.registry.borrow();
         core.session.matching_read.set(registry.faces_written());
-        let (tables, peers) = registry.tables_and_peers();
         let mut cursor = 0;
-        while let Some((handle, matching)) = tables.next_matching_change(&mut cursor, &peers) {
+        while let Some((handle, matching)) = registry
+            .app
+            .tables
+            .next_matching_change(&mut cursor, &*registry)
+        {
             self.matching.lock().flip(row_id(handle), matching);
         }
     }
@@ -6242,6 +6270,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
         self.core.lock().0.session.registry.borrow().peer_looks()
+    }
+
+    /// Hand out entity ids from `next` on, none with `None`: how a test reaches the end of the
+    /// id space without spending it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn entity_ids_from(&self, next: Option<EntityId>) {
+        tables_mut(&self.core.lock().0.session.registry).entity_ids_from(next);
     }
 
     /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread
@@ -6947,8 +6982,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // `_z_add_interest` takes it before it decides: a filter that finds none left is
             // refused, its row given back.
             let Some(taken) = core.take_entity_id() else {
-                let _ = tables_mut(&core.session.registry)
-                    .undeclare_write_filter(watching.handle, |_, _| {});
+                let _ = unwatch_filter(&mut tables_mut(&core.session.registry), watching.handle);
                 return Err(Declined::NoEntityId);
             };
             Some(u64::from(taken))
@@ -7004,13 +7038,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             interest_rank(&tables, row.interest())
         };
-        let Some(unwatched) =
-            tables_mut(&core.session.registry).undeclare_write_filter(handle, |_, _| {})
+        let Some(interest_final) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
         else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
+        if let (Some(interest), Some(at)) = (interest_final, place) {
             core.retract(
                 Kind::Interest,
                 at,

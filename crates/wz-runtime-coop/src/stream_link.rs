@@ -54,7 +54,7 @@ use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
-use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
+use crate::udp_link::{ends_fit, link_endpoints, EndsFit, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
 /// the batch behind it.
@@ -268,7 +268,7 @@ impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
 
 /// What a stack makes of a connected stream and holds as one of its links
 /// ([`StreamSocket::Link`]).
-pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
+pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + EndsFit + Sized {
     /// The link over the connected `socket`, receiving into `rx` and building its frames in `tx`.
     fn over(socket: S, rx: B, tx: X) -> Self;
 
@@ -325,6 +325,12 @@ impl StreamSocket for NoStream {
     }
 
     fn shutdown(&self) {
+        match *self {}
+    }
+}
+
+impl EndsFit for NoStream {
+    fn ends_fit(&self) -> bool {
         match *self {}
     }
 }
@@ -640,8 +646,9 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
 pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
     socket: S,
-    /// The link's two ends, `tcp/<ip>:<port>` each, known from the connection.
-    endpoints: LinkEndpoints,
+    /// The link's two ends, `tcp/<ip>:<port>` each, known from the connection; `None` only for a
+    /// link whose ends no row holds, which is refused before it is admitted ([`EndsFit`]).
+    endpoints: Option<LinkEndpoints>,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`: a batch's length and the batch behind it.
     rx_len: usize,
@@ -702,7 +709,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.capacity();
         Self {
-            endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()),
+            endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()).ok(),
             socket,
             rx_buf: RefCell::new(rx_buf),
             rx_len,
@@ -1182,7 +1189,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     }
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        Some(&self.endpoints)
+        self.endpoints.as_ref()
     }
 
     #[cfg(feature = "alloc")]
@@ -1306,6 +1313,12 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
 
     fn lost(&self) -> Option<LostCause> {
         self.lost.get()
+    }
+}
+
+impl<S: StreamSocket, B: RxStore, T: TxStore> EndsFit for StreamDriver<S, B, T> {
+    fn ends_fit(&self) -> bool {
+        ends_fit(S::PROTO, self.socket.local(), self.socket.peer())
     }
 }
 
