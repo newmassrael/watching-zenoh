@@ -49,7 +49,12 @@
 /// It moved to 4 when a querier and a declared key expression took a slot of a pool of their own:
 /// the counts a program states (`wz_ext_object_pool_counts_t`) grew `queriers` and `keyexprs`
 /// after `payload_bytes`, so a program built against 3 hands the door counts too small.
-pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 4;
+///
+/// It moved to 5 when the counts a program states took their own size: `struct_size` is now the
+/// first field of `wz_ext_object_pool_counts_t`, so a program built against 4 hands counts whose
+/// `sessions` the library reads as their size. From 5 on a count is added at the end and read only
+/// from a struct whose `struct_size` holds it, so adding one does not move the revision.
+pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 5;
 
 wz_abi_stamp::stamp!(
     family = "capi-pico",

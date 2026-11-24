@@ -192,7 +192,7 @@ pub mod ext_interface {
     /// The major version of the interface these doors were written against.
     pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
     /// The minor version of the interface these doors were written against.
-    pub const WZ_EXT_INTERFACE_MINOR: u16 = 3;
+    pub const WZ_EXT_INTERFACE_MINOR: u16 = 2;
 
     /// `replay_reply_shape`: one reply per frame, as it was sent.
     pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
