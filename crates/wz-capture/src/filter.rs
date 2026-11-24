@@ -350,7 +350,9 @@ use core::fmt;
 use wz_session_core::keyexpr_match::keyexpr_matches;
 use wz_session_core::passive::Direction;
 
-use crate::field_path::{FieldPath, PathKind, PathRefusal, PathTest};
+#[cfg(feature = "dissect")]
+use crate::field_path::PathKind;
+use crate::field_path::{FieldPath, PathRefusal, PathTest};
 use crate::pattern::{Pattern, PatternRefusal};
 
 mod clock;
@@ -1848,6 +1850,7 @@ fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
 /// holds what the wire held: the zero id is a value a field can show, and is
 /// shown as `0` ([`wz_session_core::zid_hex::zid_to_zenoh_hex`]), so a
 /// selector must be able to write it back.
+#[cfg(feature = "dissect")]
 fn parse_zid_field(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
     if value == "0" {
         return Ok(wz_session_core::zid_hex::canonical_zid(&[0u8; 16]).to_vec());
@@ -4403,7 +4406,7 @@ impl<'a> Parser<'a> {
                     },
                     Subject::Path(path) => FilterErrorKind::PathValue {
                         path: path.written(),
-                        kind: path.kind().word(),
+                        kind: path.kind_word(),
                         value: describe_token(&t.kind),
                     },
                 },
@@ -4536,12 +4539,12 @@ impl<'a> Parser<'a> {
             });
         }
         self.read_as(TokenRole::Group);
-        if !path.kind().has_width() {
+        if !path.has_width() {
             return Err(FilterError {
                 at: len_at,
                 kind: FilterErrorKind::PathOperator {
                     path: path.written(),
-                    kind: path.kind().word(),
+                    kind: path.kind_word(),
                     op: "len",
                 },
             });
@@ -4670,7 +4673,10 @@ fn build_term(
 ) -> Result<Node, FilterError> {
     match subject {
         Subject::Fixed(known) => build_fixed(*known, field_at, op_at, cmp, op_word, value),
+        #[cfg(feature = "dissect")]
         Subject::Path(path) => build_path(path, op_at, cmp, op_word, value),
+        #[cfg(not(feature = "dissect"))]
+        Subject::Path(path) => path.unresolved(),
     }
 }
 
@@ -4678,6 +4684,7 @@ fn build_term(
 ///
 /// `!=` is built as the negation of `==` on every kind, so a field the record
 /// does not carry is `yes` under `!=`: see [`crate::field_path`].
+#[cfg(feature = "dissect")]
 fn build_path(
     path: &FieldPath,
     op_at: usize,
@@ -4803,6 +4810,7 @@ fn path_integer(word: &str, at: usize) -> Result<u64, FilterError> {
     })
 }
 
+#[cfg(feature = "dissect")]
 fn describe_literal(literal: &Literal) -> String {
     match literal {
         Literal::Word(w) => w.clone(),
@@ -7520,5 +7528,21 @@ mod tests {
             Err(NodeNamesError::NotJson { .. })
         ));
         assert_eq!(NodeNames::from_json("{}"), Ok(NodeNames::new()));
+    }
+
+    /// A build without `dissect` resolves no path: every term over one is
+    /// refused at the path, before a term over its kind could be built.
+    #[cfg(not(feature = "dissect"))]
+    #[test]
+    fn a_build_without_the_walker_refuses_a_path_before_its_term() {
+        let unsupported = |at| {
+            Some(FilterError {
+                at,
+                kind: FilterErrorKind::PathsUnsupported,
+            })
+        };
+        assert_eq!(Filter::parse("Frame.sn == 1").err(), unsupported(0));
+        assert_eq!(Filter::parse("put.payload").err(), unsupported(0));
+        assert_eq!(Filter::parse("len(put.payload) == 2").err(), unsupported(4));
     }
 }
