@@ -2456,6 +2456,33 @@ fn a_derived_zid_is_the_listeners_address_and_ports_then_the_sources_bytes() {
     );
 }
 
+/// A session whose source gives nothing opens no link: its config states its zid, so the first
+/// draw is the cookie key of the dial's handshake, and the open is refused with the entropy
+/// refusal. Turned red by a start of a link that dials on without a key, or that names the
+/// refusal otherwise.
+#[test]
+fn an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal() {
+    use crate::OpenError;
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+
+    struct Dry;
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let refused = Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        Dry,
+        config(&router),
+    )
+    .err();
+    assert_eq!(refused, Some(OpenError::EntropyUnavailable));
+}
+
 /// Bytes the open makes a zid of (drawn or derived) are refused when they are no zid: all zero
 /// bytes, none, and seventeen are refused, and one and sixteen, trailing zeros trimmed, are the
 /// zid the session announces.

@@ -2742,6 +2742,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<Wire<C>, OpenError> {
+        // The cookie key of the attempt is drawn before the parameters are read off the config:
+        // drawn among them, its refusal would leave every field read before it in a temporary
+        // of its own, moved again into the parameters once the key is there.
+        let cookie_signing_key = SigningKey::from_entropy(&mut self.entropy)
+            .map_err(|_| OpenError::EntropyUnavailable)?;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
         let params = SessionInitParams {
@@ -2760,8 +2765,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // The snapshot the registry's tables were held to: the open decides it from the
             // config alone.
             limits: *resolve_limits(&self.config),
-            cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
-                .map_err(|_| OpenError::EntropyUnavailable)?,
+            cookie_signing_key,
         };
         // The link's session is the transport's to make; what the session's tables keep of the
         // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).
