@@ -140,8 +140,11 @@ impl wz_capi_port::KeyHolds for Script {
     fn release_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) {}
 
     // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
-    fn retain_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) -> bool {
-        false
+    fn retain_keyexpr(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Result<(), wz_capi_port::HoldRefused> {
+        Err(wz_capi_port::HoldRefused::Gone)
     }
 }
 

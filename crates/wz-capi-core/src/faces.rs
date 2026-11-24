@@ -161,8 +161,8 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, KeyHold, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, HoldRefused, KeyHold, MatchId, MatchingSink,
+    QblId, StatementNotHonoured, SubId, TokenId, WireKey,
 };
 
 /// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
@@ -5145,10 +5145,17 @@ impl SharedSession {
 
     /// One more holder of the declaration in row `row`, which a holder already holds: it stays
     /// declared until this holder lets go too ([`Self::release_keyexpr`]), and nothing goes on
-    /// the wire. `false`, taking none, for a row that went or a count that holds as many as it
-    /// can.
-    pub fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
-        self.lock().tables.retain_keyexpr(row)
+    /// the wire. Refused, taking none, for a count that holds as many as it can
+    /// ([`HoldRefused::Full`]) or a row that went ([`HoldRefused::Gone`]).
+    pub fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused> {
+        let mut guard = self.lock();
+        if guard.tables.retain_keyexpr(row) {
+            Ok(())
+        } else if guard.tables.keyexprs().get(row).is_some() {
+            Err(HoldRefused::Full)
+        } else {
+            Err(HoldRefused::Gone)
+        }
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`

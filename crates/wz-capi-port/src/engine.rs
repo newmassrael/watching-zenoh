@@ -41,7 +41,7 @@ use crate::os::Mutex;
 use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, KeyHold,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused, KeyHold,
     LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal,
     ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
@@ -70,11 +70,11 @@ pub trait KeyHolds: Send + Sync {
 
     /// Take one more hold on the declaration in row `row`, which a holder already holds, so it
     /// stays declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on
-    /// the wire. The engine's count is the one count of a declaration's holders. `false`, taking
-    /// none, when the row went, the session is closed or the count holds as many as it can. Every
-    /// engine states it: one that held a declaration and did not count this would retract it
-    /// before its last holder let go.
-    fn retain_keyexpr(&self, row: KeyexprHandle) -> bool;
+    /// the wire. The engine's count is the one count of a declaration's holders. Refused, taking
+    /// none, when the count holds as many as it can ([`HoldRefused::Full`]), or when the row went
+    /// or the session is closed ([`HoldRefused::Gone`]). Every engine states it: one that held a
+    /// declaration and did not count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused>;
 }
 
 /// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the

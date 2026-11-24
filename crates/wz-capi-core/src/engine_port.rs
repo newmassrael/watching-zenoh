@@ -167,7 +167,10 @@ impl wz_capi_port::KeyHolds for SharedSession {
         SharedSession::release_keyexpr(self, row)
     }
 
-    fn retain_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) -> bool {
+    fn retain_keyexpr(
+        &self,
+        row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Result<(), wz_capi_port::HoldRefused> {
         SharedSession::retain_keyexpr(self, row)
     }
 }
