@@ -4185,11 +4185,9 @@ fn declare_adminspace_reports_the_negotiated_shm_flag() {
     // A known peer, so `sessions[]` has an entry to carry the flag at all. The
     // production path fills this from the INIT exchange; a unit test stamps the
     // field directly, the same bypass `mark_session_established` uses.
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0xc3, 0xd4].into()));
     // The negotiated capability, set the way the establishment FSM sets it.
     session.actions().set_shm_offer(true);
 
@@ -4625,13 +4623,12 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     );
 
     let peer = vec![0xA1, 0x00, 0x31];
-    *actions
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(
-        wz_session_core::session_zid::SessionZid::new(&peer)
-            .expect("a 1 to 16 byte zid, not all zero"),
-    );
+    actions.fact_remote_peer_zid(|slot| {
+        *slot = Some(
+            wz_session_core::session_zid::SessionZid::new(&peer)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        )
+    });
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -4642,11 +4639,7 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     );
     assert!(row.weight.is_none(), "a session holds no router graph");
 
-    *actions
-        .peer_whatami
-        .lock()
-        .expect("peer_whatami poisoned in test fixture") =
-        Some(wz_codecs::whatami::WhatAmI::Router.to_wire());
+    actions.fact_peer_whatami(|slot| *slot = Some(wz_codecs::whatami::WhatAmI::Router.to_wire()));
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -4775,16 +4768,10 @@ fn declare_adminspace_answers_the_subscriber_leg_from_the_peer_faces_table() {
     // production path fills both from the INIT exchange). BOTH are needed and for
     // DIFFERENT reasons — the zid is what lands IN a bucket, the whatami is what
     // CHOOSES the bucket — so stamping one would leave half the rule unmeasured.
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
-    *session
-        .actions()
-        .peer_whatami
-        .lock()
-        .expect("peer_whatami poisoned in test fixture") = Some(2); // INIT wire 2 = Client
+        .fact_remote_peer_zid(|slot| *slot = Some([0x70, 0x73, 0x00, 0x03].into()));
+    session.actions().fact_peer_whatami(|slot| *slot = Some(2)); // INIT wire 2 = Client
 
     let _admin = session
         .declare_adminspace("0.9.9", Vec::new())
@@ -4868,16 +4855,10 @@ fn declare_adminspace_answers_the_token_leg_from_the_peers_liveliness_tokens() {
     let (session, _driver) = build_session();
     let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
     let whatami = session.actions().params.whatami.to_str();
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x70, 0x73, 0x00, 0x03].into());
-    *session
-        .actions()
-        .peer_whatami
-        .lock()
-        .expect("peer_whatami poisoned in test fixture") = Some(2); // INIT wire 2 = Client
+        .fact_remote_peer_zid(|slot| *slot = Some([0x70, 0x73, 0x00, 0x03].into()));
+    session.actions().fact_peer_whatami(|slot| *slot = Some(2)); // INIT wire 2 = Client
 
     let _admin = session
         .declare_adminspace("0.9.9", Vec::new())
@@ -4996,17 +4977,12 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
     // R2843 — a known peer, so the node's registry has its one transport to
     // report. The production path fills both from the INIT exchange; a unit test
     // stamps the fields directly, as the `sessions[]` tests above do.
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0xc3, 0xd4].into());
-    *session
+        .fact_remote_peer_zid(|slot| *slot = Some([0xc3, 0xd4].into()));
+    session
         .actions()
-        .peer_whatami
-        .lock()
-        .expect("peer_whatami poisoned in test fixture") =
-        Some(wz_codecs::whatami::WhatAmI::Router.to_wire());
+        .fact_peer_whatami(|slot| *slot = Some(wz_codecs::whatami::WhatAmI::Router.to_wire()));
 
     let _admin = session
         .declare_adminspace("0.9.9", Vec::new())
@@ -8865,11 +8841,9 @@ fn make_undecl_subscriber(
 #[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
 fn session_met_as_peer(remote_role: wz_codecs::whatami::WhatAmI) -> TokioSession {
     let (session, _driver) = build_session();
-    *session
+    session
         .actions()
-        .peer_whatami
-        .lock()
-        .expect("peer_whatami poisoned in test fixture") = Some(remote_role.to_wire());
+        .fact_peer_whatami(|slot| *slot = Some(remote_role.to_wire()));
     session
 }
 
@@ -17109,11 +17083,9 @@ fn session_egress_acl_denies_a_governed_keyexpr() {
     // The enforcer admits a message it cannot attribute (open-debt item 655), so
     // a fixture without a conformant peer zid would pass both assertions while
     // reaching no rule at all. A real handshake is what normally sets this.
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
 
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
@@ -17173,11 +17145,9 @@ fn session_egress_acl_governs_the_answer_to_an_interest() {
 
     const INTEREST: u64 = 9;
     let (session, driver) = build_session();
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -17264,11 +17234,9 @@ fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
 
     let (session, driver) = build_session();
     mark_session_established(&session);
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -17325,11 +17293,9 @@ fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
 #[test]
 fn session_egress_acl_is_inert_with_no_policy_installed() {
     let (session, driver) = build_session();
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     session
@@ -17357,11 +17323,9 @@ fn session_ingress_acl_drops_a_governed_message_from_the_batch() {
     use crate::interceptor::InterceptorSink;
 
     let (session, _driver) = build_session();
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
     session.set_interceptors(acl_ingress_deny_admin());
 
     let mut outcome = two_message_inbound_batch();
@@ -17392,11 +17356,9 @@ fn session_ingress_acl_does_not_apply_an_egress_rule() {
     };
 
     let (session, _driver) = build_session();
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
     session.set_interceptors(
         InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -17756,14 +17718,12 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
     use std::sync::{Arc, Mutex};
     use wz_codecs::declare::DeclareOwnedVariant;
     let (session, _driver) = build_session();
-    *session
-        .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in test fixture") = Some(
-        wz_session_core::session_zid::SessionZid::new(peer)
-            .expect("a 1 to 16 byte zid, not all zero"),
-    );
+    session.actions().fact_remote_peer_zid(|slot| {
+        *slot = Some(
+            wz_session_core::session_zid::SessionZid::new(peer)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        )
+    });
     let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
     let writer = seen.clone();
     let listener = session

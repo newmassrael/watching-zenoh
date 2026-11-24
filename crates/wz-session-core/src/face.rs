@@ -161,11 +161,13 @@ impl FaceSnapshot {
     pub fn of_actions<R: SessionRuntime, T: TimeSource>(
         actions: &SessionLinkActions<R, T>,
     ) -> Option<Self> {
-        let peer = actions.peer_zid()?;
+        // Read in its fixed form: a copy of the heap would be made each time a face comes up or
+        // goes while something watches the faces.
+        let peer = actions.peer_session_zid()?;
         let whatami = actions.peer_whatami_wire()?;
         let mut zid = [0u8; 16];
         // The first sixteen bytes at most, as many as the peer's zid has.
-        for (into, byte) in zid.iter_mut().zip(&peer) {
+        for (into, byte) in zid.iter_mut().zip(peer.as_slice()) {
             *into = *byte;
         }
         let subject = actions.link_subject().cloned();

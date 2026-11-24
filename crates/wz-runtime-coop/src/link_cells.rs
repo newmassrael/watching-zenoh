@@ -32,11 +32,14 @@ use wz_session_core::link::BoxedLinkDriver;
 
 use crate::session_drive::SessionDatagramLink;
 
-/// What a cell keeps before its value: how many handles name it, and where its memory came from,
-/// which is where it goes back once none does.
+/// What a cell keeps before its value: how many handles name it, where its memory came from,
+/// which is where it goes back once none does, and, for a cell whose handles name parts of its
+/// value ([`CellRc::halves`]), what drops the whole value. A cell whose handles each name the
+/// whole value has none: its last handle drops the value through the view of it that handle is.
 struct CellHead {
     handles: Cell<usize>,
     owner: Owner,
+    whole: Cell<Option<unsafe fn(NonNull<CellHead>)>>,
 }
 
 /// Where a cell's memory came from, which is where it goes back.
@@ -121,6 +124,7 @@ unsafe fn write_head(base: NonNull<u8>, owner: Owner) -> NonNull<CellHead> {
         head.as_ptr().write(CellHead {
             handles: Cell::new(1),
             owner,
+            whole: Cell::new(None),
         });
     }
     head
@@ -217,7 +221,62 @@ impl<K> CellRc<K> {
     }
 }
 
+/// Drop the value of the cell `head` heads, which holds a `K`: the whole of a value whose handles
+/// name its parts.
+///
+/// # Safety
+/// `head` heads a `Slot<K>` whose value was written and not dropped, which no handle names any
+/// more.
+unsafe fn drop_whole<K>(head: NonNull<CellHead>) {
+    let slot = head.cast::<Slot<K>>().as_ptr();
+    // SAFETY: the caller's contract: the value is whole and nothing reaches it after this call.
+    unsafe { core::ptr::addr_of_mut!((*slot).value).drop_in_place() };
+}
+
+impl<A, B> CellRc<(A, B)> {
+    /// `first` and `second` together in one cell of `cells` ([`Self::in_cells`], or one of the
+    /// heap when no table is lent), and a handle on each: two values that are made together and
+    /// shared apart, the cell given back with the last handle on either, which drops both. Both
+    /// back when no cell takes them.
+    pub fn halves(
+        cells: Option<&LentByteCells>,
+        first: A,
+        second: B,
+    ) -> Result<(CellRc<A>, CellRc<B>), (A, B)> {
+        let pair = Self::in_cells(cells, (first, second))?;
+        // The last handle names one half, so it drops the pair through this, not through its view.
+        pair.head().whole.set(Some(drop_whole::<(A, B)>));
+        let other = pair.clone();
+        // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
+        // lives as long as the cell does; the cell's `whole` drops the pair it was placed as.
+        unsafe {
+            Ok((
+                pair.part(|pair| {
+                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).0))
+                }),
+                other.part(|pair| {
+                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).1))
+                }),
+            ))
+        }
+    }
+}
+
 impl<T: ?Sized> CellRc<T> {
+    /// This handle as one on a part of its value, `as_part` answering where the part lies.
+    ///
+    /// # Safety
+    /// `as_part` answers a pointer to a value that lives as long as the value it is handed, and
+    /// the cell's `whole` is set: its last handle drops the whole value placed, never the part.
+    unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U> {
+        let this = core::mem::ManuallyDrop::new(self);
+        CellRc {
+            head: this.head,
+            value: as_part(this.value),
+            _owns: PhantomData,
+        }
+    }
+
     /// This handle as one on `U`, the value seen through `as_u`: a trait object of it.
     ///
     /// # Safety
@@ -299,15 +358,21 @@ impl<T: ?Sized> Clone for CellRc<T> {
 
 impl<T: ?Sized> Drop for CellRc<T> {
     fn drop(&mut self) {
-        let handles = &self.head().handles;
-        let left = handles.get().saturating_sub(1);
-        handles.set(left);
+        let head = self.head();
+        let left = head.handles.get().saturating_sub(1);
+        head.handles.set(left);
         if left == 0 {
+            let whole = head.whole.get();
             // SAFETY: this was the last handle, so nothing names the value or the cell after this,
-            // and the value was placed and not dropped. The handle names it as what it was placed
-            // as or as a trait object of it (`Self::unsize`), so this drops the value placed.
+            // and the value was placed and not dropped. A cell whose handles name parts drops the
+            // whole value through `whole` (`Self::part`); any other handle names the value as what
+            // it was placed as or as a trait object of it (`Self::unsize`), so this drops the
+            // value placed.
             unsafe {
-                self.value.as_ptr().drop_in_place();
+                match whole {
+                    Some(drop_whole) => drop_whole(self.head),
+                    None => self.value.as_ptr().drop_in_place(),
+                }
                 give_back(self.head);
             }
         }
@@ -525,5 +590,38 @@ mod tests {
         assert_eq!(cells.in_use(), 1);
         drop((placed, boxed));
         assert_eq!((drops.get(), cells.in_use()), (2, 0));
+    }
+
+    /// Two values placed as halves share one cell: each handle names its own value, the cell
+    /// keeps both until the last handle on either goes, and halves placed in a lent table take
+    /// no memory of the heap. Turned red by halves boxed while a table is lent, or by a cell
+    /// given back while a handle on one half lives.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn halves_share_one_cell_until_the_last_handle_on_either() {
+        let cells = table(CellRc::<(Counted, u32)>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let (placed, made) = crate::table_tests::allocations(|| {
+            CellRc::halves(Some(&cells), Counted(drops.clone()), 7u32)
+        });
+        let (first, second) = placed.ok().expect("a cell");
+        assert_eq!(made, 0, "halves in a lent table take no memory of the heap");
+        assert_eq!((cells.in_use(), *second), (1, 7), "one cell holds both");
+        drop(first);
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (0, 1),
+            "the other half keeps the cell and both values"
+        );
+        drop(second);
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (1, 0),
+            "the last handle drops both and gives the cell back"
+        );
+        let (_, boxed) = CellRc::halves(None, Counted(drops.clone()), 8u32)
+            .ok()
+            .expect("the heap when no table is lent");
+        assert_eq!((*boxed, cells.in_use()), (8, 0), "the heap's takes no cell");
     }
 }

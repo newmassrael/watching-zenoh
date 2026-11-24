@@ -91,7 +91,7 @@ async fn r76_rx_init_ack_advances_to_got_init_ack() {
     );
     // R68a cookie capture invariant still applies through the
     // helper (handle_inbound runs inside poll_and_dispatch_one).
-    let captured = actions.inbound_cookie.lock().unwrap().clone();
+    let captured = actions.fact_inbound_cookie(|slot| slot.clone());
     assert_eq!(captured.as_deref(), Some(cookie.as_slice()));
 }
 
@@ -2205,7 +2205,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
             "frame {sn} is delivered; got {outcome:?}"
         );
     }
-    let rx_before = actions.rx_sn.lock().unwrap().clone();
+    let rx_before = actions.fact_rx_sn(|slot| slot.clone());
 
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_openack_wire(1)))]);
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -2223,7 +2223,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
         "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
     );
     assert_eq!(
-        *actions.rx_sn.lock().unwrap(),
+        actions.fact_rx_sn(|slot| slot.clone()),
         rx_before,
         "the replay did not move the RX baseline"
     );

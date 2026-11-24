@@ -399,14 +399,15 @@ pub(super) fn namespace_egress_stage<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "routing-namespace")]
     {
         let mut msg = msg;
-        R::with_mutex_mut(&payload.namespace_egress, |slot| {
-            if let Some(ns) = slot.as_ref() {
-                wz_session_core::namespace::apply_egress(ns, &mut msg)
-            } else {
-                Ok(())
-            }
-        })
-        .map_err(SendWireError::Codec)?;
+        payload
+            .fact_namespace_egress(|slot| {
+                if let Some(ns) = slot.as_ref() {
+                    wz_session_core::namespace::apply_egress(ns, &mut msg)
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(SendWireError::Codec)?;
         Ok(msg)
     }
     #[cfg(not(feature = "routing-namespace"))]

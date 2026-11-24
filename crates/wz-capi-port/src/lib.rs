@@ -827,6 +827,20 @@ impl WireHolds {
             also.release(session);
         }
     }
+
+    /// The hold on the declaration the key names, taken out of these holds, for a record whose
+    /// own row holds that declaration: the entity then holds it once, there, and the caller gives
+    /// this hold back. `None` for a key that holds it by an object of the ABI's, or not at all;
+    /// that object and the hold of the declaration the entity's retraction names stay here.
+    pub fn take_named(&mut self) -> Option<KeyHold> {
+        match core::mem::take(&mut self.keeps) {
+            Keeps::Hold { held } => Some(held),
+            kept => {
+                self.keeps = kept;
+                None
+            }
+        }
+    }
 }
 
 /// A key as one link names it: the ABI's own, lent, or one the link's own form made, which holds
@@ -1358,6 +1372,40 @@ mod tests {
         assert_eq!(session.released.read(), [4, 6]);
         named.release(&session);
         assert_eq!(session.released.read(), [4, 6, 4]);
+    }
+
+    /// The hold of the declaration a key names comes out of its holds once, and the hold of the
+    /// declaration its entity retracts by stays, given back with the rest; a key that keeps an
+    /// object of the ABI's in place of a hold hands none out and keeps the object. Turned red by
+    /// `WireHolds::take_named` leaving the hold in place (released twice, `[4, 4, 6]`) or taking
+    /// the anchor out (`kept` let go of before the release).
+    #[test]
+    fn the_named_hold_comes_out_of_a_keys_holds_once_and_the_rest_stay() {
+        let session = CountedHolds::default();
+        let mut holds = WireKey::aliased(4, None)
+            .holding(KeyHold::taken(4))
+            .holding_also(KeyHold::taken(6))
+            .into_holds();
+        let named = holds.take_named().expect("the key held what it names");
+        assert_eq!(named.mapping_id(), 4);
+        assert!(holds.take_named().is_none(), "taken once");
+        named.release(&session);
+        holds.release(&session);
+        assert_eq!(session.released.read(), [4, 6]);
+
+        let kept = Arc::new(());
+        let mut anchored = WireKey::literal()
+            .keeping(crate::lodge::Kept::shared(kept.clone()))
+            .into_holds();
+        assert!(anchored.take_named().is_none(), "an anchor is no hold");
+        assert_eq!(Arc::strong_count(&kept), 2, "and stays with the holds");
+        anchored.release(&session);
+        assert_eq!(Arc::strong_count(&kept), 1, "let go of with them");
+        assert_eq!(
+            session.released.read(),
+            [4, 6],
+            "an anchor gives no hold back"
+        );
     }
 
     /// A key that keeps nothing of a session gives nothing back.

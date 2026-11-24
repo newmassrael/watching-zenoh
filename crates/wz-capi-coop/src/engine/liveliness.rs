@@ -29,7 +29,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-#[cfg(feature = "group")]
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 use wz_session_mcu::dial::McuActions;
@@ -37,18 +36,8 @@ use wz_session_mcu::dial::McuActions;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-/// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
-/// entity it names.
 #[cfg(feature = "group")]
-fn wire_key_of(form: WireForm<'_>) -> WireKey {
-    if form.mapping == 0 {
-        return WireKey::literal();
-    }
-    WireKey::aliased(
-        form.mapping,
-        (!form.suffix.is_empty()).then(|| String::from(form.suffix)),
-    )
-}
+use super::transport::TellGroups;
 
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
@@ -75,7 +64,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
             return;
         };
         let form = tables.wire_of(row.key());
-        let wire = wire_key_of(form);
+        let wire = super::group::wire_key_of(form);
         let retraction = row
             .key()
             .names_key()
@@ -107,16 +96,15 @@ pub(super) fn retract_token<C: ClockSource + 'static>(
 }
 
 /// One of the session's own liveliness subscribers, as a row of the session's tables holds it: the
-/// row keeps the key it hears and whether it asked for the tokens alive at its declaration, and
-/// this the rest the session knows of it: the key as the ABI named it, which its Interest names the
-/// key by, and its callback. The subscriber is that one row (`docs/c-abi-architecture.md`, P1),
-/// and so is its callback's life (P11): a call is begun on the row's latch with the session held
-/// and made after it, and an undeclared row is let go of by whoever sees its last call end.
+/// row keeps the key it hears, the declaration its Interest names the key by, which it holds, and
+/// whether it asked for the tokens alive at its declaration, and this the rest the session knows
+/// of it, its callback. The subscriber is that one row (`docs/c-abi-architecture.md`, P1), and so
+/// is its callback's life (P11): a call is begun on the row's latch with the session held and made
+/// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct LivelinessRow {
-    /// The key as the ABI named it: what the subscriber's Interest names its key by on a link of
-    /// the ABI's form and what a group is asked by, and what it keeps alive (the declaration the
-    /// ABI made it on), let go of with the row, with no lock of the session held.
-    wire: WireKey,
+    /// What the ABI's key held besides the declaration the tables' row holds (an object of the
+    /// ABI's), let go of with the row, with no lock of the session held.
+    holds: WireHolds,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: LivelinessSink,
@@ -126,24 +114,18 @@ pub(crate) struct LivelinessRow {
 
 impl super::RowHolds for LivelinessRow {
     fn into_holds(self) -> WireHolds {
-        self.wire.into_holds()
+        self.holds
     }
 }
 
 impl LivelinessRow {
-    /// A subscriber on `wire` as the ABI named its key, handing what it hears to `sink`.
-    pub(crate) fn new(wire: WireKey, sink: LivelinessSink) -> Self {
+    /// A subscriber keeping `holds`, handing what it hears to `sink`.
+    pub(crate) fn new(holds: WireHolds, sink: LivelinessSink) -> Self {
         Self {
-            wire,
+            holds,
             sink,
             latch: CallLatch::new(),
         }
-    }
-
-    /// The key as the ABI named it, which a group is asked by.
-    #[cfg(feature = "group")]
-    pub(super) fn wire(&self) -> &WireKey {
-        &self.wire
     }
 
     /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
@@ -153,24 +135,24 @@ impl LivelinessRow {
             self.sink.call(sample);
         }
     }
+}
 
-    /// Send the Interest of subscriber `id` on `keyexpr` over `actions`: the tokens to come, and
-    /// with `history` the ones alive now, its key named as the link's key-wire form says: whether
-    /// the link took it.
-    pub(super) fn ask<C: ClockSource + 'static>(
-        &self,
-        id: SubId,
-        keyexpr: &str,
-        history: bool,
-        actions: &McuActions<C>,
-    ) -> bool {
-        let id = u64::from(id);
-        let wire = super::on_link(actions, keyexpr, &self.wire);
-        let (mapping_id, suffix) = wire.names_in(keyexpr);
-        actions
-            .send_interest_liveliness_subscriber(id, history, mapping_id, suffix)
-            .is_ok()
-    }
+/// Send the Interest of liveliness subscriber `id` on `keyexpr` over `actions`: the tokens to
+/// come, and with `history` the ones alive now, its key named as the session's tables name it
+/// (`form`) or as the link's key-wire form says: whether the link took it.
+pub(super) fn ask<C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    id: SubId,
+    keyexpr: &str,
+    form: WireForm<'_>,
+    history: bool,
+) -> bool {
+    let named = WireKey::aliased_tail(form.mapping, form.suffix.len());
+    let wire = super::on_link(actions, keyexpr, &named);
+    let (mapping_id, suffix) = wire.names_in(keyexpr);
+    actions
+        .send_interest_liveliness_subscriber(u64::from(id), history, mapping_id, suffix)
+        .is_ok()
 }
 
 /// A call of a liveliness subscriber's callback, begun on its row's latch: where the row lies.

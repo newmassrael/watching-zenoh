@@ -74,7 +74,7 @@ impl TokenCall for Call {
 
 /// A tally that keeps the rounds handed out and the samples they held.
 #[derive(Default)]
-struct Counted {
+pub(crate) struct Counted {
     rounds: std::sync::atomic::AtomicUsize,
     samples: std::sync::atomic::AtomicUsize,
 }

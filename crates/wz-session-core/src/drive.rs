@@ -722,9 +722,14 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     // result that held it, would be a slot of this frame the size of the message.
     match parsed {
         Ok(_) => match inbound_to_fsm_event(frame) {
-            Some(event) => {
-                decide_admitted(event, &frame.control_facts(), to_engine, actions, engine)
-            }
+            Some(event) => decide_admitted(
+                event,
+                &frame.control_facts(),
+                frame.control_chain(),
+                to_engine,
+                actions,
+                engine,
+            ),
             None => match take_decoded(frame) {
                 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
                 InboundFrame::Frame {
@@ -879,6 +884,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 _ => decide_admitted(
                     E::FramingError,
                     &frame.control_facts(),
+                    frame.control_chain(),
                     to_engine,
                     actions,
                     engine,
@@ -896,8 +902,10 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
 /// handshake, the merges and refusals of its extensions, the node's say on the link. Shared by
 /// [`decide_unit_in`] and the in-place reader of a unit that is not a `Frame`
 /// (`read_control_in_place`), so a handshake is judged the same way whichever read it. The
-/// event the engine is to take is handed back in `to_engine`; the engine is read here, never
-/// driven. Inlined into each caller, so the frame each had before holds what it held.
+/// message's facts are of one type whichever read gave them; `chain` is the extension chain
+/// beside them, an Init's or an Open's and empty for any other message, in the form the caller
+/// read it. The event the engine is to take is handed back in `to_engine`; the engine is read
+/// here, never driven. Inlined into each caller, so the frame each had before holds what it held.
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-frame", feature = "session-slot")
@@ -908,7 +916,8 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
 #[cfg_attr(not(feature = "codec-init-body"), allow(unused_variables))]
 fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChainRead>(
     event: crate::session_fsm_unicast::SessionFsmUnicastEvent,
-    facts: &crate::inbound::ControlFacts<'_, C>,
+    facts: &crate::inbound::ControlFacts<'_>,
+    chain: C,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
     engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
@@ -928,9 +937,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // made owned once.
     #[cfg(feature = "codec-init-body")]
     let (peer_patch, peer_region) = match facts {
-        crate::inbound::ControlFacts::Init(init) => {
-            let (patch, region) =
-                crate::extregion::peer_patch_and_region_in(init.extensions.entries());
+        crate::inbound::ControlFacts::Init(_) => {
+            let (patch, region) = crate::extregion::peer_patch_and_region_in(chain.entries());
             (Some(patch), Some(region))
         }
         _ => (None, None),
@@ -957,7 +965,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             )
         )
     ))]
-    let owned_chain = facts.chain().map(crate::inbound::ExtChainRead::held);
+    let owned_chain = chain.held();
     #[cfg(any(
         all(
             feature = "codec-init-body",
@@ -980,7 +988,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             )
         )
     ))]
-    let held: &[crate::transport_profile::ExtEntryOwned] = owned_chain.as_deref().unwrap_or(&[]);
+    let held: &[crate::transport_profile::ExtEntryOwned] = &owned_chain;
     // R311kc — initiator InitAck params validation (zenoh-pico
     // unicast/transport.c:123-140): an InitAck whose size
     // parameters exceed our InitSyn advertisement REJECTS the
@@ -1141,9 +1149,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // the region name below. Placed BEFORE the admissions so a
     // refused Open seeds no SN and adopts no lease.
     #[cfg(feature = "codec-open-body")]
-    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { extensions, .. }) = facts
-    {
-        if !actions.admit_peer_remote_bound_in(extensions.entries()) {
+    if let crate::inbound::ControlFacts::Open(_) = facts {
+        if !actions.admit_peer_remote_bound_in(chain.entries()) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
@@ -2453,9 +2460,7 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         }
     };
     let facts = message.facts();
-    // The facts every reader below that takes no chain reads, made once.
-    let unchained = facts.unchained();
-    actions.observe_control(&unchained);
+    actions.observe_control(&facts);
     // R2825 — one transport message read off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
     note_rx_transport_message(actions);
@@ -2465,8 +2470,15 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         unit.len()
     };
     let mut decided = None;
-    let outcome = match crate::inbound::control_event(message.ext_admission(), &unchained) {
-        Some(event) => decide_admitted(event, &facts, &mut decided, actions, engine),
+    let outcome = match crate::inbound::control_event(message.ext_admission(), &facts) {
+        Some(event) => decide_admitted(
+            event,
+            &facts,
+            message.chain(),
+            &mut decided,
+            actions,
+            engine,
+        ),
         None => match facts {
             #[cfg(feature = "codec-keep-alive")]
             crate::inbound::ControlFacts::KeepAlive => DriverLoopOutcome::SideEffectOnly,
@@ -3073,7 +3085,7 @@ where
     // delivery dispatches must not run under that slot's lock. The Router keys
     // a chain on at most this many bytes of it.
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
-    let peer_len = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    let peer_len = actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         for (to, from) in peer.iter_mut().zip(zid) {
             *to = *from;
@@ -4201,7 +4213,7 @@ where
     else {
         return false;
     };
-    R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
         // chain the rejected frame's conduit owns, not a sibling priority's.
@@ -4290,7 +4302,7 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     // mutex behind one seam); the non-reentrant MCU mutex is safe because
     // `ingest` does not re-enter the session's mutex slots.
     let mut completed: Option<DriverLoopOutcome> = None;
-    let ingest_outcome = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    let ingest_outcome = actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
         // arena when it can be, so the reassembled message is decoded where its

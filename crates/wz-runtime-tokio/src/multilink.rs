@@ -367,9 +367,6 @@ mod tests {
     #[cfg(feature = "codec-close")]
     #[test]
     fn join_link_rejects_tampered_pubkey_and_leaves_primary_untouched() {
-        use crate::runtime_impl::TokioRuntime;
-        use wz_runtime_core::Runtime;
-
         let (primary, _primary_driver) = crate::test_fixtures::recording_actions();
         let (secondary, secondary_driver) = crate::test_fixtures::recording_actions();
 
@@ -379,8 +376,10 @@ mod tests {
         let bound_key = vec![0x01u8, 0x02, 0x03, 0x04];
         let mut tampered = bound_key.clone();
         *tampered.last_mut().unwrap() ^= 0xFF;
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(bound_key));
-        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(tampered));
+        primary.core.fact_multilink_pubkey(|s| *s = Some(bound_key));
+        secondary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(tampered));
 
         let outcome = join_link(&primary, &secondary, 2);
         assert!(
@@ -452,17 +451,16 @@ mod tests {
         Arc<crate::test_fixtures::RecordingLinkDriver>,
         Arc<crate::test_fixtures::RecordingLinkDriver>,
     ) {
-        use crate::runtime_impl::TokioRuntime;
-        use wz_runtime_core::Runtime;
-
         let (primary, primary_driver) = crate::test_fixtures::recording_actions_over(primary_kind);
         let (secondary, secondary_driver) =
             crate::test_fixtures::recording_actions_over(secondary_kind);
 
         // Matching ephemeral identity so the config-equality gate authorizes.
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
-        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        primary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+        secondary.core.fact_multilink_pubkey(|s| *s = Some(key));
         assert!(
             matches!(join_link(&primary, &secondary, 2), JoinOutcome::Joined(_)),
             "the 2nd link joins the shared core"
@@ -766,8 +764,7 @@ mod tests {
         Arc<LendingRecorder>,
         Arc<LendingRecorder>,
     ) {
-        use crate::runtime_impl::{TokioRuntime, TokioTime};
-        use wz_runtime_core::Runtime;
+        use crate::runtime_impl::TokioTime;
         use wz_session_core::link::LinkKind;
         use wz_session_core::qos::Priority;
         use wz_session_core::session_actions::LinkPriorityRange;
@@ -786,8 +783,10 @@ mod tests {
             TokioTime::new(),
         );
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
-        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        primary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+        secondary.core.fact_multilink_pubkey(|s| *s = Some(key));
         assert!(matches!(
             join_link(&primary, &secondary, 2),
             JoinOutcome::Joined(_)
@@ -1386,18 +1385,17 @@ mod tests {
     /// An aggregate of `extra + 1` recording links on the primary's core: the
     /// primary and one joined handle per extra link.
     fn aggregate_of(extra: usize) -> (Arc<SessionLinkActions>, Vec<Arc<SessionLinkActions>>) {
-        use crate::runtime_impl::TokioRuntime;
-        use wz_runtime_core::Runtime;
-
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
         let (primary, _) = crate::test_fixtures::recording_actions();
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        primary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
         let joined = (0..extra)
             .map(|_| {
                 let (secondary, _) = crate::test_fixtures::recording_actions();
-                TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| {
-                    *s = Some(key.clone())
-                });
+                secondary
+                    .core
+                    .fact_multilink_pubkey(|s| *s = Some(key.clone()));
                 match join_link(&primary, &secondary, extra + 1) {
                     JoinOutcome::Joined(handle) => handle,
                     _ => panic!("every link joins the aggregate"),

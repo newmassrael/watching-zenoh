@@ -378,14 +378,8 @@ mod tests {
     /// way the INIT exchange fills them.
     fn named_session(zid: u8) -> Arc<SessionLinkActions> {
         let (actions, _driver) = recording_actions();
-        *actions
-            .remote_peer_zid
-            .lock()
-            .expect("remote_peer_zid poisoned in test fixture") = Some([zid; 4].into());
-        *actions
-            .peer_whatami
-            .lock()
-            .expect("peer_whatami poisoned in test fixture") = Some(WhatAmI::Peer.to_wire());
+        actions.fact_remote_peer_zid(|slot| *slot = Some([zid; 4].into()));
+        actions.fact_peer_whatami(|slot| *slot = Some(WhatAmI::Peer.to_wire()));
         actions
     }
 

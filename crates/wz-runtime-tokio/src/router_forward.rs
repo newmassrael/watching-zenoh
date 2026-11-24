@@ -15575,7 +15575,6 @@ impl RouterLinkWeightSink for RouterForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
     use std::cell::Cell;
     #[cfg(feature = "access-acl")]
@@ -15585,7 +15584,6 @@ mod tests {
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
-    use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::{
         push_names_a_source, read_push_hoplimit, set_push_source,
     };
@@ -16166,13 +16164,13 @@ mod tests {
     /// face received.
     fn face(peer: Zid, wire_whatami: u8) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
         let (actions, sink) = recording_actions();
-        TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+        actions.fact_remote_peer_zid(|s| {
             *s = Some(
                 wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                     .expect("a 1 to 16 byte zid, not all zero"),
             )
         });
-        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
+        actions.fact_peer_whatami(|s| *s = Some(wire_whatami));
         (actions, sink)
     }
 
@@ -16183,7 +16181,7 @@ mod tests {
     #[cfg(feature = "access-acl")]
     fn face_without_zid(wire_whatami: u8) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
         let (actions, sink) = recording_actions();
-        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
+        actions.fact_peer_whatami(|s| *s = Some(wire_whatami));
         (actions, sink)
     }
 
@@ -17250,7 +17248,7 @@ mod tests {
         // A router-role face whose routing zid never surfaced: tier Routers, but
         // held without a graph link (the `added == None` path).
         let (actions, _sink) = recording_actions();
-        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(WIRE_ROUTER));
+        actions.fact_peer_whatami(|s| *s = Some(WIRE_ROUTER));
         fwd.register(FaceId(0), &actions);
         assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].tier, NORTH_REGION);
         assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].link, None);

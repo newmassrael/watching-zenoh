@@ -193,7 +193,8 @@ impl InitCaps {
 /// [`encode_init`]'s: an InitSyn never carries one, an InitAck carries
 /// `cookie_override` or, without one, the parameters' own.
 #[cfg(feature = "codec-init-body")]
-// One body for the write and for the count (`init_frame_len`).
+// Out of line: every Init send writes through this one body (`encode_init` and the lend-only
+// send alike).
 #[inline(never)]
 pub fn encode_init_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -209,43 +210,16 @@ pub fn encode_init_into(
     })
 }
 
-/// The bytes [`encode_init_into`] writes for the same arguments, as the message's
-/// document counts them. It is what a lent slot
-/// for the message must hold, and it is exact, since an Init body has no size
-/// constant that bounds it (its cookie's length is upstream's u16). A message
-/// `init_message` refuses counts as zero: the encoder that follows refuses it
-/// with the same error.
-// Its one caller is `SessionLinkActions::send_init_lent`, so the gate carries
-// `session_actions`' own (`storage-profile` and `session-unicast`).
-#[cfg(all(
-    feature = "tx-lend-only",
-    feature = "storage-profile",
-    feature = "session-unicast",
-    feature = "codec-init-body",
-    any(feature = "session-unicast-open", feature = "session-unicast-accept")
-))]
-pub(crate) fn init_frame_len(
-    params: &SessionInitParams,
-    caps: InitCaps,
-    is_ack: bool,
-    extensions: ChainRef<'_>,
-    cookie_override: Option<&[u8]>,
-) -> usize {
-    // Counted by the writer itself, so the count and the write are one compiled encoder and
-    // the document's separate measure is not linked.
-    let mut count = crate::tx_buf::CountTxBuf::new();
-    match encode_init_into(
-        &mut count,
-        params,
-        caps,
-        is_ack,
-        extensions,
-        cookie_override,
-    ) {
-        Ok(()) => crate::tx_buf::TxBuf::len(&count),
-        Err(_) => 0,
-    }
-}
+/// What a lend-only handshake send asks its link to lend: the most an Init or an Open can be on
+/// the wire, so each is written once into the slot, with nothing measured first. Every transport
+/// message travels in one batch, and the widest batch the wire frames is upstream's
+/// `BatchSize::MAX` ([`crate::session_init_params::RX_BUFFER_SIZE`]): the Init body's own codec
+/// bound (`InitBody::MAX_ENCODED_BYTES`, a cookie of a u16 length) is past it, and an Open body
+/// has no bound of its own. A link lends up to this much
+/// ([`crate::link::BoxedLinkDriver::tx_slot_acquire`]); a message longer than the slot it lent is
+/// refused by the write.
+#[cfg(feature = "tx-lend-only")]
+pub const HANDSHAKE_LEND_WANT: usize = crate::session_init_params::RX_BUFFER_SIZE;
 
 /// The extension chain of a transport message as its document is handed it: the
 /// entries a sender holds, read where they are, each presented as the parts the
@@ -415,7 +389,7 @@ impl TransportInitSource for InitMessage<'_, '_> {
     }
 }
 
-/// The Init message [`encode_init_into`] writes and [`init_frame_len`] counts.
+/// The Init message [`encode_init_into`] writes.
 /// `LengthOutOfRange` for a zid outside the protocol's 1..=16 bytes or a cookie
 /// past its `u16` length.
 #[cfg(feature = "codec-init-body")]
@@ -549,7 +523,7 @@ pub fn encode_open_into(
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
-// One body for the write and for the count (`open_head_len`).
+// Out of line: the lend-only Open writes its head from two arms (an echoed cookie and none).
 #[inline(never)]
 pub(crate) fn encode_open_head_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -577,9 +551,6 @@ pub(crate) fn encode_open_head_into(
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
-// Out of line: its sizer (`ext_chain_len`) runs it over a counting buffer, and inlined there it
-// was a second copy of the writer beside the one the send calls.
-#[inline(never)]
 pub(crate) fn encode_held_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     entries: ChainRef<'_>,
@@ -622,43 +593,6 @@ fn open_head_byte(message: &OpenMessage<'_, '_>, has_ext: bool) -> u8 {
     header
 }
 
-/// The bytes [`encode_open_head_into`] writes for the same arguments, whether or
-/// not a chain follows (its Z flag is a bit of the header, not a byte): exact,
-/// since an Open body has no size constant (its cookie's length is a `u32`), and
-/// zero for a message `open_message` refuses. With `ext_chain::ext_chain_len` of
-/// the chain it is what a lent slot for the Open must hold, as `init_frame_len`
-/// is for Init.
-// Its callers are the lend-only Open sends in `session_actions`, so the gate
-// carries that module's own (`storage-profile` and `session-unicast`).
-#[cfg(all(
-    feature = "tx-lend-only",
-    feature = "storage-profile",
-    feature = "session-unicast",
-    feature = "codec-open-body",
-    any(feature = "session-unicast-open", feature = "session-unicast-accept")
-))]
-pub(crate) fn open_head_len(
-    params: &SessionInitParams,
-    initial_sn: u64,
-    is_ack: bool,
-    cookie_override: Option<&[u8]>,
-) -> usize {
-    // Counted by the writer itself, as `init_frame_len` counts; the Z flag is a bit of the
-    // header and changes no length.
-    let mut count = crate::tx_buf::CountTxBuf::new();
-    match encode_open_head_into(
-        &mut count,
-        params,
-        initial_sn,
-        is_ack,
-        cookie_override,
-        false,
-    ) {
-        Ok(()) => crate::tx_buf::TxBuf::len(&count),
-        Err(_) => 0,
-    }
-}
-
 /// An Open message as `transport_open` writes it: the body, and the chain where
 /// it is held. The header presents the message id and the lease unit (T); A
 /// follows from the body (no cookie) and Z from the chain.
@@ -692,7 +626,7 @@ impl TransportOpenSource for OpenMessage<'_, '_> {
 }
 
 /// The Open message [`encode_open_into`] writes, and whose head
-/// `encode_open_head_into` writes and `open_head_len` counts.
+/// `encode_open_head_into` writes.
 /// `LengthOutOfRange` for a cookie past the protocol's `u32` length.
 #[cfg(feature = "codec-open-body")]
 fn open_message<'p, 'e>(
@@ -1117,7 +1051,7 @@ mod tests {
     /// The Open the lend-only send writes in two steps, the head and then the
     /// chain where it is staged, is the Open written whole: the Z flag follows the
     /// chain's presence, and the cookie and the chain land where the one encoder
-    /// puts them. Where the lend-only sizer is built, it counts exactly the head.
+    /// puts them.
     #[cfg(feature = "codec-open-body")]
     #[test]
     fn an_open_written_head_then_chain_is_the_open_written_whole() {
@@ -1150,82 +1084,12 @@ mod tests {
                         !chain.is_empty(),
                     )
                     .expect("head");
-                    let head = split.len();
                     super::encode_held_chain_into(&mut split, chain.into()).expect("chain");
                     assert_eq!(split, whole, "ack {is_ack}, {} ext(s)", chain.len());
                     assert_eq!(
                         whole[0] & wire_const::FLAG_T_Z != 0,
                         !chain.is_empty(),
                         "the Z flag says whether a chain follows"
-                    );
-                    #[cfg(all(
-                        feature = "tx-lend-only",
-                        feature = "storage-profile",
-                        feature = "session-unicast",
-                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-                    ))]
-                    assert_eq!(
-                        super::open_head_len(&params, 1234, is_ack, cookie),
-                        head,
-                        "the sizer counts the head it writes"
-                    );
-                    #[cfg(all(
-                        feature = "tx-lend-only",
-                        feature = "storage-profile",
-                        feature = "session-unicast",
-                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-                    ))]
-                    assert_eq!(
-                        crate::ext_chain::ext_chain_len(chain.into()),
-                        split.len() - head,
-                        "the sizer counts the chain it writes"
-                    );
-                    #[cfg(not(all(
-                        feature = "tx-lend-only",
-                        feature = "storage-profile",
-                        feature = "session-unicast",
-                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-                    )))]
-                    let _ = head;
-                }
-            }
-        }
-    }
-
-    /// The lend-only Init sizer counts exactly what the writer writes, with and without a
-    /// chain, for an InitSyn and for an InitAck with and without a cookie of its own.
-    #[cfg(all(
-        feature = "codec-open-body",
-        feature = "tx-lend-only",
-        feature = "storage-profile",
-        feature = "session-unicast",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-    ))]
-    #[test]
-    fn the_init_sizer_counts_the_init_it_writes() {
-        let params = open_params(10_000);
-        let caps = super::InitCaps::of(&params);
-        let entries = [crate::extpatch::encode_patch_ext()];
-        let cookie = [0x5Au8; 12];
-        for is_ack in [false, true] {
-            for chain in [&entries[..], &[][..]] {
-                for cookie_override in [None, Some(&cookie[..])] {
-                    let mut wire = alloc::vec::Vec::new();
-                    super::encode_init_into(
-                        &mut wire,
-                        &params,
-                        caps,
-                        is_ack,
-                        chain.into(),
-                        cookie_override,
-                    )
-                    .expect("writes");
-                    assert_eq!(
-                        super::init_frame_len(&params, caps, is_ack, chain.into(), cookie_override),
-                        wire.len(),
-                        "ack {is_ack}, {} ext(s), cookie {}",
-                        chain.len(),
-                        cookie_override.is_some()
                     );
                 }
             }

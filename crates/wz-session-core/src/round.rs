@@ -129,6 +129,20 @@ pub trait RoundCalls: 'static {
     type Tally: RoundTally;
 }
 
+/// What the session's planes are made of in an engine's own types beyond what its round owes:
+/// whether the session's own queryables answer its gets, and the locks the planes keep their state
+/// and their queues under. The get plane ([`crate::get_plane`]) and the query plane
+/// ([`crate::query_plane`]) read both.
+pub trait PlaneCalls: RoundCalls {
+    /// Whether the session's own queryables answer a get of the session on the thread that holds
+    /// the session's lock: the get plane captures the callback the answer reaches, and the query
+    /// plane notes the calls the get begins.
+    type LocalAnswers: Presence;
+    /// The locks of the planes' state and of the queues every delivery looks at
+    /// ([`Queued`](crate::plane_lock::Queued)).
+    type Queues: LockFamily;
+}
+
 /// What a round counts of the rounds it hands out, for an engine that reads it: `()` counts
 /// nothing, and the count is not even made.
 pub trait RoundTally: Default + Send + Sync {

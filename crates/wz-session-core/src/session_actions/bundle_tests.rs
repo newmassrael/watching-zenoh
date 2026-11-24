@@ -420,9 +420,7 @@ mod reply_egress_gate {
 mod handshake_records {
     use alloc::vec;
 
-    use wz_runtime_core::Runtime;
-
-    use super::{bundle, PlainRuntime};
+    use super::bundle;
 
     const ACCEPTS: bool = cfg!(feature = "session-unicast-accept");
 
@@ -450,10 +448,9 @@ mod handshake_records {
         actions
             .handle_inbound(&init_syn)
             .expect("the InitSyn decodes in either build");
-        let routed = PlainRuntime::with_mutex_mut(&actions.remote_peer_zid, |slot| *slot);
-        let bound = PlainRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot);
-        let caps =
-            PlainRuntime::with_mutex_mut(&actions.inbound_peer_init_caps, |slot| slot.is_some());
+        let routed = actions.fact_remote_peer_zid(|slot| *slot);
+        let bound = actions.fact_inbound_peer_zid(|slot| *slot);
+        let caps = actions.fact_inbound_peer_init_caps(|slot| slot.is_some());
         let expected = ACCEPTS.then_some(&ZID[..]);
         assert_eq!(routed.as_deref(), expected, "the zid the routing reads");
         assert_eq!(bound.as_deref(), expected, "the zid the cookie binds");
@@ -477,11 +474,10 @@ mod handshake_records {
         actions
             .handle_inbound(&open_syn)
             .expect("the OpenSyn decodes in either build");
-        let kept =
-            PlainRuntime::with_mutex_mut(&actions.inbound_opensyn_cookie, |slot| slot.is_some());
+        let kept = actions.fact_inbound_opensyn_cookie(|slot| slot.is_some());
         assert_eq!(kept, ACCEPTS, "the echoed cookie");
         assert!(
-            PlainRuntime::with_mutex_mut(&actions.peer_open_lease_ms, |slot| slot.is_none()),
+            actions.fact_peer_open_lease_ms(|slot| slot.is_none()),
             "no lease is taken from an OpenSyn that was only read"
         );
     }
@@ -509,6 +505,131 @@ fn the_heap_paths_opening_handshake_reaches_the_link() {
     assert_eq!(link.written.load(Ordering::SeqCst), 1, "the InitSyn");
     binding.send_open_syn();
     assert_eq!(link.written.load(Ordering::SeqCst), 2, "and the OpenSyn");
+}
+
+/// The lend-only handshake senders write each message once, into a slot asked for by the bound
+/// every handshake message fits and not by the message's own length, which nothing measures
+/// before the write; the link is handed the bytes written. A slot shorter than the message
+/// refuses it, counted, and nothing reaches the link.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "session-unicast-open"
+))]
+mod lent_handshake {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    use super::{params, NoEntropy, PlainRuntime, StillClock};
+    use crate::handshake_encode::HANDSHAKE_LEND_WANT;
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::session_actions::{SessionActionsBinding, SessionLinkActions};
+    use crate::session_fsm_unicast::SessionFsmUnicastActions;
+
+    /// A link that lends one slot of a fixed width, whatever it is asked for, and records each
+    /// ask and each send.
+    struct LendingLink {
+        slot: Mutex<Vec<u8>>,
+        asked: Mutex<Vec<usize>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl LendingLink {
+        fn of_width(width: usize) -> Arc<Self> {
+            Arc::new(Self {
+                slot: Mutex::new(alloc::vec![0; width]),
+                asked: Mutex::new(Vec::new()),
+                sent: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl BoxedLinkDriver for LendingLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            self.asked.lock().expect("the asks").push(want);
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {}
+    }
+
+    /// A new session's action bundle over `link`, and the binding the machine drives it through.
+    fn opener(
+        link: &Arc<LendingLink>,
+    ) -> (
+        Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+        SessionActionsBinding<PlainRuntime, StillClock>,
+    ) {
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        let binding =
+            SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
+        (actions, binding)
+    }
+
+    #[test]
+    fn each_opening_message_asks_the_bound_and_sends_what_it_wrote() {
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        binding.send_open_syn();
+        assert_eq!(
+            *link.asked.lock().expect("the asks"),
+            [HANDSHAKE_LEND_WANT, HANDSHAKE_LEND_WANT],
+            "each message asks for the bound, not for a length measured before the write"
+        );
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "the InitSyn and the OpenSyn");
+        assert_eq!(sent[0][0] & 0x1F, wz_codecs::wire_const::T_MID_INIT);
+        assert_eq!(sent[1][0] & 0x1F, wz_codecs::wire_const::T_MID_OPEN);
+        assert_eq!(actions.tx_refusals().no_slot, 0, "nothing was refused");
+    }
+
+    #[test]
+    fn a_slot_shorter_than_the_init_syn_refuses_it_and_sends_nothing() {
+        let link = LendingLink::of_width(4);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        assert_eq!(*link.asked.lock().expect("the asks"), [HANDSHAKE_LEND_WANT]);
+        assert!(link.sent.lock().expect("the sends").is_empty());
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
+    }
 }
 
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
@@ -541,4 +662,38 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
         0,
         "nothing was written"
     );
+}
+
+/// The session's facts are one row under one lock: what a door writes is what the whole row reads,
+/// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
+mod facts_lock {
+    use super::bundle;
+
+    #[test]
+    fn a_fact_written_through_its_door_is_read_in_the_one_row() {
+        let (actions, _link) = bundle();
+        actions.fact_peer_whatami(|slot| *slot = Some(2));
+        actions.fact_cookie_nonce(|slot| *slot = Some(7));
+        let (whatami, nonce) =
+            actions.with_facts(|facts| (facts.handshake.peer_whatami, facts.cookie_nonce));
+        assert_eq!(whatami, Some(2), "the handshake's row");
+        assert_eq!(nonce, Some(7), "the session's row");
+    }
+
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_empties_the_handshake_row_and_keeps_the_cookie_nonce() {
+        let (actions, _link) = bundle();
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
+        actions.fact_cookie_nonce(|slot| *slot = Some(7));
+        actions.reset_for_reopen();
+        let (zid, nonce) =
+            actions.with_facts(|facts| (facts.handshake.inbound_peer_zid, facts.cookie_nonce));
+        assert_eq!(zid, None, "a handshake fact is the transport's, and goes");
+        assert_eq!(
+            nonce,
+            Some(7),
+            "the nonce survives to be drawn over at the next InitAck"
+        );
+    }
 }

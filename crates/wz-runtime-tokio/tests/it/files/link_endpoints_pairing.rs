@@ -237,9 +237,6 @@ async fn quic_datagram_link_pair(
     use wz_runtime_tokio::quic_datagram_pipeline::{
         accept_quic_datagram_on, bind_quic_datagram, dial_quic_datagram, wire_quic_datagram,
     };
-    // A concrete write driver, so the trait must be in scope to call through it (the
-    // udp leg needs no such import: `wire_dialed_link_with_rx` hands back a trait object).
-    use wz_session_core::link::BoxedLinkDriver;
 
     // Self-signed `localhost` cert through the production config builders — the
     // quic_e2e / quic_datagram_e2e pattern (the leaf is its own trust anchor).
@@ -427,7 +424,6 @@ fn client_port_of(locator: &str) -> u16 {
 async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
     use std::os::unix::fs::FileTypeExt;
     use wz_runtime_tokio::unixpipe_pipeline::{bind_unixpipe, dial_unixpipe, wire_unixpipe_stream};
-    use wz_session_core::link::BoxedLinkDriver;
 
     let base = std::env::temp_dir()
         .join(format!("wz-y474-endpoints-{}", std::process::id()))
@@ -517,6 +513,7 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     use wz_runtime_tokio::serial_pipeline::{wire_serial_stream, SerialPort};
+    // A concrete write driver, so the trait must be in scope to call `link_subject` through it.
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::locator::{SerialEndpoint, SerialOptions, SerialTarget};
 

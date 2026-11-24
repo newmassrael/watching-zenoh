@@ -103,7 +103,7 @@ fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     // R68a cookie capture invariant — the cookie bytes from the
     // synthetic wire surface in `inbound_cookie` for the next
     // OpenSyn outbound to echo per RFC §5.M.
-    let captured = actions.inbound_cookie.lock().unwrap().clone();
+    let captured = actions.fact_inbound_cookie(|slot| slot.clone());
     assert_eq!(
         captured.as_deref(),
         Some(peer_cookie.as_slice()),
@@ -830,7 +830,7 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     assert!(
-        actions.inbound_peer_zid.lock().unwrap().is_none(),
+        actions.fact_inbound_peer_zid(|slot| slot.is_none()),
         "slot starts empty"
     );
 
@@ -858,7 +858,7 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
         "wire decodes to InitSyn (is_ack=false)"
     );
 
-    let captured = *actions.inbound_peer_zid.lock().unwrap();
+    let captured = actions.fact_inbound_peer_zid(|slot| *slot);
     assert_eq!(
         captured.as_deref(),
         Some(&[0xB0, 0xB1, 0xB2, 0xB3][..]),
@@ -880,7 +880,7 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     // the Accepting-side capture path, so semantic-wise InitAck
     // should NOT touch this slot to avoid cross-role confusion).
     let seeded = wz_runtime_tokio::session_glue::SessionZid::from([0xAA, 0xBB, 0xCC, 0xDD]);
-    *actions.inbound_peer_zid.lock().unwrap() = Some(seeded);
+    actions.fact_inbound_peer_zid(|slot| *slot = Some(seeded));
 
     // Hand-crafted InitAck wire — has different zid bytes
     // [0xC0..0xC3] AND a 4-byte cookie at the end, with both
@@ -906,7 +906,7 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     let frame = actions.handle_inbound(&wire).expect("InitAck parses");
     assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
 
-    let after = *actions.inbound_peer_zid.lock().unwrap();
+    let after = actions.fact_inbound_peer_zid(|slot| *slot);
     assert_eq!(
         after,
         Some(seeded),
@@ -977,7 +977,7 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
         "Initiating side captures the InitAck zid into the routing identity slot"
     );
     assert!(
-        ini.inbound_peer_zid.lock().unwrap().is_none(),
+        ini.fact_inbound_peer_zid(|slot| slot.is_none()),
         "the R86 cookie slot stays untouched on the Initiating side"
     );
 }
@@ -1069,7 +1069,7 @@ async fn inbound_openack_captures_peer_advertised_lease_ms() {
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);
     engine.process_event(SessionFsmUnicastEvent::LinkOpened);
-    assert_eq!(*actions.peer_open_lease_ms.lock().unwrap(), None);
+    assert_eq!(actions.fact_peer_open_lease_ms(|slot| *slot), None);
 
     let mut peer_params = fixture_session_init_params();
     peer_params.lease_ms = 7_000;
@@ -1085,7 +1085,7 @@ async fn inbound_openack_captures_peer_advertised_lease_ms() {
         SessionFsmUnicastState::Established
     );
     assert_eq!(
-        *actions.peer_open_lease_ms.lock().unwrap(),
+        actions.fact_peer_open_lease_ms(|slot| *slot),
         Some(7_000),
         "peer's advertised lease captured in milliseconds"
     );

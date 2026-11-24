@@ -9,7 +9,7 @@ use crate::bounded::{Arena, ARENA_ALIGN};
 use crate::caps;
 use crate::plane_lock::StdLocks;
 use crate::reply_sink::ReplyKind;
-use crate::round::{RoundRowCounts, RoundRows};
+use crate::round::{RoundCalls, RoundRowCounts, RoundRows};
 use crate::session_tables::{Absent, Present};
 use core::convert::Infallible;
 use core::sync::atomic::Ordering::SeqCst;
@@ -59,10 +59,12 @@ impl RoundCalls for Asking {
     type Tally = ();
 }
 
-impl GetCalls for Asking {
+impl PlaneCalls for Asking {
     type LocalAnswers = Present;
     type Queues = StdLocks;
+}
 
+impl GetCalls for Asking {
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -90,10 +92,12 @@ impl RoundCalls for Remote {
     type Tally = ();
 }
 
-impl GetCalls for Remote {
+impl PlaneCalls for Remote {
     type LocalAnswers = Absent;
     type Queues = StdLocks;
+}
 
+impl GetCalls for Remote {
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }

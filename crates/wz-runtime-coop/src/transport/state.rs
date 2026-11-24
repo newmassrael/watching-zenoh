@@ -120,6 +120,10 @@ pub struct TransportState<T: TransportFaces> {
     /// The cells each link's actions are placed in when the session makes the link, lent from the
     /// arena; none for a plan that laid out none.
     pub actions_cells: Option<LentByteCells>,
+    /// The cells the two halves of each link's actions are placed in together when the session
+    /// makes the link (its own state and the session's kernel, `place_halves`), lent from the
+    /// arena; none for a plan that laid out none, whose halves lie on the heap.
+    pub halves_cells: Option<LentByteCells>,
     /// The key-wire form of each link the session opens: the session's, and the one stated for an
     /// endpoint apart from it (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -333,6 +337,21 @@ impl<T: TransportFaces> TransportState<T> {
         Ok(actions)
     }
 
+    /// The two halves of the actions of a link the session makes, its own state and the session's
+    /// kernel, placed together in their cell of the session's table: a handle on each, as the
+    /// actions hold them. A link past the cells is refused as one past the stack's buffers is.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn place_halves<A, B>(
+        &self,
+        link: A,
+        kernel: B,
+        endpoint: Option<&DialEndpoint>,
+    ) -> Result<(CellRc<A>, CellRc<B>), TransportRefusal> {
+        CellRc::halves(self.halves_cells.as_ref(), link, kernel)
+            .map_err(|_| self.cells_exhausted(endpoint))
+    }
+
     /// The key-wire form of a link dialled to or taken on `endpoint`: the one stated for the
     /// endpoint apart from the session's, or the session's (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -345,17 +364,17 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// A link's gates placed in their cell of the session's table, as the link's driver is in one
-    /// of the stack's: a link past the cells is refused as one past the buffers is.
+    /// of the stack's: a link past the cells is refused as one past the buffers is. The handle
+    /// names the gates as they are, so the engine can reach them as well as pump the link through
+    /// them (`CellRc::into_link`).
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn place_gate<Gate: SessionDatagramLink + 'static>(
         &self,
         gate: Gate,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<CellRc<dyn SessionDatagramLink>, TransportRefusal> {
-        Ok(CellRc::in_cells(self.gate_cells.as_ref(), gate)
-            .map_err(|_| self.cells_exhausted(endpoint))?
-            .into_link())
+    ) -> Result<CellRc<Gate>, TransportRefusal> {
+        CellRc::in_cells(self.gate_cells.as_ref(), gate).map_err(|_| self.cells_exhausted(endpoint))
     }
 
     /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged

@@ -23,8 +23,6 @@ use wz_session_core::reply_sink::ReplyView;
 
 use crate::round::CoopCalls;
 
-use super::CoopLocks;
-
 pub(super) use wz_session_core::get_plane::EndedLegs;
 pub(crate) use wz_session_core::get_plane::{Ended, LegId};
 
@@ -46,12 +44,6 @@ pub(crate) type PendingGet = wz_session_core::pending_get::PendingGet<FanKey>;
 pub(super) use wz_session_core::pending_get::GetKind;
 
 impl GetCalls for CoopCalls {
-    #[cfg(feature = "local-queryable")]
-    type LocalAnswers = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "local-queryable"))]
-    type LocalAnswers = wz_session_core::session_tables::Absent;
-    type Queues = CoopLocks;
-
     fn call(callback: &ReplyCallback, reply: &dyn ReplyView) {
         callback.call(reply);
     }

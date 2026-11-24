@@ -13,7 +13,7 @@ use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::plane_lock::LockFamily;
-use wz_session_core::round::{RoundCall, RoundCalls, SampleCall};
+use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
 use wz_session_core::sink::SampleView;
 
 #[cfg(feature = "query")]
@@ -145,6 +145,14 @@ impl RoundCalls for CoopCalls {
     type Tally = Handed;
     #[cfg(not(all(test, feature = "std")))]
     type Tally = ();
+}
+
+impl PlaneCalls for CoopCalls {
+    #[cfg(feature = "local-queryable")]
+    type LocalAnswers = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "local-queryable"))]
+    type LocalAnswers = wz_session_core::session_tables::Absent;
+    type Queues = crate::engine::CoopLocks;
 }
 
 /// The port's lock, as the lock the round keeps what answers its queries under.
@@ -306,6 +314,12 @@ impl<P> RoundGate<P> {
     /// Asked by the session's step alone, which holds the session's lock.
     pub(crate) unsafe fn new(pump: P, round: Arc<Round>, room: ReadRoom) -> Self {
         Self { pump, round, room }
+    }
+
+    /// The link this gate stands before, as the engine admits it through the gates (`listen`).
+    #[cfg(feature = "listen")]
+    pub(crate) fn pump(&self) -> &P {
+        &self.pump
     }
 
     /// Whether the round has the room of a record, and nothing a source outside the gate owes is

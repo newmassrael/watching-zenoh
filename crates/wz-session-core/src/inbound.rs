@@ -603,13 +603,13 @@ impl InboundFrame {
 /// read where it lies in the receive buffer alike, and neither read is judged by a copy of the
 /// other's rules.
 #[derive(Debug, Clone, Copy)]
-pub enum ControlFacts<'f, C = HeldChain<'f>> {
+pub enum ControlFacts<'f> {
     /// An Init (`T_MID_INIT`).
     #[cfg(feature = "codec-init-body")]
-    Init(InitFacts<'f, C>),
+    Init(InitFacts<'f>),
     /// An Open (`T_MID_OPEN`).
     #[cfg(feature = "codec-open-body")]
-    Open(OpenFacts<'f, C>),
+    Open(OpenFacts<'f>),
     /// A Close (`T_MID_CLOSE`): its reason byte, and whether it closes the whole session
     /// (`_Z_FLAG_T_CLOSE_S`) or only the link it arrived on.
     #[cfg(feature = "codec-close")]
@@ -634,15 +634,15 @@ pub enum ControlFacts<'f, C = HeldChain<'f>> {
     /// A message this read does not take: an id this build has no reader for. It is refused as
     /// [`Self::Refused`] is, and it is no sign of the peer's life, since it was not read.
     ///
-    /// It carries the borrow of the facts' lifetime and their chain's type because a build with no
-    /// handshake reader has no other variant that does, and a parameter nothing names is refused.
-    Unread(core::marker::PhantomData<(&'f (), C)>),
+    /// It carries the borrow of the facts' lifetime because a build with no handshake reader has
+    /// no other variant that does, and a parameter nothing names is refused.
+    Unread(core::marker::PhantomData<&'f ()>),
 }
 
 /// The facts of an Init the judgement reads ([`ControlFacts::Init`]).
 #[cfg(feature = "codec-init-body")]
 #[derive(Debug, Clone, Copy)]
-pub struct InitFacts<'f, C = HeldChain<'f>> {
+pub struct InitFacts<'f> {
     /// `_Z_FLAG_T_INIT_A`: an InitAck, where clear an InitSyn.
     pub is_ack: bool,
     /// The protocol version.
@@ -655,14 +655,12 @@ pub struct InitFacts<'f, C = HeldChain<'f>> {
     pub s: Option<wz_codecs::init_body::InitBodyS>,
     /// The cookie an InitAck carries.
     pub cookie: Option<&'f [u8]>,
-    /// The extension chain, held or read where the message lies.
-    pub extensions: C,
 }
 
 /// The facts of an Open the judgement reads ([`ControlFacts::Open`]).
 #[cfg(feature = "codec-open-body")]
 #[derive(Debug, Clone, Copy)]
-pub struct OpenFacts<'f, C = HeldChain<'f>> {
+pub struct OpenFacts<'f> {
     /// `_Z_FLAG_T_OPEN_A`: an OpenAck, where clear an OpenSyn.
     pub is_ack: bool,
     /// The lease, in milliseconds whatever unit the wire wrote it in.
@@ -671,15 +669,14 @@ pub struct OpenFacts<'f, C = HeldChain<'f>> {
     pub initial_sn: u64,
     /// The cookie an OpenSyn echoes.
     pub cookie: Option<&'f [u8]>,
-    /// The extension chain, held or read where the message lies.
-    pub extensions: C,
 }
 
 /// How the judgement of a received handshake message reads its extension chain, whichever read
 /// the message: the chain a decoded message owns ([`HeldChain`]), or the chain of a message read
-/// where it lies in the receive buffer (`ReadChain`). The judgement is compiled for the read that
-/// hands it the facts, so a receive that reads in place carries no reader of an owned chain, and
-/// the copying decode no reader of one read in place.
+/// where it lies in the receive buffer (`ReadChain`). The chain is handed to the judgement beside
+/// the message's [`ControlFacts`], which are of one type whichever read gave them: only the
+/// readers of the chain are compiled for the read that hands it, so a receive that reads in place
+/// carries no reader of an owned chain, and the copying decode no reader of one read in place.
 pub trait ExtChainRead: Copy + core::fmt::Debug {
     /// One entry as a reader sees it.
     type Entry: crate::ext_view::ExtEntryView;
@@ -968,57 +965,7 @@ impl<'a> Iterator for ReadChainIter<'a> {
     }
 }
 
-impl<'f, C> ControlFacts<'f, C> {
-    /// The facts without their extension chain: what a reader that takes nothing of the chain
-    /// reads, of one type whichever read gave them, so that reader is compiled once.
-    pub fn unchained(self) -> ControlFacts<'f, ()> {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            ControlFacts::Init(init) => ControlFacts::Init(InitFacts {
-                is_ack: init.is_ack,
-                version: init.version,
-                whatami: init.whatami,
-                zid: init.zid,
-                s: init.s,
-                cookie: init.cookie,
-                extensions: (),
-            }),
-            #[cfg(feature = "codec-open-body")]
-            ControlFacts::Open(open) => ControlFacts::Open(OpenFacts {
-                is_ack: open.is_ack,
-                lease: open.lease,
-                initial_sn: open.initial_sn,
-                cookie: open.cookie,
-                extensions: (),
-            }),
-            #[cfg(feature = "codec-close")]
-            ControlFacts::Close { reason, session } => ControlFacts::Close { reason, session },
-            #[cfg(feature = "codec-keep-alive")]
-            ControlFacts::KeepAlive => ControlFacts::KeepAlive,
-            #[cfg(all(
-                feature = "alloc",
-                any(feature = "codec-frame", feature = "reassembly")
-            ))]
-            ControlFacts::Data => ControlFacts::Data,
-            ControlFacts::Refused => ControlFacts::Refused,
-            ControlFacts::Unread(_) => ControlFacts::Unread(core::marker::PhantomData),
-        }
-    }
-
-    /// The extension chain of an Init or an Open, the messages whose chain a judgement reads.
-    pub fn chain(&self) -> Option<C>
-    where
-        C: Copy,
-    {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            ControlFacts::Init(init) => Some(init.extensions),
-            #[cfg(feature = "codec-open-body")]
-            ControlFacts::Open(open) => Some(open.extensions),
-            _ => None,
-        }
-    }
-
+impl ControlFacts<'_> {
     /// The establishment message these facts are of, if they are of one.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     pub fn handshake_message(&self) -> Option<crate::handshake_stray::HandshakeMessage> {
@@ -1038,36 +985,37 @@ impl<'f, C> ControlFacts<'f, C> {
 }
 
 impl InboundFrame {
+    /// The extension chain the session's judgement reads beside [`Self::control_facts`]: an
+    /// Init's or an Open's, and an empty one for any other message, whose chain the judgement
+    /// reads only for its admission ([`Self::ext_admission`]).
+    pub fn control_chain(&self) -> HeldChain<'_> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { extensions, .. } => HeldChain(extensions),
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open { extensions, .. } => HeldChain(extensions),
+            _ => HeldChain(&[]),
+        }
+    }
+
     /// What the session's judgement reads of this message ([`ControlFacts`]).
     pub fn control_facts(&self) -> ControlFacts<'_> {
         match self {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
-                is_ack,
-                body,
-                extensions,
-                ..
-            } => ControlFacts::Init(InitFacts {
+            InboundFrame::Init { is_ack, body, .. } => ControlFacts::Init(InitFacts {
                 is_ack: *is_ack,
                 version: body.version,
                 whatami: body.whatami(),
                 zid: body.zid.as_slice(),
                 s: body.s,
                 cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
-                extensions: HeldChain(extensions),
             }),
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
-                is_ack,
-                body,
-                extensions,
-                ..
-            } => ControlFacts::Open(OpenFacts {
+            InboundFrame::Open { is_ack, body, .. } => ControlFacts::Open(OpenFacts {
                 is_ack: *is_ack,
                 lease: body.lease,
                 initial_sn: body.initial_sn,
                 cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
-                extensions: HeldChain(extensions),
             }),
             #[cfg(feature = "codec-close")]
             InboundFrame::Close {
@@ -2071,7 +2019,7 @@ fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPar
 pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
-    control_event(frame.ext_admission(), &frame.control_facts().unchained())
+    control_event(frame.ext_admission(), &frame.control_facts())
 }
 
 /// [`inbound_to_fsm_event`] over the facts of a message, whichever read them, and the
@@ -2079,7 +2027,7 @@ pub fn inbound_to_fsm_event(
 #[cfg(feature = "session-unicast")]
 pub(crate) fn control_event(
     admission: crate::ext_admit::ExtAdmission,
-    facts: &ControlFacts<'_, ()>,
+    facts: &ControlFacts<'_>,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // R311y630 (§14.1) — THE MANDATORY-EXTENSION RULE, ahead of every
@@ -2146,7 +2094,8 @@ pub(crate) fn control_event(
     feature = "session-unicast"
 ))]
 pub(crate) struct ControlRead<'a> {
-    facts: ControlFacts<'a, ReadChain<'a>>,
+    facts: ControlFacts<'a>,
+    chain: ReadChain<'a>,
     admission: crate::ext_admit::ExtAdmission,
 }
 
@@ -2157,8 +2106,15 @@ pub(crate) struct ControlRead<'a> {
 ))]
 impl<'a> ControlRead<'a> {
     /// The message's facts ([`ControlFacts`]), borrowing the unit it was read from.
-    pub(crate) fn facts(&self) -> ControlFacts<'a, ReadChain<'a>> {
+    pub(crate) fn facts(&self) -> ControlFacts<'a> {
         self.facts
+    }
+
+    /// The extension chain the judgement reads beside [`Self::facts`], as
+    /// [`InboundFrame::control_chain`] gives the decoded message's: an Init's or an Open's, and
+    /// an empty one for any other message.
+    pub(crate) fn chain(&self) -> ReadChain<'a> {
+        self.chain
     }
 
     /// What a conforming participant must do with this message's extension chain, by the rule
@@ -2183,9 +2139,11 @@ impl<'a> ControlRead<'a> {
 pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mut cursor = SceCursor::new(bytes);
-    // Each arm names the message's facts and, for a message that carries a chain, the chain with
-    // the id it is judged under, so the admission is judged once below for all of them.
-    let (facts, chain): (ControlFacts<'_, ReadChain<'_>>, Option<(u8, ReadChain<'_>)>) =
+    // Each arm names the message's facts, the chain the judgement reads beside them and, for a
+    // message that carries a chain, that chain with the id it is judged under, so the admission is
+    // judged once below for all of them.
+    let none = ReadChain::Empty(core::marker::PhantomData);
+    let (facts, kept, judged): (ControlFacts<'_>, ReadChain<'_>, Option<(u8, ReadChain<'_>)>) =
         match header & 0x1F {
             #[cfg(feature = "codec-init-body")]
             wire_const::T_MID_INIT => {
@@ -2221,8 +2179,8 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                         zid: *view.body.zid.inner(),
                         s: view.body.s,
                         cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                        extensions,
                     }),
+                    extensions,
                     Some((wire_const::T_MID_INIT, extensions)),
                 )
             }
@@ -2256,8 +2214,8 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                         ),
                         initial_sn: view.body.initial_sn,
                         cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                        extensions,
                     }),
+                    extensions,
                     Some((wire_const::T_MID_OPEN, extensions)),
                 )
             }
@@ -2279,6 +2237,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                         reason: view.body.reason,
                         session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
                     },
+                    none,
                     Some((wire_const::T_MID_CLOSE, extensions)),
                 )
             }
@@ -2297,6 +2256,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                     });
                 (
                     ControlFacts::KeepAlive,
+                    none,
                     Some((wire_const::T_MID_KEEP_ALIVE, extensions)),
                 )
             }
@@ -2307,29 +2267,34 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             #[cfg(feature = "codec-join")]
             wire_const::T_MID_JOIN => {
                 refuse_join(&mut cursor)?;
-                (ControlFacts::Refused, None)
+                (ControlFacts::Refused, none, None)
             }
             // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
             // them, and nothing of it is kept.
             wire_const::T_MID_OAM => {
                 refuse_oam(&mut cursor)?;
-                (ControlFacts::Refused, None)
+                (ControlFacts::Refused, none, None)
             }
             _ => {
                 return Ok((
                     ControlRead {
                         facts: ControlFacts::Unread(core::marker::PhantomData),
+                        chain: none,
                         admission: crate::ext_admit::ExtAdmission::Unjudged,
                     },
                     0,
                 ))
             }
         };
-    let admission = chain.map_or(crate::ext_admit::ExtAdmission::Unjudged, |(mid, chain)| {
+    let admission = judged.map_or(crate::ext_admit::ExtAdmission::Unjudged, |(mid, chain)| {
         judge_transport_chain(mid, &chain)
     });
     Ok((
-        ControlRead { facts, admission },
+        ControlRead {
+            facts,
+            chain: kept,
+            admission,
+        },
         bytes.len().saturating_sub(cursor.remaining()),
     ))
 }
@@ -3570,23 +3535,21 @@ mod control_read_tests {
             (Ok((message, used)), Ok((frame, decoded_used))) => {
                 let facts = message.facts();
                 let frame_facts = frame.control_facts();
-                // Fact by fact and chain by chain: the two reads' facts are of two types.
+                // The facts are of one type whichever read gave them; the chains are of two, and
+                // agree entry by entry.
                 assert_eq!(
-                    format!("{:?}", facts.unchained()),
-                    format!("{:?}", frame_facts.unchained()),
+                    format!("{facts:?}"),
+                    format!("{frame_facts:?}"),
                     "{wire:02x?}"
                 );
                 assert_eq!(
-                    format!("{:?}", facts.chain()),
-                    format!("{:?}", frame_facts.chain()),
+                    format!("{:?}", message.chain()),
+                    format!("{:?}", frame.control_chain()),
                     "{wire:02x?}"
                 );
                 assert_eq!(used, decoded_used, "{wire:02x?}");
                 assert_eq!(
-                    format!(
-                        "{:?}",
-                        control_event(message.ext_admission(), &facts.unchained())
-                    ),
+                    format!("{:?}", control_event(message.ext_admission(), &facts)),
                     format!("{:?}", inbound_to_fsm_event(&frame)),
                     "{wire:02x?}"
                 );
@@ -3618,8 +3581,8 @@ mod control_read_tests {
             (Ok(used), Ok((frame, decoded_used))) => {
                 assert_eq!(used, decoded_used, "{wire:02x?}");
                 assert_eq!(
-                    format!("{:?}", slot.control_facts().unchained()),
-                    format!("{:?}", frame.control_facts().unchained()),
+                    format!("{:?}", slot.control_facts()),
+                    format!("{:?}", frame.control_facts()),
                     "{wire:02x?}"
                 );
                 assert_eq!(
@@ -3781,16 +3744,12 @@ mod control_read_tests {
         ];
         let (message, used) = read_control(&wire).expect("an InitSyn with a chain");
         assert_eq!(used, wire.len());
-        let ControlFacts::Init(read) = message.facts() else {
-            panic!("an Init");
-        };
+        assert!(matches!(message.facts(), ControlFacts::Init(_)));
         let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
-        let ControlFacts::Init(held) = frame.control_facts() else {
-            panic!("an Init");
-        };
+        assert!(matches!(frame.control_facts(), ControlFacts::Init(_)));
         // Each read is judged over its own form of the chain.
-        let _: ReadChain<'_> = read.extensions;
-        let _: HeldChain<'_> = held.extensions;
+        let read: ReadChain<'_> = message.chain();
+        let held: HeldChain<'_> = frame.control_chain();
         fn answers<C: ExtChainRead>(chain: C) {
             let north = crate::extregion::RegionName::new("north").expect("a region name");
             assert_eq!(chain.entries().count(), 2);
@@ -3805,19 +3764,17 @@ mod control_read_tests {
             );
             assert_eq!(chain.held().len(), 2);
         }
-        answers(read.extensions);
-        answers(held.extensions);
-        assert_eq!(
-            format!("{:?}", read.extensions),
-            format!("{:?}", held.extensions)
-        );
+        answers(read);
+        answers(held);
+        assert_eq!(format!("{read:?}"), format!("{held:?}"));
     }
 
-    /// The facts without their chain read alike from both reads, of one type whichever read gave
-    /// them, and only an Init or an Open has a chain to read.
+    /// The facts read alike from both reads, of one type whichever read gave them, and the chain
+    /// the judgement reads beside them is an Init's or an Open's only: a Close's chain is judged
+    /// for its admission and handed to no reader, by either read.
     #[cfg(feature = "codec-init-body")]
     #[test]
-    fn the_facts_without_their_chain_agree_across_the_two_reads() {
+    fn the_facts_agree_across_the_two_reads_and_only_a_handshake_hands_its_chain() {
         let wire = [
             wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
             0x09,
@@ -3835,21 +3792,34 @@ mod control_read_tests {
         ];
         let (message, _) = read_control(&wire).expect("an InitSyn with a chain");
         let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
-        let read = message.facts();
-        let held = frame.control_facts();
-        assert!(read.chain().is_some());
-        assert!(held.chain().is_some());
-        let unchained: ControlFacts<'_, ()> = read.unchained();
-        assert_eq!(format!("{unchained:?}"), format!("{:?}", held.unchained()));
+        let read: ControlFacts<'_> = message.facts();
+        let held: ControlFacts<'_> = frame.control_facts();
+        assert_eq!(format!("{read:?}"), format!("{held:?}"));
         assert_eq!(
-            unchained.handshake_message(),
+            read.handshake_message(),
             Some(crate::handshake_stray::HandshakeMessage::InitSyn)
         );
+        assert_eq!(message.chain().entries().count(), 2);
+        assert_eq!(frame.control_chain().entries().count(), 2);
         #[cfg(feature = "codec-keep-alive")]
         {
             let (keep_alive, _) =
                 read_control(&[wire_const::T_MID_KEEP_ALIVE]).expect("a KeepAlive");
-            assert!(keep_alive.facts().chain().is_none());
+            assert_eq!(keep_alive.chain().entries().count(), 0);
+        }
+        // A Close whose chain, behind its reason, carries one entry the admission rule lets pass
+        // (a unit at id 0x2, not mandatory): read by both, and handed to the judgement by neither.
+        #[cfg(feature = "codec-close")]
+        {
+            let wire = [wire_const::T_MID_CLOSE | wire_const::FLAG_T_Z, 0x07, 0x02];
+            let (close, _) = read_control(&wire).expect("a Close with a chain");
+            let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
+            assert!(matches!(
+                close.facts(),
+                ControlFacts::Close { reason: 0x07, .. }
+            ));
+            assert_eq!(close.chain().entries().count(), 0);
+            assert_eq!(frame.control_chain().entries().count(), 0);
         }
     }
 
