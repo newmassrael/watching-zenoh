@@ -70,6 +70,7 @@ use crate::result::{
     Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
 use crate::session::z_loaned_session_t;
+use crate::sized::{Out, SizedOut};
 
 /// A send of a message sent on a period: while sends are held, only the latest of its instance
 /// is kept.
@@ -109,10 +110,13 @@ pub struct wz_ext_replay_shape_t {
     pub instances: u32,
 }
 
-/// What a cache counted.
+/// What a cache counted, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_replay_publisher_counts_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// Frames recorded.
     pub recorded: u64,
     /// Held event frames given up.
@@ -121,6 +125,24 @@ pub struct wz_ext_replay_publisher_counts_t {
     pub periodic_replaced: u64,
     /// Answers begun.
     pub answers: u64,
+}
+
+impl Default for wz_ext_replay_publisher_counts_t {
+    /// Nothing counted, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            recorded: 0,
+            deferred_overwritten: 0,
+            periodic_replaced: 0,
+            answers: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_replay_publisher_counts_t {
+    const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// How a cache serves, under `replay-reply-shape = segmented`: the segment profile and the
@@ -871,19 +893,20 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_phase(
 }
 
 /// What the cache counted, written to `out`. `Z_ERR_NULL` for a null cache, the gravestone or a
-/// null `out`.
+/// null `out`; `Z_EINVAL` for a `struct_size` short of the struct, nothing written then.
 ///
 /// # Safety
-/// `this_` is null or a loaned cache; `out` is null or writable.
+/// `this_` is null or a loaned cache; `out` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_replay_publisher_counts(
     this_: *const wz_ext_loaned_replay_publisher_t,
     out: *mut wz_ext_replay_publisher_counts_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         let Some(handle) = handle_of(this_) else {
             return Z_ERR_NULL;
         };
@@ -891,12 +914,13 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_counts(
             Some(cache) => cache.counts(),
             None => return Z_ERR_NULL,
         };
-        *out = wz_ext_replay_publisher_counts_t {
+        out.put(&wz_ext_replay_publisher_counts_t {
+            struct_size: 0,
             recorded: counts.recorded,
             deferred_overwritten: counts.deferred_overwritten,
             periodic_replaced: counts.periodic_replaced,
             answers: counts.answers,
-        };
+        });
         Z_OK
     })
 }
@@ -979,6 +1003,19 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use wz_session_core::limit_binding::Quota;
+
+    /// The counts are refused, untouched, to a struct a byte short of theirs, before the cache is
+    /// read. Turned red by a write before the size is read.
+    #[test]
+    fn counts_short_of_their_struct_are_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_replay_publisher_counts_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size; no cache is named.
+                unsafe { wz_ext_replay_publisher_counts(core::ptr::null(), out) }
+            },
+            Z_EINVAL,
+        );
+    }
 
     /// An answer is copied into the area past the rings, in the cache's order, and nowhere else:
     /// every copy and the release's room lie in the program's storage, aligned wherever that

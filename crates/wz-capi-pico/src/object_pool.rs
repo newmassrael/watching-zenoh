@@ -53,6 +53,7 @@ use crate::process_pool::{self, Counts, Plan, Refused, Unplanned};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
+use crate::sized::{Out, SizedOut};
 
 /// How many size classes the pools are reported by, the largest slot of the smallest 16 bytes and
 /// each one's twice the one before's, up to 16 KiB.
@@ -179,10 +180,13 @@ impl wz_ext_object_pool_counts_t {
 }
 
 /// The pools of one size class, the kinds whose slots it holds together, as
-/// `wz_ext_object_pool_class` reports them.
+/// `wz_ext_object_pool_class` reports them, into a struct the program sized (`crate::sized`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_object_pool_class_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// The class's largest slot: each slot it reports holds an object of at most this many bytes.
     pub slot_bytes: usize,
     /// Its slots; zero while no pool is reserved.
@@ -330,28 +334,31 @@ pub unsafe extern "C" fn wz_ext_object_pool_place(
 /// slot of each twice the one before's), in `out`: its largest slot, and while pools are reserved
 /// their slots and the bytes those take, those in use, the most in use at once and the objects they
 /// refused. `Z_OK`;
-/// `Z_ERR_NULL` for a NULL `out`; `Z_EINVAL` for a `class` past the last.
+/// `Z_ERR_NULL` for a NULL `out`; `Z_EINVAL` for a `class` past the last, or for a `struct_size`
+/// short of the struct, nothing written then.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_object_pool_class(
     class: usize,
     out: *mut wz_ext_object_pool_class_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         if class >= WZ_EXT_OBJECT_POOL_CLASSES {
             return Z_EINVAL;
         }
         let report = process_pool::report(class);
-        *out = wz_ext_object_pool_class_t {
+        out.put(&wz_ext_object_pool_class_t {
+            struct_size: 0,
             slot_bytes: report.slot_bytes,
             slots: report.slots,
             in_use: report.in_use,
             high_water: report.high_water,
             refused: report.refused,
             bytes: report.bytes,
-        };
+        });
         Z_OK
     })
 }
@@ -540,6 +547,19 @@ mod tests {
         }
         // SAFETY: a null pointer is the case under test.
         assert_eq!(unsafe { stated(ptr::null()) }, Err(Z_ERR_NULL));
+    }
+
+    /// The report of a class is refused, untouched, to a struct a byte short of the struct.
+    /// Turned red by a write before the size is read.
+    #[test]
+    fn a_class_report_short_of_the_struct_is_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_object_pool_class_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size.
+                unsafe { wz_ext_object_pool_class(0, out) }
+            },
+            Z_EINVAL,
+        );
     }
 
     /// Counts that make no pool answer an invalid value, and counts past the address space no
