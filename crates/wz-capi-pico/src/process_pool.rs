@@ -712,23 +712,30 @@ impl Blocks {
         (len / MIN_BLOCK).div_ceil(8)
     }
 
-    /// Lay an area of `len` bytes at `start` from `base`, its marks after it, every block free.
+    /// An area of no bytes with no free block, which [`Self::lay`] lays where it is held.
+    const UNLAID: Self = Self {
+        start: 0,
+        len: 0,
+        marks: 0,
+        free: [NONE; ORDERS],
+        held: 0,
+    };
+
+    /// Lay this area as `len` bytes at `start` from `base`, its marks after it, every block free.
+    /// In place: the area is laid by calls that take it by reference, so one laid aside and then
+    /// moved where it is held would be copied whole.
     ///
     /// # Safety
-    /// The `len` bytes at `start` and the marks after them are writable and the area's alone, and
-    /// `base + start` is aligned to 16.
-    unsafe fn lay(base: NonNull<u8>, start: usize, len: usize) -> Self {
-        let mut blocks = Self {
-            start,
-            len,
-            // The plan counted the area and its marks with checked arithmetic, so no sum of the
-            // offsets of the memory reaches past what it holds.
-            marks: start.saturating_add(len),
-            free: [NONE; ORDERS],
-            held: 0,
-        };
+    /// The area is [`Self::UNLAID`]. The `len` bytes at `start` and the marks after them are
+    /// writable and the area's alone, and `base + start` is aligned to 16.
+    unsafe fn lay(&mut self, base: NonNull<u8>, start: usize, len: usize) {
+        self.start = start;
+        self.len = len;
+        // The plan counted the area and its marks with checked arithmetic, so no sum of the
+        // offsets of the memory reaches past what it holds.
+        self.marks = start.saturating_add(len);
         base.as_ptr()
-            .add(blocks.marks)
+            .add(self.marks)
             .write_bytes(0, Self::marks_bytes(len));
         // The largest blocks that fit a multiple of `MIN_BLOCK` are the bits of its length, and each
         // lies after the larger ones: its offset is the bits above its own.
@@ -736,11 +743,10 @@ impl Blocks {
         for order in (0..ORDERS).rev() {
             let size = block_bytes(order);
             if len & size != 0 {
-                blocks.push(base, at, order);
+                self.push(base, at, order);
                 at |= size;
             }
         }
-        blocks
     }
 
     /// The free block at `offset`.
@@ -889,23 +895,37 @@ pub(crate) struct Pools {
 }
 
 impl Pools {
-    /// Lay `plan` out over the memory at `base`, every slot free and none of them written.
+    /// Pools of no slot over the memory at `base`, which [`Self::lay`] lays where they are held:
+    /// what it fills is too large to be laid aside and copied in.
+    fn unlaid(base: NonNull<u8>, origin: Origin) -> Self {
+        Self {
+            base,
+            bytes: 0,
+            origin,
+            pools: [Pool {
+                start: 0,
+                slots: 0,
+                size: 0,
+                fresh: 0,
+                free: None,
+            }; KINDS],
+            ends: [0; KINDS],
+            counts: [ClassCount::default(); CLASSES + 1],
+            blocks: Blocks::UNLAID,
+        }
+    }
+
+    /// Lay `plan` out over the pools' memory, every slot free and none of them written.
     ///
     /// # Safety
-    /// `base` is aligned to `SLOT_ALIGN`, the `plan.bytes()` bytes from it are writable and used
-    /// by nothing else while the pools live, and `origin` says where they came from.
-    unsafe fn over(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Self {
-        let mut pools = [Pool {
-            start: 0,
-            slots: 0,
-            size: 0,
-            fresh: 0,
-            free: None,
-        }; KINDS];
-        let mut ends = [0; KINDS];
+    /// The pools are [`Self::unlaid`]. Their `base` is aligned to `SLOT_ALIGN`, the
+    /// `plan.bytes()` bytes from it are writable and used by nothing else while the pools live, and
+    /// their `origin` says where they came from.
+    unsafe fn lay(&mut self, plan: &Plan) {
         let mut at: usize = 0;
         let planned = plan.slots.iter().zip(plan.sizes.iter());
-        for ((pool, end), (&slots, &size)) in pools.iter_mut().zip(ends.iter_mut()).zip(planned) {
+        let laid = self.pools.iter_mut().zip(self.ends.iter_mut());
+        for ((pool, end), (&slots, &size)) in laid.zip(planned) {
             pool.size = size;
             pool.start = at;
             pool.slots = slots;
@@ -914,15 +934,19 @@ impl Pools {
             at = at.saturating_add(slots.saturating_mul(size));
             *end = at;
         }
-        Self {
-            base,
-            bytes: at,
-            origin,
-            pools,
-            ends,
-            counts: [ClassCount::default(); CLASSES + 1],
-            blocks: Blocks::lay(base, at, plan.area),
-        }
+        self.bytes = at;
+        self.blocks.lay(self.base, at, plan.area);
+    }
+
+    /// Lay `plan` out over the memory at `base`, every slot free and none of them written.
+    ///
+    /// # Safety
+    /// As [`Self::lay`], for `base` and `origin`.
+    #[cfg(test)]
+    unsafe fn over(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Self {
+        let mut pools = Self::unlaid(base, origin);
+        pools.lay(plan);
+        pools
     }
 
     /// A free slot of the pool of `kind` for an object whose slot takes `size` bytes, or `None`,
@@ -1043,6 +1067,24 @@ impl Drop for Pools {
 /// The pools reserved now, if any are.
 struct Reserved(Option<Pools>);
 
+impl Reserved {
+    /// The pools reserved now, the build's ([`BUILT_PLAN`]) reserved here when none are; `None`
+    /// when the counts make no pool or the heap has not the memory. One body for every caller, and
+    /// the pools are laid where they are held rather than returned and copied in.
+    #[inline(never)]
+    fn built(&mut self) -> Option<&mut Pools> {
+        if self.0.is_none() {
+            let plan = BUILT_PLAN.ok()?;
+            let (base, layout) = heap_memory(&plan)?;
+            let pools = self.0.insert(Pools::unlaid(base, Origin::Heap(layout)));
+            // SAFETY: the pools are unlaid, over an allocation of this layout's, aligned to the
+            // slot, as long as the plan and no one else's.
+            unsafe { pools.lay(&plan) };
+        }
+        self.0.as_mut()
+    }
+}
+
 // SAFETY: the memory of the pools is reached only through the lock this is held behind, by one
 // thread at a time, and no pointer into it is handed out except to the slot's own object.
 unsafe impl Send for Reserved {}
@@ -1050,7 +1092,7 @@ unsafe impl Send for Reserved {}
 static RESERVED: Lock<Reserved> = Lock::new(Reserved(None));
 
 /// A slot for a `T` of `kind`, from that kind's pool, or `None` when it has none free. The first
-/// object a program makes reserves the build's pools when it reserved none ([`reserve_built`]);
+/// object a program makes reserves the build's pools when it reserved none ([`Reserved::built`]);
 /// when they cannot be reserved either, every object is refused and the next asks again.
 pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
     take_slot(kind, const { slot_size::<T>() })
@@ -1060,12 +1102,7 @@ pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
 /// object calls this one body, which holds the lock, the first reservation and the pool's count.
 #[inline(never)]
 fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
-    RESERVED.with(|reserved| {
-        if reserved.0.is_none() {
-            reserved.0 = reserve_built();
-        }
-        reserved.0.as_mut()?.take(kind, size)
-    })
+    RESERVED.with(|reserved| reserved.built()?.take(kind, size))
 }
 
 /// The counts of the build's pools: `HELD_SESSIONS` sessions, each holding as many of each entity
@@ -1148,12 +1185,20 @@ const fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
     }
 }
 
-/// The pools of `plan` from the heap in one allocation, or `None` when the heap has not the
-/// memory.
-fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
+/// The memory of the pools of `plan` from the heap, in one allocation, and its layout; `None`
+/// when the heap has not the memory.
+fn heap_memory(plan: &Plan) -> Option<(NonNull<u8>, Layout)> {
     let layout = Layout::from_size_align(plan.bytes().ok()?, SLOT_ALIGN).ok()?;
     // SAFETY: the layout is not of zero bytes: a plan has a slot.
     let base = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
+    Some((base, layout))
+}
+
+/// The pools of `plan` from the heap in one allocation, or `None` when the heap has not the
+/// memory.
+#[cfg(test)]
+fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
+    let (base, layout) = heap_memory(plan)?;
     // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
     // one else's.
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
@@ -1166,15 +1211,6 @@ const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
     Ok(objects) => Plan::of(&objects),
     Err(unplanned) => Err(unplanned),
 };
-
-/// The build's pools ([`BUILT_PLAN`]): what the first object a program makes reserves when it
-/// reserved none. `None` when the counts make no pool or the heap has not the memory.
-fn reserve_built() -> Option<Pools> {
-    match BUILT_PLAN {
-        Ok(plan) => reserve_from_heap(&plan),
-        Err(_) => None,
-    }
-}
 
 /// Whether `place` lies in the pools reserved now.
 #[cfg(test)]
@@ -1213,10 +1249,7 @@ pub(crate) fn give_back(place: NonNull<u8>) -> bool {
 /// when none are, as the first object does ([`take`]).
 pub(crate) fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
     RESERVED.with(|reserved| {
-        if reserved.0.is_none() {
-            reserved.0 = reserve_built();
-        }
-        let pools = reserved.0.as_mut()?;
+        let pools = reserved.built()?;
         let base = pools.base;
         // SAFETY: the area was laid over the pools' memory, which this lock holds.
         let (offset, bytes) = unsafe { pools.blocks.take(base, bytes) }?;
@@ -1277,14 +1310,14 @@ pub(crate) fn plan_of(stated: &Counts) -> Result<Plan, Unplanned> {
 /// already: then the memory is not touched, and is let go as `origin` says.
 ///
 /// # Safety
-/// As [`Pools::over`].
+/// As [`Pools::lay`], for `base` and `origin`.
 #[cfg(feature = "object-pool")]
 unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), Refused> {
     let refused = RESERVED.with(|reserved| {
         if reserved.0.is_some() {
             return true;
         }
-        reserved.0 = Some(Pools::over(base, plan, origin));
+        reserved.0.insert(Pools::unlaid(base, origin)).lay(plan);
         false
     });
     if refused {
@@ -1298,13 +1331,7 @@ unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), 
 /// was.
 #[cfg(feature = "object-pool")]
 pub(crate) fn reserve(plan: &Plan) -> Result<(), Refused> {
-    let layout = plan
-        .bytes()
-        .ok()
-        .and_then(|bytes| Layout::from_size_align(bytes, SLOT_ALIGN).ok())
-        .ok_or(Refused::NoMemory)?;
-    // SAFETY: the layout is not of zero bytes: a plan has a slot.
-    let base = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).ok_or(Refused::NoMemory)?;
+    let (base, layout) = heap_memory(plan).ok_or(Refused::NoMemory)?;
     // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
     // one else's.
     unsafe { install(base, plan, Origin::Heap(layout)) }
@@ -2051,6 +2078,34 @@ mod tests {
         );
     }
 
+    /// The build's pools are laid where the reservation holds them as a reservation laid aside
+    /// lays them, and once: the next object finds the same pools. Turned red by a reservation that
+    /// lays its pools again for each object, or leaves a part of them unlaid.
+    #[test]
+    fn the_builds_pools_are_laid_where_they_are_held_and_once() {
+        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let aside = reserve_from_heap(&plan).expect("the test's heap has the memory");
+        let mut reserved = Reserved(None);
+        let pools = reserved.built().expect("the test's heap has the memory");
+        let base = pools.base;
+        assert_eq!(pools.bytes, aside.bytes);
+        assert_eq!(pools.ends, aside.ends);
+        for (laid, kept) in pools.pools.iter().zip(aside.pools.iter()) {
+            assert_eq!(
+                (laid.start, laid.slots, laid.size, laid.fresh, laid.free),
+                (kept.start, kept.slots, kept.size, kept.fresh, kept.free)
+            );
+        }
+        assert_eq!(
+            (pools.blocks.start, pools.blocks.len, pools.blocks.marks),
+            (aside.blocks.start, aside.blocks.len, aside.blocks.marks)
+        );
+        assert_eq!(pools.blocks.held, 0);
+        // The free lists are offsets into each area, so the two read the same.
+        assert_eq!(pools.blocks.free, aside.blocks.free);
+        assert_eq!(reserved.built().map(|pools| pools.base), Some(base));
+    }
+
     /// The build's default pools hold what a pico program holds when the largest channel zenoh-pico's
     /// examples and API tests open for a kind is full: its sixteen elements
     /// (`vendor/zenoh-pico/examples/unix/c11/z_querier.c` @
@@ -2293,8 +2348,11 @@ mod tests {
     fn area_over(memory: &mut Memory, len: usize) -> (Blocks, NonNull<u8>) {
         assert!(len + Blocks::marks_bytes(len) <= memory.0.len());
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
-        // SAFETY: the memory is aligned, holds the area and its marks, and is used by nothing else.
-        (unsafe { Blocks::lay(base, 0, len) }, base)
+        let mut blocks = Blocks::UNLAID;
+        // SAFETY: the area is unlaid, and the memory is aligned, holds the area and its marks, and
+        // is used by nothing else.
+        unsafe { blocks.lay(base, 0, len) };
+        (blocks, base)
     }
 
     /// A payload's bytes are rounded down to whole blocks of the smallest size, and an area past
