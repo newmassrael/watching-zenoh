@@ -59,8 +59,8 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
 use super::plans::{
-    history_selector, parse_heartbeat_source, recovered_sample_from_reply,
-    recovery_query_timeout_ms, AdvPublisherSource,
+    history_selector, parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource,
+    RecoveredView,
 };
 use super::state::{Delivery, Miss, MissHandlers, RecoveryRequest, SampleMissListener, State};
 use crate::prelude::*;
@@ -745,11 +745,11 @@ fn issue_get<E: SessionEngine + ?Sized>(
             ) {
                 return;
             }
-            // `live = false`: the get that produced this reply is the one in flight, so a gap
-            // here must not fan another.
-            if let Some(sample) = recovered_sample_from_reply(reply) {
+            // Recovered, not live: the get that produced this reply is the one in flight, so a
+            // gap here must not fan another.
+            if let Some(view) = RecoveredView::of(reply) {
                 let now = shared.now_ms();
-                let _ = shared.lock().ingest(sample, false, now);
+                let _ = shared.lock().handle_recovered(&view, now);
             }
         })
     };

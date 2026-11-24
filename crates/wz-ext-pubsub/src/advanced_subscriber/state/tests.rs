@@ -862,3 +862,13 @@ fn a_sample_the_machine_held_is_handed_on_owned() {
     state.finish_history();
     assert_eq!(*record.lock().unwrap(), vec![(false, 0xB0)]);
 }
+
+/// A recovered sample the machine hands on at once is read where its reply lies, not copied.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_recovered_sample_handed_on_at_once_is_lent() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default());
+    assert!(state.handle_recovered(&sequenced(0, 0xC0), NOW).is_none());
+    assert_eq!(*record.lock().unwrap(), vec![(true, 0xC0)]);
+}

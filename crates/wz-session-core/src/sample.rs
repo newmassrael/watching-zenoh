@@ -1048,8 +1048,18 @@ impl Sample {
             SampleKind::Del => Self::new_del(view.keyexpr()),
         };
         sample.reliability = view.reliability();
-        sample.timestamp = view.timestamp().cloned();
-        sample.encoding = view.encoding().cloned();
+        // A view that holds the timestamp and the encoding only where they lie gives their parts.
+        sample.timestamp = view.timestamp().cloned().or_else(|| {
+            view.timestamp_parts()
+                .and_then(|(time, zid)| TimestampHint::new(time, zid))
+        });
+        sample.encoding = view.encoding().cloned().or_else(|| {
+            view.encoding_parts()
+                .map(|(packed_id, schema)| EncodingHint {
+                    packed_id,
+                    schema: schema.map(<[u8]>::to_vec),
+                })
+        });
         sample.qos = view.qos();
         sample.attachment = view
             .attachment_shared()

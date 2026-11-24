@@ -13,9 +13,17 @@
 use core::time::Duration;
 
 #[cfg(feature = "advanced-recovery")]
+use wz_session_core::link::RxBytes;
+#[cfg(feature = "advanced-recovery")]
+use wz_session_core::reliability::Reliability;
+#[cfg(feature = "advanced-recovery")]
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 #[cfg(feature = "advanced-recovery")]
-use wz_session_core::sample::{EncodingHint, Sample};
+use wz_session_core::sample::{Sample, SourceInfo, TimestampHint};
+#[cfg(feature = "advanced-recovery")]
+use wz_session_core::sample_kind::SampleKind;
+#[cfg(feature = "advanced-recovery")]
+use wz_session_core::sink::SampleView;
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
@@ -86,37 +94,70 @@ pub fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
 /// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`).
 #[cfg(feature = "advanced-recovery")]
 pub fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
-    let kind = reply.kind();
-    if kind == ReplyKind::Err {
-        return None;
+    RecoveredView::of(reply).map(|view| Sample::from_view(&view))
+}
+
+/// A recovery or history reply read as the sample it recovers, where the reply lies: what
+/// [`recovered_sample_from_reply`] copies out, lent for the length of the reply's call, so a
+/// recovered sample the subscriber hands on at once takes no memory of its own. A Del reply reads
+/// as a Del sample with no payload; a reply carries no QoS, and its reliability is the default.
+#[cfg(feature = "advanced-recovery")]
+pub struct RecoveredView<'a> {
+    reply: &'a dyn ReplyView,
+    kind: SampleKind,
+}
+
+#[cfg(feature = "advanced-recovery")]
+impl<'a> RecoveredView<'a> {
+    /// The sample `reply` recovers, or `None` for an error reply, which recovers nothing.
+    pub fn of(reply: &'a dyn ReplyView) -> Option<Self> {
+        let kind = match reply.kind() {
+            ReplyKind::Err => return None,
+            ReplyKind::Del => SampleKind::Del,
+            ReplyKind::Put => SampleKind::Put,
+        };
+        Some(Self { reply, kind })
     }
-    // A recovered reply's bytes are held, not copied, when the reply holds them
-    // shareable (a reply off the wire is a range of the frame it arrived in), so
-    // the recovered sample is a second reference to that storage as a live one is.
-    let mut sample = match kind {
-        ReplyKind::Del => Sample::new_del(reply.keyexpr()),
-        _ => Sample::new_put_shared(
-            reply.keyexpr(),
-            reply
-                .payload_shared()
-                .cloned()
-                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(reply.payload().to_vec())),
-        ),
-    };
-    sample.source_info = reply.source_info().cloned();
-    sample.timestamp = reply.timestamp().cloned();
-    sample.attachment = reply.attachment_shared().cloned().or_else(|| {
-        reply
-            .attachment()
-            .map(|bytes| wz_session_core::link::RxBytes::from(bytes.to_vec()))
-    });
-    if let Some((packed_id, schema)) = reply.put_encoding() {
-        sample.encoding = Some(EncodingHint {
-            packed_id,
-            schema: schema.map(<[u8]>::to_vec),
-        });
+}
+
+#[cfg(feature = "advanced-recovery")]
+impl SampleView for RecoveredView<'_> {
+    fn keyexpr(&self) -> &str {
+        self.reply.keyexpr()
     }
-    Some(sample)
+    fn payload(&self) -> &[u8] {
+        match self.kind {
+            SampleKind::Put => self.reply.payload(),
+            SampleKind::Del => &[],
+        }
+    }
+    fn kind(&self) -> SampleKind {
+        self.kind
+    }
+    fn reliability(&self) -> Reliability {
+        Reliability::default()
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.reply.attachment()
+    }
+    fn attachment_shared(&self) -> Option<&RxBytes> {
+        self.reply.attachment_shared()
+    }
+    fn timestamp(&self) -> Option<&TimestampHint> {
+        self.reply.timestamp()
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.reply.source_info()
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.reply.put_encoding()
+    }
+    fn payload_shared(&self) -> Option<&RxBytes> {
+        match self.kind {
+            SampleKind::Put => self.reply.payload_shared(),
+            SampleKind::Del => None,
+        }
+    }
 }
 
 /// Build the startup history GET selector from the `_max` cap (`sample_depth`)
