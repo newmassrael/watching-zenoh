@@ -1464,100 +1464,94 @@ impl<C: RoundCalls> Round<C> {
             debug_assert!(kept, "a session's subscribers fit the table of them");
             return;
         }
-        if !first {
+        // A refused call, counted by the sample's congestion control and apart as well when a part
+        // of the sample found no place: refused in one place, for a first row and a later row alike.
+        let (holds_sender, unplaced) = 'refused: {
             // SAFETY: the caller's contract.
-            if let Some(table) = unsafe { self.writable() } {
-                match table.fan {
-                    Fan::Written { holds_sender } => {
-                        if let Some(
-                            last @ Entry {
+            let Some(table) = (unsafe { self.writable() }) else {
+                break 'refused (holds_its_sender(sample.reliability(), sample.qos()), false);
+            };
+            if !first {
+                let fan = table.fan;
+                match fan {
+                    Fan::Written { holds_sender }
+                        if matches!(
+                            table.entries.last(),
+                            Some(Entry {
                                 what: Held::Sample { .. },
                                 ..
-                            },
-                        ) = table.entries.last_mut()
-                        {
-                            match table.callbacks.push(Owed::Subscriber(call)) {
-                                Ok(()) => last.owed = last.owed.saturating_add(1),
-                                Err(full) => {
-                                    self.refuse(holds_sender);
-                                    self.released.settle(full.0);
-                                }
-                            }
-                            return;
+                            })
+                        ) =>
+                    {
+                        if !Self::joins(table) {
+                            break 'refused (holds_sender, false);
                         }
+                        if self.owe_call(table, call) {
+                            if let Some(last) = table.entries.last_mut() {
+                                last.owed = last.owed.saturating_add(1);
+                            }
+                        }
+                        return;
                     }
                     Fan::Refused {
                         holds_sender,
                         unplaced,
-                    } => {
-                        self.refuse_sample(call, holds_sender, unplaced);
-                        return;
-                    }
-                    Fan::None => {}
+                    } => break 'refused (holds_sender, unplaced),
+                    _ => {}
                 }
             }
-        }
-        let sample = Offered::of(sample);
-        let holds_sender = holds_its_sender(sample.reliability, sample.qos);
-        // SAFETY: the caller's contract.
-        let lending = unsafe { self.lending() };
-        // SAFETY: the caller's contract.
-        let Some(table) = (unsafe { self.writable() }) else {
-            self.refuse_sample(call, holds_sender, false);
-            return;
-        };
-        if !Self::takes(table, 1) {
-            table.fan = Fan::Refused {
-                holds_sender,
-                unplaced: false,
+            let sample = Offered::of(sample);
+            let holds_sender = holds_its_sender(sample.reliability, sample.qos);
+            // SAFETY: the caller's contract.
+            let lending = unsafe { self.lending() };
+            // No room is refused as a part that found no place is, and counted apart from it.
+            let placed = if Self::takes(table, 1) {
+                Self::place_sample(table, &sample, lending).ok_or(true)
+            } else {
+                Err(false)
             };
-            self.refuse_sample(call, holds_sender, false);
-            return;
-        }
-        let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
-            table.fan = Fan::Refused {
-                holds_sender,
-                unplaced: true,
+            let (key, payload, rest) = match placed {
+                Ok(parts) => parts,
+                Err(unplaced) => {
+                    table.fan = Fan::Refused {
+                        holds_sender,
+                        unplaced,
+                    };
+                    break 'refused (holds_sender, unplaced);
+                }
             };
-            self.refuse_sample(call, holds_sender, true);
-            return;
-        };
-        let first = table.callbacks.len();
-        let entry = table.entries.push(Entry::owing_one(
-            Held::Sample {
-                head: Head {
-                    kind: sample.kind,
-                    reliability: sample.reliability,
-                    qos: sample.qos,
-                    key,
-                    payload,
+            let first = table.callbacks.len();
+            let entry = table.entries.push(Entry::owing_one(
+                Held::Sample {
+                    head: Head {
+                        kind: sample.kind,
+                        reliability: sample.reliability,
+                        qos: sample.qos,
+                        key,
+                        payload,
+                    },
+                    rest,
                 },
-                rest,
-            },
-            first,
-        ));
-        let kept = match entry {
-            Ok(()) => {
-                if let Some(held) = sample.held {
-                    table.hold_key(key, held);
+                first,
+            ));
+            let kept = match entry {
+                Ok(()) => {
+                    if let Some(held) = sample.held {
+                        table.hold_key(key, held);
+                    }
+                    self.owe_call(table, call)
                 }
-                self.owe_call(table, call)
-            }
-            Err(_) => {
-                self.released.end(call);
-                false
-            }
+                Err(_) => {
+                    self.released.end(call);
+                    false
+                }
+            };
+            debug_assert!(kept, "the table had the room its checks found");
+            table.fan = Fan::Written { holds_sender };
+            // SAFETY: the caller's contract: the session's lock is held.
+            unsafe { self.filled(table) };
+            return;
         };
-        debug_assert!(kept, "the table had the room its checks found");
-        table.fan = Fan::Written { holds_sender };
-        // SAFETY: the caller's contract: the session's lock is held.
-        unsafe { self.filled(table) };
-    }
-
-    /// Refuse `call` of a sample the round keeps no record of: counted by the sample's congestion
-    /// control (`holds_sender`), apart as well when a part of it found no place (`unplaced`), and
-    /// the call ended.
-    fn refuse_sample(&self, call: C::Subscriber, holds_sender: bool, unplaced: bool) {
         if unplaced {
             self.unplaced.fetch_add(1, Ordering::Relaxed);
         }
