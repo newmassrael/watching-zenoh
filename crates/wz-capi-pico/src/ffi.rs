@@ -381,18 +381,23 @@ mod callback_table {
         thread: ThreadId,
     }
 
+    // Out of line, as `here` and the drop are: each takes the table's lock, and every door that
+    // calls into C or waits for a callback would otherwise hold its own copy of the take.
+    #[inline(never)]
     pub(super) fn enter() -> Entered {
         let thread = os::current();
         IN_CALLBACK.with(|threads| threads.push(thread));
         Entered { thread }
     }
 
+    #[inline(never)]
     pub(super) fn here() -> bool {
         let thread = os::current();
         IN_CALLBACK.with(|threads| threads.contains(&thread))
     }
 
     impl Drop for Entered {
+        #[inline(never)]
         fn drop(&mut self) {
             let thread = self.thread;
             IN_CALLBACK.with(|threads| {
