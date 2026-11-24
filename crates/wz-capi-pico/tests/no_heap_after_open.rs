@@ -8,7 +8,9 @@
 //! limits, and allocates nothing after (`docs/upstream-parity.md` D12). Two sessions open over
 //! the program's own transport (an in-memory pipe, `support/pipe_pair.rs`), and once both are open
 //! and their routes are made each operation family is counted in `WINDOWS` windows, each a warm-up
-//! and then `ROUNDS` rounds with the allocator counting. One line per family is printed:
+//! and then `ROUNDS` rounds with the allocator counting. A family that needs another pair (a group,
+//! sessions opened with other settings) is counted on that pair, opened once the one before it is
+//! closed (`Stage`). One line per family is printed:
 //!
 //! ```text
 //! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
@@ -318,6 +320,14 @@ impl Round {
         Round::InstanceKey,
         Round::MessagePayload,
     ];
+
+    /// The stage whose pair the round calls through.
+    fn stage(self) -> Stage {
+        match self {
+            Round::GroupReceive => Stage::Group,
+            _ => Stage::Pipe,
+        }
+    }
 
     /// Whether the build has the capability the round exercises.
     fn built(self) -> bool {
@@ -1324,9 +1334,6 @@ struct Bench {
     replay: Replay,
     #[cfg(feature = "advanced")]
     advanced: Advanced,
-    /// Two members of one group over the program's transport.
-    #[cfg(feature = "multicast-transport")]
-    group: GroupPair,
 }
 
 impl Bench {
@@ -1426,8 +1433,6 @@ impl Bench {
             replay,
             #[cfg(feature = "advanced")]
             advanced,
-            #[cfg(feature = "multicast-transport")]
-            group: GroupPair::open(),
         }
     }
 
@@ -1450,8 +1455,7 @@ impl Bench {
             }
             Round::Get => self.get_and_reply(),
             Round::GroupReceive => {
-                #[cfg(feature = "multicast-transport")]
-                self.group_put_and_hear();
+                unreachable!("{round:?} runs on its own stage's pair")
             }
             Round::KeyexprDeclare => self.keyexpr_declare(),
             Round::LivelinessToken => {
@@ -1853,24 +1857,6 @@ impl Bench {
         );
     }
 
-    /// Put on the group from its sending member and wait until the receiving member's subscriber
-    /// hears it: the round's control, so a round that heard nothing fails whatever it allocated.
-    #[cfg(feature = "multicast-transport")]
-    unsafe fn group_put_and_hear(&self) {
-        let counts = &self.group.counts;
-        let heard = counts.heard.load(Ordering::SeqCst);
-        let mut bytes = payload();
-        assert_eq!(
-            put(self.group.sender(), &mut bytes),
-            Z_OK,
-            "a put on the group is taken"
-        );
-        assert!(
-            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
-            "a put on the group was not heard within {WAIT_BOUND:?}"
-        );
-    }
-
     /// Ask the listener's queryable from the dialler and wait for the answer and the get's end.
     unsafe fn get_and_reply(&self) {
         let counts = &self.pair.counts;
@@ -2062,10 +2048,107 @@ unsafe fn config_document() {
     z_config_drop(z_config_move(&mut config));
 }
 
+/// The open session pair a stage's rounds call through.
+///
+/// The measured build holds two sessions open at once: the release profile is merged onto
+/// zenoh-pico's defconfig, which turns on `WZ_LIMITS_ZENOH_PICO`, and under it `HELD_SESSIONS` is 2
+/// (`deploy/Kconfig.limits:204-207`). Each pair a family needs is therefore opened only after the
+/// one before it is closed, and its windows open only once it is open and its route is made, so
+/// what one pair's open or close leaves running is never counted in another pair's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Two sessions over the program's pipe, and every capability set up beside them.
+    Pipe,
+    /// Two members of one group over the program's transport.
+    Group,
+}
+
+impl Stage {
+    /// Every stage, in the order its pair is opened.
+    const ALL: [Stage; 2] = [Stage::Pipe, Stage::Group];
+
+    /// The stage's pair, open; `None` in a build without the stage's capability, whose rounds are
+    /// then all unbuilt.
+    unsafe fn open(self) -> Option<Open> {
+        match self {
+            Stage::Pipe => Some(Open::Pipe(Bench::open())),
+            Stage::Group => {
+                #[cfg(feature = "multicast-transport")]
+                {
+                    Some(Open::Group(GroupPair::open()))
+                }
+                #[cfg(not(feature = "multicast-transport"))]
+                {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// A stage's pair, open.
+enum Open {
+    Pipe(Bench),
+    #[cfg(feature = "multicast-transport")]
+    Group(GroupPair),
+}
+
+impl Open {
+    /// Run one round of `round`, which is a round of this pair's stage.
+    unsafe fn run(&mut self, round: Round) {
+        match self {
+            Open::Pipe(bench) => bench.run(round),
+            #[cfg(feature = "multicast-transport")]
+            Open::Group(group) => group_put_and_hear(group),
+        }
+    }
+
+    /// Close the pair: whether every closure the library was handed is dropped, and whether the
+    /// transports the pair let go were dropped.
+    unsafe fn close(self) -> (bool, bool) {
+        match self {
+            Open::Pipe(bench) => bench.close(),
+            #[cfg(feature = "multicast-transport")]
+            Open::Group(group) => {
+                let counts = std::sync::Arc::clone(&group.counts);
+                drop(group);
+                // The group's transports are released by its drop, which counts none.
+                (closures_dropped(&counts), true)
+            }
+        }
+    }
+}
+
+/// Whether every closure made with a context of `counts` was dropped within the bound.
+#[cfg(feature = "multicast-transport")]
+fn closures_dropped(counts: &pipe_pair::Counts) -> bool {
+    wait_for(WAIT_BOUND, || {
+        counts.made.load(Ordering::SeqCst) == counts.dropped.load(Ordering::SeqCst)
+    })
+}
+
+/// Put on the group from its sending member and wait until the receiving member's subscriber hears
+/// it: the round's control, so a round that heard nothing fails whatever it allocated.
+#[cfg(feature = "multicast-transport")]
+unsafe fn group_put_and_hear(group: &GroupPair) {
+    let counts = &group.counts;
+    let heard = counts.heard.load(Ordering::SeqCst);
+    let mut bytes = payload();
+    assert_eq!(
+        put(group.sender(), &mut bytes),
+        Z_OK,
+        "a put on the group is taken"
+    );
+    assert!(
+        wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+        "a put on the group was not heard within {WAIT_BOUND:?}"
+    );
+}
+
 /// One window of `round`: the warm-up and the counted rounds.
-unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
+unsafe fn window(open: &mut Open, round: Round) -> Seen {
     for _ in 0..WARM_UP {
-        bench.run(round);
+        open.run(round);
     }
     std::thread::sleep(SETTLE);
     let place = Round::ALL
@@ -2075,7 +2158,7 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
     open_window(0);
     SITE_ROUND.store(place, Ordering::SeqCst);
     for _ in 0..rounds() {
-        bench.run(round);
+        open.run(round);
     }
     std::thread::sleep(SETTLE);
     SITE_ROUND.store(NO_ROUND, Ordering::SeqCst);
@@ -2088,10 +2171,10 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
 }
 
 /// Every window of `round`.
-unsafe fn measure(bench: &mut Bench, round: Round) -> Vec<Seen> {
+unsafe fn measure(open: &mut Open, round: Round) -> Vec<Seen> {
     let mut seen = Vec::with_capacity(windows());
     for _ in 0..windows() {
-        seen.push(window(bench, round));
+        seen.push(window(open, round));
     }
     seen
 }
@@ -2121,13 +2204,26 @@ fn allocations_after_open_are_counted_per_operation_family() {
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
-        let mut bench = Bench::open();
-        let seen: Vec<(Round, Vec<Seen>)> = Round::ALL
-            .into_iter()
-            .filter(|round| round.built())
-            .map(|round| (round, measure(&mut bench, round)))
-            .collect();
-        let (balanced, dropped) = bench.close();
+        let mut seen: Vec<(Round, Vec<Seen>)> = Vec::new();
+        let (mut balanced, mut dropped) = (true, true);
+        for stage in Stage::ALL {
+            let rounds: Vec<Round> = Round::ALL
+                .into_iter()
+                .filter(|round| round.built() && round.stage() == stage)
+                .collect();
+            if rounds.is_empty() {
+                continue;
+            }
+            let Some(mut open) = stage.open() else {
+                continue;
+            };
+            for round in rounds {
+                seen.push((round, measure(&mut open, round)));
+            }
+            let (closures, transports) = open.close();
+            balanced &= closures;
+            dropped &= transports;
+        }
         (seen, balanced, dropped)
     };
     assert!(balanced, "every closure the library was handed is dropped");
