@@ -60,6 +60,7 @@
 //! API rewrite).
 
 use core::fmt;
+use core::mem::MaybeUninit;
 
 use crate::bounded::{BoundedString, Profile, Storage};
 use crate::caps;
@@ -382,6 +383,20 @@ pub fn canonize_parts_into(
     out: &mut [u8],
     dialect: KeyexprDialect,
 ) -> Result<usize, KeyexprCanonError> {
+    // SAFETY: `MaybeUninit<u8>` has the layout of `u8`, and the writer writes only initialized
+    // bytes through the view, so every byte of `out` is still initialized when it is read again.
+    let room = unsafe { &mut *(core::ptr::from_mut(out) as *mut [MaybeUninit<u8>]) };
+    canonize_parts_uninit(parts, room, dialect).map(<[u8]>::len)
+}
+
+/// [`canonize_parts_into`] into room whose bytes need not be initialized, and the form written
+/// there: no byte of `out` past the form is read or written, so a caller that keeps the room on
+/// its stack does not fill it before the walk, as an initialized buffer of the bound would make it.
+pub fn canonize_parts_uninit<'o>(
+    parts: &[&[u8]],
+    out: &'o mut [MaybeUninit<u8>],
+    dialect: KeyexprDialect,
+) -> Result<&'o [u8], KeyexprCanonError> {
     let text = Parts(parts);
     let mut walk = CanonWalk::new(dialect, false);
     let mut len = 0usize;
@@ -397,13 +412,29 @@ pub fn canonize_parts_into(
         let dst = out
             .get_mut(len..end)
             .ok_or(KeyexprCanonError::ExceedsCapacity)?;
-        match piece {
+        let written = match piece {
             Piece::Text { from, .. } => text.copy_into(from, dst),
-            Piece::Fixed(spelling) => dst.copy_from_slice(spelling.as_bytes()),
+            Piece::Fixed(spelling) => write_bytes(dst, spelling.as_bytes()),
+        };
+        // A span past the text's end would leave bytes of the form unwritten, which the form is
+        // read as; the walk hands out none, and one is refused rather than read.
+        if written != count {
+            return Err(KeyexprCanonError::ExceedsCapacity);
         }
         len = end;
     }
-    Ok(len)
+    // SAFETY: the bytes of `out` before `len` are the pieces' `count` bytes each, every one of
+    // them written above; the slice borrows `out` for as long as it is read.
+    Ok(unsafe { core::slice::from_raw_parts(out.as_ptr().cast::<u8>(), len) })
+}
+
+/// `src` written over the start of `dst`, as many bytes as both hold, and how many that is.
+fn write_bytes(dst: &mut [MaybeUninit<u8>], src: &[u8]) -> usize {
+    let n = src.len().min(dst.len());
+    // SAFETY: `n` bytes are read from `src` and written into `dst`, each holding at least that
+    // many, and a shared and an exclusive borrow do not overlap.
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), n) };
+    n
 }
 
 /// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
@@ -473,26 +504,24 @@ impl Parts<'_, '_> {
         None
     }
 
-    /// Fill `dst` with the bytes of the text from `from`, as many as `dst` holds; what lies
-    /// past the end of the text leaves the rest of `dst` as it was.
-    fn copy_into(&self, from: usize, dst: &mut [u8]) {
+    /// Fill `dst` with the bytes of the text from `from`, as many as `dst` holds, and how many
+    /// were written: fewer than `dst` holds when the text ends first, the rest of `dst` left as
+    /// it was.
+    fn copy_into(&self, from: usize, dst: &mut [MaybeUninit<u8>]) -> usize {
         let mut skip = from;
-        let mut rest = dst;
+        let mut written = 0usize;
         for part in self.0 {
-            if rest.is_empty() {
-                return;
-            }
+            let Some(rest) = dst.get_mut(written..).filter(|rest| !rest.is_empty()) else {
+                break;
+            };
             let Some(here) = part.get(skip..) else {
                 skip = skip.saturating_sub(part.len());
                 continue;
             };
             skip = 0;
-            let n = here.len().min(rest.len());
-            // `n` is at most the length of both, so the cut is inside each.
-            let (head, tail) = core::mem::take(&mut rest).split_at_mut(n);
-            head.copy_from_slice(here.get(..n).unwrap_or_default());
-            rest = tail;
+            written = written.saturating_add(write_bytes(rest, here));
         }
+        written
     }
 }
 
@@ -1512,6 +1541,36 @@ mod tests {
         assert_eq!(
             canonize_parts_into(&parts, &mut short, KeyexprDialect::Pico),
             Err(KeyexprCanonError::ExceedsCapacity)
+        );
+    }
+
+    /// The writer into room of no set bytes gives the form the writer into a buffer gives, as a
+    /// view of the room's first bytes, and writes no byte past the form; a form past the room is
+    /// refused as past the capacity. Turned red by a form read from past what was written, or a
+    /// piece written past it.
+    #[test]
+    fn a_form_written_into_unset_room_is_its_first_bytes_and_no_more() {
+        let parts: [&[u8]; 3] = [b"home/te", b"mp/$", b"*$*x"];
+        let mut out = [0u8; 32];
+        let len = canonize_parts_into(&parts, &mut out, KeyexprDialect::Pico).expect("a key");
+        let mut room = [MaybeUninit::new(0xa5u8); 32];
+        let form = canonize_parts_uninit(&parts, &mut room, KeyexprDialect::Pico).expect("a key");
+        assert_eq!(form, b"home/temp/$*x");
+        assert_eq!(form, &out[..len]);
+        // SAFETY: every byte of the room was set before the walk, which writes only bytes.
+        let after = room.map(|byte| unsafe { byte.assume_init() });
+        assert_eq!(&after[..len], b"home/temp/$*x");
+        assert!(after[len..].iter().all(|&byte| byte == 0xa5), "{after:?}");
+
+        let mut short = [MaybeUninit::<u8>::uninit(); 12];
+        assert_eq!(
+            canonize_parts_uninit(&parts, &mut short, KeyexprDialect::Pico),
+            Err(KeyexprCanonError::ExceedsCapacity)
+        );
+        let refused: [&[u8]; 2] = [b"a?", b"b"];
+        assert_eq!(
+            canonize_parts_uninit(&refused, &mut room, KeyexprDialect::Pico),
+            Err(KeyexprCanonError::ContainsSharpOrQmark)
         );
     }
 
