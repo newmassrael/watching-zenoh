@@ -45,9 +45,7 @@ use alloc::vec::Vec;
 use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::Digest;
-use crate::e2e_profile::{
-    check_distinct, child, object, read_json, read_uint, Cover, DocError, Profile,
-};
+use crate::e2e_profile::{child, read_json, Cover, DocError, Pointer, Profile};
 
 /// What the caller supplies for one field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,29 +125,30 @@ impl Values {
     /// appears twice, so a repeat of one is refused here and not resolved
     /// silently.
     pub fn from_tree(root: &Json5Value, reserved: &[&str]) -> Result<Self, DocError> {
-        let entries = object(root, "")?;
-        check_distinct(entries, "")?;
+        let doc = Pointer::text("");
+        let entries = doc.object(root)?;
+        doc.check_distinct(entries)?;
         let mut out = Vec::with_capacity(entries.len());
         let mut address = None;
         for (name, value) in entries
             .iter()
             .filter(|(n, _)| !reserved.contains(&n.as_str()))
         {
-            let here = child("", name);
+            let here = doc.key(name);
             if name == ADDRESS {
-                address = Some(read_uint(value, &here)?);
+                address = Some(here.read_uint(value)?);
                 continue;
             }
             let supplied = match value {
                 Json5Value::Object(parts) => {
-                    check_distinct(parts, &here)?;
+                    here.check_distinct(parts)?;
                     let mut list = Vec::with_capacity(parts.len());
                     for (part, v) in parts {
-                        list.push((part.clone(), read_uint(v, &child(&here, part))?));
+                        list.push((part.clone(), here.key(part).read_uint(v)?));
                     }
                     Supplied::Parts(list)
                 }
-                other => Supplied::Whole(read_uint(other, &here)?),
+                other => Supplied::Whole(here.read_uint(other)?),
             };
             out.push((name.clone(), supplied));
         }
@@ -301,11 +300,13 @@ fn read_be(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b))
 }
 
+/// Write the low `out.len()` bytes of `value`, most significant first. A field
+/// is at most 8 bytes wide (the profile refuses a wider one), so this is a
+/// copy of the tail of the value's own big-endian bytes: a per-byte shift loop
+/// over a length the compiler cannot bound is vectorised at every inlined call.
 pub(crate) fn write_be(out: &mut [u8], value: u64) {
     let n = out.len();
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = (value >> (8 * (n - 1 - i))) as u8;
-    }
+    out.copy_from_slice(&value.to_be_bytes()[8 - n..]);
 }
 
 /// Feed one covered piece of `frame` to `digest`, as it stands on the wire.
@@ -618,11 +619,11 @@ pub fn expect(
     let (crc_at, length_at) = (profile.crc().field, profile.length().field);
     let mut checked = 0;
     let mut differences = Vec::new();
+    let doc = Pointer::text("");
     for (i, (name, supplied)) in expected.entries.iter().enumerate() {
-        let path = child("", name);
-        let refuse = |at: String, reason: String| DocError::invalid(at, reason);
+        let path = doc.key(name);
         let Some(index) = profile.field_index(name) else {
-            return Err(refuse(path, format!("no field is called `{name}`")));
+            return Err(path.refuse(format!("no field is called `{name}`")));
         };
         if index == crc_at || index == length_at {
             let (role, judged_by) = if index == crc_at {
@@ -630,16 +631,15 @@ pub fn expect(
             } else {
                 ("length", "length_matches_frame")
             };
-            return Err(refuse(
-                path,
-                format!("the {role} field `{name}` is judged by `{judged_by}`: leave it out"),
-            ));
+            return Err(path.refuse(format!(
+                "the {role} field `{name}` is judged by `{judged_by}`: leave it out"
+            )));
         }
         if expected.entries[..i]
             .iter()
             .any(|(earlier, _)| earlier == name)
         {
-            return Err(refuse(path, format!("the field `{name}` is stated twice")));
+            return Err(path.refuse(format!("the field `{name}` is stated twice")));
         }
         let field = &profile.fields()[index];
         let report = &opened.fields[index];
@@ -647,22 +647,16 @@ pub fn expect(
             Supplied::Whole(value) => {
                 if !field.parts.is_empty() {
                     let names: Vec<&str> = field.parts.iter().map(|p| p.name.as_str()).collect();
-                    return Err(refuse(
-                        path,
-                        format!(
-                            "the field `{name}` is split into parts: state an object with some of {}",
-                            names.join(", ")
-                        ),
-                    ));
+                    return Err(path.refuse(format!(
+                        "the field `{name}` is split into parts: state an object with some of {}",
+                        names.join(", ")
+                    )));
                 }
                 if *value > field.max_value() {
-                    return Err(refuse(
-                        path,
-                        format!(
-                            "{value} does not fit the {}-byte field `{name}`",
-                            field.bytes
-                        ),
-                    ));
+                    return Err(path.refuse(format!(
+                        "{value} does not fit the {}-byte field `{name}`",
+                        field.bytes
+                    )));
                 }
                 checked += 1;
                 if *value != report.value {
@@ -676,35 +670,27 @@ pub fn expect(
             }
             Supplied::Parts(given) => {
                 if field.parts.is_empty() {
-                    return Err(refuse(
-                        path,
-                        format!("the field `{name}` is not split: state a number"),
-                    ));
+                    return Err(
+                        path.refuse(format!("the field `{name}` is not split: state a number"))
+                    );
                 }
                 for (j, (part_name, value)) in given.iter().enumerate() {
-                    let at = child(&path, part_name);
+                    let at = path.key(part_name);
                     let Some(position) = field.parts.iter().position(|p| &p.name == part_name)
                     else {
-                        return Err(refuse(
-                            at,
-                            format!("the field `{name}` has no part called `{part_name}`"),
-                        ));
+                        return Err(at.refuse(format!(
+                            "the field `{name}` has no part called `{part_name}`"
+                        )));
                     };
                     if given[..j].iter().any(|(earlier, _)| earlier == part_name) {
-                        return Err(refuse(
-                            at,
-                            format!("the part `{part_name}` is stated twice"),
-                        ));
+                        return Err(at.refuse(format!("the part `{part_name}` is stated twice")));
                     }
                     let part = &field.parts[position];
                     if *value > part.max_value() {
-                        return Err(refuse(
-                            at,
-                            format!(
-                                "{value} does not fit the {}-bit part `{part_name}` of `{name}`",
-                                part.width
-                            ),
-                        ));
+                        return Err(at.refuse(format!(
+                            "{value} does not fit the {}-bit part `{part_name}` of `{name}`",
+                            part.width
+                        )));
                     }
                     checked += 1;
                     let found = report.parts[position];
@@ -831,4 +817,33 @@ pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
         payload_offset: view.payload_offset,
         payload_bytes: view.payload_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_be, write_be};
+    use crate::e2e_crc::width_mask;
+
+    /// Every byte distinct and the top bit set, so a byte out of place or a
+    /// sign carried down shows.
+    const VALUE: u64 = 0x8877_6655_4433_2211;
+
+    #[test]
+    fn write_be_lays_every_width_most_significant_byte_first() {
+        for width in 1..=8usize {
+            let mut out = [0xEEu8; 10];
+            write_be(&mut out[1..1 + width], VALUE);
+            for (i, &byte) in out[1..1 + width].iter().enumerate() {
+                let wanted = (VALUE >> (8 * (width - 1 - i))) as u8;
+                assert_eq!(byte, wanted, "width {width}, byte {i}");
+            }
+            assert_eq!(out[0], 0xEE, "width {width} wrote before the field");
+            assert!(
+                out[1 + width..].iter().all(|&b| b == 0xEE),
+                "width {width} wrote past the field"
+            );
+            let low = VALUE & width_mask((width * 8) as u8);
+            assert_eq!(read_be(&out[1..1 + width]), low, "width {width}");
+        }
+    }
 }
