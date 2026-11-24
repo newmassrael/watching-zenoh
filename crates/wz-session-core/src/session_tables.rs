@@ -547,12 +547,16 @@ pub struct WireForm<'a> {
     pub suffix: &'a str,
 }
 
+/// The count of a key expression declaration's holders ([`KeyexprRow::holds`]): a declaration
+/// whose count is at its `MAX` takes no further holder.
+pub type KeyexprHolds = u16;
+
 /// A key expression the session declares.
 #[derive(Debug)]
 pub struct KeyexprRow<Key> {
     id: ExprId,
     key: Key,
-    holds: u16,
+    holds: KeyexprHolds,
 }
 
 impl<Key: KeyBacking> KeyexprRow<Key> {
@@ -567,7 +571,7 @@ impl<Key: KeyBacking> KeyexprRow<Key> {
     }
 
     /// Its holders: the declarations of the program and the entities that name it.
-    pub fn holds(&self) -> u16 {
+    pub fn holds(&self) -> KeyexprHolds {
         self.holds
     }
 }
@@ -1472,36 +1476,49 @@ struct Declaring<'a, P: Storage> {
 }
 
 impl<P: Storage> Declaring<'_, P> {
-    /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be.
+    /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be. Refused
+    /// with [`RegisterError::KeyexprHoldsFull`], keeping nothing, when a declaration the row would
+    /// hold has as many holders as its count holds: a row that named it holding nothing would name
+    /// a declaration its last counted holder's going retracts.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
-        let prefix = form.prefix.filter(|&prefix| {
-            self.keyexprs.get(prefix).is_some_and(|row| {
-                row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
-            })
-        });
+        let prefix = self.holdable(form.prefix.filter(|&prefix| {
+            self.keyexprs
+                .get(prefix)
+                .is_some_and(|row| text.starts_with(KeyBacking::as_str(&row.key)))
+        }))?;
         // The declaration of the entity's own key: the one the form states, or else the one a
         // named retraction names, found by its id once, here, and held by handle from here on.
         // One no longer declared is not held, and a retraction that named it names the key whole.
-        let stated = form.own.filter(|&own| {
-            self.keyexprs
-                .get(own)
-                .is_some_and(|row| row.holds < u16::MAX)
-        });
-        let named = stated.or_else(|| match form.retraction {
-            Retraction::Named(named) if named.mapping_id != 0 => self
-                .keyexprs
-                .iter()
-                .find(|(_, row)| row.id == named.mapping_id && row.holds < u16::MAX)
-                .map(|(handle, _)| handle),
-            _ => None,
-        });
+        let stated = form.own.filter(|&own| self.keyexprs.get(own).is_some());
+        let named = self.holdable(stated.or_else(|| {
+            match form.retraction {
+                Retraction::Named(named) if named.mapping_id != 0 => self
+                    .keyexprs
+                    .iter()
+                    .find(|(_, row)| row.id == named.mapping_id)
+                    .map(|(handle, _)| handle),
+                _ => None,
+            }
+        }))?;
+        let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
         Ok(EntityKey {
             key,
             prefix,
             named,
             retraction: form.retraction,
         })
+    }
+
+    /// `declaration` where it stands and its count has room for one more holder; `None` where it
+    /// went, which is held by nothing; refused where its count is full.
+    fn holdable(
+        &self,
+        declaration: Option<KeyexprHandle>,
+    ) -> Result<Option<KeyexprHandle>, RegisterError> {
+        match declaration.and_then(|handle| Some((handle, self.keyexprs.get(handle)?.holds))) {
+            Some((_, holds)) if holds == KeyexprHolds::MAX => Err(RegisterError::KeyexprHoldsFull),
+            stands => Ok(stands.map(|(handle, _)| handle)),
+        }
     }
 
     /// The id and the key of an entity declared on `text` as `form` asks, into a table with

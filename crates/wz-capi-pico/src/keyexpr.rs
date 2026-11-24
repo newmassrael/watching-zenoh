@@ -2047,7 +2047,7 @@ mod tests {
         }
         assert_eq!(
             holds.len(),
-            usize::from(u16::MAX) - 1,
+            usize::from(wz_session_core::session_tables::KeyexprHolds::MAX) - 1,
             "CONTROL: the count holds its bound"
         );
         let mut copy = z_owned_keyexpr_t::null_value();
