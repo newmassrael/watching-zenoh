@@ -144,7 +144,7 @@ use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(feature = "query")]
-use wz_session_core::reply_hold::HeldReplies;
+use wz_session_core::reply_hold::HeldReply;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1232,8 +1232,8 @@ impl ArenaPlan {
                 core::mem::size_of::<crate::engine::PendingGet>(),
             );
         }
-        // The replies the gets that consolidate hold to their Finals: one table of rows shared by
-        // every get, tagged with its leg (`engine::get::LegHold`).
+        // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
+        // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
         #[cfg(feature = "query")]
         {
             plan.session.held_replies = plan.lent(
@@ -1241,10 +1241,12 @@ impl ArenaPlan {
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
-            let held = plan.sized(HeldReplies::<u64, Lent>::arena_bytes(
+            plan.put(
+                "held replies",
+                "MAX_PENDING_REPLIES",
                 plan.session.held_replies,
-            ));
-            plan.put("held replies", "MAX_PENDING_REPLIES", 1, held);
+                core::mem::size_of::<HeldReply<u64, Lent>>(),
+            );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.

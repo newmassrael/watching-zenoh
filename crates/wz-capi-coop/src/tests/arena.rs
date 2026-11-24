@@ -1137,6 +1137,14 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
         row(&plan, "pending legs").entry_bytes,
         core::mem::size_of::<crate::engine::PendingGet>()
     );
+    // The replies held to their Finals are a row each, as many as the session holds at once, of
+    // the rows the engine lends them (`HeldReplies::lent`).
+    let held = row(&plan, "held replies");
+    assert_eq!(held.count, plan.session().held_replies());
+    assert_eq!(
+        held.span(),
+        wz_session_core::reply_hold::HeldReplies::<u64, Lent>::arena_bytes(held.count)
+    );
 }
 
 /// The queries held for their callbacks are the value of `MAX_PENDING_FINALS` the open resolved,
