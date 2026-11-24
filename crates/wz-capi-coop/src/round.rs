@@ -49,7 +49,9 @@ use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
-use wz_session_core::byte_cells::{ByteBuf, KeptBytes};
+#[cfg(feature = "group")]
+use wz_session_core::byte_cells::ByteBuf;
+use wz_session_core::byte_cells::KeptBytes;
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -1044,10 +1046,12 @@ pub(crate) struct Round {
     /// The datagram a record of the table reads where it lies, as the lock holder last wrote it
     /// ([`Self::filled`]): what a buffer given back is asked about while a delivery has the table
     /// ([`Self::keep_rx`]). Written under the session's lock.
+    #[cfg(feature = "group")]
     reading: UnsafeCell<Option<(*const u8, usize)>>,
     /// The receive buffer of a group the session left whose datagram the table reads, kept until
     /// the lock holder finds the table no longer reads it ([`Self::settle`]). Written under the
     /// session's lock.
+    #[cfg(feature = "group")]
     kept_rx: UnsafeCell<Option<ByteBuf>>,
     /// The calls of the subscribers the samples offered now reach, begun on their rows and handed
     /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
@@ -1143,7 +1147,9 @@ impl Round {
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).rejoining), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).kept), UnsafeCell::new(None));
+            #[cfg(feature = "group")]
             ptr::write(addr_of_mut!((*at).reading), UnsafeCell::new(None));
+            #[cfg(feature = "group")]
             ptr::write(addr_of_mut!((*at).kept_rx), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
@@ -1182,8 +1188,10 @@ impl Round {
             lending: _,
             rejoining: _,
             kept: _,
-            reading: _,
-            kept_rx: _,
+            #[cfg(feature = "group")]
+                reading: _,
+            #[cfg(feature = "group")]
+                kept_rx: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
             released: _,
@@ -1232,8 +1240,11 @@ impl Round {
                     if table.spent {
                         table.clear();
                         *self.kept.get() = None;
-                        *self.reading.get() = None;
-                        *self.kept_rx.get() = None;
+                        #[cfg(feature = "group")]
+                        {
+                            *self.reading.get() = None;
+                            *self.kept_rx.get() = None;
+                        }
                     }
                     Some(table)
                 }
@@ -1253,8 +1264,11 @@ impl Round {
         if table.lends() {
             self.lends.store(true, Ordering::Release);
         }
+        #[cfg(feature = "group")]
         // SAFETY: the caller's contract: written under the session's lock alone.
-        unsafe { *self.reading.get() = table.datagram };
+        unsafe {
+            *self.reading.get() = table.datagram
+        };
         self.state.store(FILLING, Ordering::Release);
     }
 
@@ -1753,6 +1767,7 @@ impl Round {
     ///
     /// # Safety
     /// The caller holds the session's lock, and holds no borrow of the table.
+    #[cfg(feature = "group")]
     pub(crate) unsafe fn keep_rx(&self, buf: ByteBuf) {
         // SAFETY: the caller's contract; `reading` and `kept_rx` are written under that lock
         // alone. A round handed out and not yet cleared is cleared first, so what it read is not
@@ -1823,8 +1838,11 @@ impl Round {
         unsafe {
             *self.rejoining.get() = None;
             *self.kept.get() = None;
-            *self.reading.get() = None;
-            *self.kept_rx.get() = None;
+            #[cfg(feature = "group")]
+            {
+                *self.reading.get() = None;
+                *self.kept_rx.get() = None;
+            }
         }
         self.lends.store(false, Ordering::Release);
         self.state.store(EMPTY, Ordering::Release);
