@@ -1767,8 +1767,6 @@ pub mod extlowlatency;
 // half — the packed priority-range + reliability body and the DIRECTIONAL
 // containment that negotiates it (acceptor: subset; initiator: superset).
 #[cfg(feature = "transport-qos")]
-// Totality debt TD-118 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos;
 
 // SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)

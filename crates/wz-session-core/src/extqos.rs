@@ -313,6 +313,14 @@ pub fn qos_link_from_endpoint(
     })
 }
 
+/// Where the band's last priority sits in the `QoSLink` body: the byte after the first's.
+#[cfg(feature = "session-extqos")]
+const BAND_END_SHIFT: u32 = 11;
+
+/// Where the reliability bit sits in the `QoSLink` body: past the band's two bytes.
+#[cfg(feature = "session-extqos")]
+const CLASS_SHIFT: u32 = 19;
+
 /// Pack a QoS state into the `QoSLink` z64 body — byte-for-byte zenoh
 /// `State::to_u64` (`ext/qos.rs`), whose three low bits discriminate:
 /// `0b000` NoQoS · `0b001` QoS with no metadata · bit 1 = a priority range is
@@ -327,14 +335,14 @@ pub fn qos_state_to_u64(state: &QosLinkState) -> u64 {
     if let Some(priorities) = state.priorities {
         value |= 0b010_u64;
         value |= (priorities.start().wire_byte() as u64) << 3;
-        value |= (priorities.end().wire_byte() as u64) << (3 + 8);
+        value |= (priorities.end().wire_byte() as u64) << BAND_END_SHIFT;
     }
     if let Some(reliability) = state.reliability {
         value |= 0b100_u64;
         // zenoh `(bool::from(*reliability) as u64) << 19`, and its `From<Reliability>
         // for bool` is `Reliable => true` — the same 0/1 the wz enum's discriminant
         // already is (`BestEffort = 0, Reliable = 1`).
-        value |= (reliability as u8 as u64) << (3 + 8 + 8);
+        value |= (reliability as u8 as u64) << CLASS_SHIFT;
     }
     value
 }
