@@ -372,6 +372,7 @@ impl Base<'_> {
             source_delay_ms: None,
             outcome: None,
             zid: self.ctx.zid(direction),
+            receiver_zid: self.ctx.zid(direction.peer()),
             tree,
             row,
             // A row with no record carries no frame, and a record this plane

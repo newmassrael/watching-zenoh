@@ -494,6 +494,9 @@ pub struct OpenExchange {
     /// request. A `zid` that meant the replier on a row whose `dir` meant the
     /// requester would be two ends of one exchange wearing one row.
     zid: Option<alloc::vec::Vec<u8>>,
+    /// The ZID of the end the request went TO, the replier's, owned for the
+    /// reason `zid` is: what the `zids` and `session` terms read beside it.
+    receiver_zid: Option<alloc::vec::Vec<u8>>,
     /// The request's kind and payload size, from the throughput plane's
     /// classifier, for `kind` and `bytes` terms at close.
     kind: crate::filter::RecordKind,
@@ -882,6 +885,7 @@ impl ExchangeTable {
                     keyexpr: resolved.ok(),
                     direction,
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
+                    receiver_zid: ctx.zid(direction.peer()).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
                     value: match crate::agg::payload_content(message) {
@@ -1046,6 +1050,7 @@ impl ExchangeTable {
             // R2757 (open debt 790) — the requester's, kept since the rid was
             // minted; see `OpenExchange::zid` for why it is that end.
             zid: entry.zid.as_deref(),
+            receiver_zid: entry.receiver_zid.as_deref(),
             keyexpr: entry.keyexpr.as_deref(),
             kind: crate::filter::Record::Is(entry.kind),
             payload_bytes: entry.payload_bytes,

@@ -1879,6 +1879,7 @@ impl ThroughputTable {
             // R2757 (open debt 790) — the node plane's answer for THIS
             // direction of this list, not a reading taken here.
             zid: ctx.zid(direction),
+            receiver_zid: ctx.zid(direction.peer()),
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no

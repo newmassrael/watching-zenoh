@@ -158,6 +158,7 @@ fn view<'a>(row: Option<RowFacts<'a>>, kind: Record) -> RecordView<'a> {
         source_delay_ms: None,
         outcome: None,
         zid: None,
+        receiver_zid: None,
         tree: None,
         row,
         e2e: None,
@@ -432,4 +433,15 @@ fn row_takes_an_integer() {
         FilterErrorKind::OperatorNotAdmitted { field: "row", .. }
     ));
     assert!(Filter::parse("row <= 10").is_ok());
+}
+
+/// `time` and `elapsed` written as a person writes them select the rows their
+/// instants name: this capture began 1 ms after the epoch, a row per ms.
+#[test]
+fn time_and_elapsed_read_clock_times_dates_and_units_over_rows() {
+    assert_words("time > 00:00:00.001", ["no", "yes", "yes"]);
+    assert_words("time >= 1970-01-01T00:00:00.002Z", ["no", "yes", "yes"]);
+    assert_words("time == 1970-01-01T09:00:00.003+09:00", ["no", "no", "yes"]);
+    assert_words("elapsed >= 1ms", ["no", "yes", "yes"]);
+    assert_words("elapsed < 0.002s", ["yes", "yes", "no"]);
 }

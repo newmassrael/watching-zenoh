@@ -2220,7 +2220,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 59
+#define WZ_DISSECT_ABI_REVISION 60
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2552,15 +2552,15 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   dir          a or b, either case                         == !=
  *   kind         put del query reply err                     == !=
  *   bytes        an integer                                  == != < <= > >=
- *   time         an integer, ms                              == != < <= > >=
- *   elapsed      an integer, ms since the capture began      == != < <= > >=
+ *   time         ms, a date or a clock time (see below)      == != < <= > >=
+ *   elapsed      ms or 1.5s (see below), since the start     == != < <= > >=
  *   offset       an integer, bytes into the framing unit     == != < <= > >=
- *   delay        an integer, ms from the source's stamp      == != < <= > >=
+ *   delay        ms or 1.5s, from the source's stamp         == != < <= > >=
  *   zid          the sender's zid, or a prefix of it         == !=
  *   replies      an integer                                  == != < <= > >=
  *   errs         an integer                                  == != < <= > >=
- *   first_reply  an integer, ms                              == != < <= > >=
- *   completion   an integer, ms                              == != < <= > >=
+ *   first_reply  ms or 1.5s                                  == != < <= > >=
+ *   completion   ms or 1.5s                                  == != < <= > >=
  *   closed       yes or no (y or n)                          == !=
  *   value        the payload's bytes: "text" or 0x and bytes contains == !=
  *   node         the sender's name, bound before the doors   == !=
@@ -2580,6 +2580,8 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   e2e.counter  none repeat out_of_range unjudged           == !=
  *   e2e.timeout  ok error unjudged                           == !=
  *   row          an integer, the row's place, from 0         == != < <= > >=
+ *   zids         either end's zid, or a prefix of it         == !=
+ *   session      the two ends' zids, a/b, either order       == !=
  *
  * THE END-TO-END JUDGE'S VERDICT. A Push carrying a put under a key a profile
  * rule covers is a FRAME, and so (since field-document revision 66, selection
@@ -2655,6 +2657,45 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * values door write no such rows, and a `row` term there is UNDECIDED. A row of
  * a list no document writes (a recovered QUIC stream, a serial line) has no
  * place and is UNDECIDED too.
+ *
+ * (ABI 60, selector_fields revision 8) TIME AS A PERSON WRITES IT. `time` takes
+ * milliseconds since the Unix epoch, and also:
+ *
+ *     - an ISO 8601 date and clock time, `2026-11-23T12:04:00`, with `T` (or
+ *       `t`, or a space inside quotes) between them, the seconds and up to three
+ *       digits of a fraction optional, and an offset optional: `Z`, `+09:00`,
+ *       `+0900` or `+09`. A date alone is its midnight.
+ *     - a clock time alone, `12:04`, `12:04:00` or `12:04:00.250` (the hour in
+ *       one digit or two), with an offset optional. Its day is THE CAPTURE'S: the
+ *       day a clock at the offset reads the capture's first instant in, so
+ *       `time > 12:04` over a capture that began at 12:04:30 is every row after
+ *       12:04 of that day. One day and not the nearest: a time past a midnight
+ *       the capture crossed is written with its date. It is UNDECIDED wherever
+ *       `elapsed` is.
+ *     - A LITERAL WITH NO OFFSET IS READ IN UTC, by every door. The zone a list
+ *       shows times in is the reader's and not the capture's: to have such
+ *       literals read in yours, pass the selector through
+ *       wz_dissect_selector_bind_in_zone, which writes your offset onto each.
+ *
+ * More than three digits of a fraction name an instant the field cannot
+ * compare, and are refused, as are a date before 1970 and a day the month does
+ * not have; a value that opens with a digit and is no integer, no date and no
+ * clock time is refused at the value as one `time` does not admit. `elapsed`,
+ * `delay`, `first_reply` and `completion` take a number and a unit besides an
+ * integer of milliseconds: `250ms`, `1.5s`, `2min`, `1h`, `2000us`,
+ * `3000000ns`. The value must come to a whole number of milliseconds: `0.5ms`
+ * and `1.0005s` are refused, never rounded.
+ *
+ * BOTH ENDS. `zid` is the sender's zid. `zids` is EITHER end's: `zids == X` is
+ * every message node X sent and every message sent to it. `session == X/Y` is
+ * every message between X and Y, either way and on every link of theirs: two
+ * zids joined by a slash, in either order, naming two nodes. Each is read as a
+ * `zid` value is, a prefix included, and an ambiguous one is reported under
+ * `ambiguous_zid_prefixes` with the span of its own digits. The receiver's zid
+ * is known where the sender's is, from a handshake the capture saw. With an end
+ * unknown the answer is UNDECIDED unless the other end settles it (`zids == X`
+ * is `yes` when the known end is X, `session == X/Y` is `no` when the known
+ * end is neither), and `!=` and `not` are undecided with it, as for `zid`.
  *
  * `value` compares the application payload of a Put, a Reply or an Err as the
  * publisher put it: after the transport has decompressed and reassembled the
@@ -3897,6 +3938,33 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
 int wz_dissect_selector_bind(const char *selector, const char *names_json,
                              char **out);
 
+/* (ABI 60) -- wz_dissect_selector_bind, AND THE ZONE YOUR LIST SHOWS TIMES IN.
+ *
+ * A `time` literal that carries no offset (`time > 12:04`,
+ * `time >= 2026-11-23T09:00`) is read in UTC by every door (THE SELECTOR
+ * LANGUAGE), because the zone a reader's clock shows is not a fact a capture
+ * carries. A list that shows times in another zone hands its offset here, and
+ * the selector it gets back carries the offset in its text: each such literal
+ * gains it right after its last character (inside the quotes of a quoted one),
+ * as `+09:00`, `-05:30` or `+00:00`. No door takes a zone, and the text means
+ * the same instant wherever it is read again.
+ *
+ * `utc_offset_minutes` is the offset east of UTC in minutes: 540 for +09:00,
+ * -330 for -05:30, 0 for UTC. Past 23:59 either way (1439) is
+ * WZ_DISSECT_ERR_INVALID_ARG and no string. An offset and not a zone name: it
+ * is the offset the list shows that is written, and this library ships no
+ * table of zones; a capture that crosses a change of summer time is read at
+ * the one offset given.
+ *
+ * Everything else is wz_dissect_selector_bind's: `names_json`, the document
+ * (`selector_bind`, the same revision, the same refusals, with every position
+ * in the text you passed and not in the text with offsets written), and the
+ * memory rule. A literal that carries an offset, and an integer of
+ * milliseconds, are left as written. */
+int wz_dissect_selector_bind_in_zone(const char *selector,
+                                     const char *names_json,
+                                     int utc_offset_minutes, char **out);
+
 /* (ABI 52) -- THE SELECTOR A NODE OF THE FIELD DOCUMENT OFFERS: filter by the
  * field it shows, add it to the selector typed, or exclude it.
  *
@@ -3985,7 +4053,7 @@ int wz_dissect_selector_term(const char *node, int verb, const char *selector,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":7},
+ *     {"document":{"name":"selector_fields","revision":8},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
