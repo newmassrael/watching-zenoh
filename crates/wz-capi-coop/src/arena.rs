@@ -224,9 +224,9 @@ const HANDLE_ROWS: usize = 2;
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
 /// (`query`), pending liveliness gets (`liveliness-get`), matching listeners, declaration watches
-/// (`remote-declaration-watch` or `declarations-synced-event`), transport events listeners
-/// (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the ABI asks
-/// places of, at most these.
+/// (`remote-declaration-watch` or `declarations-synced-event`), transport and link events
+/// listeners (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the
+/// ABI asks places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
     * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
@@ -236,7 +236,7 @@ const ENTITY_PLACE_ROWS: usize = 2
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         )) as usize
-        + cfg!(feature = "connectivity") as usize
+        + 2 * cfg!(feature = "connectivity") as usize
         + 2 * cfg!(feature = "advanced") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
@@ -325,6 +325,11 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "advanced subscriber place flags",
             "advanced subscriber places",
             "MAX_ADVANCED_SUBSCRIBERS",
+        ),
+        EntityKind::LinkEventsListener => (
+            "link events listener place flags",
+            "link events listener places",
+            "MAX_LINK_EVENTS_LISTENERS",
         ),
     }
 }
@@ -470,6 +475,9 @@ pub struct EntityRows {
     /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
     /// advanced publishers; none in a build without `advanced`.
     pub advanced_subscribers: usize,
+    /// The link events listeners (`MAX_LINK_EVENTS_LISTENERS`); none in a build without
+    /// `connectivity`.
+    pub link_events_listeners: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -565,6 +573,7 @@ impl EntityRows {
             EntityKind::TransportEventsListener => self.transport_events_listeners,
             EntityKind::AdvancedPublisher => self.advanced_publishers,
             EntityKind::AdvancedSubscriber => self.advanced_subscribers,
+            EntityKind::LinkEventsListener => self.link_events_listeners,
         }
     }
 
@@ -1760,6 +1769,14 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
                 "MAX_ADVANCED_SUBSCRIBERS",
                 limits.max_advanced_subscribers(),
+            )?
+        } else {
+            0
+        },
+        link_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+                "MAX_LINK_EVENTS_LISTENERS",
+                limits.max_link_events_listeners(),
             )?
         } else {
             0
