@@ -55,6 +55,8 @@ use wz_session_core::WhatAmI;
 
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::matching::FilterListeners;
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
 use crate::refusal::{refusal_code, Door};
 use crate::result::ZResult;
