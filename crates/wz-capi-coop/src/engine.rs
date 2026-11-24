@@ -233,11 +233,12 @@ use {
 #[cfg(feature = "query")]
 mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]); a build that asks
-/// no query registers none, and its tables are sized for the closure pair a sink would be.
+/// no query registers none, so its sink is one of no value, and a row of pending gets, what
+/// delivers to it and what drops it are code the build does not keep.
 #[cfg(feature = "query")]
 pub(crate) use get::{Ended, LegSink};
 #[cfg(not(feature = "query"))]
-pub(crate) type LegSink = wz_session_core::reply_sink::BoxedReplySink;
+pub(crate) type LegSink = wz_session_core::reply_sink::NoReplies;
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},

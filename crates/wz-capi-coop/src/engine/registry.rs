@@ -34,6 +34,10 @@
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
@@ -43,6 +47,11 @@ use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+#[cfg(not(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+)))]
+use wz_session_core::slot_observer::NoSink;
 use wz_session_core::slot_observer::{
     ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
 };
@@ -312,8 +321,29 @@ impl ObserverSinks for CoopSinks {
     type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::Queryable;
+    // The program's watches of what the peers declare are the only observers this engine installs
+    // (`decl_watch`), boxed closures; a build without them holds none, so its observer lists are
+    // of a sink that cannot be made and hold nothing to drop or free.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     type Declared = BoxedDeclSink;
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     type Undeclared = BoxedUndeclSink;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    type Declared = NoSink;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    type Undeclared = NoSink;
 }
 
 /// Where a matching listener's flips go on this engine: the session's queue of them, by the
@@ -1207,6 +1237,33 @@ mod tests {
     use wz_session_core::peer_tables::PeerPoolRows;
     use wz_session_core::reply_stage::FinalStaging;
     use wz_session_core::sample::QosLevel;
+
+    /// Without the declaration watches the observers this engine may hold are none: the lists'
+    /// sink has no value, so a list holds nothing to drop and frees nothing. Turned red by boxed
+    /// sinks chosen for a build that installs none.
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    #[test]
+    fn without_the_watches_an_observer_list_holds_nothing_to_drop() {
+        assert!(!core::mem::needs_drop::<
+            <CoopSinks as ObserverSinks>::Declared,
+        >());
+        assert!(!core::mem::needs_drop::<
+            <CoopSinks as ObserverSinks>::Undeclared,
+        >());
+    }
+
+    /// A build that asks no query holds its faces' pending gets over a sink of no value: no row of
+    /// them can be made, so none is delivered to or dropped. Turned red by a sink that can be made
+    /// chosen for such a build.
+    #[cfg(not(feature = "query"))]
+    #[test]
+    fn without_query_a_pending_get_has_a_sink_of_no_value() {
+        assert_eq!(core::mem::size_of::<LegSink>(), 0);
+        assert_eq!(core::mem::size_of::<Option<LegSink>>(), 0);
+    }
 
     /// A flip reported for a listener waits in the session's queue under the listener's id, to be
     /// handed after the lock; a change back before it is handed takes it away.

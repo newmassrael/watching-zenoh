@@ -709,7 +709,15 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         pooled(caps::RX_POOL_BUFFERS, 3 + 2),
         "the links share a pool of receive buffers"
     );
-    assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
+    assert_eq!(
+        dial.gets().rows.queries,
+        if cfg!(feature = "query") {
+            caps::MAX_PENDING_QUERIES
+        } else {
+            0
+        },
+        "a build that asks no query lends its gets no row"
+    );
     assert_eq!(
         row(&listening, "session tables"),
         row(&dial, "session tables"),
@@ -1471,7 +1479,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         entities.interests(),
         Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
     );
-    assert_eq!(plan.gets().rows.queries, preset("MAX_PENDING_QUERIES"));
+    assert_eq!(
+        plan.gets().rows.queries,
+        if cfg!(feature = "query") {
+            preset("MAX_PENDING_QUERIES")
+        } else {
+            0
+        }
+    );
     assert_eq!(
         plan.peers().rows.pending_declares,
         preset("MAX_PENDING_DECLARES")
