@@ -14,7 +14,7 @@ use std::vec::Vec;
 
 /// What a test's calls were handed, and how many calls and counts of legs were ended.
 #[derive(Default)]
-struct Log {
+pub(crate) struct Log {
     handed: Mutex<Vec<String>>,
     ended: std::sync::atomic::AtomicUsize,
 }
@@ -24,7 +24,7 @@ impl Log {
         self.handed.lock().unwrap().push(what);
     }
 
-    fn handed(&self) -> Vec<String> {
+    pub(crate) fn handed(&self) -> Vec<String> {
         self.handed.lock().unwrap().clone()
     }
 
@@ -38,9 +38,9 @@ impl Log {
 }
 
 /// A call of the test's row `row`, which notes what it is handed and its end in `log`.
-struct Call {
-    row: u32,
-    log: Arc<Log>,
+pub(crate) struct Call {
+    pub(crate) row: u32,
+    pub(crate) log: Arc<Log>,
 }
 
 impl RoundCall for Call {
@@ -88,7 +88,7 @@ impl RoundTally for Counted {
 }
 
 /// A round that keeps every kind of record.
-enum Kept {}
+pub(crate) enum Kept {}
 
 impl RoundCalls for Kept {
     type Subscriber = Call;
@@ -130,7 +130,7 @@ struct Block([u8; ARENA_ALIGN]);
 
 /// A round of a few records, its tables lent from an arena over memory the test process leaks,
 /// so it outlives the round.
-fn round<C: RoundCalls>() -> Arc<Round<C>> {
+pub(crate) fn round<C: RoundCalls>() -> Arc<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(4),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),

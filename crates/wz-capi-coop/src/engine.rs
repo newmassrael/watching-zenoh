@@ -3334,7 +3334,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         )
         .max(1);
         // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
-        unsafe { self.session.retract_owed(callbacks) };
+        unsafe {
+            self.session
+                .retract_owed(crate::round::ReadRoom { callbacks })
+        };
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
