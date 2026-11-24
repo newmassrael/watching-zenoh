@@ -561,7 +561,8 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let first = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap();
-    let asked = first.interest.unwrap();
+    let opened = first.interest.unwrap();
+    let asked = opened.id;
     let second = tables
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
@@ -577,7 +578,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             false,
         )
         .unwrap();
-    assert!(querier.interest.is_some_and(|id| id != asked));
+    assert!(querier.interest.is_some_and(|new| new.id != asked));
     assert_eq!(tables.interests().len(), 2);
     let interest = tables
         .write_filters()
@@ -585,6 +586,11 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
         .unwrap()
         .interest()
         .unwrap();
+    assert_eq!(
+        interest, opened.handle,
+        "the filter holds the Interest it opened"
+    );
+    assert_eq!(tables.interests().get(interest).unwrap().id(), asked);
     assert_eq!(tables.interest_key(interest), Some("k"));
     assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
@@ -2212,13 +2218,18 @@ fn a_listener_on_a_key_holds_an_interest_of_its_own() {
     let alone = tables
         .declare_matching_listener_on(Plane::Subscribers, "m", true, 6)
         .unwrap();
-    let asked = alone.interest.expect("a new Interest");
+    let opened = alone.interest.expect("a new Interest");
+    let asked = opened.id;
     let interest = tables
         .matching_listeners()
         .get(alone.handle)
         .unwrap()
         .interest()
         .unwrap();
+    assert_eq!(
+        interest, opened.handle,
+        "the listener holds the Interest it opened"
+    );
     let row = tables.interests().get(interest).unwrap();
     assert_eq!(
         (row.mapping_id(), row.suffix(), row.aggregate()),
