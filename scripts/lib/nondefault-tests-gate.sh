@@ -898,6 +898,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The critical section of an image that states one context (`single-context`): it takes no
     # lock, runs, nests and leaves the cells' own borrow rules (`cs::single_context_tests`).
     "wz-runtime-coop|hook|single-context|cs::"
+    # The values the runtime lends a session whose engine confines it to its lock
+    # (`session-confined`): the runtime lends the kind that takes no lock, whose try always runs,
+    # nested in another value's hold too (`runtime_impl::tests`). The type's own tests
+    # (`sync::tests`) run in every build.
+    "wz-runtime-coop|hook|alloc,session-confined|runtime_impl::tests::a_confined"
     # The high-water mark of the task table on the slot profile (`pool-monitor`): the most cells held
     # at once, which a build without the feature reports as unknown. The slot profile's row above,
     # with the feature, on its own module.
