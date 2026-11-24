@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (74) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (72) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -264,7 +264,7 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
 | TD-004 | `wz-session-core` | `session_actions` | `expect_used` | 4 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
-| TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
+| TD-031 | `wz-session-core` | `lent_push` | `expect_used` | 1 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
@@ -337,6 +337,9 @@ leaves with them. TD-099 (`lent_control`) waits on the same change: `chain_of` i
 fixed-capacity twin of `one_entry`, and `NamedKeyexpr::entry` holds a body of at most
 `NAMED_KEYEXPR_BYTES` as a slice of the `ZBuf`'s u32 bound, which a constructor from a list
 whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves.
+TD-031 (`lent_push::put_with_qos`) is the same list: the one QoS entry of a Push's outer chain,
+whose bounds are one entry or more, held through `Bounded::new` from a `heapless::Vec`; the
+same constructor pays it, and the rest of the module is total.
 TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen bytes by its
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the

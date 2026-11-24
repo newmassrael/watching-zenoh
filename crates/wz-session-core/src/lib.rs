@@ -1290,11 +1290,7 @@ pub mod encoded_push;
 /// lend-only send and the multicast no-allocator TX. `codec-push` gated.
 #[cfg(feature = "codec-push")]
 // Totality debt TD-031 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used)]
 pub mod lent_push;
 
 /// A strict, allocation-free reader of the one record a data stream is made of (a `Push`
