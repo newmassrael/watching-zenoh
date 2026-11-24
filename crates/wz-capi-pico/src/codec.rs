@@ -54,7 +54,7 @@ pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
 
 /// Write the VLE encoding of `v` into `out`, returning the byte count: [`encode_zint`], out of
 /// line, for this export and the serializer's sequence lengths, each of which would otherwise hold
-/// the encoder unrolled over its nine rungs.
+/// its own copy of the encoder's loop.
 #[inline(never)]
 pub(crate) fn encode_zint_into(out: &mut [u8; VLE_LEN], v: u64) -> usize {
     encode_zint(out, v)
