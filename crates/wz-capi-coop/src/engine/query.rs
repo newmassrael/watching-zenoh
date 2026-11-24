@@ -354,7 +354,8 @@ impl FinalHolds {
     }
 
     /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing and
-    /// noting nothing, when no hold of that query is open and every row is taken.
+    /// noting nothing, when no hold of that query is open and every row is taken, or when its
+    /// holds are as many as a count holds.
     pub(super) fn take(
         &mut self,
         generation: u64,
@@ -365,7 +366,10 @@ impl FinalHolds {
             .iter_mut()
             .find(|h| h.generation == generation && h.rid == rid)
         {
-            hold.holds += 1;
+            let Some(holds) = hold.holds.checked_add(1) else {
+                return false;
+            };
+            hold.holds = holds;
             return true;
         }
         self.holds
@@ -436,11 +440,11 @@ impl FinalHolds {
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
     ) -> Option<QosLevel> {
-        let at = self
+        let (at, hold) = self
             .holds
-            .iter()
-            .position(|h| h.generation == generation && h.rid == rid)?;
-        let hold = &mut self.holds[at];
+            .iter_mut()
+            .enumerate()
+            .find(|(_, h)| h.generation == generation && h.rid == rid)?;
         hold.holds = hold.holds.saturating_sub(1);
         if hold.holds > 0 {
             return None;
@@ -983,6 +987,31 @@ mod refusal_tests {
             holds.release(1, 8).is_none(),
             "nothing owed yet for the request held afresh"
         );
+    }
+
+    /// A hold past the most a count holds is refused, and the holds already counted keep the
+    /// Final held: a release lets go of one of them, not of the row.
+    ///
+    /// # Control
+    ///
+    /// A `take` that wraps or saturates the count reds the refusal or the release.
+    #[test]
+    fn a_hold_past_the_counts_bound_is_refused_and_the_final_stays_held() {
+        let mut holds = FinalHolds::leaked(1);
+        assert!(holds.take(1, 7), "CONTROL: the one row is taken");
+        for hold in holds.holds.iter_mut() {
+            hold.holds = usize::MAX;
+        }
+        assert!(!holds.take(1, 7), "no count past the bound");
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the Final waits for the holds counted"
+        );
+        assert!(
+            holds.release(1, 7).is_none(),
+            "one release lets go of one hold, not the row"
+        );
+        assert_eq!(holds.holds.len(), 1, "the row is still held");
     }
 
     /// A hold taken outside a dispatch (a get of the session's own) and refused notes no
