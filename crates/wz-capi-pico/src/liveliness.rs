@@ -40,7 +40,7 @@ use wz_capi_port::WireKey;
 use wz_capi_port::{LivelinessSink, TokenId};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
-use crate::abi::{handle_ref, z_loaned_keyexpr_t};
+use crate::abi::z_loaned_keyexpr_t;
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::prelude::*;
@@ -639,16 +639,6 @@ pub(crate) fn liveliness_kind_of(kind: LivelinessSampleKind) -> crate::pubsub::z
         LivelinessSampleKind::Delete => Z_SAMPLE_KIND_DELETE,
     }
 }
-
-/// Read the boxed token behind a loaned handle — the accessor shape every other
-/// handle type in this crate uses.
-#[allow(dead_code)]
-pub(crate) unsafe fn token_state<'a>(
-    ptr: *const z_loaned_liveliness_token_t,
-) -> Option<&'a TokenState> {
-    handle_ref::<z_loaned_liveliness_token_t, TokenState>(ptr)
-}
-
 /// Declare a liveliness subscription on `shared` that lives for the SESSION
 /// (R311y559).
 ///
