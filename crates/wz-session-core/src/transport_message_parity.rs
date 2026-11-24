@@ -91,6 +91,7 @@ fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams
             .expect("32-byte test key"),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
+        region: None,
     }
 }
 

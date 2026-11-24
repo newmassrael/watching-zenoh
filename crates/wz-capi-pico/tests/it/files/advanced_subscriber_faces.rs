@@ -110,6 +110,7 @@ fn init_params(whatami: WhatAmI) -> SessionInitParams {
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key"),
+        region: None,
     }
 }
 

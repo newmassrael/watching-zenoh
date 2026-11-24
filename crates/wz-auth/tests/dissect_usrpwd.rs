@@ -42,6 +42,7 @@ fn params() -> SessionInitParams {
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+        region: None,
     }
 }
 
