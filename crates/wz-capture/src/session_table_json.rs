@@ -31,7 +31,15 @@
 //! * `flows` -- the flows the row is made of, each with the flow object every
 //!   other document carries and its own `encrypted`, `decryption`,
 //!   `key_source`, `bytes`, the three zenoh keys, `unit_readings`,
-//!   `stream_anomalies` and `unstated`, for a consumer that joins.
+//!   `direction_basis`, `stream_anomalies` and `unstated`, for a consumer
+//!   that joins.
+//!
+//! # Direction basis
+//!
+//! A flow's `direction_basis` says how its halves `a` and `b` were told apart
+//! ([`crate::session_table::DirectionBasis`]): `endpoints` for every flow read
+//! off addresses, and for the serial line `handshake`, `interface_order` or
+//! `unknown`, the last when one interface carried both wires.
 //!
 //! # Decryption
 //!
@@ -249,7 +257,11 @@ fn push_link(link: &Link, out: &mut String) {
     let _ = write!(out, ",\"bytes\":{}", link.bytes);
     crate::fields_json::push_zenoh(link.versions, &link.evidence, out);
     crate::fields_json::push_unit_readings(link.readings, out);
-    out.push(',');
+    let _ = write!(
+        out,
+        ",\"direction_basis\":\"{}\",",
+        link.direction_basis.name()
+    );
     push_cell(
         out,
         &mut unstated,

@@ -75,7 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::byte_log::{LogPlace, UnitLog, MASK_KEY_LEN};
+use crate::byte_log::{LentBytes, LogPlace, UnitLog, MASK_KEY_LEN};
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::column_log::{ColumnLog, Kind};
 use crate::inbound::InboundFrame;
@@ -1705,10 +1705,10 @@ pub trait UnitBytes {
     /// `None` when the source does not hold all of them.
     fn stream_bytes(&self, direction: Direction, from: usize, to: usize) -> Option<Cow<'_, [u8]>>;
 
-    /// The capture container the list's holder lends, which a datagram unit
-    /// logged by its place there is read from ([`MessageList::push_datagram`]);
-    /// `None` when the holder lends none.
-    fn container(&self) -> Option<&[u8]> {
+    /// The capture the list's holder lends, which a datagram unit logged by
+    /// its place there is read from ([`MessageList::push_datagram`]); `None`
+    /// when the holder lends none.
+    fn container(&self) -> Option<&dyn LentBytes> {
         None
     }
 }
@@ -1839,7 +1839,7 @@ impl UnitBytes for NoBytes {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Datagrams<'a> {
     /// What [`UnitBytes::container`] answers.
-    pub container: Option<&'a [u8]>,
+    pub container: Option<&'a dyn LentBytes>,
 }
 
 impl UnitBytes for Datagrams<'_> {
@@ -1847,7 +1847,7 @@ impl UnitBytes for Datagrams<'_> {
         None
     }
 
-    fn container(&self) -> Option<&[u8]> {
+    fn container(&self) -> Option<&dyn LentBytes> {
         self.container
     }
 }
@@ -2064,6 +2064,22 @@ impl MessageList {
     #[cfg(not(feature = "reassembly"))]
     fn chain_bytes(&self) -> usize {
         0
+    }
+
+    /// The lowest capture offset among the units this list reads from the
+    /// capture its holder lends ([`LogPlace::Container`]), or `None` when it
+    /// reads none from there: what says which of a capture's containers the
+    /// holder still needs. A pass over the rows held.
+    pub fn oldest_lent_place(&self) -> Option<usize> {
+        let Store::Indexed(index) = &self.rows else {
+            return None;
+        };
+        index
+            .entries
+            .iter_from(0)
+            .filter(UnitRow::logged)
+            .filter_map(|row| LogPlace::of(row.locator).in_container())
+            .min()
     }
 
     /// What the list holds on the heap, by structure.

@@ -2529,7 +2529,10 @@ impl Default for PassiveSession {
                 // `PassiveSession::with_reassembly_window` instead. Markers
                 // start off and are pushed in per frame from the negotiated
                 // patch level.
-                ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
+                ReassemblyDispatcher::new(
+                    ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX)
+                        .with_max_message_bytes(PASSIVE_CHAIN_DEFAULT_BYTES),
+                )
             }),
             observed_at_ns: None,
             lease_ms: [None; 2],
@@ -2574,11 +2577,21 @@ const PASSIVE_CHAIN_QUOTA: u16 = 4;
 #[cfg(feature = "reassembly")]
 pub const PASSIVE_CHAIN_SLOTS: usize = 4;
 
-/// Reassembled-message ceiling per chain. It costs nothing until fragments
-/// arrive, because the chains are heap buffers ([`PassiveRouter`]); it still
-/// bounds what a corrupt or hostile chain can accumulate.
+/// The most bytes one reassembled message may reach, whatever a caller asks:
+/// the slot ceiling of [`PassiveRouter`]. It costs nothing until fragments
+/// arrive, because the chains are heap buffers that grow with what they stage;
+/// what a session actually holds a chain to is its configured figure, which is
+/// [`PASSIVE_CHAIN_DEFAULT_BYTES`] unless [`PassiveSession::with_reassembly`]
+/// was given another.
 #[cfg(feature = "reassembly")]
-pub const PASSIVE_CHAIN_CAP: usize = 65_536;
+pub const PASSIVE_CHAIN_CAP: usize = 1 << 30;
+
+/// The bytes one reassembled message may reach in a session built without a
+/// figure of its own: the ceiling every passive session held its chains to
+/// before a caller could choose one. It still bounds what a corrupt or hostile
+/// chain can accumulate.
+#[cfg(feature = "reassembly")]
+pub const PASSIVE_CHAIN_DEFAULT_BYTES: usize = 65_536;
 
 /// One direction's chain router, staging into heap buffers in EVERY build.
 ///
@@ -2638,10 +2651,24 @@ impl PassiveSession {
 
     #[cfg(feature = "reassembly")]
     pub fn with_reassembly_window(window_ms: u64) -> Self {
+        Self::with_reassembly(Some(window_ms), PASSIVE_CHAIN_DEFAULT_BYTES)
+    }
+
+    /// An observer whose chains expire after `window_ms` (never, for `None`)
+    /// and join at most `chain_bytes` into one message, held to
+    /// [`PASSIVE_CHAIN_CAP`]. A fragment that would take its chain past it ends
+    /// the chain as `CapacityOverflow`, as a smaller figure always did.
+    ///
+    /// A chain's buffer grows with what it stages, so the figure costs nothing
+    /// until a message that large arrives; each direction holds up to four open
+    /// chains, so it is also what one hostile peer can make a direction hold
+    /// four times over.
+    #[cfg(feature = "reassembly")]
+    pub fn with_reassembly(window_ms: Option<u64>, chain_bytes: usize) -> Self {
+        let config = ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, window_ms.unwrap_or(u64::MAX))
+            .with_max_message_bytes(chain_bytes.min(PASSIVE_CHAIN_CAP));
         Self {
-            reasm: core::array::from_fn(|_| {
-                ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, window_ms))
-            }),
+            reasm: core::array::from_fn(|_| ReassemblyDispatcher::new(config)),
             ..Self::default()
         }
     }

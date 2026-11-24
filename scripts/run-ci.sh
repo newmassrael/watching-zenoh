@@ -13627,7 +13627,9 @@ layer_c1l_reassembly() {
     # 2026-11-18 -- 47 -> 61, printed on pc2 and by hosted run 44032688827: a fault ends the chain
     # and not the process (90824ba2ec, twelve), the displaced chain reported (15e2b6a495) and the
     # pool-overflow policy (8075950284).
-    _runci_guarded_test C1l 61 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    # 2026-11-24 -- 61 -> 67, printed by the guarded-count gate's run: the bytes one chain may
+    # join became a caller-set cap, and its tests joined the module.
+    _runci_guarded_test C1l 67 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     wz_test_args wz-runtime-tokio layer3_reassembly_rx
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly "${WZ_TEST_ARGS[@]}" --quiet \
@@ -13638,7 +13640,8 @@ layer_c1l_reassembly() {
     # duplicate-first test, also ungated; 43 -> 47 with the four bound tests,
     # ungated as well (MEASURED: `47 passed`).
     # 2026-11-18 -- 47 -> 61, the fourteen of the guard above, ungated, printed.
-    _runci_guarded_test C1l 61 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # 2026-11-24 -- 61 -> 67, the six of the guard above, printed.
+    _runci_guarded_test C1l 67 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the

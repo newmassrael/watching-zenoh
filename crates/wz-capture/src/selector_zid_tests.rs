@@ -339,6 +339,79 @@ fn the_census_document_of_a_unique_prefix_is_the_one_of_the_full_spelling() {
 }
 
 /// The rows of the selection document, as their words.
+/// `zids` IS EITHER END: the records a node sent and the records sent to it,
+/// read by the node plane on both ends, and a prefix names the node as it does
+/// for `zid`.
+#[test]
+fn zids_selects_what_a_node_sent_and_what_was_sent_to_it() {
+    let d = twins_and_two_others();
+    assert_eq!(counts(judged(&d, &format!("zid == {LONE_A}"))), (1, 3, 0));
+    for selector in [
+        format!("zids == {LONE_A}"),
+        "zids == 1234abcd".to_string(),
+        format!("zids in {{{LONE_A}, {PAIR_A}}}"),
+    ] {
+        assert_eq!(counts(judged(&d, &selector)), (2, 2, 0), "{selector}");
+    }
+    assert_eq!(counts(judged(&d, &format!("zids != {LONE_A}"))), (2, 2, 0));
+    assert_eq!(counts(judged(&d, &format!("zids == {PAIR_A}"))), (0, 4, 0));
+    // A prefix that begins two nodes judges nothing, as it does for `zid`.
+    assert_eq!(counts(judged(&d, "zids == cbf383be")), (0, 0, 4));
+}
+
+/// `session` IS THE PAIR, EITHER WAY: the two records between two nodes,
+/// whichever order the selector writes them in, and none of another pair's.
+#[test]
+fn session_selects_both_ways_between_two_nodes() {
+    let d = twins_and_two_others();
+    for selector in [
+        format!("session == {TWIN_A}/{LONE_A}"),
+        format!("session == {LONE_A}/{TWIN_A}"),
+        format!("session == 1234abcd/{TWIN_A}"),
+    ] {
+        assert_eq!(counts(judged(&d, &selector)), (2, 2, 0), "{selector}");
+    }
+    assert_eq!(
+        counts(judged(&d, &format!("session == {TWIN_A}/{LONE_B}"))),
+        (0, 4, 0),
+        "two nodes of the capture that never spoke to each other"
+    );
+    assert_eq!(
+        counts(judged(&d, &format!("session != {TWIN_B}/{LONE_B}"))),
+        (2, 2, 0)
+    );
+    assert_eq!(
+        counts(judged(&d, &format!("session == cbf383be/{LONE_A}"))),
+        (0, 0, 4),
+        "an ambiguous half judges nothing"
+    );
+}
+
+/// Where no handshake named the ends, `zids` and `session` are UNDECIDED,
+/// never `no`, and so are their negations: the nodes are there, the capture
+/// never heard them name themselves.
+#[test]
+fn zids_and_session_are_undecided_where_no_end_named_itself() {
+    let key = || sender_space(0, Some("demo/p"));
+    let mut d = Dissection::new();
+    let from_low = frame_carrying(&push(key(), b"a"));
+    let from_high = frame_carrying(&push(key(), b"bb"));
+    let sent_up = udp_packet(LOW, 43210, HIGH, 7447, &from_low);
+    let sent_down = udp_packet(HIGH, 7447, LOW, 43210, &from_high);
+    d.push_packet(LINKTYPE_ETHERNET, 0, &sent_up);
+    d.push_packet(LINKTYPE_ETHERNET, 1, &sent_down);
+    d.finish();
+    for selector in [
+        format!("zids == {LONE_A}"),
+        format!("zids != {LONE_A}"),
+        format!("not zids == {LONE_A}"),
+        format!("session == {LONE_A}/{TWIN_A}"),
+        format!("session != {LONE_A}/{TWIN_A}"),
+    ] {
+        assert_eq!(counts(judged(&d, &selector)), (0, 0, 2), "{selector}");
+    }
+}
+
 #[cfg(feature = "dissect")]
 fn selected_words(doc: &str) -> Vec<&str> {
     doc.split("\"selected\":\"")

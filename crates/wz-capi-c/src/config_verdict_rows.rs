@@ -118,7 +118,7 @@ pub struct wz_capi_c_moved_config_verdict_t {
 }
 
 impl wz_capi_c_owned_config_verdict_t {
-    fn null_value() -> Self {
+    pub(crate) fn null_value() -> Self {
         Self {
             handle: std::ptr::null_mut(),
         }
@@ -149,7 +149,7 @@ unsafe fn verdict_state<'a>(
 ///
 /// # Safety
 /// `out` must be valid and writable.
-unsafe fn publish(
+pub(crate) unsafe fn publish(
     out: *mut wz_capi_c_owned_config_verdict_t,
     findings: Vec<Finding>,
     code: ZResult,

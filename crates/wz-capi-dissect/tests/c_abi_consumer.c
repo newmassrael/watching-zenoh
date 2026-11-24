@@ -590,7 +590,7 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":5") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":7") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
     CHECK(strstr(doc, "\"continued\":false") != NULL,
@@ -682,7 +682,7 @@ static int check_selection_since_door(void) {
         CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
               "selection_since_declaring rc=%d", rc);
         CHECK(strstr(declaring,
-                     "\"document\":{\"name\":\"selection_since\",\"revision\":5") !=
+                     "\"document\":{\"name\":\"selection_since\",\"revision\":7") !=
                   NULL,
               "the since document under declarations: %s", declaring);
         CHECK(strstr(declaring, "\"continued\":false") != NULL,
@@ -1163,6 +1163,181 @@ static int check_open_bounded_door(void) {
     CHECK(strstr(doc, "\"held\":{\"frames\":4,") != NULL,
           "four messages are held under the per-flow ceiling: %s", doc);
     wz_dissect_string_free(doc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
+/* Defined below with the replay door's check, which it was written for; the
+ * container doors' checks above that definition build their files with it
+ * too. */
+static size_t pcap_of_frames(unsigned char *out, const unsigned char *frame,
+                             size_t frame_len, size_t n);
+
+/* (ABI 61) -- THE OPTIONS DOOR, driven from C: a sized struct the caller owns,
+ * zeroed and given its own size. It refuses a NULL struct, a size below the
+ * first published one and a link-type count with no list; and a declared link
+ * type is read as a serial line where the same packet on an undeclared handle
+ * is skipped. The packet is not a valid serial frame, which the declaration
+ * does not need: what moves is whether the link type is read at all. */
+static int check_open_with_door(void) {
+    static const unsigned char not_a_frame[] = {0x11, 0x22, 0x33};
+    static const unsigned int serial[] = {147};
+    wz_dissect_live_options o;
+    wz_dissect_live *h = NULL;
+    char *doc = NULL;
+    int rc;
+
+    if (sizeof(void *) == 8) {
+        CHECK(sizeof(wz_dissect_live_options) >= 40,
+              "the options are %zu bytes", sizeof(wz_dissect_live_options));
+        CHECK(offsetof(wz_dissect_live_options, limits) == 8, "limits offset");
+        CHECK(offsetof(wz_dissect_live_options, serial_link_type_count) == 12,
+              "serial_link_type_count offset");
+        CHECK(offsetof(wz_dissect_live_options, serial_link_types) == 16,
+              "serial_link_types offset");
+        CHECK(offsetof(wz_dissect_live_options, frames_per_flow) == 24,
+              "frames_per_flow offset");
+        CHECK(offsetof(wz_dissect_live_options, frames_total) == 32,
+              "frames_total offset");
+        CHECK(offsetof(wz_dissect_live_options, stream_bytes_per_direction) == 40,
+              "stream_bytes_per_direction offset");
+        CHECK(offsetof(wz_dissect_live_options, reassembly_window_ms) == 48,
+              "reassembly_window_ms offset");
+        CHECK(offsetof(wz_dissect_live_options, chain_bytes) == 56,
+              "chain_bytes offset");
+        CHECK(offsetof(wz_dissect_live_options, stream_bytes_total) == 64,
+              "stream_bytes_total offset");
+        CHECK(sizeof(wz_dissect_live_options) == 72,
+              "the options are %zu bytes, expected 72",
+              sizeof(wz_dissect_live_options));
+    }
+
+    rc = wz_dissect_live_open_with(NULL, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null options rc=%d", rc);
+
+    memset(&o, 0, sizeof o);
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a size of zero rc=%d", rc);
+
+    o.size = sizeof o;
+    o.limits = WZ_DISSECT_LIMITS_NONE;
+    o.serial_link_type_count = 1;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a count with no list rc=%d", rc);
+
+    o.serial_link_types = serial;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "open_with rc=%d", rc);
+    rc = wz_dissect_live_push(h, 147, 1000000u, not_a_frame, sizeof not_a_frame);
+    CHECK(rc == WZ_DISSECT_OK, "declared push rc=%d", rc);
+    rc = wz_dissect_live_health(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "declared health rc=%d", rc);
+    CHECK(strstr(doc, "\"link_type\":147") == NULL,
+          "a declared link type is read, not skipped: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_live_session_table(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "declared table rc=%d", rc);
+    CHECK(strstr(doc, "\"link\":\"serial\"") != NULL,
+          "the declared line is a flow of the table: %s", doc);
+    CHECK(strstr(doc, "\"direction_basis\":\"unknown\"") != NULL,
+          "one interface cannot separate the wires: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    wz_dissect_live_close(h);
+    h = NULL;
+
+    /* (ABI 62) The byte ceiling is the caller's, and the document that names
+     * the ceilings echoes it. */
+    memset(&o, 0, sizeof o);
+    o.size = sizeof o;
+    o.limits = WZ_DISSECT_LIMITS_LIVE_TAP;
+    o.stream_bytes_per_direction = 3;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "byte ceiling open rc=%d", rc);
+    rc = wz_dissect_live_retention(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "byte ceiling retention rc=%d", rc);
+    CHECK(strstr(doc, "\"stream_bytes_per_direction\":3,") != NULL,
+          "the caller's byte ceiling is the one named: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    wz_dissect_live_close(h);
+    h = NULL;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "undeclared open rc=%d", rc);
+    rc = wz_dissect_live_push(h, 147, 1000000u, not_a_frame, sizeof not_a_frame);
+    CHECK(rc == WZ_DISSECT_OK, "undeclared push rc=%d", rc);
+    rc = wz_dissect_live_health(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "undeclared health rc=%d", rc);
+    CHECK(strstr(doc, "\"interface\":0,\"link_type\":147,\"packets\":1") != NULL,
+          "an undeclared link type is skipped and counted: %s", doc);
+    wz_dissect_string_free(doc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
+/* (ABI 63) -- ONE CAPTURE AS TWO CONTAINERS, driven from C: a handle that
+ * read the first goes on into the second, numbers its packets on from the
+ * first's, hands out the messages of both, and is lent no container after it
+ * moved. */
+static int check_follow_next_door(void) {
+    unsigned char frame[64];
+    unsigned char first[24 + 3 * (16 + 64)];
+    unsigned char second[24 + 2 * (16 + 64)];
+    wz_dissect_record buf[16];
+    wz_dissect_live *h = NULL;
+    size_t frame_len = udp_keepalive_frame(frame);
+    size_t first_len = pcap_of_frames(first, frame, frame_len, 3);
+    size_t second_len = pcap_of_frames(second, frame, frame_len, 2);
+    uint64_t first_packet = 0;
+    uint64_t oldest = 0;
+    uint64_t current = 0;
+    size_t n = 0;
+    int rc;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "follow_next open rc=%d", rc);
+    rc = wz_dissect_live_follow_next(h, second, second_len, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null first_packet rc=%d", rc);
+    rc = wz_dissect_live_follow(h, first, first_len);
+    CHECK(rc == WZ_DISSECT_OK, "first container rc=%d", rc);
+    rc = wz_dissect_live_follow_next(h, second, second_len, &first_packet);
+    CHECK(rc == WZ_DISSECT_OK, "next container rc=%d", rc);
+    CHECK(first_packet == 3, "the next container begins at packet %llu, not 3",
+          (unsigned long long)first_packet);
+    rc = wz_dissect_live_drain(h, buf, 16, &n);
+    CHECK(rc == WZ_DISSECT_OK && n == 5, "five keep-alives, drained %zu", n);
+    CHECK(buf[3].anchor == 3 && buf[4].anchor == 4,
+          "the second container's packets are numbered on: %llu %llu",
+          (unsigned long long)buf[3].anchor, (unsigned long long)buf[4].anchor);
+    rc = wz_dissect_live_follow_lent(h, second, second_len);
+    CHECK(rc == WZ_DISSECT_OK, "a moved handle is lent rc=%d", rc);
+    rc = wz_dissect_live_oldest_container(h, &oldest, &current);
+    CHECK(rc == WZ_DISSECT_OK && oldest == 1 && current == 1,
+          "a handle that copied reads no container: rc=%d %llu %llu", rc,
+          (unsigned long long)oldest, (unsigned long long)current);
+    wz_dissect_live_close(h);
+
+    /* (ABI 66) -- the same capture lent as two containers: the handle goes on
+     * reading the first for the datagrams it keeps there. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "lent open rc=%d", rc);
+    rc = wz_dissect_live_follow_lent(h, first, first_len);
+    CHECK(rc == WZ_DISSECT_OK, "first lent container rc=%d", rc);
+    rc = wz_dissect_live_follow_next_lent(h, second, second_len, &first_packet);
+    CHECK(rc == WZ_DISSECT_OK && first_packet == 3,
+          "next lent container rc=%d first=%llu", rc,
+          (unsigned long long)first_packet);
+    rc = wz_dissect_live_drain(h, buf, 16, &n);
+    CHECK(rc == WZ_DISSECT_OK && n == 5, "five lent keep-alives, drained %zu", n);
+    rc = wz_dissect_live_oldest_container(h, &oldest, &current);
+    CHECK(rc == WZ_DISSECT_OK && oldest == 0 && current == 1,
+          "the first lent container is still read: rc=%d %llu %llu", rc,
+          (unsigned long long)oldest, (unsigned long long)current);
+    rc = wz_dissect_live_oldest_container(h, NULL, &current);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null oldest rc=%d", rc);
     wz_dissect_live_close(h);
     return 0;
 }
@@ -1761,8 +1936,8 @@ static int check_follow_door(void) {
         rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
         CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":5},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":5},")) ==
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
@@ -1791,8 +1966,8 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && doc != NULL,
               "field_values_since_window rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":5},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":5},")) ==
                   0,
               "the windowed door writes the same document: %s", doc);
         wz_dissect_string_free(doc);
@@ -3026,7 +3201,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":14},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":17},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -3081,6 +3256,11 @@ static int check_session_table_doors(void) {
     CHECK(strstr(from_file, "\"encrypted\":\"clear\",\"decryption\":null,"
                             "\"key_source\":null,\"bytes\":") != NULL,
           "a clear flow states no decryption: %s", from_file);
+    /* A flow read off addresses has its halves by its endpoints (session_table
+     * revision 15); only the serial line says anything else. */
+    CHECK(strstr(from_file, "\"direction_basis\":\"endpoints\","
+                            "\"stream_anomalies\":") != NULL,
+          "a udp flow's halves are its endpoints: %s", from_file);
     CHECK(strstr(from_file, "\"stream_anomalies\":null,\"unstated\":"
                             "[{\"cell\":\"decryption\","
                             "\"reason\":\"not_encrypted\"},"
@@ -3984,11 +4164,13 @@ int main(void) {
      * Revision 8 is `zenoh` joining the fields, and nothing on this branch.
      * Revision 9 is its words becoming the sequential test's three, and
      * nothing on this branch either; nor is revision 10, the four e2e fields
-     * joining.
+     * joining, nor revision 11, `row` joining, nor revision 12, the dates,
+     * clock times and units of `time` and the intervals, and `zids` and
+     * `session`, joining, nor revision 13, a zone rule after a time.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -4094,9 +4276,10 @@ int main(void) {
      * among the rules: the number a field row's matched_rule.index reports.
      * Revision 3 adds the kind `schema_file`, which this text has none of.
      * Revision 4 adds the kind `segment_rule`, which it has none of either,
-     * and revision 5 the kind `key_binding`, nor that. */
+     * and revision 5 the kind `key_binding`, nor that. Revision 6 names the
+     * types of a ROS definition file's line, and this text declares none. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5},"
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":6},"
                  "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
                  "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
                  "\"rule_index\":0}]}") == 0,
@@ -4337,8 +4520,15 @@ int main(void) {
      * byte's M bit names. Values move under stationary keys.
      * 27: an unresolved alias says where it first missed and whether it was
      * declared after; the exchange plane gains `maybe_other_link`; a reply
-     * pairs with its request across a named session's links. */
-    revisioned[0].revision = 27;
+     * pairs with its request across a named session's links.
+     * 28: `dropped_by_limits.caps` gains `chain_bytes`, the bytes one fragment
+     * chain may join. A key arrives; nothing retires.
+     * 29: a `row` term is read against the places the documents give the
+     * rows, so the narrowed planes count such a record matched or rejected
+     * where they counted it undecided. Values move under stationary keys.
+     * 30: `dropped_by_limits.caps` gains `stream_bytes_total`, the bytes every
+     * TCP flow keeps together. A key arrives; nothing retires. */
+    revisioned[0].revision = 30;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4363,8 +4553,15 @@ int main(void) {
      * 7: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
      * 8: `skips` gains `link_type_interfaces`, the unread interfaces each with
-     * its link type and count. A key arrives; nothing retires. */
-    revisioned[1].revision = 8;
+     * its link type and count. A key arrives; nothing retires.
+     * 9: the document gains `comments`, the pcapng capture's commented packets
+     * counted and its section comments carried. Eight keys arrive; nothing
+     * retires.
+     * 10: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires.
+     * 11: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
+    revisioned[1].revision = 11;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -4657,8 +4854,24 @@ int main(void) {
      * and three families arrive; nothing retires.
      * 80: the document gains `dns`, the capture's name lookups and what
      * answered them. Eighteen keys and two families arrive; nothing
-     * retires. */
-    revisioned[2].revision = 80;
+     * retires.
+     * 81: each row gains `packet_comments` and each capture interface
+     * `comments`, the pcapng comments of the packet holding the row's first
+     * byte and of the interface. Four keys arrive; no family.
+     * 82: a decoding that applied a format gains `chosen_by` and
+     * `encoding_schema`: whether a rule or the sample's declared encoding
+     * chose it. Two keys and one family arrive; a json or cbor decoding is
+     * now typed.
+     * 83: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
+     * nothing retires.
+     * 84: a `decoded` payload block gains `type_hash`, the ROS type hash of
+     * a `cdr` rule's type and `null` otherwise. A key arrives; nothing
+     * retires.
+     * 85: every flow gains `unrowed_comments`, the comments of its packets
+     * that begin no row. A key arrives; nothing retires.
+     * 86: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
+    revisioned[2].revision = 86;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4684,8 +4897,12 @@ int main(void) {
      * the instant of the packet that carried the oldest message's first
      * byte; a precision and a value move under a stationary key.
      * 4: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
-    revisioned[4].revision = 4;
+     * flow. A key arrives; nothing retires.
+     * 5: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires.
+     * 6: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
+    revisioned[4].revision = 6;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;
@@ -4701,8 +4918,10 @@ int main(void) {
     /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
      * same `health` object; 4 on the summary's move to 7, `caps` gaining
      * `frames_total`; 5 on the summary's move to 8, `skips` gaining
-     * `link_type_interfaces`. */
-    revisioned[5].revision = 5;
+     * `link_type_interfaces`; 6 on the summary's move to 10, `caps` gaining
+     * `chain_bytes`; 7 on the summary's move to 11, `caps` gaining
+     * `stream_bytes_total`. */
+    revisioned[5].revision = 7;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;
@@ -4828,9 +5047,14 @@ int main(void) {
      * opened it came from), and `reason` gains `not_encrypted`,
      * `not_yet_known` and `not_opened`. Keys and two families arrive, two
      * families gain words; nothing retires.
-     * 14: model 7, as the field document's 68. No key moves. */
+     * 14: model 7, as the field document's 68. No key moves.
+     * 15: each flow gains `direction_basis`, what named its directions.
+     * 16: `dropped_by_limits.caps` gains `chain_bytes`. Keys arrive; nothing
+     * retires.
+     * 17: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 14;
+    revisioned[12].revision = 17;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -4867,12 +5091,71 @@ int main(void) {
     CHECK(rc == WZ_DISSECT_OK, "proto_message document rc=%d", rc);
     /* (ABI 35) -- the binder's verdict, at 1. A selector with no node term and
      * no table is the cheapest input it answers; the same envelope opens a
-     * refusal. */
+     * refusal.
+     * 2: the rule binder's three refusals join; no key moves. */
     revisioned[16].name = "selector_bind";
-    revisioned[16].revision = 1;
+    revisioned[16].revision = 2;
     revisioned[16].doc = NULL;
     rc = wz_dissect_selector_bind("kind == put", NULL, &revisioned[16].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_bind document rc=%d", rc);
+    /* (ABI 60) -- the zone binder writes the binder's document, with the
+     * caller's offset after a `time` literal that carries none, and refuses an
+     * offset no zone has with no string. */
+    {
+        char *zoned = NULL;
+        rc = wz_dissect_selector_bind_in_zone("time > 12:04", NULL, 540, &zoned);
+        CHECK(rc == WZ_DISSECT_OK && zoned != NULL, "selector_bind_in_zone rc=%d", rc);
+        if (zoned != NULL) {
+            CHECK(strncmp(zoned, "{\"document\":{\"name\":\"selector_bind\",\"revision\":2},",
+                          strlen("{\"document\":{\"name\":\"selector_bind\",\"revision\":2},")) ==
+                      0,
+                  "the zone binder writes the binder's document: %s", zoned);
+            CHECK(strstr(zoned, "\"selector\":\"time > 12:04+09:00\"") != NULL,
+                  "the offset is not written after the literal: %s", zoned);
+            wz_dissect_string_free(zoned);
+        }
+        zoned = NULL;
+        rc = wz_dissect_selector_bind_in_zone("time > 12:04", NULL, 1440, &zoned);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && zoned == NULL,
+              "an offset past 23:59 rc=%d", rc);
+        rc = wz_dissect_selector_bind_in_zone(NULL, NULL, 0, &zoned);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && zoned == NULL,
+              "a null selector rc=%d", rc);
+    }
+    /* (ABI 65) -- the rule binder writes the offset in force onto a date, the
+     * rule onto a clock time, refuses a date the clock skips with its span, and
+     * refuses a null with no string. */
+    {
+        static const char cet[] = "CET-1CEST,M3.5.0,M10.5.0/3";
+        char *ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 2026-07-15T12:00", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "\"selector\":\"time > 2026-07-15T12:00+02:00\"") != NULL,
+                  "the summer offset is not written after the date: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 12:04", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz clock rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "12:04[CET-1CEST,M3.5.0,M10.5.0/3]") != NULL,
+                  "the rule is not written onto the clock time: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 2026-03-29T02:30", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz skipped rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "\"refusal\":\"skipped_time\"") != NULL &&
+                      strstr(ruled, "\"start\":7,\"end\":23") != NULL,
+                  "a skipped date is not refused at its span: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 12:04", NULL, NULL, &ruled);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && ruled == NULL, "a null rule rc=%d", rc);
+    }
     /* (ABI 36) -- the message list, at 1: the cheapest input it answers is one
      * file with one message. */
     revisioned[17].name = "proto_message_list";
@@ -4897,9 +5180,13 @@ int main(void) {
      * flow. A key arrives; nothing retires.
      * 4: every row is judged. Values move; no key arrives.
      * 5: a query reply carrying a put is read as a published sample is (its
-     * CRC judged, its counter and timeout not). Values move; no key arrives. */
+     * CRC judged, its counter and timeout not). Values move; no key arrives.
+     * 6: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires.
+     * 7: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 5;
+    revisioned[18].revision = 7;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;
@@ -4916,8 +5203,11 @@ int main(void) {
     revisioned[19].name = "selector_fields";
     /* 5: `renamed`, the renames of published paths, joined; empty here.
      * 6: the end-to-end judge's four fields join the fixed fields; no key
-     * moves. */
-    revisioned[19].revision = 6;
+     * moves.
+     * 7: `row`, the row's place in the documents, joins them; no key moves.
+     * 8: `zids` and `session` join them, and `time` and the intervals read
+     * dates, clock times and units; no key moves. */
+    revisioned[19].revision = 8;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);
@@ -5308,6 +5598,16 @@ int main(void) {
 
     /* (ABI 43) -- and the open that takes the two message ceilings. */
     if (check_open_bounded_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 61) -- and the open that takes its options as a sized struct. */
+    if (check_open_with_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 63) -- and one capture read as two containers by one handle. */
+    if (check_follow_next_door() != 0) {
         return 1;
     }
 

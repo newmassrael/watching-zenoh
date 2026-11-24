@@ -98,6 +98,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-auth/src/usrpwd.rs` | S6 | |
 | `crates/wz-capi-c/src/abi.rs` | S8 | |
 | `crates/wz-capi-c/src/abi_origin.rs` | S8 | |
+| `crates/wz-capi-c/src/acl_verdict.rs` | S8 | |
 | `crates/wz-capi-c/src/advanced.rs` | S8 | |
 | `crates/wz-capi-c/src/advanced_plane.rs` | S8 | |
 | `crates/wz-capi-c/src/bytes.rs` | S8 | |

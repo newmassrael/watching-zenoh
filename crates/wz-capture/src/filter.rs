@@ -46,15 +46,15 @@
 //! | `dir` | `a` / `b`, either case | `==` `!=` | never |
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
-//! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
-//! | `elapsed` | an integer, ms since the capture began | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
+//! | `time` | an integer, ms since the Unix epoch; an ISO 8601 date, with a clock time and an offset or without; a clock time alone, on the capture's day; a date or a clock time with a POSIX TZ rule in brackets | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock; for a clock time alone, also the plane was not told the origin, or its rule skips or repeats it on the capture's day |
+//! | `elapsed` | an interval since the capture began: an integer of ms, or a number and a unit (`250ms`, `1.5s`) | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
 //! | `offset` | an integer, bytes into the framing unit | `==` `!=` `<` `<=` `>` `>=` | never — every record was walked out of a unit |
-//! | `delay` | an integer, ms from the source's stamp to arrival | `==` `!=` `<` `<=` `>` `>=` | no source clock, no arrival clock, or the source's clock is ahead |
+//! | `delay` | an interval, as `elapsed` writes one, from the source's stamp to arrival | `==` `!=` `<` `<=` `>` `>=` | no source clock, no arrival clock, or the source's clock is ahead |
 //! | `zid` | the zid the record's sender announced, in zenoh's spelling, either case: all of it, or a prefix of eight or more digits | `==` `!=` | this capture never saw the sender name itself, or the value is a prefix that begins more than one zid of the capture |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
-//! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
-//! | `completion` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or it never closed |
+//! | `first_reply` | an interval, as `elapsed` writes one | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
+//! | `completion` | an interval, as `elapsed` writes one | `==` `!=` `<` `<=` `>` `>=` | as above, or it never closed |
 //! | `closed` | `yes` / `no`, or `y` / `n` | `==` `!=` | the plane does not correlate exchanges |
 //! | `value` | the payload bytes: a quoted text, or `0x` and whole bytes in hex | `contains` `==` `!=` | the record's payload cannot be separated from its message, or is not carried in it |
 //! | `node` | the name of the node that sent the record | `==` `!=` | never judged: the name is bound to a `zid` term before any record is asked (see below) |
@@ -73,11 +73,59 @@
 //! | `e2e.crc` | `ok` `error`; absent where the record carries no frame | `==` `!=` | as `e2e` |
 //! | `e2e.counter` | `none` `repeat` `out_of_range` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
 //! | `e2e.timeout` | `ok` `error` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
+//! | `row` | an integer, the row's place in the documents' row order, from 0 | `==` `!=` `<` `<=` `>` `>=` | the plane was not given the row's facts, or was not told where the documents place it (a build without `dissect`, which has no document to place a row) |
+//! | `zids` | either end's zid, the sender's or the receiver's, as `zid` takes it | `==` `!=` | an end that is not the node is one this capture never saw name itself, or the value is an ambiguous prefix |
+//! | `session` | the two zids of a session, either order, `a/b`, each as `zid` takes it | `==` `!=` | an end that is one of the two is matched with one this capture never saw name itself, or a value is an ambiguous prefix |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one the field list document prints are one
 //! declaration (`selector_fields!`), and a test holds this table to it by
 //! offering the parser every name here.
+//!
+//! ## `row` is the place the documents give the row
+//!
+//! `packet` names the capture packet that carried the row's first byte, and a
+//! packet that carries several messages gives them all one number. `row` is
+//! the row's own: its place in the order the selection document writes its
+//! rows (the field document's rows, flow after flow), counted from 0. Every
+//! row a list ever produced holds its place, so a ceiling that takes the front
+//! of a list moves no number, and a document's `max_messages_shown_per_flow`
+//! moves none either. What does move a number is a flow written before the row
+//! gaining a row, which is why a door reads every `row` term against the
+//! dissection it renders ([`crate::filter::Filter::rows_numbered_by`]), once,
+//! before any row is judged.
+//!
+//! ## `time` takes a date or a clock time, and the intervals a unit
+//!
+//! `time` compares milliseconds since the Unix epoch, and takes them written as
+//! a person reads them as well: an ISO 8601 date with a clock time and an
+//! offset (`2026-11-23T12:04:00+09:00`), a date alone (its midnight), or a
+//! clock time alone (`12:04`, `12:04:00.250`), which names that time on the
+//! day the capture began, so `time > 12:04` means what it looks like in a
+//! capture of an afternoon. A literal with no offset is read in UTC; a consumer
+//! that shows times in another zone hands its offset to the binder
+//! ([`crate::filter::bind_json_in_zone`]), which writes it onto every such
+//! literal, so no door is told a zone. A zone that changes its clock is a POSIX
+//! TZ rule written in brackets after the time, inside quotes
+//! (`"12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`): a date is read at the offset the
+//! rule puts in force then, and refused where the clock skips it or shows it
+//! twice; a clock time is read on the capture's day at the offset in force
+//! there, and is undecided on a day that skips or repeats it. The binder that
+//! takes such a rule ([`crate::filter::bind_json_in_tz`]) writes the offset
+//! onto a date and the rule onto a clock time. `elapsed`, `delay`,
+//! `first_reply` and `completion` take a number and a unit (`250ms`, `1.5s`,
+//! `2min`) that comes to a whole number of milliseconds. `filter::clock` and
+//! `filter::tz` have the rules.
+//!
+//! ## `zids` and `session` name the nodes at BOTH ends
+//!
+//! `zid` is the sender's. `zids` is either end's, so `zids == a1b2c3d4` is
+//! every message that node sent or was sent, and `session == a1b2c3d4/b2b2b2b2`
+//! every message between the two, either way and on every link of theirs. The
+//! receiver's zid comes from the node plane the sender's does
+//! ([`crate::filter::RecordView::receiver_zid`]), so an end this capture never
+//! saw name itself leaves undecided what it could have decided, as `zid` does.
+//! Both read a value as `zid` reads one, a prefix included.
 //!
 //! ## Any other word is a PATH into the record's dissection
 //!
@@ -305,6 +353,9 @@ use wz_session_core::passive::Direction;
 use crate::field_path::{FieldPath, PathKind, PathRefusal, PathTest};
 use crate::pattern::{Pattern, PatternRefusal};
 
+mod clock;
+mod tz;
+
 /// Which counter a record moves — the record's kind as a filter can ask about
 /// it.
 ///
@@ -512,6 +563,11 @@ pub struct RecordView<'a> {
     /// one would put an identity on the wire that nobody sent, which is the
     /// line the consumer's own half-row rule draws from the other side.
     pub zid: Option<&'a [u8]>,
+    /// The ZID the node this record was SENT TO announced, or `None` where
+    /// this capture never learned one: the other end of [`Self::zid`], from
+    /// the same node plane and with the same meaning of `None`. What the
+    /// `zids` and `session` terms read beside the sender's.
+    pub receiver_zid: Option<&'a [u8]>,
     /// The record's message as the dissection walked it, inside the transport
     /// message that carried it, for the terms that name a field by its path
     /// ([`crate::field_path`]); `None` where this plane did not walk it.
@@ -562,7 +618,7 @@ pub enum Record {
 }
 
 /// THE ROW'S FACTS, as the `msg`, `src`, `dst`, `addr`, `sport`, `dport`,
-/// `port`, `link`, `flow` and `packet` terms read them.
+/// `port`, `link`, `flow`, `packet` and `row` terms read them.
 ///
 /// One value per message row, built by [`RowFacts::of`] for every reader of a
 /// row, so a census plane judging a record and the field document judging the
@@ -583,6 +639,10 @@ pub struct RowFacts<'a> {
     /// it (a datagram row's `packet`, a stream row's `first_byte.packet`), or
     /// `None` where the reader cannot place it.
     pub packet: Option<u64>,
+    /// The row's produced-index in its list: how many messages the list had
+    /// produced before it, which no front trim moves. What a `row` term looks
+    /// the row up by ([`RowOrdinals`]); `None` where the walk did not say.
+    pub produced: Option<u64>,
     /// The number of the message list the row belongs to (a live handle's
     /// `list_id`).
     pub flow: u64,
@@ -653,6 +713,7 @@ impl<'a> RowFacts<'a> {
     pub fn of(
         messages: &'a [&'a str],
         packet: Option<usize>,
+        produced: Option<u64>,
         list: usize,
         flow: &crate::link::FlowKey,
         direction: Direction,
@@ -666,6 +727,7 @@ impl<'a> RowFacts<'a> {
             messages,
             unread_remainder: false,
             packet: packet.map(|p| p as u64),
+            produced,
             flow: list as u64,
             link: flow.link(),
             src,
@@ -843,6 +905,9 @@ selector_fields! {
     E2eCrc => "e2e.crc",
     E2eCounter => "e2e.counter",
     E2eTimeout => "e2e.timeout",
+    Row => "row",
+    Zids => "zids",
+    Session => "session",
 }
 
 /// The words a `msg` term takes: every message name a row or a record can
@@ -913,7 +978,9 @@ impl Field {
             | Self::E2e
             | Self::E2eCrc
             | Self::E2eCounter
-            | Self::E2eTimeout => EQUALITY,
+            | Self::E2eTimeout
+            | Self::Zids
+            | Self::Session => EQUALITY,
             // The binder replaces a `node` term whole, one name per term.
             Self::Node => &["==", "!="],
             Self::Bytes
@@ -929,7 +996,8 @@ impl Field {
             | Self::Dport
             | Self::Port
             | Self::Flow
-            | Self::Packet => ORDERED,
+            | Self::Packet
+            | Self::Row => ORDERED,
         }
     }
 
@@ -1056,6 +1124,37 @@ pub fn selector_fields_json() -> String {
     out
 }
 
+/// The clock a clock-time term is read on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockZone {
+    /// A clock this many milliseconds ahead of UTC all year.
+    Fixed(i64),
+    /// A clock that goes forward and back as a POSIX TZ rule says (`tz`).
+    Rule(tz::ZoneRule),
+}
+
+impl ClockZone {
+    /// The clock `rule` keeps: one offset where it never changes.
+    fn of(rule: tz::ZoneRule) -> Self {
+        match rule.fixed_east_ms() {
+            Some(east_ms) => Self::Fixed(east_ms),
+            None => Self::Rule(rule),
+        }
+    }
+}
+
+/// Where a `time` value written with no offset sits in the selector's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Unzoned {
+    /// The value's first byte, its opening quote for a quoted one.
+    start: usize,
+    /// One past the value's last byte, its closing quote included.
+    end: usize,
+    /// Where an offset is written: after the value's last character, inside
+    /// its quotes for a quoted one.
+    insert_at: usize,
+}
+
 /// One comparison, already validated against its field's admissible operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Term {
@@ -1098,9 +1197,33 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// An instant in milliseconds since the Unix epoch: an integer, or a date
+    /// read at its offset or its zone rule (`clock`, `tz`). `unzoned` is
+    /// where a date written with neither sits, for a binder that zones it.
     Time {
         op: Op,
         value: u64,
+        unzoned: Option<Unzoned>,
+    },
+    /// A clock time with no date, milliseconds after the midnight of the clock
+    /// `zone` keeps: the instant is that time on the day the clock reads the
+    /// capture's first instant in (`clock::anchor`, `tz::anchor_in`).
+    /// `unzoned` as for `Term::Time`.
+    Clock {
+        op: Op,
+        of_day_ms: u64,
+        zone: ClockZone,
+        unzoned: Option<Unzoned>,
+    },
+    /// Either end of the record is this node: the sender (`zid`) or the
+    /// receiver. `!=` is built as the negation.
+    Zids {
+        want: ZidValue,
+    },
+    /// The record went between these two nodes, either way. `!=` is built as
+    /// the negation.
+    Session {
+        pair: [ZidValue; 2],
     },
     /// R311y638 (§1.1r) — the same comparison against the capture-relative
     /// clock.
@@ -1221,6 +1344,20 @@ enum Term {
     Packet {
         op: Op,
         value: u64,
+    },
+    /// The row's place in the documents' row order compares with the integer,
+    /// before the term was read against a dissection: no plane can place a row
+    /// by it, so it is undecided ([`Filter::rows_numbered_by`]).
+    Row {
+        op: Op,
+        value: u64,
+    },
+    /// A `row` term read against a dissection: the rows whose place satisfied
+    /// it, as `(list, produced-index)` sorted ascending, and the lists the
+    /// documents write, sorted. A row of any other list has no place.
+    RowIn {
+        rows: Vec<(u64, u64)>,
+        lists: Vec<u64>,
     },
 }
 
@@ -1436,6 +1573,16 @@ impl Term {
                 None | Some(None) => Truth::Unknown,
                 Some(Some(packet)) => Truth::of(op.apply(packet, *value)),
             },
+            // A row's place is the documents' to give, and a plane that was
+            // not handed it cannot rank a row: undecided, never `no`.
+            Self::Row { .. } => Truth::Unknown,
+            Self::RowIn { rows, lists } => match record.row {
+                Some(row) if lists.binary_search(&row.flow).is_ok() => match row.produced {
+                    Some(at) => Truth::of(rows.binary_search(&(row.flow, at)).is_ok()),
+                    None => Truth::Unknown,
+                },
+                _ => Truth::Unknown,
+            },
             Self::Key { pattern, negated } => match record.keyexpr {
                 // The undecidable case, and the one this module exists for: the
                 // record HAS a keyexpr, the capture just never carried the
@@ -1471,6 +1618,30 @@ impl Term {
                     (wz_session_core::zid_hex::canonical_zid(seen) == want.as_slice()) != *negated,
                 ),
             },
+            // Either end. One end that is the node is `yes` whatever the other
+            // is; with neither, an end this capture never heard name itself
+            // leaves the answer undecidable, for the reason the `Zid` arm gives.
+            Self::Zids { want } => {
+                let is_it = |seen: Option<&[u8]>| seen.is_some_and(|z| names_zid(z, &want.want));
+                if is_it(record.zid) || is_it(record.receiver_zid) {
+                    Truth::Yes
+                } else if record.zid.is_some() && record.receiver_zid.is_some() {
+                    Truth::No
+                } else {
+                    Truth::Unknown
+                }
+            }
+            // An end that is neither node of the pair is another session,
+            // whatever the other end is. Both ends named and each one of the
+            // pair is the session when they are two nodes.
+            Self::Session { pair } => {
+                let of_the_pair = |seen: &[u8]| pair.iter().any(|end| names_zid(seen, &end.want));
+                match [record.zid, record.receiver_zid] {
+                    ends if ends.into_iter().flatten().any(|seen| !of_the_pair(seen)) => Truth::No,
+                    [Some(from), Some(to)] => Truth::of(!same_node(from, to)),
+                    _ => Truth::Unknown,
+                }
+            }
             Self::Dir { want, negated } => {
                 Truth::of((dir_index(record.direction) == dir_index(*want)) != *negated)
             }
@@ -1484,7 +1655,7 @@ impl Term {
                 None => Truth::Unknown,
                 Some(bytes) => Truth::of(op.apply(bytes, *value)),
             },
-            Self::Time { op, value } => match record.observed_at_ms {
+            Self::Time { op, value, .. } => match record.observed_at_ms {
                 // The second undecidable case: pcap carries a timestamp per
                 // packet and a raw byte-stream fixture carries none, so a
                 // `time` term over a clockless capture is a question this
@@ -1492,6 +1663,23 @@ impl Term {
                 // by keeping the clock an `Option` all the way up.
                 None => Truth::Unknown,
                 Some(at) => Truth::of(op.apply(at, *value)),
+            },
+            // A clock time is a day's time until the capture says which day,
+            // and the capture's first instant is the record's less its elapsed
+            // time: undecidable exactly where `time` or `elapsed` is.
+            // A clock time in a zone that changes its clock is undecided on a
+            // day that skips or repeats it, as on a capture with no clock.
+            Self::Clock {
+                op,
+                of_day_ms,
+                zone,
+                ..
+            } => match (
+                record.observed_at_ms,
+                clock_instant(record, *of_day_ms, zone),
+            ) {
+                (Some(at), Some(instant)) => Truth::of(op.apply(at, instant)),
+                _ => Truth::Unknown,
             },
             // R311y638 (§1.1r) — undecidable for either of two reasons, and
             // deliberately not told apart: a record with no clock and a plane
@@ -1665,6 +1853,195 @@ fn parse_zid_field(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
         return Ok(wz_session_core::zid_hex::canonical_zid(&[0u8; 16]).to_vec());
     }
     parse_zid(value, at)
+}
+
+/// A zid a `zids` or `session` term names: the bytes, the digits as written
+/// (lower case) and the byte span of the digits in the selector, kept for the
+/// reason `Term::Zid` keeps them: a value of eight digits or more may be a
+/// prefix, and which zid it names is the capture's to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ZidValue {
+    want: Vec<u8>,
+    written: String,
+    span: (usize, usize),
+}
+
+impl ZidValue {
+    /// `text`, at `span` in the selector, as a zid a term of `field` names.
+    fn parse(field: &'static str, text: &str, span: (usize, usize)) -> Result<Self, FilterError> {
+        let want = parse_zid(text, span.0).map_err(|_| FilterError {
+            at: span.0,
+            kind: FilterErrorKind::UnknownValue {
+                field,
+                value: text.to_string(),
+            },
+        })?;
+        Ok(Self {
+            want,
+            written: text.to_ascii_lowercase(),
+            span,
+        })
+    }
+
+    /// This value read against the zids a capture names, as a `zid` term's is
+    /// ([`Filter::resolved_against`]), with an ambiguity recorded in `found`.
+    fn resolved(&self, named: &NamedZids, found: &mut Vec<ZidAmbiguity>) -> Self {
+        match named.resolve(&self.want, &self.written) {
+            ZidResolution::AsWritten => self.clone(),
+            ZidResolution::Names(want) => Self {
+                want,
+                ..self.clone()
+            },
+            ZidResolution::Ambiguous(candidates) => {
+                found.push(ZidAmbiguity {
+                    start: self.span.0,
+                    end: self.span.1,
+                    prefix: self.written.clone(),
+                    candidates,
+                });
+                self.clone()
+            }
+        }
+    }
+}
+
+/// Whether the zid a record carries is the one a term wants, compared in the
+/// canonical form the `zid` term compares in.
+fn names_zid(seen: &[u8], want: &[u8]) -> bool {
+    wz_session_core::zid_hex::canonical_zid(seen) == want
+}
+
+/// Whether two zids a record carries are one node's.
+fn same_node(a: &[u8], b: &[u8]) -> bool {
+    wz_session_core::zid_hex::canonical_zid(a) == wz_session_core::zid_hex::canonical_zid(b)
+}
+
+/// The instant a clock-time term compares the record's own with: the clock time
+/// on the day the capture began, whose first instant is the record's instant
+/// less its elapsed time.
+fn clock_instant(record: &RecordView<'_>, of_day_ms: u64, zone: &ClockZone) -> Option<u64> {
+    let origin = record.observed_at_ms?.checked_sub(record.elapsed_ms?)?;
+    match zone {
+        ClockZone::Fixed(offset_ms) => clock::anchor(origin, of_day_ms, *offset_ms),
+        ClockZone::Rule(rule) => tz::anchor_in(origin, of_day_ms, rule),
+    }
+}
+
+/// A `time` term: milliseconds since the Unix epoch, a date with or without a
+/// clock time, or a clock time alone, each with an offset, a zone rule in
+/// brackets, or neither. `place` is where the value sits in the text.
+fn time_term(op: Op, value: &str, at: usize, place: Unzoned) -> Result<Term, FilterError> {
+    if reads_as_integer(value) {
+        return Ok(Term::Time {
+            op,
+            value: integer(value, at)?,
+            unzoned: None,
+        });
+    }
+    if let Some((time, rule)) = tz::bracketed(value) {
+        return time_in_rule(op, time, rule, value, at);
+    }
+    let refused = || FilterError {
+        at,
+        kind: FilterErrorKind::UnknownValue {
+            field: "time",
+            value: value.to_string(),
+        },
+    };
+    let unzoned = |zoned: bool| (!zoned).then_some(place);
+    Ok(match clock::time_literal(value).ok_or_else(refused)? {
+        clock::TimeLiteral::Instant { ms, zoned } => Term::Time {
+            op,
+            value: ms,
+            unzoned: unzoned(zoned),
+        },
+        clock::TimeLiteral::Clock {
+            of_day_ms,
+            offset_ms,
+            zoned,
+        } => Term::Clock {
+            op,
+            of_day_ms,
+            zone: ClockZone::Fixed(offset_ms),
+            unzoned: unzoned(zoned),
+        },
+    })
+}
+
+/// A `time` value `value`, written as the time `time` and the zone rule
+/// `rule` in brackets after it. A date is read at the offset the rule puts in
+/// force at that local time, and refused where the rule's clock skips it or
+/// shows it twice; a clock time keeps the rule, for the day a capture gives it.
+/// A time that also carries an offset names two zones and is refused.
+fn time_in_rule(
+    op: Op,
+    time: &str,
+    rule: &str,
+    value: &str,
+    at: usize,
+) -> Result<Term, FilterError> {
+    let refusal = |kind| FilterError { at, kind };
+    let rule = tz::ZoneRule::parse(rule).map_err(|e| {
+        refusal(FilterErrorKind::BadZone {
+            value: value.to_string(),
+            why: e.to_string(),
+        })
+    })?;
+    let not_a_time = || {
+        refusal(FilterErrorKind::UnknownValue {
+            field: "time",
+            value: value.to_string(),
+        })
+    };
+    match clock::time_literal(time).ok_or_else(not_a_time)? {
+        clock::TimeLiteral::Instant { zoned: true, .. }
+        | clock::TimeLiteral::Clock { zoned: true, .. } => Err(not_a_time()),
+        clock::TimeLiteral::Instant { ms, .. } => {
+            let local = i64::try_from(ms).map_err(|_| not_a_time())?;
+            match rule.resolve(local) {
+                tz::Local::One(east_ms) => Ok(Term::Time {
+                    op,
+                    value: u64::try_from(local - east_ms).map_err(|_| not_a_time())?,
+                    unzoned: None,
+                }),
+                tz::Local::Skipped => Err(refusal(FilterErrorKind::SkippedLocalTime {
+                    value: value.to_string(),
+                })),
+                tz::Local::Repeated => Err(refusal(FilterErrorKind::RepeatedLocalTime {
+                    value: value.to_string(),
+                })),
+            }
+        }
+        clock::TimeLiteral::Clock { of_day_ms, .. } => Ok(Term::Clock {
+            op,
+            of_day_ms,
+            zone: ClockZone::of(rule),
+            unzoned: None,
+        }),
+    }
+}
+
+/// An interval of `field`: an integer of milliseconds, or a number and a unit
+/// that comes to a whole number of them (`clock`).
+fn duration(field: &'static str, value: &str, at: usize) -> Result<u64, FilterError> {
+    if reads_as_integer(value) {
+        return integer(value, at);
+    }
+    clock::duration_ms(value).ok_or_else(|| FilterError {
+        at,
+        kind: FilterErrorKind::UnknownValue {
+            field,
+            value: value.to_string(),
+        },
+    })
+}
+
+/// Whether a `time` or interval value is read as a bare integer: all digits,
+/// or a word that does not open with one, which is refused as a number as it
+/// was before dates and units were read.
+fn reads_as_integer(value: &str) -> bool {
+    let digit = |c: char| c.is_ascii_digit();
+    value.chars().all(digit) || !value.starts_with(digit)
 }
 
 /// The parsed expression tree.
@@ -1864,6 +2241,19 @@ impl Filter {
             .any_term(&|term| matches!(term, Term::Zenoh { .. }))
     }
 
+    /// `true` when some term reads the zids the capture names (`zid`, `zids`,
+    /// `session`): a fold kept between calls must then begin again when the
+    /// nodes the capture names move, since a prefix is read against them
+    /// ([`Self::resolved_against`]).
+    pub fn reads_zid(&self) -> bool {
+        self.root.any_term(&|term| {
+            matches!(
+                term,
+                Term::Zid { .. } | Term::Zids { .. } | Term::Session { .. }
+            )
+        })
+    }
+
     /// `true` when some term reads the end-to-end judge's verdict (`e2e`,
     /// `e2e.crc`, `e2e.counter`, `e2e.timeout`): for a plane handed
     /// declarations to judge the samples it walks only when a selector asks.
@@ -1886,8 +2276,32 @@ impl Filter {
                     | Term::Flow { .. }
                     | Term::FlowIn(_)
                     | Term::Packet { .. }
+                    | Term::Row { .. }
+                    | Term::RowIn { .. }
             )
         })
+    }
+
+    /// `true` when some term compares the row's place in the documents' row
+    /// order (`row`), which a door must read against the dissection it renders
+    /// first ([`Self::rows_numbered_by`]).
+    pub fn reads_row_ordinal(&self) -> bool {
+        self.root.any_term(&|term| matches!(term, Term::Row { .. }))
+    }
+
+    /// Read this selector's `row` terms against the places `ordinals` gives
+    /// the rows of one dissection, and return the filter that judges by them.
+    ///
+    /// The place of a row moves when a flow written before it gains a row, so
+    /// a term is read into the set of rows whose place satisfies it NOW, once
+    /// per document and before any row is judged: the verdict a row is given
+    /// then cannot depend on when in the walk it was reached. A filter kept
+    /// between calls that compares this result with the last one begins again
+    /// when the places moved, which is the case that needs it.
+    pub fn rows_numbered_by(&self, ordinals: &RowOrdinals) -> Filter {
+        Filter {
+            root: self.root.rows_numbered(ordinals),
+        }
     }
 
     /// Read this selector against the zids ONE capture names, and say what its
@@ -1954,6 +2368,81 @@ impl Node {
             )),
             Self::Term(_) => self.clone(),
         }
+    }
+
+    fn rows_numbered(&self, places: &RowOrdinals) -> Node {
+        match self {
+            Self::Any => Self::Any,
+            Self::Ambiguous => Self::Ambiguous,
+            Self::Or(nodes) => Self::Or(nodes.iter().map(|n| n.rows_numbered(places)).collect()),
+            Self::And(nodes) => Self::And(nodes.iter().map(|n| n.rows_numbered(places)).collect()),
+            Self::Not(inner) => Self::Not(alloc::boxed::Box::new(inner.rows_numbered(places))),
+            Self::Term(Term::Row { op, value }) => Self::Term(Term::RowIn {
+                rows: places.satisfying(*op, *value),
+                lists: places.lists.clone(),
+            }),
+            Self::Term(_) => self.clone(),
+        }
+    }
+}
+
+/// THE PLACE EACH ROW HAS IN THE DOCUMENTS' ROW ORDER, for one dissection: what
+/// a `row` term compares.
+///
+/// Built by the documents' own enumeration (`crate::fields_json`), so the
+/// number a term reads is the place the selection document writes the row at.
+/// Kept by `(list, produced-index)`, the coordinates a plane hands a row
+/// ([`RowFacts::flow`] and [`RowFacts::produced`]), which no front trim moves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowOrdinals {
+    /// `(list, produced-index, place)`, sorted by the first two.
+    rows: Vec<(u64, u64, u64)>,
+    /// The lists the documents write, sorted.
+    lists: Vec<u64>,
+}
+
+impl RowOrdinals {
+    /// Name `list` as one the documents write: a row of it with no place is a
+    /// row the walk did not reach, not one of a list no document writes.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn write_list(&mut self, list: usize) {
+        self.lists.push(list as u64);
+    }
+
+    /// Give the row at produced-index `produced` of `list` the place `place`.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn place(&mut self, list: usize, produced: u64, place: u64) {
+        self.rows.push((list as u64, produced, place));
+    }
+
+    /// The places, put in the order a term is looked up by. A row is placed
+    /// once, so no two entries share a list and a produced-index.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn sorted(mut self) -> Self {
+        self.rows.sort_unstable();
+        self.lists.sort_unstable();
+        self.lists.dedup();
+        self
+    }
+
+    /// The place of the row at produced-index `produced` of `list`, or `None`
+    /// for a row the documents do not write.
+    pub fn place_of(&self, list: usize, produced: u64) -> Option<u64> {
+        let key = (list as u64, produced);
+        let at = self.rows.binary_search_by_key(&key, |&(l, p, _)| (l, p));
+        at.ok().map(|at| self.rows[at].2)
+    }
+
+    /// The rows whose place satisfies `op value`, as `(list, produced-index)`
+    /// in the order they are kept.
+    fn satisfying(&self, op: Op, value: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        for &(list, produced, place) in &self.rows {
+            if op.apply(place, value) {
+                out.push((list, produced));
+            }
+        }
+        out
     }
 }
 
@@ -2149,7 +2638,36 @@ impl Node {
                     self.clone()
                 }
             },
+            Self::Term(Term::Zids { want }) => Self::Term(Term::Zids {
+                want: want.resolved(named, found),
+            }),
+            Self::Term(Term::Session { pair: [a, b] }) => Self::Term(Term::Session {
+                pair: [a.resolved(named, found), b.resolved(named, found)],
+            }),
             Self::Term(_) => self.clone(),
+        }
+    }
+
+    /// Every `time` value written with no offset and no zone rule: what a
+    /// binder writes a zone onto.
+    fn unzoned_times(&self, out: &mut Vec<UnzonedTime>) {
+        match self {
+            Self::Any | Self::Ambiguous => {}
+            Self::Or(nodes) | Self::And(nodes) => nodes.iter().for_each(|n| n.unzoned_times(out)),
+            Self::Not(inner) => inner.unzoned_times(out),
+            Self::Term(Term::Time {
+                value,
+                unzoned: Some(place),
+                ..
+            }) => out.push(UnzonedTime::Date {
+                local_ms: *value,
+                place: *place,
+            }),
+            Self::Term(Term::Clock {
+                unzoned: Some(place),
+                ..
+            }) => out.push(UnzonedTime::Clock { place: *place }),
+            Self::Term(_) => {}
         }
     }
 
@@ -2542,6 +3060,15 @@ pub enum FilterErrorKind {
     UnclosedList,
     /// `in {}`: a list with nothing to be in.
     EmptyList,
+    /// A `time` value with a zone rule in brackets the rule grammar refuses:
+    /// the value, and why.
+    BadZone { value: String, why: String },
+    /// A date with a zone rule that the rule's clock skips where it goes
+    /// forward, so no instant shows it.
+    SkippedLocalTime { value: String },
+    /// A date with a zone rule that the rule's clock shows twice where it goes
+    /// back, so it names two instants.
+    RepeatedLocalTime { value: String },
 }
 
 impl fmt::Display for FilterError {
@@ -2601,6 +3128,19 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
             }
+            FilterErrorKind::BadZone { value, why } => {
+                write!(f, "time does not admit the value {value:?}: {why}")
+            }
+            FilterErrorKind::SkippedLocalTime { value } => write!(
+                f,
+                "{value:?} is a local time its zone skips where the clock goes forward, so no \
+                 instant shows it"
+            ),
+            FilterErrorKind::RepeatedLocalTime { value } => write!(
+                f,
+                "{value:?} is a local time its zone shows twice where the clock goes back; \
+                 write the offset of the one meant"
+            ),
             FilterErrorKind::OperatorNotAdmitted { field, op } => {
                 write!(f, "{field} does not admit the operator {op}")
             }
@@ -2880,6 +3420,188 @@ pub fn diagnose_json(expr: &str) -> String {
 /// `names_json` of `None` is a table with no names, so a selector without a
 /// `node` term binds to itself and one with a term is an unknown node.
 pub fn bind_json(selector: &str, names_json: Option<&str>) -> String {
+    bind_json_zoned(selector, names_json, None)
+}
+
+/// [`bind_json`], with every `time` value the selector writes with no offset
+/// given the offset `offset_minutes` east of UTC (`540` writes `+09:00`,
+/// `-330` writes `-05:30`, `0` writes `+00:00`): what
+/// `wz_dissect_selector_bind_in_zone` writes.
+///
+/// A literal with no offset is read in UTC by every door, because which zone a
+/// reader's clock shows is not a fact a capture carries. A consumer that shows
+/// times in another zone hands its offset here, and the selector it gets back
+/// carries the offset in its text, so no door needs to be told a zone and the
+/// selector means the same instant wherever it is read again. The offset is
+/// written right after the literal (inside its quotes for a quoted one), and
+/// every other byte is as `bind_json` leaves it, so a refusal's position is a
+/// position in the text typed.
+///
+/// `None` for an offset past 23:59 either way, which no zone has and ISO 8601
+/// cannot spell.
+pub fn bind_json_in_zone(
+    selector: &str,
+    names_json: Option<&str>,
+    offset_minutes: i32,
+) -> Option<String> {
+    let offset = clock::offset_text(offset_minutes)?;
+    Some(bind_json_zoned(
+        selector,
+        names_json,
+        Some(Ok(Zone::Offset(&offset))),
+    ))
+}
+
+/// [`bind_json`], with every `time` value the selector writes with no offset
+/// zoned by the POSIX TZ rule `rule` (`CET-1CEST,M3.5.0,M10.5.0/3`): what
+/// `wz_dissect_selector_bind_in_tz` writes.
+///
+/// A date gains the offset the rule puts in force at that local time, so a
+/// date on either side of a change gets its own (`+01:00` in January,
+/// `+02:00` in July). A clock time has no day until a capture gives it one,
+/// so it gains the rule itself, in brackets, inside quotes
+/// (`"12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`), and each door reads it on the
+/// capture's day at the offset in force there; a rule that never changes its
+/// clock writes its one offset instead. Every other byte is as `bind_json`
+/// leaves it.
+///
+/// A date the rule's clock skips where it goes forward, or shows twice where
+/// it goes back, names no single instant and is refused, `skipped_time` or
+/// `repeated_time` with the value's span in the text typed; a rule the
+/// grammar refuses is `zone`, with no position, as a table that does not read
+/// is `table`.
+pub fn bind_json_in_tz(selector: &str, names_json: Option<&str>, rule: &str) -> String {
+    let zone = tz::ZoneRule::parse(rule).map(|parsed| Zone::Rule {
+        rule: parsed,
+        text: rule,
+    });
+    bind_json_zoned(selector, names_json, Some(zone))
+}
+
+/// What a binder writes onto each `time` value that carries no offset.
+enum Zone<'a> {
+    /// One offset, as a literal spells it (`+09:00`).
+    Offset(&'a str),
+    /// A POSIX TZ rule, and the text it was read from.
+    Rule { rule: tz::ZoneRule, text: &'a str },
+}
+
+/// A `time` value written with no offset, as a binder finds it.
+#[derive(Clone, Copy)]
+enum UnzonedTime {
+    /// A date, read as UTC, so `local_ms` is the local time it writes.
+    Date { local_ms: u64, place: Unzoned },
+    /// A clock time.
+    Clock { place: Unzoned },
+}
+
+impl UnzonedTime {
+    fn place(self) -> Unzoned {
+        match self {
+            Self::Date { place, .. } | Self::Clock { place } => place,
+        }
+    }
+}
+
+/// Why a selector could not be zoned.
+enum ZoneTimeError {
+    /// The text does not compile.
+    Selector(FilterError),
+    /// A date the zone's clock skips (`repeated` false) or shows twice, at
+    /// `place`.
+    Local { repeated: bool, place: Unzoned },
+}
+
+impl Zone<'_> {
+    /// The text `time` gains, as `(byte, text)` insertions into `out`.
+    fn insertions(
+        &self,
+        time: UnzonedTime,
+        out: &mut Vec<(usize, String)>,
+    ) -> Result<(), ZoneTimeError> {
+        let (rule, text) = match self {
+            Self::Offset(offset) => {
+                out.push((time.place().insert_at, String::from(*offset)));
+                return Ok(());
+            }
+            Self::Rule { rule, text } => (rule, *text),
+        };
+        match time {
+            UnzonedTime::Date { local_ms, place } => {
+                let refused = |repeated| ZoneTimeError::Local { repeated, place };
+                let local = i64::try_from(local_ms).map_err(|_| refused(false))?;
+                match rule.resolve(local) {
+                    tz::Local::One(east_ms) => out.push((place.insert_at, offset_of(east_ms))),
+                    tz::Local::Skipped => return Err(refused(false)),
+                    tz::Local::Repeated => return Err(refused(true)),
+                }
+            }
+            UnzonedTime::Clock { place } => match rule.fixed_east_ms() {
+                Some(east_ms) => out.push((place.insert_at, offset_of(east_ms))),
+                // A rule holds characters a bare word does not, so a word is
+                // quoted to carry it.
+                None if place.insert_at == place.end => {
+                    out.push((place.start, String::from("\"")));
+                    out.push((place.insert_at, alloc::format!("[{text}]\"")));
+                }
+                None => out.push((place.insert_at, alloc::format!("[{text}]"))),
+            },
+        }
+        Ok(())
+    }
+}
+
+/// `east_ms` ahead of UTC as a literal writes it. A rule's offsets are whole
+/// minutes within 23:59, which `tz` holds them to.
+fn offset_of(east_ms: i64) -> String {
+    i32::try_from(east_ms / 60_000)
+        .ok()
+        .and_then(clock::offset_text)
+        .unwrap_or_default()
+}
+
+/// `bound` with `zone` written onto its `time` values, once `typed`, the text it
+/// was bound from, has been zoned without a refusal: a refusal's span is one in
+/// the text typed.
+fn zone_bound(typed: &str, bound: &str, zone: &Zone<'_>) -> Result<String, ZoneTimeError> {
+    zone_times(typed, zone)?;
+    zone_times(bound, zone)
+}
+
+/// `text` with `zone` written onto every `time` value that carries no offset.
+///
+/// `text` is a selector the binder has already read, so it parses; its terms
+/// say where each value sits, so the grammar is read once, by the parser.
+fn zone_times(text: &str, zone: &Zone<'_>) -> Result<String, ZoneTimeError> {
+    let filter = Filter::parse_tree(text).map_err(ZoneTimeError::Selector)?;
+    let mut times = Vec::new();
+    filter.root.unzoned_times(&mut times);
+    let mut insertions = Vec::with_capacity(times.len());
+    for time in times {
+        zone.insertions(time, &mut insertions)?;
+    }
+    // Stable, so a word's opening quote stays before what follows it.
+    insertions.sort_by_key(|(at, _)| *at);
+    let added: usize = insertions.iter().map(|(_, piece)| piece.len()).sum();
+    let mut out = String::with_capacity(text.len() + added);
+    let mut from = 0;
+    for (position, piece) in insertions {
+        out.push_str(&text[from..position]);
+        out.push_str(&piece);
+        from = position;
+    }
+    out.push_str(&text[from..]);
+    Ok(out)
+}
+
+/// The binder's verdict, with `zone` written onto every `time` value the bound
+/// selector writes with no offset, or with nothing written for `None`. A zone
+/// that did not read is refused after the table and before the selector.
+fn bind_json_zoned(
+    selector: &str,
+    names_json: Option<&str>,
+    zone: Option<Result<Zone<'_>, tz::ZoneError>>,
+) -> String {
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_BIND, &mut out);
     let names = match names_json {
@@ -2908,13 +3630,79 @@ pub fn bind_json(selector: &str, names_json: Option<&str>) -> String {
             wz_session_core::json::push_str_array(candidates, out);
         }
     };
-    match names.map(|names| bind_nodes(selector, &names)) {
-        Err(e) => refusal(&mut out, BindRefusal::Table, &e, None, None, None),
-        Ok(Ok(bound)) => {
-            out.push_str(",\"ok\":true,\"selector\":");
-            wz_session_core::json::escape_into(&bound, &mut out);
+    let names = match names {
+        Ok(names) => names,
+        Err(e) => {
+            refusal(&mut out, BindRefusal::Table, &e, None, None, None);
+            out.push('}');
+            return out;
         }
-        Ok(Err(e)) => match &e {
+    };
+    let zone = match zone {
+        None => None,
+        Some(Ok(zone)) => Some(zone),
+        Some(Err(e)) => {
+            refusal(&mut out, BindRefusal::Zone, &e, None, None, None);
+            out.push('}');
+            return out;
+        }
+    };
+    match bind_nodes(selector, &names) {
+        Ok(bound) => {
+            // A date the zone cannot place is refused at its span in the text
+            // typed, before any text is written; the text written is the
+            // bound one, whose spans differ where a `node` term was replaced.
+            let zoned = match &zone {
+                None => Ok(bound),
+                Some(zone) => zone_bound(selector, &bound, zone),
+            };
+            match zoned {
+                Ok(text) => {
+                    out.push_str(",\"ok\":true,\"selector\":");
+                    wz_session_core::json::escape_into(&text, &mut out);
+                }
+                // Not reached: the text is one `bind_nodes` read, and the bound
+                // text is its own. Were it refused, the refusal is the
+                // selector's, at its byte.
+                Err(ZoneTimeError::Selector(e)) => refusal(
+                    &mut out,
+                    BindRefusal::Selector,
+                    &e,
+                    None,
+                    Some((e.at, e.at)),
+                    None,
+                ),
+                Err(ZoneTimeError::Local { repeated, place }) => {
+                    let value = &selector[place.start..place.end];
+                    let (which, message) = if repeated {
+                        (
+                            BindRefusal::RepeatedTime,
+                            alloc::format!(
+                                "{value} is a local time the zone shows twice where its clock \
+                                 goes back; write the offset of the one meant"
+                            ),
+                        )
+                    } else {
+                        (
+                            BindRefusal::SkippedTime,
+                            alloc::format!(
+                                "{value} is a local time the zone skips where its clock goes \
+                                 forward, so no instant shows it"
+                            ),
+                        )
+                    };
+                    refusal(
+                        &mut out,
+                        which,
+                        &message,
+                        None,
+                        Some((place.start, place.end)),
+                        None,
+                    );
+                }
+            }
+        }
+        Err(e) => match &e {
             NodeBindError::Selector(f) => refusal(
                 &mut out,
                 BindRefusal::Selector,
@@ -2956,25 +3744,34 @@ pub fn bind_json(selector: &str, names_json: Option<&str>) -> String {
 #[derive(Clone, Copy)]
 enum BindRefusal {
     AmbiguousNode,
+    RepeatedTime,
     Selector,
+    SkippedTime,
     Table,
     UnknownNode,
+    Zone,
 }
 
 impl BindRefusal {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 7] = [
         Self::AmbiguousNode,
+        Self::RepeatedTime,
         Self::Selector,
+        Self::SkippedTime,
         Self::Table,
         Self::UnknownNode,
+        Self::Zone,
     ];
 
     const fn word(self) -> &'static str {
         match self {
             Self::AmbiguousNode => "ambiguous_node",
+            Self::RepeatedTime => "repeated_time",
             Self::Selector => "selector",
+            Self::SkippedTime => "skipped_time",
             Self::Table => "table",
             Self::UnknownNode => "unknown_node",
+            Self::Zone => "zone",
         }
     }
 }
@@ -4154,13 +4951,23 @@ fn build_fixed(
             op,
             value: integer(&value, value_at)?,
         },
-        Field::Time => Term::Time {
-            op,
-            value: integer(&value, value_at)?,
-        },
+        // A clock time or a date written with no offset is read in UTC, and
+        // the binder writes a consumer's zone where `unzoned` says.
+        Field::Time => {
+            let insert_at = match literal {
+                Literal::Quoted(_) => value_end - 1,
+                Literal::Word(_) => value_end,
+            };
+            let place = Unzoned {
+                start: value_at,
+                end: value_end,
+                insert_at,
+            };
+            time_term(op, &value, value_at, place)?
+        }
         Field::Elapsed => Term::Elapsed {
             op,
-            value: integer(&value, value_at)?,
+            value: duration(known.name(), &value, value_at)?,
         },
         Field::Offset => Term::Offset {
             op,
@@ -4168,7 +4975,7 @@ fn build_fixed(
         },
         Field::Delay => Term::Delay {
             op,
-            value: integer(&value, value_at)?,
+            value: duration(known.name(), &value, value_at)?,
         },
         Field::Replies => Term::Replies {
             op,
@@ -4180,11 +4987,11 @@ fn build_fixed(
         },
         Field::FirstReply => Term::FirstReply {
             op,
-            value: integer(&value, value_at)?,
+            value: duration(known.name(), &value, value_at)?,
         },
         Field::Completion => Term::Completion {
             op,
-            value: integer(&value, value_at)?,
+            value: duration(known.name(), &value, value_at)?,
         },
         Field::Closed => {
             let negated = equality_negation(op, known.name(), op_at)?;
@@ -4315,11 +5122,50 @@ fn build_fixed(
                 negated,
             }
         }
+        // Either end's zid, and the pair of a session. Each reads a zid as the
+        // `zid` term does, a prefix included, and `!=` is the negation of
+        // `==`, as for an address: an end this capture never named is
+        // undecided under both.
+        Field::Zids => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let want = ZidValue::parse(known.name(), &value, (value_at, value_end))?;
+            return Ok(negate_if(negated, Term::Zids { want }));
+        }
+        Field::Session => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let refused = || FilterError {
+                at: value_at,
+                kind: FilterErrorKind::UnknownValue {
+                    field: known.name(),
+                    value: value.clone(),
+                },
+            };
+            let start = match literal {
+                Literal::Quoted(_) => value_at + 1,
+                Literal::Word(_) => value_at,
+            };
+            let (a, b) = value.split_once('/').ok_or_else(refused)?;
+            let middle = start + a.len();
+            let first = ZidValue::parse(known.name(), a, (start, middle))?;
+            let second = ZidValue::parse(known.name(), b, (middle + 1, start + value.len()))?;
+            // A node is not in a session with itself.
+            if first.want == second.want {
+                return Err(refused());
+            }
+            let term = Term::Session {
+                pair: [first, second],
+            };
+            return Ok(negate_if(negated, term));
+        }
         Field::Flow => Term::Flow {
             op,
             value: integer(&value, value_at)?,
         },
         Field::Packet => Term::Packet {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Row => Term::Row {
             op,
             value: integer(&value, value_at)?,
         },
@@ -4509,6 +5355,8 @@ mod tests {
             // to drive this axis writes `RecordView { zid: Some(..), ..view(..) }`
             // and is visibly the one that cares.
             zid: None,
+            // The other end, on the same rule.
+            receiver_zid: None,
             // The default is a plane that was never told the capture origin,
             // so every pre-existing test below drives the undecidable arm.
             elapsed_ms: None,
@@ -4947,6 +5795,440 @@ mod tests {
                 .matches(&no_origin),
             Truth::Yes
         );
+    }
+
+    /// `time` READS A DATE AND A CLOCK TIME AS A PERSON WRITES THEM, and a
+    /// clock time alone on the day the capture began: here 2023-11-14, whose
+    /// first instant is 22:13:20 UTC, the record's instant less its elapsed time.
+    #[test]
+    fn time_reads_a_date_and_a_clock_time_on_the_captures_day() {
+        let mut r = view(
+            Direction::A,
+            Some("demo/a"),
+            RecordKind::Put,
+            10,
+            Some(1_700_000_005_000),
+        );
+        r.elapsed_ms = Some(5_000);
+        for (source, expected) in [
+            ("time > 22:13", Truth::Yes),
+            ("time > 22:13:25", Truth::No),
+            ("time >= 22:13:25", Truth::Yes),
+            ("time == 22:13:25", Truth::Yes),
+            ("time == 22:13:25.001", Truth::No),
+            ("time < 22:13:25.001", Truth::Yes),
+            ("time < 22:14Z", Truth::Yes),
+            // At +09:00 the capture began at 07:13:20 on the 15th.
+            ("time > 07:13+09:00", Truth::Yes),
+            ("time > 07:14+09:00", Truth::No),
+            ("time > 2023-11-14T22:13:00Z", Truth::Yes),
+            ("time > 2023-11-15T07:13:25+09:00", Truth::No),
+            ("time >= 2023-11-15T07:13:25+09:00", Truth::Yes),
+            ("time >= \"2023-11-14 22:13:25\"", Truth::Yes),
+            ("time < 2023-11-15", Truth::Yes),
+            ("time == 1700000005000", Truth::Yes),
+            ("time in {22:13:25, 23:00}", Truth::Yes),
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&r),
+                expected,
+                "{source}"
+            );
+        }
+
+        // A clock time needs the day, and a plane never told where the capture
+        // began has none: undecided, where a date over the same record decides.
+        let no_origin = view(
+            Direction::A,
+            Some("demo/a"),
+            RecordKind::Put,
+            10,
+            Some(1_700_000_005_000),
+        );
+        for source in ["time > 22:13", "time != 22:13:25", "not time > 22:13"] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&no_origin),
+                Truth::Unknown,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            Filter::parse("time > 2023-11-14")
+                .expect("parses")
+                .matches(&no_origin),
+            Truth::Yes
+        );
+    }
+
+    /// A `time` value that opens with a digit and is no integer, no date and no
+    /// clock time is refused at the value as one `time` does not admit; a word
+    /// is refused as a number, as it always was.
+    #[test]
+    fn a_time_that_is_no_date_and_no_clock_time_is_refused() {
+        for value in [
+            "25:00",
+            "12:04:00.2500",
+            "2023-02-29",
+            "1969-12-31",
+            "12:04+24:00",
+        ] {
+            let source = alloc::format!("time > {value}");
+            let err = Filter::parse(&source).expect_err(&source);
+            assert_eq!(
+                err.kind,
+                FilterErrorKind::UnknownValue {
+                    field: "time",
+                    value: value.to_string()
+                },
+                "{source}"
+            );
+            assert_eq!(err.at, 7, "{source}: at the value");
+        }
+        let err = Filter::parse("time > noon").expect_err("a word");
+        assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
+    }
+
+    /// THE FOUR INTERVALS TAKE A NUMBER AND A UNIT, read exactly: the value
+    /// must come to a whole number of milliseconds.
+    #[test]
+    fn an_interval_takes_a_unit_and_comes_to_whole_milliseconds() {
+        let mut r = view(
+            Direction::A,
+            Some("demo/a"),
+            RecordKind::Put,
+            10,
+            Some(1_700_000_005_000),
+        );
+        r.elapsed_ms = Some(5_000);
+        for (source, expected) in [
+            ("elapsed == 5s", Truth::Yes),
+            ("elapsed == 5000000us", Truth::Yes),
+            ("elapsed < 5.001s", Truth::Yes),
+            ("elapsed > 4999ms", Truth::Yes),
+            ("elapsed >= 1min", Truth::No),
+            ("elapsed in {5s, 6s}", Truth::Yes),
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&r),
+                expected,
+                "{source}"
+            );
+        }
+        for source in ["delay > 250ms", "first_reply < 1.5s", "completion >= 1h"] {
+            assert!(Filter::parse(source).is_ok(), "{source}");
+        }
+        for (source, field, value) in [
+            ("elapsed > 1.0005s", "elapsed", "1.0005s"),
+            ("delay > 0.5ms", "delay", "0.5ms"),
+            ("first_reply > 5m", "first_reply", "5m"),
+            ("completion > 2days", "completion", "2days"),
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect_err(source).kind,
+                FilterErrorKind::UnknownValue {
+                    field,
+                    value: value.to_string()
+                },
+                "{source}"
+            );
+        }
+        // `bytes` counts bytes and takes no unit.
+        assert!(matches!(
+            Filter::parse("bytes > 5s").expect_err("a count").kind,
+            FilterErrorKind::NotAnInteger(_)
+        ));
+    }
+
+    /// `zids` IS EITHER END, `session` THE PAIR EITHER WAY, and an end this
+    /// capture never heard name itself leaves undecided what the other end does
+    /// not settle, `!=` and `not` included, as for `zid`.
+    #[test]
+    fn zids_reads_either_end_and_session_the_pair() {
+        const A: &[u8] = &[0xA1; 4];
+        const B: &[u8] = &[0xB2; 4];
+        let judge = |source: &str, zid: Option<&'static [u8]>, to: Option<&'static [u8]>| {
+            let record = RecordView {
+                zid,
+                receiver_zid: to,
+                ..put(Some("demo/a"))
+            };
+            Filter::parse(source).expect(source).matches(&record)
+        };
+        for (source, expected) in [
+            ("zids == a1a1a1a1", Truth::Yes),
+            ("zids == b2b2b2b2", Truth::Yes),
+            ("zids == c3c3c3c3", Truth::No),
+            ("zids != c3c3c3c3", Truth::Yes),
+            ("zids in {c3c3c3c3, b2b2b2b2}", Truth::Yes),
+            ("session == a1a1a1a1/b2b2b2b2", Truth::Yes),
+            ("session == b2b2b2b2/a1a1a1a1", Truth::Yes),
+            ("session == a1a1a1a1/c3c3c3c3", Truth::No),
+            ("session != a1a1a1a1/c3c3c3c3", Truth::Yes),
+        ] {
+            assert_eq!(judge(source, Some(A), Some(B)), expected, "{source}");
+        }
+        // The receiver unknown: the sender settles what it can.
+        for (source, expected) in [
+            ("zids == a1a1a1a1", Truth::Yes),
+            ("zids == b2b2b2b2", Truth::Unknown),
+            ("zids != b2b2b2b2", Truth::Unknown),
+            ("not zids == b2b2b2b2", Truth::Unknown),
+            ("session == a1a1a1a1/b2b2b2b2", Truth::Unknown),
+            ("session == b2b2b2b2/c3c3c3c3", Truth::No),
+        ] {
+            assert_eq!(judge(source, Some(A), None), expected, "{source}");
+        }
+        // Neither end known, and a node at both ends, which is no session.
+        assert_eq!(judge("zids == a1a1a1a1", None, None), Truth::Unknown);
+        assert_eq!(
+            judge("session == a1a1a1a1/b2b2b2b2", None, None),
+            Truth::Unknown
+        );
+        assert_eq!(
+            judge("session == a1a1a1a1/b2b2b2b2", Some(A), Some(A)),
+            Truth::No
+        );
+    }
+
+    /// A `session` value is two zids of two nodes joined by a slash, each half
+    /// refused at its own digits; both fields take equality alone.
+    #[test]
+    fn a_session_is_two_zids_of_two_nodes() {
+        for (source, at) in [
+            ("session == a1a1a1a1", 11),
+            ("session == a1a1a1a1/a1a1a1a1", 11),
+            ("session == a1a1a1a1/xyz", 20),
+            ("session == 0a1b/a1a1a1a1", 11),
+        ] {
+            let err = Filter::parse(source).expect_err(source);
+            assert!(
+                matches!(
+                    err.kind,
+                    FilterErrorKind::UnknownValue {
+                        field: "session",
+                        ..
+                    }
+                ),
+                "{source}: {err}"
+            );
+            assert_eq!(err.at, at, "{source}");
+        }
+        let err = Filter::parse("zids < a1a1a1a1").expect_err("ordered");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::OperatorNotAdmitted {
+                field: "zids",
+                op: "<"
+            }
+        );
+        let err = Filter::parse("session > a/b").expect_err("ordered");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::OperatorNotAdmitted {
+                field: "session",
+                op: ">"
+            }
+        );
+    }
+
+    /// THE ZONE BINDER writes the caller's offset after each `time` literal
+    /// that carries none, leaves every other byte, and refuses an offset no
+    /// zone has.
+    #[test]
+    fn the_zone_binder_writes_an_offset_onto_each_unzoned_time() {
+        let bound = |selector: &str, minutes: i32| {
+            let doc = bind_json_in_zone(selector, None, minutes).expect("an offset a zone has");
+            let start = doc.find("\"selector\":\"").expect("a bound selector") + 12;
+            doc[start..doc.len() - 2].to_string()
+        };
+        assert_eq!(bound("time > 12:04", 540), "time > 12:04+09:00");
+        assert_eq!(bound("time > 12:04Z", 540), "time > 12:04Z");
+        assert_eq!(
+            bound("time > 5 and elapsed < 1s", 540),
+            "time > 5 and elapsed < 1s"
+        );
+        assert_eq!(
+            bound("time >= 2026-11-23", -330),
+            "time >= 2026-11-23-05:30"
+        );
+        assert_eq!(
+            bound("not time in {12:00,13:00}", 0),
+            "not time in {12:00+00:00,13:00+00:00}"
+        );
+        // What the binder writes is a selector, and reads the instant the
+        // offset names.
+        let zoned = Filter::parse(&bound("time > 12:04", 540)).expect("parses");
+        let written = Filter::parse("time > 12:04+09:00").expect("parses");
+        assert_eq!(zoned, written);
+        assert_eq!(bind_json_in_zone("time > 12:04", None, 1440), None);
+        assert_eq!(bind_json_in_zone("time > 12:04", None, -1440), None);
+        // A literal that carries an offset is the text the binder always wrote.
+        assert_eq!(
+            Some(bind_json("time > 12:04Z", None)),
+            bind_json_in_zone("time > 12:04Z", None, 540)
+        );
+    }
+
+    /// Central European time: an hour ahead in winter, two in summer, forward at
+    /// 01:00 UTC on the last Sunday of March and back on the last of October.
+    const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+
+    /// The selector a rule binder's verdict carries, as the JSON writes it.
+    fn bound_in_tz(selector: &str, rule: &str) -> String {
+        let doc = bind_json_in_tz(selector, None, rule);
+        let start = doc.find("\"selector\":\"").expect("a bound selector") + 12;
+        doc[start..doc.len() - 2].to_string()
+    }
+
+    /// THE RULE BINDER writes onto a date the offset its rule puts in force at
+    /// that local time, on either side of both changes, and onto a clock time
+    /// the rule itself, quoted, since its day is the capture's; a rule that
+    /// never changes its clock writes its one offset.
+    #[test]
+    fn the_rule_binder_writes_the_offset_in_force_onto_each_date() {
+        for (date, offset) in [
+            ("2026-01-15T12:00", "+01:00"),
+            ("2026-07-15T12:00", "+02:00"),
+            ("2026-03-29T01:59", "+01:00"),
+            ("2026-03-29T03:00", "+02:00"),
+            ("2026-10-25T01:59", "+02:00"),
+            ("2026-10-25T03:00", "+01:00"),
+        ] {
+            let typed = alloc::format!("time > {date}");
+            assert_eq!(
+                bound_in_tz(&typed, CET),
+                alloc::format!("time > {date}{offset}"),
+                "{date}"
+            );
+        }
+        assert_eq!(
+            bound_in_tz("time > \"2026-07-15 12:00\"", CET),
+            "time > \\\"2026-07-15 12:00+02:00\\\""
+        );
+        assert_eq!(
+            bound_in_tz("time > 12:04", CET),
+            "time > \\\"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\\\""
+        );
+        assert_eq!(
+            bound_in_tz("time > '12:04'", CET),
+            "time > '12:04[CET-1CEST,M3.5.0,M10.5.0/3]'"
+        );
+        assert_eq!(
+            bound_in_tz("time in {12:00, 2026-07-15}", CET),
+            "time in {\\\"12:00[CET-1CEST,M3.5.0,M10.5.0/3]\\\", 2026-07-15+02:00}"
+        );
+        assert_eq!(
+            bound_in_tz("time > 12:04Z or time > 5", CET),
+            "time > 12:04Z or time > 5"
+        );
+        assert_eq!(bound_in_tz("time > 12:04", "JST-9"), "time > 12:04+09:00");
+        // What it writes is a selector the doors take, and a date it zoned
+        // reads the instant the written offset names.
+        const DATE_WITH_RULE: &str = "time > \"2026-07-15T12:00[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        const CLOCK_WITH_RULE: &str = "time > \"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        let parsed = |text: &str| Filter::parse(text).expect(text);
+        assert_eq!(
+            parsed(DATE_WITH_RULE),
+            parsed("time > 2026-07-15T12:00+02:00")
+        );
+        assert!(Filter::parse(CLOCK_WITH_RULE).is_ok());
+    }
+
+    /// A date the rule's clock skips or shows twice names no single instant,
+    /// and the rule binder refuses it at its span in the text TYPED, after a
+    /// `node` term too; a rule that does not read is refused before the
+    /// selector, and after the table.
+    #[test]
+    fn the_rule_binder_refuses_a_date_the_clock_skips_or_repeats() {
+        fn refused_as(doc: &str, word: &str) -> bool {
+            doc.contains(&alloc::format!("\"refusal\":\"{word}\""))
+        }
+        let skipped = bind_json_in_tz("kind == put and time > 2026-03-29T02:30", None, CET);
+        assert!(refused_as(&skipped, "skipped_time"), "{skipped}");
+        assert!(skipped.contains("\"start\":23,\"end\":39"), "{skipped}");
+        let repeated = bind_json_in_tz("time < 2026-10-25T02:30", None, CET);
+        assert!(refused_as(&repeated, "repeated_time"), "{repeated}");
+        assert!(repeated.contains("\"start\":7,\"end\":23"), "{repeated}");
+        let table = r#"{"cam":"ff0eedd0c0b0a0908070605040302011"}"#;
+        let typed = "node == cam and time > 2026-03-29T02:30";
+        let named = bind_json_in_tz(typed, Some(table), CET);
+        assert!(named.contains("\"start\":23,\"end\":39"), "{named}");
+
+        let zone = bind_json_in_tz("time > 12:04", None, "CET-1CEST");
+        assert!(refused_as(&zone, "zone"), "{zone}");
+        assert!(!zone.contains("\"start\""), "{zone}");
+        let both = bind_json_in_tz("time > 12:04", Some("[]"), "CET-1CEST");
+        assert!(refused_as(&both, "table"), "{both}");
+    }
+
+    /// Written by hand, a date with a rule the clock skips or repeats is
+    /// refused at the value; a rule that does not read, and a time with an
+    /// offset AND a rule, are refused too.
+    #[test]
+    fn a_date_with_a_rule_the_clock_skips_or_repeats_does_not_parse() {
+        let kind = |selector: &str| Filter::parse(selector).expect_err(selector).kind;
+        assert!(matches!(
+            kind("time > \"2026-03-29T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\""),
+            FilterErrorKind::SkippedLocalTime { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"2026-10-25T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\""),
+            FilterErrorKind::RepeatedLocalTime { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"12:04[CET-1CEST]\""),
+            FilterErrorKind::BadZone { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"12:04+01:00[CET-1]\""),
+            FilterErrorKind::UnknownValue { field: "time", .. }
+        ));
+        let at = Filter::parse("time > \"2026-03-29T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\"")
+            .expect_err("skipped")
+            .at;
+        assert_eq!(at, 7);
+    }
+
+    /// A clock time with a rule is read on the capture's day at the offset in
+    /// force there: the same `12:00` is 11:00 UTC on a January capture and
+    /// 10:00 UTC on a July one. On the day the clock skips or repeats it, it is
+    /// undecided.
+    #[test]
+    fn a_clock_time_with_a_rule_takes_the_offset_of_the_captures_day() {
+        let at = |observed_ms: u64| {
+            let mut r = view(
+                Direction::A,
+                Some("demo/a"),
+                RecordKind::Put,
+                10,
+                Some(observed_ms),
+            );
+            r.elapsed_ms = Some(5_000);
+            r
+        };
+        let judged = |selector: &str, observed_ms: u64| {
+            let typed = alloc::format!("time {selector}");
+            let bound = bound_in_tz(&typed, CET).replace("\\\"", "\"");
+            Filter::parse(&bound)
+                .expect(&bound)
+                .matches(&at(observed_ms))
+        };
+        // 2026-01-15T11:00:05Z, five seconds into a capture: 12:00:05 there.
+        let january = 1_768_474_805_000;
+        assert_eq!(judged("> 12:00", january), Truth::Yes);
+        assert_eq!(judged("> 12:01", january), Truth::No);
+        // 2026-07-15T10:00:05Z: 12:00:05 there as well.
+        let july = 1_784_109_605_000;
+        assert_eq!(judged("> 12:00", july), Truth::Yes);
+        assert_eq!(judged("> 12:01", july), Truth::No);
+        // 2026-03-29T00:30:05Z: the day 02:30 is skipped there.
+        let spring = 1_774_744_205_000;
+        assert_eq!(judged("> 02:30", spring), Truth::Unknown);
+        assert_eq!(judged("> 04:00", spring), Truth::No);
+        // 2026-10-25T00:30:05Z: the day 02:30 is shown twice there.
+        let autumn = 1_792_888_205_000;
+        assert_eq!(judged("> 02:30", autumn), Truth::Unknown);
+        assert_eq!(judged("< 03:30", autumn), Truth::Yes);
     }
 
     /// R311y636 (§1.1v) — the outcome axis, driven the same way: every field,

@@ -69,10 +69,13 @@ use std::any::Any;
 // multicast one, say) had to depend on the routing plane or on the engine crate directly.
 #[cfg(feature = "access-acl")]
 pub use wz_access_control::{
-    AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, AclUsername, Permission, SubjectSelector,
+    AclConfig, AclDecision, AclFlow, AclJudgement, AclMessage, AclPolicy, AclRule, AclUsername,
+    Attribute, DecidedBy, PartialSubject, Permission, SubjectAttribute, SubjectSelector,
 };
 
-use wz_routing_graph::Zid;
+// The subject a rule names and `InterceptorContext::subject` returns, public for the reason the
+// engine's types above are: a caller describing a subject to the policy has to name it.
+pub use wz_routing_graph::Zid;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::network_message::MessageRef;
 
