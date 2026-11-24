@@ -665,6 +665,8 @@ pub mod decl_watch {
     pub const WZ_EXT_DECL_DECLARED: u8 = 0;
     /// `kind` of an event: the peer retracted the entity.
     pub const WZ_EXT_DECL_UNDECLARED: u8 = 1;
+    /// `kind` of an event: the watch lost events, `id` of them (added in minor version 3).
+    pub const WZ_EXT_DECL_LOST: u8 = 3;
     /// `entity` of a watch and an event: a queryable.
     pub const WZ_EXT_DECL_QUERYABLE: u8 = 1;
 

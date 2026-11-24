@@ -1458,6 +1458,10 @@ typedef struct wz_ext_replay_subscriber_counts_t {
   uint64_t abandoned;
   uint64_t frames_given_up; /* segmented: a piece never came */
   uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
+  uint64_t declarations_lost; /* added in minor version 3: declarations of the
+                                 publishers' queryables the watch lost
+                                 (WZ_EXT_DECL_LOST); not zero, the rounds may
+                                 miss a publisher or wait on one that went */
 } wz_ext_replay_subscriber_counts_t;
 
 typedef struct wz_ext_owned_replay_subscriber_t {
