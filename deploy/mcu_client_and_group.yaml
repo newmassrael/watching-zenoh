@@ -78,7 +78,7 @@ machines:
     session_pool:
       ref: session_slot_pool_mcu
       process:
-        max_tasks: 8
+        max_tasks: 16
         max_timers: 16
         # The buffer one admin reply is built in: a reply past it is refused,
         # counted and answered to the querier as a typed error. An admin reply is

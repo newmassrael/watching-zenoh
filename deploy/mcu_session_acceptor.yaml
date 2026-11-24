@@ -54,7 +54,7 @@ machines:
       # this machine's admin node. The validator refuses a ceiling below it.
       typed_slot_image: mcu-admin-node
       process:
-        max_tasks: 8
+        max_tasks: 16
         max_timers: 16
         admin_reply_bytes: 1024
         admin_locators: 4
