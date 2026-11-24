@@ -255,6 +255,13 @@ impl SessionEngine for Script {
     ) -> Result<MatchId, Refusal> {
         Ok(0)
     }
+    fn declare_filter_matching_listener(
+        &self,
+        _filter: FilterId,
+        _sink: MatchingSink,
+    ) -> Result<MatchId, Refusal> {
+        Ok(0)
+    }
     fn undeclare_matching_listener(&self, _id: MatchId) {}
     fn declare_write_filter(
         &self,
