@@ -353,10 +353,10 @@ fn reply_key_of(
 
 /// The slots the router stand-in's link lends its session. The stand-in is built with the session
 /// core the engine under test is built with, so a lend-only build (`tx-lend-only`) gives it the
-/// send that has no heap frame to fall back on: a link that lends no slot carries none of its
-/// frames, the InitAck included, and every open of an engine against it waits for an answer that
-/// never comes. Two, because the stand-in's session batches and holds one slot open while it
-/// encodes into another.
+/// send that has no heap frame to fall back on: a frame with no slot free is not sent, the InitAck
+/// included. Two, because the stand-in's session batches and holds one slot open while it encodes
+/// into another; a link holds at least the slots its session needs whatever it is given
+/// (`SESSION_TX_SLOTS`).
 const ROUTER_TX_SLOTS: usize = 2;
 
 /// The host's links the router stand-in accepts on: each lends its session [`ROUTER_TX_SLOTS`]
@@ -913,9 +913,10 @@ fn until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// The router stand-in's link lends its session a slot of the stand-in's whole batch, which a
-/// lend-only session needs for each frame it sends. The CONTROL is the host's links as they come,
-/// which lend none, so the test tells a stand-in that lends from one that does not.
+/// The router stand-in's link lends its session two slots of the stand-in's whole batch, which a
+/// lend-only session that batches needs. The CONTROL is the host's links as they come, which lend
+/// the slots their session needs (`SESSION_TX_SLOTS`), each as long as their receive buffer, and
+/// none past them while those are out.
 #[test]
 fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
     use wz_session_core::qos::Priority;
@@ -932,17 +933,36 @@ fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
         len >= grant.headroom + usize::from(batch),
         "a slot of {len} bytes holds a batch of {batch} after its headroom"
     );
+    let second = sink
+        .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
+        .expect("a second slot while the first is out");
     sink.tx_slot_abort(grant.slot);
+    sink.tx_slot_abort(second.slot);
 
     let OpenedLink { sink: plain, .. } = PosixLinks::new(LOOPBACK, PosixTcpDial)
         .open_acceptor(0)
         .expect("bind a plain end");
+    let held = [(); wz_session_core::link::SESSION_TX_SLOTS].map(|()| {
+        plain
+            .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
+            .expect("CONTROL: a link given no storage lends its session's slots")
+    });
+    for grant in &held {
+        assert_eq!(
+            plain.tx_slot_storage(grant.slot).1,
+            plain.link_rx_capacity(),
+            "CONTROL: each as long as its receive buffer"
+        );
+    }
     assert!(
         plain
             .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
             .is_none(),
-        "CONTROL: the host's links as they come lend nothing"
+        "CONTROL: and none past them while they are out"
     );
+    for grant in held {
+        plain.tx_slot_abort(grant.slot);
+    }
 }
 
 /// A session opens to the router, knows it as a router, declares a subscriber the router sees,

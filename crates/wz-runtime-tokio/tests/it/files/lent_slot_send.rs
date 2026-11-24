@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::new_session_actions;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
@@ -70,6 +70,9 @@ struct LendingLink {
     /// past the call (`tx_slot_spare`): `false` for a link of a pool with none
     /// free besides.
     spare: core::sync::atomic::AtomicBool,
+    /// Whether a frame handed over as bytes is copied into a free slot of the link's, as the
+    /// cooperative runtime's links send one, so that it is refused while every slot is out.
+    copies: core::sync::atomic::AtomicBool,
 }
 
 impl LendingLink {
@@ -78,6 +81,7 @@ impl LendingLink {
             lends,
             grants_left: AtomicUsize::new(usize::MAX),
             spare: core::sync::atomic::AtomicBool::new(true),
+            copies: core::sync::atomic::AtomicBool::new(false),
             headroom,
             slots: (0..n_slots)
                 .map(|_| SlotMem(UnsafeCell::new(vec![0u8; slot_len].into_boxed_slice())))
@@ -132,6 +136,9 @@ impl LendingLink {
 
 impl BoxedLinkDriver for LendingLink {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        if self.copies.load(Ordering::SeqCst) && self.free() == 0 {
+            return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
+        }
         self.heap.lock().expect("heap").push(bytes.to_vec());
         self.doors
             .lock()
@@ -1085,6 +1092,62 @@ fn a_dry_pool_stages_the_window_on_the_heap_and_counts_it() {
     let actions = batching_session(plain.clone());
     run_window(&actions, &payloads);
     assert_eq!(actions.batch_lend_counts().heap_no_slot, 1);
+}
+
+/// Two conduits alternate reliable messages in one window over a link of ONE slot that also copies
+/// a frame handed over as bytes into a slot of its own, as the cooperative runtime's links do:
+/// every message reaches the link once, each conduit's in the order they were sent, and nothing
+/// is refused, as before such a link sent its bytes through its slots. A conduit that finds the
+/// slot held by another conduit's open batch sends that batch first and takes the slot. Turned red
+/// by a lend that gives up on a held slot (`lease_on` without `send_open_lent_batches`): the
+/// second conduit's frame is staged on the heap and refused at the byte door.
+#[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
+#[test]
+fn two_conduits_alternating_over_one_slot_lose_no_message() {
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    link.copies.store(true, Ordering::SeqCst);
+    let actions = batching_session(link.clone());
+    assert!(
+        actions.set_qos_offer(true),
+        "the session carries a conduit for each priority"
+    );
+    let payloads: Vec<Vec<u8>> = (0..6u8).map(|n| vec![0xE0 | n; 4]).collect();
+    actions.batch_start().expect("batch_start");
+    for (n, payload) in payloads.iter().enumerate() {
+        let priority = if n % 2 == 0 {
+            Priority::Data
+        } else {
+            Priority::DataHigh
+        };
+        actions
+            .send_push_literal_qos("home/two", payload, true, priority)
+            .expect("push");
+    }
+    actions.batch_stop().expect("batch_stop");
+    let frames: Vec<Vec<u8>> = link.doors().into_iter().map(|(_, frame)| frame).collect();
+    let holds = |frame: &Vec<u8>, payload: &[u8]| {
+        frame.windows(payload.len()).any(|bytes| bytes == payload)
+    };
+    for payload in &payloads {
+        assert_eq!(
+            frames.iter().filter(|frame| holds(frame, payload)).count(),
+            1,
+            "{payload:?} reaches the link once"
+        );
+    }
+    for lane in 0..2 {
+        let order: Vec<usize> = payloads
+            .iter()
+            .skip(lane)
+            .step_by(2)
+            .filter_map(|payload| frames.iter().position(|frame| holds(frame, payload)))
+            .collect();
+        assert!(
+            order.windows(2).all(|pair| pair[0] <= pair[1]),
+            "conduit {lane} leaves in the order it was sent: {order:?}"
+        );
+    }
+    link.assert_every_slot_home();
 }
 
 /// A slot that cannot hold the whole budget is refused: a frame built in it

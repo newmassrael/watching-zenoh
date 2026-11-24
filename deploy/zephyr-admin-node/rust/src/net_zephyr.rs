@@ -44,11 +44,10 @@ impl ZephyrNet {
             return Err(c"wz: FAIL - the board gave no identity to derive a zenoh id from");
         };
         let links = ZephyrLinks::new(address).with_rx_capacity(BATCH_SIZE as usize + RX_SLACK);
-        // The client node's sessions encode each frame into a buffer their link allocated once and
-        // lends, one batch long (`wz/transport-tx-lend`): two, because a session that batches holds
-        // one open while it encodes the next message into the other. The admin node's build each
-        // frame in a buffer of their own.
-        #[cfg(role_client)]
+        // Each link lends its session the buffers it needs, allocated once and one batch long: the
+        // client node's sessions encode their frames into them (`wz/transport-tx-lend`), and a
+        // link sends a frame of bytes from one of them. Two, because a session that batches holds
+        // one open while another frame leaves; a link holds more where its session needs more.
         let links = links.with_tx_buffers(2, BATCH_SIZE as usize);
         Ok(Self {
             links: Rc::new(links),
