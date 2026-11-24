@@ -36,15 +36,24 @@
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
 use alloc::sync::{Arc, Weak};
+use core::cell::UnsafeCell;
+use core::ffi::c_void;
+use core::mem::MaybeUninit;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use wz_capi_port::lodge::{Kept, Lodging, Strong, WeakRef};
 use wz_capi_port::os::Mutex;
 use wz_ext_pubsub::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
+use crate::ffi::{CountIn, KeptIn};
 use crate::keyexpr::DeclaredKeyexpr;
-use crate::prelude::*;
 use crate::session::Engine;
 use crate::write_filter::PicoSession;
+
+/// How many entities an advanced subscriber declares ([`Entity`]).
+const ENTITIES: usize = 4;
 
 /// The four entities an advanced subscriber declares, in the order the forms
 /// are asked about them and the index of each one's answer.
@@ -67,6 +76,76 @@ struct Anchor {
     announced: DeclaredKeyexpr,
 }
 
+/// The places the anchors of one subscriber's entities are lodged in, one per entity, kept beside
+/// the subscriber in its place, so an anchor takes no memory of its own.
+pub(crate) struct AnchorRooms([AnchorRoom; ENTITIES]);
+
+/// One entity's room: the anchor lodged in it, and the keep of the place the rooms lie in, held
+/// while an anchor is, so the place stands until the anchor's last count goes.
+struct AnchorRoom {
+    lodging: UnsafeCell<MaybeUninit<Lodging<Anchor>>>,
+    keep: UnsafeCell<Option<KeptIn>>,
+    /// Set when the last count of the anchor lodged here let go of the room ([`vacate`]), read
+    /// before another is lodged.
+    vacant: AtomicBool,
+}
+
+impl AnchorRooms {
+    /// Four rooms holding no anchor.
+    pub(crate) fn new() -> Self {
+        Self(core::array::from_fn(|_| AnchorRoom {
+            lodging: UnsafeCell::new(Lodging::vacant()),
+            keep: UnsafeCell::new(None),
+            vacant: AtomicBool::new(true),
+        }))
+    }
+
+    fn room(&self, entity: Entity) -> &AnchorRoom {
+        let [subscriber, late_publishers, heartbeat, token] = &self.0;
+        match entity {
+            Entity::Subscriber => subscriber,
+            Entity::LatePublishers => late_publishers,
+            Entity::Heartbeat => heartbeat,
+            Entity::Token => token,
+        }
+    }
+
+    /// `anchor` lodged in `entity`'s room, which `keep` keeps standing until its last count goes.
+    ///
+    /// # Safety
+    /// The room is vacant, these rooms stand unmoved until it is given back, and no other thread
+    /// lodges in it meanwhile.
+    unsafe fn lodge(&self, entity: Entity, anchor: Anchor, keep: Option<KeptIn>) -> Strong<Anchor> {
+        let room = self.room(entity);
+        room.vacant.store(false, Ordering::Relaxed);
+        // SAFETY: the caller's: the room is vacant and lodged in by this thread alone, so its keep
+        // is written before the anchor that `vacate` reads it for, and the lodging is free.
+        unsafe {
+            *room.keep.get() = keep;
+            Strong::lodge(
+                NonNull::new_unchecked(room.lodging.get()),
+                anchor,
+                vacate,
+                core::ptr::from_ref(room).cast_mut().cast::<c_void>(),
+            )
+        }
+    }
+}
+
+/// The last count of an anchor let go of its room: the room is vacant, and the keep of the place
+/// it held goes last, as it may give the place back.
+///
+/// # Safety
+/// `context` is the room the anchor was lodged in ([`AnchorRooms::lodge`]), given back once.
+unsafe fn vacate(context: *mut c_void) {
+    let room = context.cast::<AnchorRoom>();
+    // SAFETY: the caller's: no count of the anchor is left, so nothing else reads the keep.
+    let keep = unsafe { (*(*room).keep.get()).take() };
+    // SAFETY: as above; the room stands while the keep is held.
+    unsafe { (*room).vacant.store(true, Ordering::Release) };
+    drop(keep);
+}
+
 /// The [`DeclarationForms`] of one C advanced subscriber.
 pub(crate) struct PicoSubscriberForms {
     /// Weak, because the registry holds these forms (they are in the entry it
@@ -77,31 +156,72 @@ pub(crate) struct PicoSubscriberForms {
     base: DeclaredKeyexpr,
     /// The declaration each entity stands on now, indexed by [`Entity`]. Held
     /// weakly: a face's entity holds it, the forms do not.
-    answered: Mutex<[Weak<Anchor>; 4]>,
-    /// Declarations handed over when a subscriber runs in the background.
-    retained: Mutex<Vec<Arc<dyn Send + Sync>>>,
+    answered: Mutex<[Option<WeakRef<Anchor>>; ENTITIES]>,
+    /// Where each entity's anchor is lodged.
+    rooms: NonNull<AnchorRooms>,
+    /// The count of the place the rooms lie in, kept once for each anchor lodged; `None` for
+    /// rooms that stand by other means.
+    place: Option<CountIn>,
+    /// Declarations handed over when a subscriber runs in the background, one per entity.
+    retained: Mutex<[Option<Kept>; ENTITIES]>,
 }
 
+// SAFETY: the rooms are reached through shared borrows; a room's cells are written only while it
+// is vacant, under `answered`'s lock, or by its anchor's last count, which nothing else reads
+// past; the place's count is `Send + Sync`.
+unsafe impl Send for PicoSubscriberForms {}
+// SAFETY: as `Send`.
+unsafe impl Sync for PicoSubscriberForms {}
+
 impl PicoSubscriberForms {
-    /// The forms of an advanced subscriber on `base`, declared on `session`.
-    pub(crate) fn new(session: &PicoSession, base: DeclaredKeyexpr) -> Self {
+    /// The forms of an advanced subscriber on `base`, declared on `session`, lodging each
+    /// entity's anchor in `rooms`, whose place `place` counts.
+    ///
+    /// # Safety
+    /// `rooms` are vacant and stand unmoved until every anchor lodged in them is let go of: the
+    /// place `place` counts stands while it is kept, which every anchor is; with no `place`, the
+    /// caller keeps the rooms past the forms and every anchor they answer with. Anchors are
+    /// lodged only while the place's owner holds it.
+    pub(crate) unsafe fn new(
+        session: &PicoSession,
+        base: DeclaredKeyexpr,
+        rooms: NonNull<AnchorRooms>,
+        place: Option<CountIn>,
+    ) -> Self {
         Self {
             shared: Arc::downgrade(&session.engine),
             mode: session.mode,
             base,
-            answered: Mutex::new([Weak::new(), Weak::new(), Weak::new(), Weak::new()]),
-            retained: Mutex::new(Vec::new()),
+            answered: Mutex::new([None, None, None, None]),
+            rooms,
+            place,
+            retained: Mutex::new([None, None, None, None]),
         }
     }
 
     /// The declaration `entity` stands on: the one another face already holds,
-    /// else a new one. `None` when the session cannot make it.
-    fn anchor(&self, shared: &Arc<Engine>, entity: Entity, keyexpr: &str) -> Option<Arc<Anchor>> {
+    /// else a new one, lodged in the entity's room. `None` when the session cannot make it, or
+    /// when the last holder of the previous one is letting go of its room on another thread.
+    fn anchor(
+        &self,
+        shared: &Arc<Engine>,
+        entity: Entity,
+        keyexpr: &str,
+    ) -> Option<Strong<Anchor>> {
         // Held across the declaration, so two faces asking at once cannot both
         // declare: the second finds the first's answer.
         let mut answered = self.answered.lock();
-        if let Some(held) = answered.get(entity as usize).and_then(Weak::upgrade) {
+        let slot = answered.get_mut(entity as usize)?;
+        if let Some(held) = slot.as_ref().and_then(WeakRef::upgrade) {
             return Some(held);
+        }
+        // Every face let go: the room goes back with the weak count let go of here, unless the
+        // last count is going on another thread right now.
+        drop(slot.take());
+        // SAFETY: the rooms stand while the forms do (`Self::new`).
+        let rooms = unsafe { self.rooms.as_ref() };
+        if !rooms.room(entity).vacant.load(Ordering::Acquire) {
+            return None;
         }
         // The key the entity's own derives from. The subscriber is on the
         // caller's; the rest are on keys built FROM it (`z_keyexpr_clone` then
@@ -125,10 +245,17 @@ impl PicoSubscriberForms {
                 (key, announced)
             }
         };
-        let anchor = Arc::new(Anchor { key, announced });
-        if let Some(slot) = answered.get_mut(entity as usize) {
-            *slot = Arc::downgrade(&anchor);
-        }
+        // SAFETY: the room is vacant, lodged in under `answered`'s lock alone, and the rooms
+        // stand until its anchor's last count goes (`Self::new`); the place is kept while its
+        // owner holds it, as anchors are lodged only then.
+        let anchor = unsafe {
+            rooms.lodge(
+                entity,
+                Anchor { key, announced },
+                self.place.map(CountIn::keep),
+            )
+        };
+        *slot = Some(Strong::downgrade(&anchor));
         Some(anchor)
     }
 
@@ -144,13 +271,14 @@ impl PicoSubscriberForms {
         let Some(anchor) = self.anchor(&shared, entity, keyexpr) else {
             return EntityForm::literal();
         };
-        let wire = anchor.announced.wire(Arc::as_ref(&shared));
-        let form = if wire.mapping_id == 0 {
-            EntityForm::literal()
-        } else {
-            EntityForm::aliased(wire.mapping_id, wire.suffix)
+        let kept = Kept::lodged(anchor.clone());
+        let form = match anchor.announced.aliased_parts(Arc::as_ref(&shared)) {
+            // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
+            // unchanged, for as long as a count of it is held, and `kept` is one.
+            Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
+            None => EntityForm::literal().keeping(kept),
         };
-        let form = match entity {
+        match entity {
             Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
                 anchor
                     .key
@@ -158,8 +286,7 @@ impl PicoSubscriberForms {
             ),
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),
-        };
-        form.keeping(anchor)
+        }
     }
 }
 
@@ -180,8 +307,13 @@ impl DeclarationForms for PicoSubscriberForms {
         self.form(Entity::Token, keyexpr)
     }
 
-    fn retain(&self, anchor: Arc<dyn Send + Sync>) {
-        self.retained.lock().push(anchor);
+    fn retain(&self, anchor: Kept) {
+        let mut retained = self.retained.lock();
+        // A subscriber hands over one keep per entity, so a free row is always found; one past
+        // them is let go of, as the engine's entry for the entity holds a count of its own.
+        if let Some(free) = retained.iter_mut().find(|row| row.is_none()) {
+            *free = Some(anchor);
+        }
     }
 }
 
@@ -196,7 +328,7 @@ mod tests {
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which
     /// needs no peer.
-    fn forms_on(key: &str) -> (Arc<SharedSession>, PicoSubscriberForms) {
+    fn forms_on(key: &str) -> (Arc<SharedSession>, Box<AnchorRooms>, PicoSubscriberForms) {
         let shared = Arc::new(
             SharedSession::new(
                 TokioTime::new(),
@@ -211,8 +343,18 @@ mod tests {
             hlc: NodeHlc::default(),
             time: crate::last_timestamp::SessionTime::new(),
         };
-        let forms = PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key));
-        (shared, forms)
+        let rooms = Box::new(AnchorRooms::new());
+        // SAFETY: the rooms are vacant, and each test keeps them past the forms and every anchor
+        // they answer with (it binds them before both).
+        let forms = unsafe {
+            PicoSubscriberForms::new(
+                &session,
+                DeclaredKeyexpr::literal_only(key),
+                NonNull::from(&*rooms),
+                None,
+            )
+        };
+        (shared, rooms, forms)
     }
 
     /// The keys the registry holds, in declaration order.
@@ -225,6 +367,38 @@ mod tests {
     }
 
     const BASE: &str = "demo/kd/asub/**";
+
+    /// An anchor lies in its entity's room: lodging it, counting it into an entity's form, copying
+    /// that and letting every count go takes no memory, and the last count leaves the room vacant
+    /// for the next anchor.
+    ///
+    /// # Control
+    ///
+    /// Lodging the anchor in a box of its own (`Strong::boxed`) counts one allocation; a
+    /// `vacate` that does not mark the room vacant reds the second assertion.
+    #[test]
+    fn an_anchor_lies_in_its_room_and_takes_no_memory() {
+        let rooms = AnchorRooms::new();
+        let anchor = Anchor {
+            key: DeclaredKeyexpr::literal_only(BASE),
+            announced: DeclaredKeyexpr::literal_only(BASE),
+        };
+        let taken = crate::connectivity::tests::allocations(|| {
+            // SAFETY: the room is vacant, lodged in by this thread alone, and the rooms outlive
+            // every count taken here.
+            let lodged = unsafe { rooms.lodge(Entity::Heartbeat, anchor, None) };
+            let form = EntityForm::literal().keeping(Kept::lodged(lodged.clone()));
+            let copy = form.clone();
+            drop(lodged);
+            drop(form);
+            drop(copy);
+        });
+        assert_eq!(taken, 0, "the anchor and its counts take no memory");
+        assert!(
+            rooms.room(Entity::Heartbeat).vacant.load(Ordering::Acquire),
+            "the last count gave the room back"
+        );
+    }
     const PUBLISHERS: &str = "demo/kd/asub/**/@adv/pub/**";
     const DETECTION: &str = "demo/kd/asub/**/@adv/sub/zid/7/_";
 
@@ -244,7 +418,7 @@ mod tests {
     /// reds the second.
     #[test]
     fn each_entity_declares_its_own_key_and_a_shared_prefix_goes_with_its_last_holder() {
-        let (shared, forms) = forms_on(BASE);
+        let (shared, _rooms, forms) = forms_on(BASE);
 
         let subscription = forms.subscriber(BASE);
         let late = forms.late_publishers(PUBLISHERS);
@@ -289,16 +463,21 @@ mod tests {
     /// Answering every face with a declaration of its own reds the holder count.
     #[test]
     fn a_second_face_shares_the_declaration_and_the_last_to_let_go_retracts_it() {
-        let (shared, forms) = forms_on(BASE);
+        let (shared, _rooms, forms) = forms_on(BASE);
 
         let first = forms.subscriber(BASE);
         let second = forms.subscriber(BASE);
         assert_eq!(declared(&shared), vec!["demo/kd/asub"], "one declaration");
+        let held = forms.answered.lock()[Entity::Subscriber as usize]
+            .as_ref()
+            .and_then(WeakRef::upgrade)
+            .expect("the answer stands");
         assert_eq!(
-            forms.answered.lock()[Entity::Subscriber as usize].strong_count(),
-            2,
-            "both faces hold the one declaration"
+            Strong::strong_count(&held),
+            3,
+            "both faces hold the one declaration, and this read a third count"
         );
+        drop(held);
 
         drop(first);
         assert_eq!(
@@ -322,7 +501,7 @@ mod tests {
     /// last face lets go, which reds the first assertion.
     #[test]
     fn a_declaration_every_face_let_go_of_is_made_again_for_the_next() {
-        let (shared, forms) = forms_on(BASE);
+        let (shared, _rooms, forms) = forms_on(BASE);
 
         drop(forms.subscriber(BASE));
         assert!(

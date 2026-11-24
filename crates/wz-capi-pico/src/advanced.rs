@@ -56,6 +56,7 @@ use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherOn, AdvancedPublisherOptions, AdvancedPutOptions,
     MissDetectionConfig, Sequencing,
 };
+use wz_ext_pubsub::advanced_subscriber::FormsHandle;
 use wz_ext_pubsub::advanced_subscriber::{
     AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, LentCore,
     Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
@@ -63,7 +64,7 @@ use wz_ext_pubsub::advanced_subscriber::{
 use wz_session_core::publish_options::PublishError;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
-use crate::advanced_forms::PicoSubscriberForms;
+use crate::advanced_forms::{AnchorRooms, PicoSubscriberForms};
 use crate::advanced_plane::PicoPlane;
 use crate::entity::z_entity_global_id_t;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
@@ -957,13 +958,18 @@ pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubK
 /// hold of the place it keeps open until the host gives it back ([`let_go_core`]).
 ///
 /// The miss listeners' set lies here too, with a keep of the place: the owned listeners' handles
-/// reach it after the subscriber's owner let go, and its undeclare does not wait for them.
+/// reach it after the subscriber's owner let go, and its undeclare does not wait for them. So do
+/// the forms that name the subscriber's entities, with a keep of their own, and the rooms of the
+/// anchors those names stand on, each anchor keeping the place while it stands.
 pub(crate) struct AdvSubKept {
     sample: SubscriberKept,
     core: SubscriberCore<Engine>,
     core_hold: core::mem::MaybeUninit<crate::ffi::HeldIn>,
     miss: core::mem::MaybeUninit<Lodging<ListenerSet<CMissClosure>>>,
     miss_keep: core::mem::MaybeUninit<crate::ffi::KeptIn>,
+    forms: core::mem::MaybeUninit<Lodging<PicoSubscriberForms>>,
+    forms_keep: core::mem::MaybeUninit<crate::ffi::KeptIn>,
+    anchors: AnchorRooms,
 }
 
 impl AdvSubKept {
@@ -975,6 +981,9 @@ impl AdvSubKept {
             core_hold: core::mem::MaybeUninit::uninit(),
             miss: Lodging::vacant(),
             miss_keep: core::mem::MaybeUninit::uninit(),
+            forms: Lodging::vacant(),
+            forms_keep: core::mem::MaybeUninit::uninit(),
+            anchors: AnchorRooms::new(),
         }
     }
 }
@@ -1013,6 +1022,52 @@ unsafe fn let_go_miss_place(context: *mut c_void) {
     let kept = context.cast::<AdvSubKept>();
     // SAFETY: the caller's: the keep is read out of the place once and dropped out of it.
     drop(unsafe { core::ptr::addr_of!((*kept).miss_keep).read().assume_init() });
+}
+
+/// The forms of an advanced subscriber's entities, lodged in its place beside the rooms of their
+/// anchors, with a keep of the place held until the forms' last count is let go of
+/// ([`let_go_forms_place`]); each anchor lodged keeps the place too while it stands.
+///
+/// # Safety
+/// `state` was filled for an `AdvSubPlace`, its owner holds it until the subscriber's entities
+/// are declared, and no forms are lodged in it yet.
+unsafe fn lodge_forms(
+    state: *mut AdvSubState,
+    session: &PicoSession,
+    base: DeclaredKeyexpr,
+) -> Strong<PicoSubscriberForms> {
+    // SAFETY: the caller's; the keep is written before the forms are lodged, and the forms and
+    // the rooms lie in the place, which stands while the keep or an anchor's keep is held.
+    unsafe {
+        let kept = crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(state);
+        let keep = crate::object_slot::keep_entity::<AdvSubState, AdvSubKept>(state);
+        let place = keep.count();
+        (*kept).forms_keep.write(keep);
+        let forms = PicoSubscriberForms::new(
+            session,
+            base,
+            core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).anchors)),
+            Some(place),
+        );
+        Strong::lodge(
+            core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).forms)),
+            forms,
+            let_go_forms_place,
+            kept.cast::<c_void>(),
+        )
+    }
+}
+
+/// The last count of a subscriber's forms was let go of: the keep of the place is too, which
+/// gives the place back if its owner, every closure and every anchor went first.
+///
+/// # Safety
+/// `context` is the kept part of an advanced subscriber's place whose keep for the forms was
+/// written ([`lodge_forms`]) and is let go of once, here.
+unsafe fn let_go_forms_place(context: *mut c_void) {
+    let kept = context.cast::<AdvSubKept>();
+    // SAFETY: the caller's: the keep is read out of the place once and dropped out of it.
+    drop(unsafe { core::ptr::addr_of!((*kept).forms_keep).read().assume_init() });
 }
 
 /// The host gave back the place of its part: the hold of the subscriber's place it kept open is
@@ -1239,8 +1294,6 @@ unsafe fn declare_subscriber_state(
         Some(declared) => declared.share(),
         None => DeclaredKeyexpr::literal_of_session(&engine, ke)?,
     };
-    let forms = Arc::new(PicoSubscriberForms::new(&PicoSession::of(handle), base));
-    let opts = advanced_subscriber_options(options).with_declaration_forms(forms);
     let session = crate::session::session_count(zs);
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
@@ -1291,6 +1344,11 @@ unsafe fn declare_subscriber_state(
             kept.cast::<c_void>(),
         )
     };
+    // SAFETY: as above; the forms are asked only while the subscriber's entities are declared,
+    // below, while the owner holds the place.
+    let forms = unsafe { lodge_forms(state, &PicoSession::of(handle), base) };
+    let opts =
+        advanced_subscriber_options(options).with_declaration_forms(FormsHandle::lodged(forms));
     // SAFETY: as above.
     let miss = unsafe { lodge_miss_set(state) };
     let lent_miss = Strong::into_raw(miss.clone());
@@ -2812,6 +2870,81 @@ mod tests {
             free(&engine),
             places,
             "the close returns with the place given back, its job ended"
+        );
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// A background advanced subscriber whose four entities each stand on a name lodged in its
+    /// place (the subscription, the heartbeat subscription, the late-publisher subscription and
+    /// the detection token): the session's entries keep those names past the declaration, and the
+    /// close lets them go, so the place is given back by the time the close returns. Turned red
+    /// by a close that keeps an entry's key, whose lodged name then keeps the place, and the
+    /// place's lender the session's engine, for ever.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_background_subscribers_lodged_names_go_back_with_the_close() {
+        use crate::object_slot::{Kind, Slot};
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            z_session_loan, z_session_loan_mut, z_session_move,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        let free = |engine: &Arc<Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
+                    .collect();
+            claimed.len()
+        };
+        // SAFETY: a view is plain data, and the text is a live C string.
+        let mut view: crate::abi::z_view_keyexpr_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        let viewed = unsafe {
+            crate::keyexpr::z_view_keyexpr_from_str(&mut view, c"demo/adv/named/**".as_ptr())
+        };
+        assert_eq!(viewed, Z_OK);
+        // SAFETY: the view is live for the rest of the frame.
+        let ke = unsafe { crate::keyexpr::z_view_keyexpr_loan(&view) };
+        // SAFETY: an options struct is plain data, filled with pico's defaults here.
+        let mut options: ze_advanced_subscriber_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is live.
+        unsafe { ze_advanced_subscriber_options_default(&mut options) };
+        options.recovery.is_enabled = true;
+        options.recovery.last_sample_miss_detection.is_enabled = true;
+        options
+            .recovery
+            .last_sample_miss_detection
+            .periodic_queries_period_ms = 0;
+        options.history.is_enabled = true;
+        options.history.detect_late_publishers = true;
+        options.subscriber_detection = true;
+        let places = free(&engine);
+
+        let drops = AtomicUsize::new(0);
+        let mut callback = counted_sample_closure(&drops);
+        // SAFETY: every pointer is live.
+        let code = unsafe {
+            ze_declare_background_advanced_subscriber(loaned, ke, &mut callback, &mut options)
+        };
+        assert_eq!(code, Z_OK, "a subscriber with all four entities declares");
+        assert_eq!(free(&engine), places - 1, "held past its declaration");
+
+        // SAFETY: the session is live and owned here.
+        let code = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            free(&engine),
+            places,
+            "the close lets the entries' names go, and with them the place"
         );
         drop(engine);
         // SAFETY: the session is owned here, and given up by this call.

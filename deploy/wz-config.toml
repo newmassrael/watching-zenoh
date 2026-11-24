@@ -3619,6 +3619,34 @@ value = 1
 reason = "zenoh-pico bounds its advanced subscribers by no count; its advanced publish and subscribe test holds one advanced subscriber on a session at once, beside the other entities of the plane (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `ASSERT_OK(ze_declare_advanced_subscriber(z_loan(s), &sub, z_loan(k), z_move(closure), &sub_opts));`)."
 
 [[limit]]
+id = "MAX_SAMPLE_MISS_LISTENERS"
+kconfig = "WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS"
+kind = "bound"
+driven = "local"
+default = 4
+storage = "capacity"
+scope = "entity"
+# Bound in the build: the rooms lie in each advanced subscriber's place, which the session's pool
+# sizes when it is reserved, on either profile of the session the zenoh-pico interface runs on.
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The sample-miss listeners one advanced subscriber of the zenoh-pico
+interface holds at once, owned or background, each in a room of the
+subscriber's place. Declaring one more is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY while every room is taken.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the sample-miss listeners an advanced subscriber declares, and zenoh-pico keeps each on the heap with no constant of its own; the default holds four, more than any of zenoh-pico's own tests or examples holds on one subscriber at once."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its sample-miss listeners by no count; its callback drop test holds an owned one and a background one on one advanced subscriber (`vendor/zenoh-pico/tests/z_api_callback_drop_on_undeclare_test.c` @ `ze_advanced_subscriber_declare_background_sample_miss_listener(`), and its advanced subscriber example holds one (`vendor/zenoh-pico/examples/unix/c11/z_advanced_sub.c` @ `ze_advanced_subscriber_declare_sample_miss_listener(z_loan(sub), &miss_listener, z_move(miss_callback));`)."
+
+[[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
 kind = "bound"

@@ -153,6 +153,15 @@ impl Drop for KeptIn {
     }
 }
 
+#[cfg(feature = "advanced")]
+impl KeptIn {
+    /// The count this keep is held in, from which more keeps of the same place may be taken while
+    /// this one holds it.
+    pub(crate) fn count(&self) -> CountIn {
+        self.0
+    }
+}
+
 /// One held open in an owner's count ([`CountIn::hold`]): dropped, it tells the count, and the
 /// last one let go of after the owner let go of its place gives the place back.
 pub(crate) struct HeldIn(CountIn);

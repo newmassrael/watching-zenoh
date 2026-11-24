@@ -76,9 +76,9 @@ extern crate alloc;
 
 // The engine is the session shell's heap profile: a build that unified the per-session slot
 // profile into its dependencies has none of the forms it is written over, and is refused here by
-// name, with no item of the crate compiled to report what that profile lacks.
-wz_session_core::heap_session_profile! {
-"wz-capi-coop";
+// name, first, while the macros expand. Called bare rather than around the items: rustfmt does
+// not read a macro's body, so modules declared in one are formatted by no `cargo fmt`.
+wz_session_core::heap_session_profile!("wz-capi-coop";);
 
 /// What `std`'s prelude gave every module and `alloc` does not: brought in by the modules that
 /// use it, so a build without `std` reads the same source. A build's features decide which of
@@ -97,12 +97,7 @@ mod prelude {
 // on another system: a build for one is refused here by name, rather than by the paths it lacks.
 #[cfg(all(
     any(feature = "scout", feature = "group-host"),
-    not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "nto",
-        windows
-    ))
+    not(any(target_os = "linux", target_os = "android", target_os = "nto", windows))
 ))]
 compile_error!(
     "wz-capi-coop: `scout` and `group-host` open a host's multicast sockets, which \
@@ -138,15 +133,14 @@ pub use wz_runtime_coop::app_link;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
+#[cfg(feature = "time-base")]
+pub use engine::ClockMoves;
 pub use engine::{
     ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, EndpointRefusal,
     KeyWireFormRefused, OpenError, OpenKeyIds, Refusal,
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;
-#[cfg(feature = "time-base")]
-pub use engine::ClockMoves;
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
 /// opens the engine with its host's, or with one of its own (a time base the program supplies).
 pub use wz_runtime_coop::ClockSource;
-}

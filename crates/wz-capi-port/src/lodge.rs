@@ -17,6 +17,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 /// Where a value lies and its two counts. Written once, when the value is lodged, and read through
 /// the counts until the place is given back.
@@ -234,6 +235,98 @@ unsafe fn release_place<T>(at: NonNull<Lodging<T>>) {
     unsafe { give_back(context) };
 }
 
+/// A count of a value its holder neither names nor reads, held for what the value keeps alive: a
+/// value in a box of its own (`Arc`), or one lodged where its maker put it ([`Strong`]), so a
+/// holder that keeps another's value takes no memory for it when the value is lodged. A copy is one
+/// more count; a drop lets one go, and the last lets the value go as its own count says.
+#[derive(Clone)]
+pub struct Kept(KeptForm);
+
+#[derive(Clone)]
+enum KeptForm {
+    Shared { _held: Arc<dyn Send + Sync> },
+    Lodged(LodgedCount),
+}
+
+/// A count of a lodged value whose type is named only by the two functions that take and let go
+/// of a count of it.
+struct LodgedCount {
+    raw: NonNull<c_void>,
+    retain: unsafe fn(*const c_void),
+    release: unsafe fn(*mut c_void),
+}
+
+// SAFETY: made only from a `Strong<T>` with `T: Send + Sync` ([`Kept::lodged`]), which is both.
+unsafe impl Send for LodgedCount {}
+// SAFETY: as `Send`.
+unsafe impl Sync for LodgedCount {}
+
+impl Kept {
+    /// One count of `value`, in a box of its own.
+    pub fn shared(value: Arc<dyn Send + Sync>) -> Self {
+        Self(KeptForm::Shared { _held: value })
+    }
+
+    /// The count `count` is, of a value lodged where its maker put it.
+    pub fn lodged<T: Send + Sync>(count: Strong<T>) -> Self {
+        Self(KeptForm::Lodged(LodgedCount {
+            // SAFETY: `into_raw` gives up a count of a lodging, which is never null.
+            raw: unsafe { NonNull::new_unchecked(Strong::into_raw(count)) },
+            retain: retain_raw::<T>,
+            release: release_raw::<T>,
+        }))
+    }
+}
+
+impl core::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self.0 {
+            KeptForm::Shared { .. } => "Kept::Shared",
+            KeptForm::Lodged(_) => "Kept::Lodged",
+        })
+    }
+}
+
+impl Clone for LodgedCount {
+    fn clone(&self) -> Self {
+        // SAFETY: this count holds the value, so another may be taken from it.
+        unsafe { (self.retain)(self.raw.as_ptr().cast_const()) };
+        Self {
+            raw: self.raw,
+            retain: self.retain,
+            release: self.release,
+        }
+    }
+}
+
+impl Drop for LodgedCount {
+    fn drop(&mut self) {
+        // SAFETY: this count was given up by `Strong::into_raw` (or taken by `retain_raw`) and is
+        // let go of once, here.
+        unsafe { (self.release)(self.raw.as_ptr()) };
+    }
+}
+
+/// Take one more count of the value lodged at `raw`.
+///
+/// # Safety
+/// `raw` names a lodging of a `T` of which the caller holds a count.
+unsafe fn retain_raw<T>(raw: *const c_void) {
+    // SAFETY: the caller's count holds the lodging; Relaxed, as `Strong::clone`'s.
+    unsafe { &*raw.cast::<Lodging<T>>() }
+        .strong
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Let go of one count of the value lodged at `raw`.
+///
+/// # Safety
+/// `raw` is a count of a `T`'s lodging that the caller gives up, once.
+unsafe fn release_raw<T>(raw: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(unsafe { Strong::<T>::from_raw(raw) });
+}
+
 /// Give back a box [`Strong::boxed`] made.
 ///
 /// # Safety
@@ -241,4 +334,65 @@ unsafe fn release_place<T>(at: NonNull<Lodging<T>>) {
 unsafe fn free_box<T>(context: *mut c_void) {
     // SAFETY: the caller's; a vacant lodging drops nothing of the value.
     drop(unsafe { Box::from_raw(context.cast::<MaybeUninit<Lodging<T>>>()) });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Count one giving back of a place, in the counter `context` names.
+    ///
+    /// # Safety
+    /// `context` is an `AtomicUsize` that outlives the call.
+    unsafe fn count_back(context: *mut c_void) {
+        // SAFETY: the caller's.
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A lodged value held by a key's keep is a count like any other: a copy of the keep is one
+    /// more, a drop one less, and the place goes back once, after the last of them.
+    ///
+    /// # Control
+    ///
+    /// A keep whose copy takes no count gives the place back while a copy still holds it, which
+    /// reds the second and third assertions.
+    #[test]
+    fn a_lodged_keep_counts_its_copies_and_the_place_goes_back_once() {
+        let mut place = Lodging::<u32>::vacant();
+        let given = AtomicUsize::new(0);
+        // SAFETY: the place is vacant and stands, as the counter does, past every count here.
+        let count = unsafe {
+            Strong::lodge(
+                NonNull::from(&mut place),
+                7,
+                count_back,
+                core::ptr::from_ref(&given).cast_mut().cast::<c_void>(),
+            )
+        };
+        let kept = Kept::lodged(count.clone());
+        let copy = kept.clone();
+        assert_eq!(
+            Strong::strong_count(&count),
+            3,
+            "the keep and its copy are counts"
+        );
+        drop(kept);
+        assert_eq!(
+            Strong::strong_count(&count),
+            2,
+            "a dropped keep is one less"
+        );
+        drop(count);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            0,
+            "the copy still holds the place"
+        );
+        drop(copy);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            1,
+            "the last count gave the place back"
+        );
+    }
 }
