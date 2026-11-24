@@ -896,6 +896,11 @@ unsafe impl<S> Send for Entry<S> {}
 /// the id the next one is given.
 struct Table<S, const N: usize> {
     rows: [Option<Entry<S>>; N],
+    /// The rows whose listener's history is being replayed. The engine notes what the listener
+    /// was told under its row (`wz_capi_port::told`), so the row is not given to another listener
+    /// until the replay forgot those notes, even when the listener was undeclared meanwhile (from
+    /// its own callback, say): a listener given the row then would find the notes as its own.
+    replaying: [bool; N],
     last_id: u64,
 }
 
@@ -903,8 +908,17 @@ impl<S, const N: usize> Table<S, N> {
     fn new() -> Self {
         Self {
             rows: core::array::from_fn(|_| None),
+            replaying: [false; N],
             last_id: 0,
         }
+    }
+
+    /// The first row no listener holds and no replay keeps.
+    fn free_row(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .zip(&self.replaying)
+            .position(|(row, replaying)| row.is_none() && !replaying)
     }
 }
 
@@ -962,8 +976,9 @@ fn retire_entry<S: Listened>(entry: Entry<S>) {
 
 /// Put the listener whose owner holds the place at `object` in a free row of `table`, holding its
 /// place for the hub, and tell `name` its id before the row can be read: the row, which the
-/// listener's told bits are noted under while it replays (`wz_capi_port::told`). `None` when
-/// every row is held, the listener's closure let go of and its owner's place given back.
+/// listener's told bits are noted under while it replays (`wz_capi_port::told`), and which a
+/// listener that `replays` holds until [`end_replay`] even past its undeclare. `None` when every
+/// row is held, the listener's closure let go of and its owner's place given back.
 ///
 /// # Safety
 /// `object` is a place of `Answering<S, S::Kept>` its owner filled and holds, and lets go of here
@@ -972,15 +987,17 @@ unsafe fn admit<S: Listened, const N: usize>(
     table: &Mutex<Table<S, N>>,
     object: *mut S,
     name: impl FnOnce(u64),
+    replays: bool,
 ) -> Option<usize> {
     // SAFETY: the caller's: the owner holds the place.
     let held = unsafe { hold_entity::<S, S::Kept>(object) };
     let mut rows = lock(table);
     let id = rows.last_id.wrapping_add(1);
-    if let Some(at) = rows.rows.iter().position(Option::is_none) {
+    if let Some(at) = rows.free_row() {
         rows.last_id = id;
         name(id);
         rows.rows[at] = Some(Entry { id, object, held });
+        rows.replaying[at] = replays;
         return Some(at);
     }
     drop(rows);
@@ -988,6 +1005,14 @@ unsafe fn admit<S: Listened, const N: usize>(
     // SAFETY: the caller's: the owner lets go of the place once, here, with no other hold left.
     unsafe { retire_entity::<S, S::Kept>(object) };
     None
+}
+
+/// The replay of the listener of row `at` of `table` ended and the engine forgot what it was told
+/// (`SessionEngine::forget_told`): the row is free for another listener once its own went.
+fn end_replay<S, const N: usize>(table: &Mutex<Table<S, N>>, at: usize) {
+    if let Some(replaying) = lock(table).replaying.get_mut(at) {
+        *replaying = false;
+    }
 }
 
 /// Count the closure `gate` holds in the place of the listener at `object`: the place stands until
@@ -1183,7 +1208,8 @@ impl Connectivity {
         // between is queued rather than missed.
         // SAFETY: the place was filled just above and its owner holds it; the id is written
         // before the entry can be read.
-        let Some(slot) = (unsafe { admit(&self.transports, object, |id| (*object).id = id) })
+        let Some(slot) =
+            (unsafe { admit(&self.transports, object, |id| (*object).id = id, history) })
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
@@ -1205,6 +1231,7 @@ impl Connectivity {
                 |delivery| converge_transports(engine, slot, delivery),
             );
             SessionEngine::forget_told(engine, plane, slot);
+            end_replay(&self.transports, slot);
         }
         Ok(object)
     }
@@ -1245,7 +1272,8 @@ impl Connectivity {
             );
         }
         // SAFETY: as in `declare_transport`.
-        let Some(slot) = (unsafe { admit(&self.links, object, |id| (*object).id = id) }) else {
+        let Some(slot) = (unsafe { admit(&self.links, object, |id| (*object).id = id, history) })
+        else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         if history {
@@ -1268,6 +1296,7 @@ impl Connectivity {
                 |_| converge_links(engine, slot, listener),
             );
             SessionEngine::forget_told(engine, plane, slot);
+            end_replay(&self.links, slot);
         }
         Ok(object)
     }
@@ -2857,6 +2886,34 @@ mod tests {
         // The allocator counts at all: a box made under it is counted.
         let control = allocations(|| drop(core::hint::black_box(Box::new(1u64))));
         assert_eq!(control, 1);
+    }
+
+    /// A row whose listener's history is being replayed is given to no other listener until the
+    /// replay ended, even once no listener holds it: what the engine noted under the row belongs
+    /// to the replay until it forgot it.
+    ///
+    /// # Control
+    ///
+    /// A free row read from `rows` alone (the replay's mark ignored) reds the first assertion.
+    #[test]
+    fn a_row_a_replay_keeps_is_given_to_no_other_listener_until_it_ended() {
+        let table = Mutex::new(Table::<TransportListenerState, 2>::new());
+        lock(&table).replaying[0] = true;
+        assert_eq!(lock(&table).free_row(), Some(1), "the replay keeps row 0");
+        lock(&table).replaying[1] = true;
+        assert_eq!(lock(&table).free_row(), None, "both rows kept");
+        end_replay(&table, 0);
+        assert_eq!(
+            lock(&table).free_row(),
+            Some(0),
+            "the replay that ended frees it"
+        );
+        end_replay(&table, 9);
+        assert_eq!(
+            lock(&table).free_row(),
+            Some(0),
+            "a row past the table is no row"
+        );
     }
 
     /// Undeclaring runs the closure's `drop(context)` exactly once, before it
