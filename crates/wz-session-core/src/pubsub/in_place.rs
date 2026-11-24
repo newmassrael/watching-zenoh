@@ -284,6 +284,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
             routed: true,
             #[cfg(feature = "alloc")]
             hints: Some(Default::default()),
+            #[cfg(feature = "alloc")]
+            source: None,
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.

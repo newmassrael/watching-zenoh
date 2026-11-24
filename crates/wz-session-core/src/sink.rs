@@ -282,6 +282,11 @@ pub struct SampleRef<'a> {
     /// The hints built from the parts, for a sample that answers them.
     #[cfg(feature = "alloc")]
     pub(crate) hints: Option<Hints>,
+    /// The view the sample was read off ([`Self::of`]), which answers the shared values it holds
+    /// the payload, the attachment and the timestamp stack in, so a holder that keeps the sample
+    /// takes a second reference to that storage rather than a copy; none for a sample of parts.
+    #[cfg(feature = "alloc")]
+    pub(crate) source: Option<&'a dyn SampleView>,
 }
 
 /// The owned hints a [`SampleRef`] that answers them builds from its parts, each once.
@@ -317,6 +322,8 @@ impl<'a> SampleRef<'a> {
             routed: false,
             #[cfg(feature = "alloc")]
             hints: None,
+            #[cfg(feature = "alloc")]
+            source: None,
         }
     }
 
@@ -345,6 +352,8 @@ impl<'a> SampleRef<'a> {
             routed: view.routed(),
             #[cfg(feature = "alloc")]
             hints: Some(Hints::default()),
+            #[cfg(feature = "alloc")]
+            source: Some(view),
         }
     }
 
@@ -367,6 +376,10 @@ impl<'a> SampleRef<'a> {
             routed: self.routed,
             #[cfg(feature = "alloc")]
             hints: self.hints.as_ref().map(|_| Hints::default()),
+            // The timestamp stack is not the timestamp: an entity that does not see timestamps
+            // still sees the stack, as it did through a view that hid the timestamp alone.
+            #[cfg(feature = "alloc")]
+            source: self.source,
         }
     }
 }
@@ -428,6 +441,22 @@ impl SampleView for SampleRef<'_> {
     #[cfg(feature = "pubsub-ts-stack")]
     fn routed(&self) -> bool {
         self.routed
+    }
+    #[cfg(feature = "alloc")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.source?.payload_shared()
+    }
+    #[cfg(feature = "alloc")]
+    fn payload_shared_owned(&self) -> Option<crate::link::RxBytes> {
+        self.source?.payload_shared_owned()
+    }
+    #[cfg(feature = "alloc")]
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.source?.attachment_shared()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.source?.ts_stack()
     }
 }
 
@@ -1116,6 +1145,39 @@ mod tests {
         assert_eq!(hidden.encoding(), sample.encoding());
         assert!(hidden.encoding().is_some());
         assert_eq!(hidden.source_info(), sample.source_info());
+    }
+
+    /// The session's sample of an owned sample, its timestamp hidden or not, answers the shared
+    /// values the owned sample holds its payload and attachment in: the same values at the same
+    /// address, so a holder takes a second reference to that storage and copies nothing. A sample
+    /// of parts holds none. Turned red by a `SampleRef` that answers no shared value for a view
+    /// that has one, or answers one of its own.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_sample_of_an_owned_sample_shares_its_payload_and_attachment() {
+        let owned = crate::sample::Sample::new_put("demo/shared", std::vec![1u8, 2, 3])
+            .with_attachment(std::vec![4u8, 5]);
+        let held_attachment = owned.attachment.as_ref().expect("an attachment");
+        let sample = SampleRef::of(&owned);
+        let hidden = sample.without_timestamp();
+        for view in [&sample as &dyn SampleView, &hidden] {
+            let payload = view.payload_shared().expect("the owned sample's payload");
+            assert!(core::ptr::eq(payload, &owned.payload), "the same value");
+            assert_eq!(
+                payload.as_slice().as_ptr(),
+                owned.payload.as_slice().as_ptr(),
+                "the same storage"
+            );
+            let kept = view.payload_shared_owned().expect("a second reference");
+            assert_eq!(kept.as_slice().as_ptr(), owned.payload.as_slice().as_ptr());
+            let attachment = view
+                .attachment_shared()
+                .expect("the owned sample's attachment");
+            assert!(core::ptr::eq(attachment, held_attachment));
+        }
+        let parts = SampleRef::new("k", b"p", SampleKind::Put, Reliability::Reliable);
+        assert!(parts.payload_shared().is_none() && parts.attachment_shared().is_none());
+        assert!(parts.payload_shared_owned().is_none());
     }
 
     // A no-heap-style concrete sink: the shape an MCU consumer `enum`
