@@ -52,7 +52,7 @@ use crate::arena::{
     EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables, PlanFrom,
     SessionArena, SessionRows, TransportTables,
 };
-use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
+use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
@@ -61,7 +61,7 @@ use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
@@ -77,7 +77,9 @@ use wz_session_core::slot_observer::ObserverRows;
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
 #[cfg(feature = "listen")]
 use crate::admission_gate::AdmissionGate;
-use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
+use wz_capi_port::os::{self, Mutex, MutexGuard};
+#[cfg(feature = "threads")]
+use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
     KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
@@ -1024,9 +1026,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// entity ids are spent.
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
+    #[cfg(feature = "threads")]
     reader: Mutex<Option<ReadTask>>,
     /// The run of read tasks, one past each stop: a read task steps the session while the run is
     /// the one it was started in, so a stop needs no word made for it (`ReaderBody`).
+    #[cfg(feature = "threads")]
     reader_run: core::sync::atomic::AtomicUsize,
     /// The threads handing deliveries out for this engine now, and the callbacks each runs
     /// ([`Deliveries`]): a callback that steps its session again from one of them queues what it
@@ -1654,6 +1658,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
+#[cfg(feature = "threads")]
 struct ReadTask {
     thread: JoinHandle,
     id: ThreadId,
@@ -1662,11 +1667,13 @@ struct ReadTask {
 /// What the read task's thread runs, handed to whatever makes the thread: a hold of the engine,
 /// stepped until the engine's run of read tasks is no longer this one's (`reader_run`). A value
 /// of a type that can be named, so the start boxes nothing and makes no word for the stop.
+#[cfg(feature = "threads")]
 pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: Arc<CoopEngine<L, C>>,
     run: usize,
 }
 
+#[cfg(feature = "threads")]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
     /// Step the session until the task is told to stop or the session ends.
     pub(crate) fn run(self) {
@@ -1913,7 +1920,7 @@ pub(crate) struct SubscriberRow {
     /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
     expose: bool,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: CallLatch,
+    latch: Latch,
 }
 
 impl SubscriberRow {
@@ -1926,7 +1933,7 @@ impl SubscriberRow {
             _anchor: anchor,
             sink,
             expose,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -1985,7 +1992,7 @@ const _: () = assert!(
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
 // the tables held has no atomic read-modify-write of a word, and so no `Arc` this engine is built on.
 const _: () = assert!(
-    !CallLatch::ENDS_HELD,
+    !Latch::ENDS_HELD,
     "a call of a subscriber's callback ends with no lock held"
 );
 
@@ -4220,7 +4227,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 closed: AtomicBool::new(false),
                 #[cfg(any(feature = "query", feature = "ticker"))]
                 next_local: AtomicU64::new(1),
+                #[cfg(feature = "threads")]
                 reader: Mutex::new(None),
+                #[cfg(feature = "threads")]
                 reader_run: core::sync::atomic::AtomicUsize::new(0),
                 deliveries: Deliveries::new(),
                 arena_bytes,
@@ -4660,14 +4669,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Run `held` while holding the session as a read step holds it: what a test of a publish that
     /// finds the session held by what is not a publish runs beside one.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
         let _core = self.live();
         held();
     }
 
     /// Run `held` while holding the session as a read working out its wait holds it.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_read_wait(&self, held: impl FnOnce()) {
         let _core = self.live();
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);
@@ -4742,21 +4751,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// delivers nothing itself: the delivery this thread is already making goes on to hand out
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
-    fn deliver(&self) {
-        self.deliveries.within(|entered| {
-            if entered {
-                self.hand_out_entered();
-            }
-        });
+    /// Whether this call handed anything out: none inside the delivery it is already making.
+    fn deliver(&self) -> bool {
+        self.deliveries
+            .within(|entered| entered && self.hand_out_entered())
     }
 
-    /// Everything [`Self::deliver`] hands out, inside the delivery it entered.
-    fn hand_out_entered(&self) {
+    /// Everything [`Self::deliver`] hands out, inside the delivery it entered: whether its passes
+    /// handed anything out.
+    fn hand_out_entered(&self) -> bool {
         // A callback can queue more for this delivery than the pass that ran it has already passed
         // over (a queryable's answer to the session's own get lies in the next round): the passes
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
         // there.
-        while self.hand_out() {}
+        let mut handed = false;
+        while self.hand_out() {
+            handed = true;
+        }
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
         self.let_go_of_released();
         // What the declaration watches are owed and the round had no room for when it came (the
@@ -4808,6 +4819,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
         }
+        handed
     }
 
     /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
@@ -5574,6 +5586,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// out of its table is under way. At once on a thread that delivers now (see
     /// [`Self::wait_for_release`]).
     fn wait_until_let_go(&self, held: impl Fn(&CoopTables) -> bool, settled: impl Fn() -> bool) {
+        // Every call runs on this thread: one that runs now is below on this stack and lets the
+        // row go as the delivery it is inside of ends (the delivery here is then none), and with
+        // none running the delivery here ends every call the round owes and lets the rows go.
+        if !<CoopForm as ThreadForm>::OTHER_THREADS {
+            self.deliver();
+            return;
+        }
         if self.deliveries.delivers_here() {
             return;
         }
@@ -5957,6 +5976,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Some(now_us)
     }
 
+    /// One take of the session for a step after `wait`: its links, what publishes handed to it,
+    /// and whether a periodic job is due by the clock reading the step made. What publishes handed
+    /// to the session while it was held leaves on this step too, so a program that only reads its
+    /// session sends it; let go of once the session is. Whether the session is still open, and
+    /// the time a job is due.
+    fn step_after(&self, wait: IdleWait) -> (bool, Option<u64>) {
+        let Some(mut core) = self.live() else {
+            return (false, None);
+        };
+        let handed = matches!(wait, IdleWait::Input { .. });
+        core.0.transport.links.waited(wait);
+        if handed {
+            self.hand_back.handed_back();
+        }
+        let stepped = self.step(&mut core.0);
+        self.input_held.store(
+            stepped.is_some() && core.0.transport.holds_input(),
+            Ordering::Relaxed,
+        );
+        let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
+        #[cfg(any(feature = "listen", feature = "group"))]
+        self.send_handed_now(&mut core.0);
+        (stepped.is_some(), jobs_due_ms)
+    }
+
     /// The id of something the session holds and never names to a peer (`next_local`).
     #[cfg(any(feature = "query", feature = "ticker"))]
     fn next_local_id(&self) -> u64 {
@@ -6201,6 +6245,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// is answered (`NoThread`), and the task is left not running, so a later start tries again:
     /// zenoh-pico's start answers its task creation's error the same way, and a panic here would
     /// leave the C caller nothing to read on a build that aborts on one.
+    #[cfg(feature = "threads")]
     pub(crate) fn start_reader(
         &self,
         spawn: impl FnOnce(ReaderBody<L, C>) -> Option<(JoinHandle, ThreadId)>,
@@ -6224,6 +6269,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Stop the read task, from a thread that is not it.
+    #[cfg(feature = "threads")]
     fn stop_reader(&self) -> Result<(), CalledFromReadTask> {
         let task = {
             let mut reader = lock(&self.reader);
@@ -7873,6 +7919,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // The read task stops first, so the close is the last thing the session does. A close
         // from the read task itself stops nothing and leaves the thread to see the session
         // closed.
+        #[cfg(feature = "threads")]
         let _ = self.stop_reader();
         let mut guard = self.core.lock();
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -7955,18 +8002,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.closed.load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "threads")]
     fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
         self.start_reader(|body| os::spawn(move || body.run()))
     }
 
+    // A build of one thread starts none: its rows count their calls for that thread alone
+    // (`CoopForm`), and a read task would end them on another.
+    #[cfg(not(feature = "threads"))]
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        Err(ReadTaskStartRefused::NoThread)
+    }
+
+    #[cfg(feature = "threads")]
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
         self.stop_reader()
     }
 
+    #[cfg(not(feature = "threads"))]
+    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        Ok(())
+    }
+
+    #[cfg(feature = "threads")]
     fn read_task_is_running(&self) -> bool {
         lock(&self.reader)
             .as_ref()
             .is_some_and(|task| !task.thread.is_finished())
+    }
+
+    #[cfg(not(feature = "threads"))]
+    fn read_task_is_running(&self) -> bool {
+        false
     }
 
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
@@ -8000,30 +8067,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        // One take of the session for the step: its links, what publishes handed to it, and
-        // whether a periodic job is due by the clock reading the step made.
-        // What publishes handed to the session while it was held leaves on this step too, so a
-        // program that only reads its session sends it; let go of once the session is.
-        let (stepped, jobs_due_ms) = match self.live() {
-            Some(mut core) => {
-                let handed = matches!(wait, IdleWait::Input { .. });
-                core.0.transport.links.waited(wait);
-                if handed {
-                    self.hand_back.handed_back();
-                }
-                let stepped = self.step(&mut core.0);
-                self.input_held.store(
-                    stepped.is_some() && core.0.transport.holds_input(),
-                    Ordering::Relaxed,
-                );
-                let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
-                #[cfg(any(feature = "listen", feature = "group"))]
-                self.send_handed_now(&mut core.0);
-                (stepped.is_some(), jobs_due_ms)
-            }
-            None => (false, None),
-        };
-        self.deliver();
+        let (mut stepped, jobs_due_ms) = self.step_after(wait);
+        let mut handed = self.deliver();
+        // One thread: the round took one record of what the links hold (`Round::has_room`), so
+        // the step goes on in this read, each record read once the callbacks of the one before
+        // returned, until the links hold nothing more or a step hands nothing out.
+        while !<CoopForm as ThreadForm>::OTHER_THREADS
+            && handed
+            && stepped
+            && self.input_held.load(Ordering::Relaxed)
+        {
+            stepped = self.step_after(IdleWait::None).0;
+            handed = self.deliver();
+        }
         if let Some(started_ms) = jobs_due_ms {
             self.run_due_tickers(started_ms);
         }

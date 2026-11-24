@@ -58,13 +58,13 @@ use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::RowCallback;
 use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
 use wz_session_mcu::dial::McuActions;
 
-use crate::round::CoopCalls;
+use crate::round::{CoopCalls, Latch};
 
 use super::{key_on_link, CoopEngine};
 
@@ -85,7 +85,7 @@ pub(crate) struct QueryableRow {
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
-    latch: CallLatch,
+    latch: Latch,
 }
 
 impl QueryableRow {
@@ -94,7 +94,7 @@ impl QueryableRow {
         Self {
             _anchor: anchor,
             sink,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -177,8 +177,9 @@ pub(crate) struct QueryableCall {
 }
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
-// no one writes after the declaration (its id) and what is made for threads: its latch, and its
-// callback, which is `Send + Sync` and called through a shared borrow. The row lies in the session's arena, which
+// no one writes after the declaration (its id) and what is made for every thread that may make a
+// call (`crate::round::CoopForm`): its latch, and its callback, which is `Send + Sync` and called
+// through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
 
@@ -218,7 +219,7 @@ impl QueryableCall {
     pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
-        // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
+        // (`Latch::ENDS_HELD` is asserted false where the rows are chosen).
         unsafe { <QueryableRow as RowCallback>::end(self.call) }
     }
 }

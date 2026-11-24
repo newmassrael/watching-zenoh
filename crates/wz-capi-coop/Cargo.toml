@@ -129,8 +129,16 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
 # the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
 # supplies both (docs/upstream-parity.md section 5a).
-default = ["std", "key-matching-listener"]
+default = ["std", "key-matching-listener", "threads"]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
+# A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
+# thread of its own, so a callback's call may end on one thread while another undeclares its row,
+# and the rows count their calls on an atomic latch (`row_callback::Threads`). Off, which is
+# pico's single-threaded arm, every call runs on the thread that steps the session: the latches
+# count with no read-modify-write, an undeclaration waits for nothing, no read task starts, and a
+# program that calls one session from two threads at once orders those calls itself, as it does
+# on zenoh-pico's single-threaded arm.
+threads = []
 # The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
 # library built without `std` runs the read task and holds the locks as one with `std` does, and

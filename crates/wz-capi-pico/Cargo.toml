@@ -697,8 +697,9 @@ gossip = ["engine-tokio", "peer", "wz-capi-core/gossip"]
 # them. The two arms disagree on struct sizes the C program allocates, so a program must link the
 # build of the arm it compiled against. The tokio engine drives a session on its own runtime in
 # both; the cooperative engine is stepped by the program in the single-threaded arm and by its
-# read task in the multi-threaded one, so this selects no engine.
-multi-thread = ["wz-capi-core?/multi-thread"]
+# read task in the multi-threaded one, so this selects no engine; it gives the cooperative one its
+# read task (`wz-capi-coop`'s `threads`).
+multi-thread = ["wz-capi-core?/multi-thread", "wz-capi-coop?/threads"]
 serial-drive-own-thread = ["engine-tokio", "wz-capi-core/serial-drive-own-thread"]
 # Receive busy-poll: on in a default build through wz-capi-core's own default, and named here so a
 # build that lists its features can say so; see wz-capi-core's feature of this name.

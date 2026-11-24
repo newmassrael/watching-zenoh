@@ -114,6 +114,7 @@ impl RoundCalls for Kept {
     type Group = Present;
     type Locks = StdLocks;
     type Tally = Counted;
+    type Form = crate::row_callback::Threads;
 }
 
 /// A round that keeps samples alone, offered calls of every other kind all the same.
@@ -134,6 +135,28 @@ impl RoundCalls for Lean {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
+}
+
+/// [`Lean`] in a build whose calls all run on the thread that steps the session.
+enum Single {}
+
+impl RoundCalls for Single {
+    type Subscriber = Call;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Absent;
+    type Replies = Absent;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Absent;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::OneThread;
 }
 
 /// One block of an arena's memory, aligned as an arena's spans start.
@@ -413,6 +436,42 @@ fn a_token_is_held_where_tokens_are_kept_and_refused_where_they_are_not() {
             held_over: 1,
             unplaced: 0
         }
+    );
+}
+
+/// A round of one thread holds one record at a time: once a record is written the gate reads
+/// nothing more until it was handed out, so what the peer sent after it is read after its
+/// callbacks returned. The CONTROL is the round of threads, which takes the next record while it
+/// has the room; both take one again once handed out.
+#[test]
+fn a_round_of_one_thread_takes_one_record_at_a_time() {
+    let room = ReadRoom { callbacks: 1 };
+    let log = Arc::new(Log::default());
+    let threads = round::<Lean>();
+    let single = round::<Single>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        assert!(single.has_room(room), "an empty round takes a record");
+        fan_out(&threads, &[1], &Sample("k/1"), &log);
+        fan_out(&single, &[2], &Sample("k/2"), &log);
+        assert!(
+            threads.has_room(room),
+            "CONTROL: a round of threads takes the next while it has room"
+        );
+        assert!(
+            !single.has_room(room),
+            "a round of one thread holds one record"
+        );
+        threads.seal();
+        single.seal();
+    }
+    assert!(threads.deliver() && single.deliver());
+    assert_eq!(log.handed(), ["1 sample k/1", "2 sample k/2"]);
+    // SAFETY: as above.
+    assert!(
+        unsafe { single.has_room(room) },
+        "handed out, the next is read"
     );
 }
 

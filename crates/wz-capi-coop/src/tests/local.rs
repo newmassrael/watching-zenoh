@@ -378,7 +378,9 @@ impl Drop for Dropped {
 /// An undeclaration made on another thread while a put's call of the subscriber's callback runs
 /// returns only once that call has returned and the callback was let go of (P11), as zenoh-pico's
 /// undeclare waits for the entity's lock. The CONTROL is the undeclaration while the callback is
-/// held inside its call: not returned, and the callback standing.
+/// held inside its call: not returned, and the callback standing. Only a build of threads has a
+/// call on another thread to wait for.
+#[cfg(feature = "threads")]
 #[test]
 fn an_undeclare_on_another_thread_waits_for_the_running_call() {
     use std::sync::atomic::AtomicBool;
