@@ -42,7 +42,7 @@ use core::ffi::{c_char, c_void, CStr};
 use wz_session_core::sample::{BoundedEncoding, EncodingRef};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_owned_string_t};
-use crate::bytes::{store_owned_string, ByteBuf, NoRoom};
+use crate::bytes::{store_owned_string, Block, NoRoom};
 use crate::ffi::guarded;
 use crate::object_slot::{Kind, Placed, Slot};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
@@ -79,31 +79,30 @@ use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 /// encoding points at the state of its [`HeldEncoding`], or for an encoding of no schema at the
 /// state of its well-known constant ([`constant_of`]); a sample's, a reply's or a query's at the
 /// one its marshal holds.
+///
+/// The schema is a start and a length whoever holds its bytes, so reading the encoding
+/// ([`Self::view`]) has no branch on where they lie; what holds them is `block`, beside the read.
 pub(crate) struct EncodingState {
     packed_id: u32,
-    schema: Schema,
-}
-
-/// Where an encoding's schema lies.
-enum Schema {
-    /// The encoding carries none.
-    Absent,
-    /// Bytes another holds: a received message's, read for as long as the marshal that holds this
-    /// state does ([`EncodingState::lent`]), or the room of the held encoding this state is part
-    /// of, which never moves while it lives.
-    Lent { start: *const u8, len: usize },
-    /// A copy of its own in a block of the payloads' area, where a kept value's other bytes lie:
-    /// what a sample, a reply or a query kept past its callback holds, whose message's bytes it may
-    /// outlive. It takes no encoding of the pool, whose count is the program's own encodings.
-    Kept(ByteBuf),
+    /// Where the schema starts, null for an encoding that carries none. The bytes are another's:
+    /// a received message's, read for as long as the marshal that holds this state does
+    /// ([`Self::lent`]), or the room of the held encoding this state is part of, which never moves
+    /// while it lives; or they lie in `block`.
+    schema_start: *const u8,
+    schema_len: usize,
+    /// The block of the payloads' area a kept schema lies in ([`Self::kept`]), let go with the
+    /// state: what a sample, a reply or a query kept past its callback holds, whose message's bytes
+    /// it may outlive. It takes no encoding of the pool, whose count is the program's own
+    /// encodings. None for a schema another holds, for an empty one and for none.
+    block: Option<Block>,
 }
 
 // SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
 // (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
 // as the holder's own borrow would be; a kept one is a block of the payloads' area this state alone
-// holds, and the pools are reached under the port's lock.
-unsafe impl Send for Schema {}
-unsafe impl Sync for Schema {}
+// holds and nothing writes after the copy, and the pools are reached under the port's lock.
+unsafe impl Send for EncodingState {}
+unsafe impl Sync for EncodingState {}
 
 impl EncodingState {
     /// A well-known encoding: its id, no schema.
@@ -112,7 +111,9 @@ impl EncodingState {
             // The wire word is `(id << 1) | has_schema`, and a constant never carries a schema, so
             // bit 0 is clear by construction rather than by a second field agreeing with the first.
             packed_id: (id as u32) << 1,
-            schema: Schema::Absent,
+            schema_start: core::ptr::null(),
+            schema_len: 0,
+            block: None,
         }
     }
 
@@ -124,49 +125,49 @@ impl EncodingState {
     pub(crate) unsafe fn lent(packed_id: u32, schema: Option<&[u8]>) -> Self {
         Self {
             packed_id,
-            schema: match schema {
-                Some(schema) => Schema::Lent {
-                    start: schema.as_ptr(),
-                    len: schema.len(),
-                },
-                None => Schema::Absent,
-            },
+            schema_start: schema.map_or(core::ptr::null(), <[u8]>::as_ptr),
+            schema_len: schema.map_or(0, <[u8]>::len),
+            block: None,
         }
     }
 
     /// The encoding as its readers see it.
     pub(crate) fn view(&self) -> EncodingRef<'_> {
-        match &self.schema {
-            Schema::Absent => EncodingRef {
-                packed_id: self.packed_id,
-                schema: None,
-            },
-            // SAFETY: a lent schema outlives the state that holds it (`Self::lent`), and a slice's
-            // start is never null.
-            Schema::Lent { start, len } => EncodingRef {
-                packed_id: self.packed_id,
-                schema: Some(unsafe { core::slice::from_raw_parts(*start, *len) }),
-            },
-            Schema::Kept(bytes) => EncodingRef {
-                packed_id: self.packed_id,
-                schema: Some(bytes.as_slice()),
-            },
+        let schema = if self.schema_start.is_null() {
+            None
+        } else {
+            // SAFETY: a non-null start reads `schema_len` bytes that outlive the state: its
+            // lender's (`Self::lent`) or its own block's (`Self::kept`).
+            Some(unsafe { core::slice::from_raw_parts(self.schema_start, self.schema_len) })
+        };
+        EncodingRef {
+            packed_id: self.packed_id,
+            schema,
         }
     }
 
     /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
     /// callback holds. A schema is copied into a block of the payloads' area, as the kept value's
     /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
-    /// encoding of no schema takes none.
+    /// encoding of no schema, or of an empty one, takes none.
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
-        let view = self.view();
-        let schema = match view.schema {
-            None => Schema::Absent,
-            Some(schema) => Schema::Kept(ByteBuf::copy_of(schema)?),
+        let (schema_start, block) = match self.view().schema {
+            None => (core::ptr::null(), None),
+            // Present but empty: a start that reads nothing and outlives every lender.
+            Some([]) => (
+                core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
+                None,
+            ),
+            Some(schema) => {
+                let (block, start) = Block::kept_copy(schema).ok_or(NoRoom)?;
+                (start.as_ptr().cast_const(), Some(block))
+            }
         };
         Ok(Self {
-            packed_id: view.packed_id,
-            schema,
+            packed_id: self.packed_id,
+            schema_start,
+            schema_len: self.schema_len,
+            block,
         })
     }
 }
@@ -1054,7 +1055,52 @@ mod tests {
         let bare = unsafe { EncodingState::lent(4 << 1, None) };
         assert_eq!(bare.view().schema, None);
         let bare_kept = bare.kept().expect("an encoding of no schema keeps nothing");
-        assert!(matches!(bare_kept.schema, Schema::Absent));
+        assert_eq!(bare_kept.view().schema, None);
+        assert!(
+            bare_kept.block.is_none(),
+            "an encoding of no schema holds no block"
+        );
+    }
+
+    /// A state reads its schema by start and length whoever holds the bytes: none for a constant,
+    /// the lender's own for a received one, its own block's for a kept one, which an empty schema
+    /// does not take; and the state is four words, the read beside what holds the bytes.
+    #[test]
+    fn a_states_schema_is_one_start_and_length_whoever_holds_it() {
+        let constant = EncodingState::constant(4);
+        assert_eq!(constant.view().schema, None);
+        assert!(constant.block.is_none());
+
+        let message = b"utf8".to_vec();
+        // SAFETY: the states that borrow `message` are dropped before it.
+        let received = unsafe { EncodingState::lent((4 << 1) | 1, Some(message.as_slice())) };
+        assert!(
+            received.block.is_none(),
+            "a received schema is read where it lies"
+        );
+        assert_eq!(received.schema_start, message.as_ptr());
+        let kept = received.kept().expect("room for the kept schema");
+        assert!(kept.block.is_some(), "a kept schema holds a block");
+        assert_ne!(kept.schema_start, message.as_ptr());
+
+        // SAFETY: as above.
+        let empty = unsafe { EncodingState::lent((4 << 1) | 1, Some(&message[..0])) };
+        let empty_kept = empty.kept().expect("an empty schema takes no room");
+        assert!(empty_kept.block.is_none(), "an empty schema takes no block");
+        drop((received, empty));
+        drop(message);
+        assert_eq!(kept.view().schema, Some(&b"utf8"[..]));
+        assert_eq!(
+            empty_kept.view().schema,
+            Some(&b""[..]),
+            "present, and empty"
+        );
+        assert_eq!(kept.view().packed_id, (4 << 1) | 1);
+
+        assert_eq!(
+            core::mem::size_of::<EncodingState>(),
+            4 * core::mem::size_of::<usize>()
+        );
     }
 
     /// An owned encoding reads its schema from the room of its own slot, and a schema set on it is
