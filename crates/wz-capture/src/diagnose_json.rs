@@ -94,7 +94,7 @@ pub fn declarations_diagnose_json(declarations: &str) -> String {
 /// explicit and derived, in the order rosidl adds them, as
 /// `{"name":"<pkg>/<kind>/<Type>","type_hash":"RIHS01_<hex>"}`, the hash
 /// `null` where the type reaches one no declared file defines.
-fn push_definition_types(map: &mut FormatMap, file: &str, out: &mut String) {
+fn push_definition_types(map: &mut FormatMap<'_>, file: &str, out: &mut String) {
     out.push_str(",\"types\":[");
     for (at, (name, hash)) in map.definition_types(file).iter().enumerate() {
         if at > 0 {
