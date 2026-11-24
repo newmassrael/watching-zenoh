@@ -193,8 +193,6 @@ pub mod dial;
 // A node that is a client of a router and answers queries: the dialer over a fixed list of
 // endpoints, an observer for the application's queryables and subscribers, and their
 // declarations sent on every session as it establishes.
-// Totality debt TD-221 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "client-node", not(feature = "session-slot")))]
 pub mod client_node;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
