@@ -2551,3 +2551,50 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
     assert!(reserved > 0, "the arena was reserved before the refusal");
     assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
 }
+
+/// A plan laid out when the build is compiled is the plan an open lays out at run time, row by
+/// row: for a client of the build's limits, and for a client of the pico preset that dials as many
+/// endpoints as the build admits, the shape a build of fixed limits lays its arena out by. Turned
+/// red by a row the walk lays out at one time and not the other, or by a number of the config the
+/// shape reads apart from the one the open reads.
+#[test]
+fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
+    use crate::arena::PlanShape;
+    const CLIENT: PlanShape = PlanShape {
+        max_faces: caps::MAX_FACES,
+        accept_pending: caps::MAX_ACCEPT_PENDING,
+        ..PlanShape::dial_only(0, 1024)
+    };
+    const CLIENT_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(CLIENT, &SessionLimits::BUILD);
+    assert_eq!(PlanShape::of(&client_config()), CLIENT);
+    let at_open = ArenaPlan::of(&client_config(), &SessionLimits::defaults());
+    assert!(
+        at_open.is_ok(),
+        "CONTROL: the build lays its own client out"
+    );
+    assert_eq!(CLIENT_PLAN, at_open);
+
+    const PRESET: PlanShape = PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024);
+    const PRESET_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(PRESET, &SessionLimits::PICO_PRESET);
+    let preset = CoopConfig {
+        endpoints: vec![String::from("udp/127.0.0.1:7447"); caps::MAX_STATIC_CONNECT],
+        max_faces: 0,
+        accept_pending: 0,
+        limits: SessionLimits::PICO_PRESET,
+        ..client_config()
+    };
+    assert_eq!(PlanShape::of(&preset), PRESET);
+    let at_open = ArenaPlan::of(&preset, &SessionLimits::PICO_PRESET);
+    assert!(at_open.is_ok(), "CONTROL: the preset lays a client out");
+    let (Ok(at_build), Ok(at_open)) = (&PRESET_PLAN, &at_open) else {
+        unreachable!("both laid out");
+    };
+    assert!(
+        at_build.rows().eq(at_open.rows()),
+        "row by row: {at_build:?} against {at_open:?}"
+    );
+    assert_eq!(at_build.reserved_bytes(), at_open.reserved_bytes());
+    assert_eq!(PRESET_PLAN.as_ref(), Ok(at_open));
+}
