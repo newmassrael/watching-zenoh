@@ -211,6 +211,16 @@ config WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS
 	  transport to a peer opens or closes. Declaring one more is refused while
 	  the table is full.
 
+config WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS
+	int "MAX_LINK_EVENTS_LISTENERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The link events listeners a session holds at once, each told when a link
+	  to a peer comes up or goes. Declaring one more is refused while the table
+	  is full. Apart from the transport events listeners' bound, so a profile
+	  that holds more of one kind spends nothing on the other.
+
 config WZ_LIMIT_MAX_DECL_WATCH_EVENTS
 	int "MAX_DECL_WATCH_EVENTS"
 	default 8 if WZ_LIMITS_ZENOH_PICO
