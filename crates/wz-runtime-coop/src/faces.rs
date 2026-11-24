@@ -21,6 +21,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Deref;
 
+#[cfg(feature = "session-unicast-accept")]
+use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
@@ -483,6 +485,26 @@ impl IdleWait {
     }
 }
 
+/// What a publish that waits for an outbound slot waits on ([`LinkSupervisor::owing_waits`]), in
+/// the publishing thread's own frame: publishes on several threads may wait at once, each with
+/// nothing of the session held, so none shares a buffer of the session's, and none takes one of
+/// the heap. A link owes its stack the rest of a frame only from an outbound slot it holds, so the
+/// links that owe are at most the build's `TX_POOL_SLOTS`, and at most the faces a session holds
+/// (`MAX_FACES` and the dial role's): a publish waits for a slot only while the slots are fewer.
+#[cfg(feature = "session-unicast-accept")]
+pub type OwingWaits = BoundedVec<LinkWait, OWING_WAITS, Static>;
+
+/// The room of [`OwingWaits`]: the fewer of the build's outbound slots and its faces.
+#[cfg(feature = "session-unicast-accept")]
+const OWING_WAITS: usize = {
+    let faces = caps::MAX_FACES.saturating_add(1);
+    if caps::TX_POOL_SLOTS < faces {
+        caps::TX_POOL_SLOTS
+    } else {
+        faces
+    }
+};
+
 /// A session's faces, dials and ports over the network `L`, each face kept as the session's
 /// record `F`. The first face is the dial role's, which is never removed.
 pub struct LinkSupervisor<L: SessionLinks, F> {
@@ -718,14 +740,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// stack the rest of a frame, for its room and its input. A link whose stack gives no wait is
     /// not in it.
     #[cfg(feature = "session-unicast-accept")]
-    pub fn owing_waits(&self) -> Vec<LinkWait> {
-        self.faces
+    pub fn owing_waits(&self) -> OwingWaits {
+        let mut waits = OwingWaits::new_static();
+        let owing = self
+            .faces
             .iter()
             .filter_map(|face| face.link().wire())
             .filter(|wire| wire.owes_write())
-            .filter_map(|wire| wire.input)
-            .map(LinkWait::input_or_room)
-            .collect()
+            .filter_map(|wire| wire.input);
+        for on in owing {
+            if waits.push(LinkWait::input_or_room(on)).is_err() {
+                break;
+            }
+        }
+        waits
     }
 
     /// What a read waits for, for at most `most` milliseconds: the input of every link that
@@ -1440,6 +1468,39 @@ mod tests {
                 _ => panic!("a wait on the link and the group"),
             }
         }
+    }
+
+    /// What a publish that waits for a slot waits on is each link that owes its stack a write, for
+    /// its input and its room, and gathering it allocates nothing: it lies in the publishing
+    /// thread's frame. CONTROL: a link that owes nothing is not in it. Turned red by waits
+    /// gathered into a buffer of the heap.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_publish_gathers_the_links_owing_a_write_without_allocating() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), 3);
+        let quiet = TestFace {
+            id: 1,
+            link: Link::Up(waited_wire(&local, WaitOn::Socket(4), false)),
+        };
+        assert!(faces.push_face(quiet).is_ok());
+        let owing = TestFace {
+            id: 2,
+            link: Link::Up(waited_wire(&local, WaitOn::Socket(5), true)),
+        };
+        assert!(faces.push_face(owing).is_ok());
+        let (waits, made) = crate::table_tests::allocations(|| faces.owing_waits());
+        assert_eq!(made, 0, "gathering the waits allocates nothing");
+        let owe = [
+            LinkWait::input_or_room(WaitOn::Socket(3)),
+            LinkWait::input_or_room(WaitOn::Socket(5)),
+        ];
+        assert_eq!(
+            *waits,
+            owe[..OWING_WAITS.min(owe.len())],
+            "the links that owe, for their input and their room"
+        );
     }
 
     /// A wait on links is the stack's for the whole time, and leaves its buffer emptied.
