@@ -10,6 +10,8 @@
 //! (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`),
 //! so the two transports share one deadline rather than two copies of it.
 
+use sce_forge_runtime::codec::CodecError;
+
 use crate::limit_binding::Quota;
 use crate::link::RoomWait;
 use crate::session_init_params::TxQueueConf;
@@ -29,6 +31,9 @@ pub enum PushOutcome {
     /// congestion drop the sender is told of, as pico's put fails when its held transmit lock
     /// drops the message, where a [`Self::Congested`] one is answered as sent.
     Held,
+    /// The message's body refused it (a key or a payload past its protocol bound), so nothing was
+    /// framed or queued: the sender is told, as a session's own send refuses it.
+    Refused(CodecError),
 }
 
 /// What a BLOCKING message that found no room in its deadline costs: the one decision the

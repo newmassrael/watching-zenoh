@@ -486,3 +486,27 @@ mod handshake_records {
         );
     }
 }
+
+/// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
+/// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
+/// message, and the send answers that as a value.
+#[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+#[test]
+fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
+    let (actions, link) = bundle();
+    let long = "k".repeat(usize::from(u16::MAX) + 1);
+    let key = crate::named_key::NamedKey::literal(&long).expect("a key");
+    let sent =
+        actions.send_plain_put_qos(key, b"v", None, true, false, crate::qos::Priority::DEFAULT);
+    assert_eq!(
+        sent,
+        Some(Err(crate::send_wire_error::SendWireError::Codec(
+            sce_forge_runtime::codec::CodecError::LengthOutOfRange
+        )))
+    );
+    assert_eq!(
+        link.written.load(Ordering::SeqCst),
+        0,
+        "nothing was written"
+    );
+}

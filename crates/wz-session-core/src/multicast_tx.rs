@@ -1843,7 +1843,13 @@ where
             }
         }
     }
-    let frame = crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body);
+    // The vector refuses no write, but the body can refuse its message: nothing is queued then,
+    // and the SN minted for it is skipped, as a chain its drop marker stops skips the rest.
+    let frame =
+        match crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body) {
+            Ok(frame) => frame,
+            Err(refused) => return PushOutcome::Refused(refused),
+        };
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
         let body = crate::frame_encode::frame_wire_body(&frame, sn, ext_qos);
