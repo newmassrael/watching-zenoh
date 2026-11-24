@@ -774,6 +774,10 @@ pub mod face_plane;
 /// is a trait and needs no feature.
 pub mod plane_lock;
 
+/// The legs of a session's gets still pending on its faces, and the faces' tables they are
+/// registered in, as the session's state ends them. Unconditional: its rows are a bounded table.
+pub mod pending_get;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason

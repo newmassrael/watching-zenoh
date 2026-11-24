@@ -827,6 +827,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/peer_table.rs` | S1 | |
 | `crates/wz-session-core/src/peer_tables.rs` | S1 | |
 | `crates/wz-session-core/src/peer_target.rs` | S1 | |
+| `crates/wz-session-core/src/pending_get.rs` | S2 | |
 | `crates/wz-session-core/src/plain_push.rs` | S2 | |
 | `crates/wz-session-core/src/plane_lock.rs` | S2 | |
 | `crates/wz-session-core/src/policy.rs` | S3 | |

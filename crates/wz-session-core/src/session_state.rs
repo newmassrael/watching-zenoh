@@ -22,17 +22,20 @@ use crate::face::{FaceEventKind, FaceSnapshot};
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::face_plane::FaceReports;
 use crate::key_arena::KeySpace;
+use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
 use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
 /// The parts of a session's state an engine keeps in types of its own: each is `()` where the
 /// engine's build leaves the part out. The registry is the one part the state reads itself: it
 /// keeps the session's tables ([`Self::tables`]), which the session's own declarations are
-/// numbered and named by.
+/// numbered and named by, and its faces ([`Self::faces`]), which its pending gets are asked of.
 pub trait SessionParts {
     /// What the application holds and what the peers declared. It is the session's, so it outlives
     /// each link: a new link is dispatched to the same registry.
     type Registry;
+    /// The faces the registry keeps: what each face's peer declared and the gets pending on it.
+    type Faces: SessionFaces;
     /// The callbacks the rows of the session's tables hold.
     type Callbacks: RowCallbacks;
     /// Where the session's tables keep their rows.
@@ -63,6 +66,12 @@ pub trait SessionParts {
     fn tables_mut(
         registry: &Self::Registry,
     ) -> RefMut<'_, SessionTables<Self::Callbacks, Self::Storage>>;
+
+    /// The faces, where `registry` keeps them, to read.
+    fn faces(registry: &Self::Registry) -> Ref<'_, Self::Faces>;
+
+    /// [`Self::faces`], to write.
+    fn faces_mut(registry: &Self::Registry) -> RefMut<'_, Self::Faces>;
 }
 
 impl<P: SessionParts> SessionState<P> {
@@ -149,6 +158,40 @@ where
     }
 }
 
+impl<P: SessionParts> SessionState<P>
+where
+    P::PendingGets: PendingLegs,
+{
+    /// Hold the pending leg `leg` in a row of the session's: `false` past the rows, which a leg
+    /// registered in a face's table of pending gets never reaches, as the rows are one for each
+    /// entry of those tables; its entry is dropped then, which says its end, and the leg is over.
+    pub fn note_pending(&mut self, leg: PendingGet<<P::PendingGets as PendingLegs>::Fan>) -> bool {
+        match self.pending_gets.note(leg) {
+            Ok(()) => true,
+            Err(leg) => {
+                leg.unregister(&mut *P::faces_mut(&self.registry));
+                false
+            }
+        }
+    }
+
+    /// What the lost link of face `face` takes with it: every subscriber, queryable and token its
+    /// peer declared, so a matching status or a write filter that counted on one reads the session
+    /// as it now is, and every get asked of it, whose Final its peer can no longer send: each
+    /// pending leg's entry is dropped, which ends the leg.
+    pub fn lose_face(&mut self, face: u64) {
+        let mut faces = P::faces_mut(&self.registry);
+        faces.lose_face(face);
+        self.pending_gets
+            .drop_face(face, |leg| leg.unregister(&mut *faces));
+    }
+
+    /// When the earliest pending get is due: a query's or a liveliness snapshot's, on any face.
+    pub fn next_get_deadline_ms(&self) -> Option<u64> {
+        P::faces(&self.registry).next_get_deadline_ms()
+    }
+}
+
 /// The request ids of a session's gets of its own queryables, counted apart from the ids its links
 /// hand out: from 0, wrapping, as a link's own count does.
 #[derive(Debug, Default)]
@@ -190,6 +233,7 @@ mod tests {
     use super::*;
     use crate::bounded::{Arena, Profile, ARENA_ALIGN};
     use crate::limits::SessionLimits;
+    use crate::pending_get::GetKind;
     use crate::session_tables::Absent;
     use core::cell::RefCell;
     use core::ptr::NonNull;
@@ -211,39 +255,74 @@ mod tests {
 
     type Tables = SessionTables<NoCallbacks, Profile>;
 
-    /// The parts of an engine whose registry is its tables alone, which reports its faces to
-    /// `$watchers` and keeps no other part.
+    /// A registry of the session's tables, which records what its faces are told.
+    #[derive(Default)]
+    struct Registry {
+        tables: Tables,
+        ended: std::vec::Vec<(u64, GetKind)>,
+        lost: std::vec::Vec<u64>,
+    }
+
+    impl SessionFaces for Registry {
+        fn end_leg(&mut self, face: u64, kind: GetKind) {
+            self.ended.push((face, kind));
+        }
+
+        fn lose_face(&mut self, face: u64) {
+            self.lost.push(face);
+        }
+
+        fn next_get_deadline_ms(&self) -> Option<u64> {
+            Some(40)
+        }
+    }
+
+    /// The parts of an engine whose registry is [`Registry`], which reports its faces to
+    /// `$watchers`, holds its pending legs in `$legs` and keeps no other part.
     macro_rules! tables_only {
-        ($name:ident, $watchers:ty) => {
+        ($name:ident, $watchers:ty, $legs:ty) => {
             enum $name {}
 
             impl SessionParts for $name {
-                type Registry = RefCell<Tables>;
+                type Registry = RefCell<Registry>;
+                type Faces = Registry;
                 type Callbacks = NoCallbacks;
                 type Storage = Profile;
                 type Watchers = $watchers;
                 type Entities = ();
                 type Queryables = ();
-                type PendingGets = ();
+                type PendingGets = $legs;
                 type Gets = ();
                 type Lane = ();
                 type KeyIds = ();
                 type LocalRequests = LocalRequests;
 
                 fn tables(registry: &Self::Registry) -> Ref<'_, Tables> {
-                    registry.borrow()
+                    Ref::map(registry.borrow(), |registry| &registry.tables)
                 }
 
                 fn tables_mut(registry: &Self::Registry) -> RefMut<'_, Tables> {
+                    RefMut::map(registry.borrow_mut(), |registry| &mut registry.tables)
+                }
+
+                fn faces(registry: &Self::Registry) -> Ref<'_, Registry> {
+                    registry.borrow()
+                }
+
+                fn faces_mut(registry: &Self::Registry) -> RefMut<'_, Registry> {
                     registry.borrow_mut()
                 }
             }
         };
     }
 
-    tables_only!(Unwatched, ());
+    /// Rows of two pending legs.
+    type TwoLegs = crate::bounded::BoundedVec<PendingGet<u8>, 2, crate::bounded::Static>;
+
+    tables_only!(Unwatched, (), ());
+    tables_only!(Legs, (), TwoLegs);
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    tables_only!(Watched, crate::face_plane::FacePlane<CellLocks>);
+    tables_only!(Watched, crate::face_plane::FacePlane<CellLocks>, ());
 
     /// One block of an arena's memory, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -270,19 +349,19 @@ mod tests {
     fn state<P>() -> SessionState<P>
     where
         P: SessionParts<
-            Registry = RefCell<Tables>,
+            Registry = RefCell<Registry>,
             Entities = (),
             Queryables = (),
-            PendingGets = (),
             Gets = (),
             Lane = (),
             KeyIds = (),
             LocalRequests = LocalRequests,
         >,
         P::Watchers: Default,
+        P::PendingGets: Default,
     {
         SessionState {
-            registry: RefCell::new(Tables::new()),
+            registry: RefCell::new(Registry::default()),
             watchers: Default::default(),
             entities: (),
             keys: keys(64),
@@ -290,9 +369,60 @@ mod tests {
             local_requests: LocalRequests::default(),
             matching: MatchingRead::default(),
             plane: (),
-            pending_gets: (),
+            pending_gets: Default::default(),
             gets: (),
             lane: (),
+        }
+    }
+
+    fn leg(face: u64, id: u64) -> PendingGet<u8> {
+        PendingGet {
+            face,
+            leg: id,
+            kind: GetKind::Query(id as RequestId),
+            fan: None,
+        }
+    }
+
+    /// A leg past the rows is refused and its entry ended in the tables of the face it was asked
+    /// of; a session that holds no rows refuses every leg so.
+    #[test]
+    fn a_leg_past_the_rows_is_ended_where_it_was_registered() {
+        let mut state = state::<Legs>();
+        assert!(state.note_pending(leg(1, 1)));
+        assert!(state.note_pending(leg(2, 2)));
+        assert!(!state.note_pending(leg(3, 3)));
+        assert_eq!(state.faces_told().ended, [(3, GetKind::Query(3))]);
+        let mut none = state::<Unwatched>();
+        let refused = PendingGet {
+            face: 5,
+            leg: 5,
+            kind: GetKind::Query(5),
+            fan: None::<core::convert::Infallible>,
+        };
+        assert!(!none.note_pending(refused));
+        assert_eq!(none.faces_told().ended, [(5, GetKind::Query(5))]);
+    }
+
+    /// A lost face takes what its peer declared first, then ends each leg asked of it, once, and
+    /// keeps the legs of the other faces.
+    #[test]
+    fn a_lost_face_ends_the_legs_asked_of_it_and_keeps_the_rest() {
+        let mut state = state::<Legs>();
+        assert!(state.note_pending(leg(1, 1)));
+        assert!(state.note_pending(leg(2, 2)));
+        state.lose_face(1);
+        assert_eq!(state.faces_told().lost, [1]);
+        assert_eq!(state.faces_told().ended, [(1, GetKind::Query(1))]);
+        let kept: std::vec::Vec<u64> = state.pending_gets.iter().map(|leg| leg.leg).collect();
+        assert_eq!(kept, [2]);
+        assert_eq!(state.next_get_deadline_ms(), Some(40), "read off the faces");
+    }
+
+    impl<P: SessionParts<Registry = RefCell<Registry>>> SessionState<P> {
+        /// What the faces were told, read back.
+        fn faces_told(&self) -> Ref<'_, Registry> {
+            self.registry.borrow()
         }
     }
 
