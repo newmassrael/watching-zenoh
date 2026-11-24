@@ -5047,13 +5047,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // One thread hands the changes out at a time; another that finds it doing so leaves what
         // it queued to it.
-        if self.matching.is_pending() && self.matching.lock().begin() {
-            loop {
-                // Popped under the queue's lock alone, which is released before the sink runs.
-                let next = self.matching.lock().next_or_end();
-                let Some((id, matching)) = next else {
-                    break;
-                };
+        if let Some(mut turn) = self.matching.begin_handing() {
+            while let Some((id, matching)) = turn.next() {
                 handed = true;
                 // The callback is taken out of the listener's row under the session's lock and
                 // called after it; a listener undeclared since the change was found is handed
