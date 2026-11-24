@@ -107,7 +107,11 @@ impl<T> core::error::Error for CapacityFull<T> {}
 /// the session shell rather than a feature. Implemented by [`Heap`] and
 /// [`Static`]; a container is generic over it and the algorithm around the
 /// container is written once.
-pub trait Storage {
+///
+/// A policy is a tag of types, never a borrow: `'static`, so a borrow of a table of any policy
+/// is well formed for every lifetime the borrow is named by, and a signature generic over a policy
+/// and a lifetime asks nothing more of the policy.
+pub trait Storage: 'static {
     /// Whether a push past the declared capacity is refused (`true`) or the
     /// backing grows past it (`false`).
     const ENFORCES_CAPACITY: bool;
