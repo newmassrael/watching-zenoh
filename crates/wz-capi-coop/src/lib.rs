@@ -143,6 +143,11 @@ pub use engine::{
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;
+/// The grammar this engine reads an endpoint's text with when it dials or listens on it, and the
+/// protocols a locator it reads names: what an ABI reads an endpoint with when it answers for an
+/// open of this engine without opening it.
+pub use wz_runtime_coop::locator_text;
+pub use wz_runtime_coop::session_drive::LinkProto;
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
 /// opens the engine with its host's, or with one of its own (a time base the program supplies).
 pub use wz_runtime_coop::ClockSource;

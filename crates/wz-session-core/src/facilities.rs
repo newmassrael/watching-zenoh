@@ -9,7 +9,10 @@
 //! resolution, one told to dial `tcp/router.lan:7447` needs both. Each reader of a configuration
 //! (the zenoh-c open plan, the pico C ABI, the demo's sessions document) reads it into
 //! [`OpenFacts`], the same reading its open acts on, and [`device_requires`] answers from it, so
-//! the answer cannot read a configuration differently from the open.
+//! the answer cannot read a configuration differently from the open. A reader whose open reads an
+//! endpoint's text with a grammar of its own (the pico C ABI on the cooperative engine) reads each
+//! endpoint with that grammar into [`ReadFacts`] and asks [`device_requires_of`], so no second
+//! grammar judges what the open has already judged.
 //!
 //! The two sets keep the manifest's meanings. `requires` is what the open cannot go on without:
 //! the engine's threads and entropy, each file the run reads and cannot go on without, each
@@ -155,6 +158,53 @@ fn json_string(text: &str) -> String {
     out
 }
 
+/// What one endpoint is, as the open that dials, binds or joins it reads it: the facts of it the
+/// facility vocabulary answers from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    /// An IP link of `proto`, to a host name the resolver turns into an address when `named`.
+    Ip {
+        /// The protocol of the link.
+        proto: Proto,
+        /// Whether the address is a host name rather than an address.
+        named: bool,
+    },
+    /// pico's raw Ethernet transport, a link-layer socket on the interface the locator names.
+    RawEthernet,
+    /// A Unix domain socket.
+    UnixSocket,
+    /// A pair of named pipes, made and opened by their paths.
+    UnixPipe,
+}
+
+/// One endpoint as its reader read it: what it is, or why what it asks has no name in the
+/// vocabulary.
+pub type EndpointReading = Result<Endpoint, String>;
+
+/// [`OpenFacts`] with every endpoint already read, each by the grammar of the open that acts on
+/// it. A reader whose open reads endpoints with a grammar of its own reads them into these, so the
+/// answer cannot read an endpoint differently from the open; [`device_requires`] reads them with
+/// [`read_any_endpoint`].
+#[derive(Clone, Debug)]
+pub struct ReadFacts {
+    /// The endpoints dialled.
+    pub connect: Vec<EndpointReading>,
+    /// Whether a dial that reaches none of them fails the open.
+    pub dial_must_succeed: bool,
+    /// The unicast endpoints bound.
+    pub listen: Vec<EndpointReading>,
+    /// The multicast groups joined.
+    pub groups: Vec<EndpointReading>,
+    /// Whether an endpoint or group that cannot be bound fails the open.
+    pub bind_must_succeed: bool,
+    /// How the open scouts.
+    pub scouting: Scouting,
+    /// As [`OpenFacts::reads_files`].
+    pub reads_files: bool,
+    /// As [`OpenFacts::reads_calendar`].
+    pub reads_calendar: bool,
+}
+
 /// What one endpoint asks for: `strict`, without which its link cannot be made, and `loose`, which
 /// its link may ask for and goes on without.
 #[derive(Default)]
@@ -188,31 +238,21 @@ fn ip_link(proto: Proto) -> EndpointNeeds {
 /// locator names, looked up by that name.
 const RAW_ETHERNET_SCHEME: &str = "reth/";
 
-/// What dialling or binding `endpoint` asks for, or why that has no name.
-fn endpoint_needs(endpoint: &str) -> Result<EndpointNeeds, String> {
+/// `endpoint` read by the grammar of every scheme the tree knows (`parse_any_locator`), the
+/// reading of an open that dials and binds with that grammar; a scheme no facility names, or a text
+/// the grammar refuses, is the reason.
+pub fn read_any_endpoint(endpoint: &str) -> EndpointReading {
     if endpoint.starts_with(RAW_ETHERNET_SCHEME) {
-        return Ok(EndpointNeeds {
-            strict: BTreeSet::from(["raw-ethernet", "interface-list"]),
-            loose: BTreeSet::new(),
-        });
+        return Ok(Endpoint::RawEthernet);
     }
     match parse_any_locator(endpoint) {
-        Ok(AnyLocator::Ip(parsed)) => Ok(ip_link(parsed.proto)),
-        Ok(AnyLocator::Named { proto, .. }) => {
-            // A host rather than an address goes through the resolver before any socket.
-            let mut needs = ip_link(proto);
-            needs.strict.insert("name-resolution");
-            Ok(needs)
-        }
-        Ok(AnyLocator::Unixsock(_)) => Ok(EndpointNeeds {
-            strict: BTreeSet::from(["unix-sockets"]),
-            loose: BTreeSet::new(),
+        Ok(AnyLocator::Ip(parsed)) => Ok(Endpoint::Ip {
+            proto: parsed.proto,
+            named: false,
         }),
-        // A pipe link is a pair of named pipes made and opened by their paths.
-        Ok(AnyLocator::Unixpipe(_)) => Ok(EndpointNeeds {
-            strict: BTreeSet::from(["filesystem"]),
-            loose: BTreeSet::new(),
-        }),
+        Ok(AnyLocator::Named { proto, .. }) => Ok(Endpoint::Ip { proto, named: true }),
+        Ok(AnyLocator::Unixsock(_)) => Ok(Endpoint::UnixSocket),
+        Ok(AnyLocator::Unixpipe(_)) => Ok(Endpoint::UnixPipe),
         Ok(AnyLocator::Serial(_)) => Err(format!(
             "{endpoint}: a serial device is a request no facility of the vocabulary names"
         )),
@@ -225,18 +265,72 @@ fn endpoint_needs(endpoint: &str) -> Result<EndpointNeeds, String> {
     }
 }
 
-/// What joining the group `endpoint` asks for: a UDP socket that has joined an IP multicast group,
-/// or for pico's raw Ethernet group the link-layer socket alone.
-fn group_needs(endpoint: &str) -> Result<EndpointNeeds, String> {
-    let mut needs = endpoint_needs(endpoint)?;
-    if !endpoint.starts_with(RAW_ETHERNET_SCHEME) {
-        needs.strict.insert("multicast");
+/// What dialling or binding `endpoint` asks for.
+fn needs_of(endpoint: Endpoint) -> EndpointNeeds {
+    match endpoint {
+        Endpoint::Ip { proto, named } => {
+            let mut needs = ip_link(proto);
+            // A host rather than an address goes through the resolver before any socket.
+            if named {
+                needs.strict.insert("name-resolution");
+            }
+            needs
+        }
+        Endpoint::RawEthernet => EndpointNeeds {
+            strict: BTreeSet::from(["raw-ethernet", "interface-list"]),
+            loose: BTreeSet::new(),
+        },
+        Endpoint::UnixSocket => EndpointNeeds {
+            strict: BTreeSet::from(["unix-sockets"]),
+            loose: BTreeSet::new(),
+        },
+        Endpoint::UnixPipe => EndpointNeeds {
+            strict: BTreeSet::from(["filesystem"]),
+            loose: BTreeSet::new(),
+        },
     }
-    Ok(needs)
 }
 
-/// What a run of an open of `facts` asks of the operating system. See the module documentation.
+/// What joining the group `endpoint` asks for: a UDP socket that has joined an IP multicast group,
+/// or for pico's raw Ethernet group the link-layer socket alone.
+fn group_needs(endpoint: Endpoint) -> EndpointNeeds {
+    let mut needs = needs_of(endpoint);
+    if endpoint != Endpoint::RawEthernet {
+        needs.strict.insert("multicast");
+    }
+    needs
+}
+
+/// What a run of an open of `facts` asks of the operating system, each endpoint read with
+/// [`read_any_endpoint`]. See the module documentation.
 pub fn device_requires(facts: &OpenFacts<'_>) -> DeviceRequires {
+    device_requires_of(&ReadFacts {
+        connect: facts
+            .connect
+            .iter()
+            .map(|endpoint| read_any_endpoint(endpoint))
+            .collect(),
+        dial_must_succeed: facts.dial_must_succeed,
+        listen: facts
+            .listen
+            .iter()
+            .map(|endpoint| read_any_endpoint(endpoint))
+            .collect(),
+        groups: facts
+            .groups
+            .iter()
+            .map(|group| read_any_endpoint(group))
+            .collect(),
+        bind_must_succeed: facts.bind_must_succeed,
+        scouting: facts.scouting,
+        reads_files: facts.reads_files,
+        reads_calendar: facts.reads_calendar,
+    })
+}
+
+/// What a run of an open of `facts` asks of the operating system, its endpoints read by the
+/// reader's own grammar. See the module documentation.
+pub fn device_requires_of(facts: &ReadFacts) -> DeviceRequires {
     let mut requires: BTreeSet<&'static str> = ENGINE.into_iter().collect();
     let mut may: BTreeSet<&'static str> = BTreeSet::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -250,8 +344,13 @@ pub fn device_requires(facts: &OpenFacts<'_>) -> DeviceRequires {
     let bound = facts
         .listen
         .iter()
-        .map(|endpoint| endpoint_needs(endpoint))
-        .chain(facts.groups.iter().map(|group| group_needs(group)));
+        .map(|read| read.as_ref().map(|endpoint| needs_of(*endpoint)))
+        .chain(
+            facts
+                .groups
+                .iter()
+                .map(|read| read.as_ref().map(|endpoint| group_needs(*endpoint))),
+        );
     for needs in bound {
         match needs {
             Ok(needs) => {
@@ -262,21 +361,22 @@ pub fn device_requires(facts: &OpenFacts<'_>) -> DeviceRequires {
                 }
                 may.extend(needs.loose);
             }
-            Err(reason) => unknown.push(reason),
+            Err(reason) => unknown.push(reason.clone()),
         }
     }
 
     // One dial target that answers is enough, so what the open cannot go on without is what every
     // target needs.
     let mut common: Option<BTreeSet<&'static str>> = None;
-    for endpoint in facts.connect {
-        let strict = match endpoint_needs(endpoint) {
-            Ok(needs) => {
+    for read in &facts.connect {
+        let strict = match read {
+            Ok(endpoint) => {
+                let needs = needs_of(*endpoint);
                 may.extend(needs.loose);
                 needs.strict
             }
             Err(reason) => {
-                unknown.push(reason);
+                unknown.push(reason.clone());
                 BTreeSet::new()
             }
         };
@@ -417,5 +517,72 @@ mod tests {
         ]);
         assert_eq!(unknown.may_require, None);
         assert_eq!(unknown.unknown.len(), 1);
+    }
+
+    fn read_facts(connect: Vec<EndpointReading>, listen: Vec<EndpointReading>) -> ReadFacts {
+        ReadFacts {
+            connect,
+            dial_must_succeed: true,
+            listen,
+            groups: Vec::new(),
+            bind_must_succeed: true,
+            scouting: Scouting::Off,
+            reads_files: false,
+            reads_calendar: false,
+        }
+    }
+
+    /// The answer is read off the reader's own reading of each endpoint, not off its text: an
+    /// address read as one asks for no resolver, and a reading the reader could not name leaves
+    /// `may_require` unknown with the reader's reason.
+    #[test]
+    fn a_reading_the_reader_gives_is_answered_from() {
+        let address = Endpoint::Ip {
+            proto: Proto::Tcp,
+            named: false,
+        };
+        let got = device_requires_of(&read_facts(vec![Ok(address)], Vec::new()));
+        assert_eq!(got.requires, ["entropy", "sockets-tcp", "threads"]);
+        assert_eq!(got.may_require, Some(vec!["interface-list"]));
+        let listened = device_requires_of(&read_facts(
+            Vec::new(),
+            vec![Ok(Endpoint::Ip {
+                proto: Proto::Udp,
+                named: false,
+            })],
+        ));
+        assert_eq!(listened.requires, ["entropy", "sockets-udp", "threads"]);
+        let refused = device_requires_of(&read_facts(
+            vec![Err("tcp/x: no name for it".to_owned())],
+            Vec::new(),
+        ));
+        assert_eq!(refused.may_require, None);
+        assert_eq!(refused.unknown, ["tcp/x: no name for it"]);
+    }
+
+    /// The grammar of every scheme reads a host name as one the resolver must answer, a raw
+    /// Ethernet locator by its scheme, and a scheme the vocabulary has no word for as the reason.
+    #[test]
+    fn the_reading_of_every_scheme_names_what_each_endpoint_is() {
+        assert_eq!(
+            read_any_endpoint("tcp/router.example:7447"),
+            Ok(Endpoint::Ip {
+                proto: Proto::Tcp,
+                named: true
+            })
+        );
+        assert_eq!(
+            read_any_endpoint("udp/192.0.2.1:7447"),
+            Ok(Endpoint::Ip {
+                proto: Proto::Udp,
+                named: false
+            })
+        );
+        assert_eq!(
+            read_any_endpoint("reth/eth0#ethtype=72e1"),
+            Ok(Endpoint::RawEthernet)
+        );
+        let vsock = read_any_endpoint("vsock/1:7447").unwrap_err();
+        assert!(vsock.contains("vsock"), "{vsock}");
     }
 }
