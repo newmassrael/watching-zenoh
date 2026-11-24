@@ -684,13 +684,20 @@ jobs:
           # first time it is taken, so the port holds its in-place lock there. Its unit tests count
           # what a lock's first take allocates, which each host answers for its own arm.
           for crate in wz-capi-port wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect wz-capi-replay; do
+            # wz-capi-pico's default build is the cooperative engine, whose host runtime
+            # (wz-runtime-posix) has no macOS form yet: on macOS the crate is built and tested on
+            # the tokio engine, named, until that port lands (docs/c-abi-engine-and-memory.md P1).
+            crate_args=()
+            if [ "$crate" = wz-capi-pico ] && [ "$RUNNER_OS" = macOS ]; then
+              read -r -a crate_args <<< "$(python3 scripts/lib/wz_config.py --bench-cargo-args tokio)"
+            fi
             built=FAIL
-            (cd crates && cargo build -p "$crate") && built=PASS
+            (cd crates && cargo build -p "$crate" ${crate_args[@]+"${crate_args[@]}"}) && built=PASS
             verdict "$crate builds:" "$built"
             tested=SKIPPED
             if [ "$built" = PASS ]; then
               tested=FAIL
-              (cd crates && cargo test -p "$crate" --lib) && tested=PASS
+              (cd crates && cargo test -p "$crate" ${crate_args[@]+"${crate_args[@]}"} --lib) && tested=PASS
             fi
             verdict "$crate unit tests:" "$tested"
             [ "$tested" = PASS ] || overall=FAIL
@@ -718,7 +725,7 @@ jobs:
               integrated=SKIPPED
               if [ "$built" = PASS ]; then
                 integrated=FAIL
-                (cd crates && cargo test -p "$crate" --tests -- --nocapture) && integrated=PASS
+                (cd crates && cargo test -p "$crate" ${crate_args[@]+"${crate_args[@]}"} --tests -- --nocapture) && integrated=PASS
               fi
               verdict "$crate integration tests:" "$integrated"
               [ "$integrated" = PASS ] || overall=FAIL

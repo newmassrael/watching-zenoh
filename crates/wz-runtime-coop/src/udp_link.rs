@@ -288,7 +288,7 @@ pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
     caps::MAX_LOCATOR_LEN >= LONGEST_IP_LOCATOR_LEN
         || [local, peer]
             .into_iter()
-            .all(|at| Locator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
+            .all(|at| Locator::ip(proto, at).text().demanded() <= caps::MAX_LOCATOR_LEN)
 }
 
 /// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
@@ -1469,8 +1469,11 @@ impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
     const IPV6: bool = S::IPV6;
 
     fn bind(&mut self, to: Locator) -> Result<FixedUdpDriver<S>, LinkOpenError> {
-        match to.proto {
-            LinkProto::Udp => self.bind_initiator(to.at),
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
+            LinkProto::Udp => self.bind_initiator(ip.at),
             // A stack of datagram sockets has no stream to give; one that has both is
             // `ip_stack`'s `IpStack`.
             LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1812,7 +1815,7 @@ mod tests {
             )),
         ] {
             for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-                let locator = Locator { proto, at };
+                let locator = Locator::ip(proto, at);
                 let printed = std::format!("{}/{at}", proto.scheme());
                 assert_eq!(locator.text().finish(), Ok(printed.as_str()));
                 assert_eq!(std::format!("{locator}"), printed);
@@ -1846,29 +1849,12 @@ mod tests {
             u32::MAX,
         ));
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-            let v4 = std::format!(
-                "{}",
-                Locator {
-                    proto,
-                    at: widest_v4
-                }
-            );
-            let v6 = std::format!(
-                "{}",
-                Locator {
-                    proto,
-                    at: widest_v6
-                }
-            );
+            let v4 = std::format!("{}", Locator::ip(proto, widest_v4));
+            let v6 = std::format!("{}", Locator::ip(proto, widest_v6));
             assert_eq!(v4.len(), LONGEST_IPV4_LOCATOR_LEN, "{v4}");
             assert_eq!(v6.len(), LONGEST_IP_LOCATOR_LEN, "{v6}");
             assert_eq!(
-                Locator {
-                    proto,
-                    at: widest_v4
-                }
-                .text()
-                .finish(),
+                Locator::ip(proto, widest_v4).text().finish(),
                 Ok(v4.as_str())
             );
         }
@@ -1899,11 +1885,7 @@ mod tests {
         ));
         let short_v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 7447));
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-            let v6 = Locator {
-                proto,
-                at: widest_v6,
-            }
-            .text();
+            let v6 = Locator::ip(proto, widest_v6).text();
             assert_eq!(v6.finish().map(str::len), Ok(LONGEST_IP_LOCATOR_LEN));
             assert!(ends_fit(proto, widest_v4, widest_v4), "every IPv4 link");
             assert!(ends_fit(proto, short_v6, short_v6));

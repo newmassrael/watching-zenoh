@@ -109,7 +109,7 @@ fn parse_endpoint<const IPV6: bool>(
     if at.port() == 0 && !any_port {
         return Err(DialRefused::BadAddress);
     }
-    Ok(Locator { proto, at })
+    Ok(Locator::ip(proto, at))
 }
 
 /// `a.b.c.d:port` read as `SocketAddrV4`'s `FromStr` reads it, in one pass over the bytes: four
@@ -669,6 +669,20 @@ mod tests {
                 7447
             ))))
         );
+    }
+
+    /// A locator read from its text writes that text back, through the one reader and the one
+    /// writer, by either writer (`Locator::text` and `Display`), and its IP form builds the same
+    /// locator again. Turned red by a writer or a reader that drifts from the other.
+    #[test]
+    fn an_ip_locator_is_written_as_it_was_read() {
+        for text in ["udp/127.0.0.1:7447", "tcp/10.0.0.1:80", "tls/[::1]:7447"] {
+            let read = parse_locator(text).expect("a dialable locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            let ip = read.as_ip().expect("an IP locator");
+            std::assert_eq!(Locator::ip(ip.proto, ip.at), read);
+        }
     }
 
     /// The octet reader takes four octets and leaves what follows them, and refuses a `.` after

@@ -591,9 +591,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 2_024_404,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,007,557 hosted, +9,344 on one machine.
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST, COOP_ENGINE),
-         require=(SINGLE_THREADED, TOKIO_ENGINE, KECCAK, LOG_FACADE),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane. Hosted reads run higher than "
@@ -621,9 +624,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_657_964,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,644,062 hosted, +8,004 on one machine.
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST),
-         require=(SINGLE_THREADED,), profile="capi-small",
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(SINGLE_THREADED, COOP_ENGINE), profile="capi-small",
          note="the pico-client build with panics aborting: the like-for-like of zenoh-pico's C. "
               "1,468,134 measured against pico-client's 1,790,361 (-18.0%). Read 1,498,558 on "
               "hosted CI on 2026-10-26 with the key set's gate and the engine port's advanced "
@@ -653,9 +659,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_088_660,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,075,981 hosted, +7,732 on one machine.
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST),
-         require=(UDP, SINGLE_THREADED),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
               "same growth as pico-client's, whose note attributes it. 1,910,913 on hosted CI on "
               "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states. "
@@ -1105,8 +1114,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_218_864,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 3,241,530 hosted, +2,124 on one machine.
-         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
-         require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE, KECCAK),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          note="peer implies scout and with it the UDP group"),
     # 2026-11-03, the SCE pins -- 4,356,318 on hosted run 41589047498 (4,355,414 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
@@ -1145,9 +1158,13 @@ CASES: tuple[Case, ...] = (
     Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_739_032,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 4,740,260 hosted, +8,024 on one machine.
-         forbid=(SINGLE_THREADED,),
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                  CONNECTIVITY, MULTICAST),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         # Gossip is off in the preset (decision Q7), and the tokio engine's own planes (its
+         # accept loop, responder and scouting glue) are not linked.
+         forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
+         require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
          exports=811,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
@@ -1177,7 +1194,11 @@ CASES: tuple[Case, ...] = (
     # this day says: +3,448 on one machine; the budget moves by it and keeps its headroom.
     Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_021_848,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
-                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT)),
+                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
+         # The tokio engine's own marks, which the pico client required while its default was that
+         # engine: the zenoh-c drop-in still runs on it, with zenoh's derivation of the initial
+         # sequence number and the runtime's `log` facade.
+         require=(TOKIO_ENGINE, KECCAK, LOG_FACADE)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +19,522 on
@@ -2744,9 +2765,11 @@ def cmd_selftest() -> int:
                     reference_key("other", "cc", flags, rule),
                     reference_key("pin", "other", flags, rule)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
-           {"serial-drive-own-thread", "rx-busy-poll"}
-           <= case_features(next(c for c in CASES if c.id == "pico-client"))
-           and "peer" in case_features(next(c for c in CASES if c.id == "pico-default")))
+           "engine-coop" in case_features(next(c for c in CASES if c.id == "pico-client"))
+           and not {"engine-tokio", "serial-drive-own-thread", "rx-busy-poll"}
+           & case_features(next(c for c in CASES if c.id == "pico-client"))
+           and "peer" in case_features(next(c for c in CASES if c.id == "pico-default"))
+           and "gossip" not in case_features(next(c for c in CASES if c.id == "pico-default")))
     # A profile is a compile property, not a capability: a case that differs from another only in
     # its profile must be divided by the same pico, or the ratio moves from both sides at once.
     by_id = {c.id: c for c in CASES}
