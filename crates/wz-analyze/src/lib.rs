@@ -531,7 +531,8 @@ OPTIONS:
                       the line then says it was chosen by the encoding.
                       `#@<package>/msg/<Type>.msg=\"...\"` declares a ROS
                       message definition (`.srv`: a service's request and
-                      response), and `<keyexpr>=cdr@<package>/msg/<Type>`
+                      response; `.action`: an action's goal, result,
+                      feedback and the types derived from them), and `<keyexpr>=cdr@<package>/msg/<Type>`
                       reads the topic's CDR payload by it.
                       Needs --fields.
                       PAYLOAD FORMATS: cbor, json, protobuf, text

@@ -799,6 +799,48 @@ mod tests {
         );
     }
 
+    /// An action's derived request, by the name its samples carry, read
+    /// through a rule over the declared action file: the goal's UUID, as the
+    /// one run of octets ROS fixes it as, then the goal.
+    #[test]
+    fn an_action_goal_request_reads_by_its_derived_type() {
+        let mut map = FormatMap::new();
+        map.declare_all(
+            "#@demo/action/Fib.action=\"int32 order\\n---\\nint32[] sequence\\n---\\nint32[] seq\"\n\
+             demo/goal=cdr@demo/action/Fib_SendGoal_Request",
+        )
+        .expect("the declarations install");
+        let rule = map.matching_rule("demo/goal").expect("the cdr rule");
+        let mut bytes = vec![0u8, 1, 0, 0];
+        bytes.extend(1..=16u8);
+        bytes.extend_from_slice(&5i32.to_le_bytes());
+        let fields = rule.format.decode(&bytes).expect("a goal request");
+        assert_eq!(
+            rows(&fields),
+            vec![
+                ("$", None, "demo/action/Fib_SendGoal_Request", None, 4, 24),
+                (
+                    "$.goal_id",
+                    Some("goal_id"),
+                    "unique_identifier_msgs/msg/UUID",
+                    None,
+                    4,
+                    20
+                ),
+                (
+                    "$.goal_id.uuid",
+                    Some("uuid"),
+                    "uint8[16]",
+                    Some("\"AQIDBAUGBwgJCgsMDQ4PEA==\""),
+                    4,
+                    20
+                ),
+                ("$.goal", Some("goal"), "demo/action/Fib_Goal", None, 20, 24),
+                ("$.goal.order", Some("order"), "int32", Some("5"), 20, 24),
+            ]
+        );
+    }
+
     /// A service's response, by the name its samples carry.
     #[test]
     fn a_service_response_reads_by_its_own_type() {

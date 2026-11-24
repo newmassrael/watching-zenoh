@@ -251,6 +251,30 @@ mod tests {
         }
     }
 
+    /// An action's own type and the types it derives are hashed. No published
+    /// value was at hand for an action, so the action's own hash is pinned to
+    /// the value the recipe the four published hashes above verify gives
+    /// when it is extended by rosidl's `add_action` (rosidl_parser's `Action`
+    /// for the derived types): a change to how an action is described moves
+    /// it.
+    #[test]
+    fn an_action_and_every_type_it_derives_is_hashed() {
+        let set = set_of(&[(
+            "example_interfaces/action/Fibonacci.action",
+            "int32 order\n---\nint32[] sequence\n---\nint32[] sequence",
+        )]);
+        assert_eq!(
+            type_hash(&set, "example_interfaces/action/Fibonacci").as_deref(),
+            Ok("RIHS01_9508051da1ea4658de144b09bd0690ff3de52104683d847aed764d2915906f51")
+        );
+        for name in set
+            .types_of_file("example_interfaces/action/Fibonacci.action")
+            .expect("declared")
+        {
+            assert!(type_hash(&set, name).is_ok(), "{name}");
+        }
+    }
+
     /// A type that reaches one no file defines has no hash, and says which.
     #[test]
     fn a_type_that_reaches_an_undefined_one_has_no_hash() {

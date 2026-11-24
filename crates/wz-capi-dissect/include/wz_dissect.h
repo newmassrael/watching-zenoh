@@ -4313,8 +4313,23 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * nothing of them is on the wire. `builtin_interfaces/msg/Time` and
  * `service_msgs/msg/ServiceEventInfo`, which ROS fixes and every service's
  * event names, are defined by this library: declare them or not, and a
- * declared one that defines other fields is refused. `.action` files are not
- * read.
+ * declared one that defines other fields is refused.
+ *
+ * An ACTION is declared by its `.action` file,
+ * `#@<package>/action/<Type>.action="..."` (its goal, a line `---`, its
+ * result, a line `---`, its feedback), and defines, every name under
+ * `<package>/action/`, what rosidl derives from it: `<Type>_Goal`,
+ * `<Type>_Result` and `<Type>_Feedback` as written; `<Type>_SendGoal_Request`
+ * (`goal_id`, a `unique_identifier_msgs/msg/UUID`, then `goal`) and
+ * `<Type>_SendGoal_Response` (`accepted`, a `bool`, then `stamp`, a
+ * `builtin_interfaces/msg/Time`); `<Type>_GetResult_Request` (`goal_id`) and
+ * `<Type>_GetResult_Response` (`status`, an `int8`, then `result`); the two
+ * services' `_Event` messages; `<Type>_FeedbackMessage` (`goal_id`, then
+ * `feedback`), what an action's feedback topic carries; and the types that
+ * are hashed and never a payload, `<Type>_SendGoal`, `<Type>_GetResult` and
+ * `<Type>`. `unique_identifier_msgs/msg/UUID` (`uint8[16] uuid`) is defined
+ * by this library as the two above are. So
+ * `demo/goal=cdr@<package>/action/<Type>_SendGoal_Request` reads a goal.
  *
  * (Declaration-verdict revision 6) A definition file is read when its line is
  * declared, so one that cannot be read refuses the text at its own line

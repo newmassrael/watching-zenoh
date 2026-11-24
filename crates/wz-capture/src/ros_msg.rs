@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ROS 2 message definitions read from a declaration text: the `.msg` and
-//! `.srv` files a `cdr@<package>/msg/<Type>` rule reads a payload by
+//! ROS 2 message definitions read from a declaration text: the `.msg`,
+//! `.srv` and `.action` files a `cdr@<package>/msg/<Type>` rule reads a payload by
 //! (`crate::payload_cdr` reads the bytes).
 //!
 //! # Why `.msg` and not the `.idl` generated from it
@@ -30,6 +30,19 @@
 //! the message a service's introspection publishes, and `<package>/srv/<Type>`
 //! itself, which is never on the wire and exists to be hashed
 //! (`crate::ros_type_hash`).
+//!
+//! `<package>/action/<Type>.action`, a goal, a line `---`, a result, a line
+//! `---` and a feedback, defines what rosidl_parser's `Action` derives from
+//! them, every name under `<package>/action/`: `<Type>_Goal`, `<Type>_Result`
+//! and `<Type>_Feedback` as written; the services `<Type>_SendGoal` (request
+//! `goal_id`, a `unique_identifier_msgs/msg/UUID`, and `goal`; response
+//! `accepted`, a `bool`, and `stamp`, a `builtin_interfaces/msg/Time`) and
+//! `<Type>_GetResult` (request `goal_id`; response `status`, an `int8`, and
+//! `result`), each with its request, response and event as a `.srv` has
+//! them; `<Type>_FeedbackMessage` (`goal_id` and `feedback`); and the
+//! action's own type `<Type>`, hashed and never read, whose members name the
+//! goal, the result, the feedback, the two services and the feedback message.
+//!
 //! A field naming another message (`geometry_msgs/Point`, or `Point` for one
 //! in the file's own package) is resolved among every declared file, when a
 //! rule first names a type.
@@ -48,9 +61,10 @@
 //! # The messages ROS fixes
 //!
 //! A service's event message names `service_msgs/msg/ServiceEventInfo`, which
-//! names `builtin_interfaces/msg/Time`. Both are part of the hash of every
-//! service, and neither is something a person declaring a service should have
-//! to declare, so their definitions are carried here (`FIXED`). A declared
+//! names `builtin_interfaces/msg/Time`, and an action's derived types name
+//! `unique_identifier_msgs/msg/UUID` and the same `Time`. They are part of the
+//! hash of every service and action, and none is something a person declaring
+//! one should have to declare, so their definitions are carried here (`FIXED`). A declared
 //! file of the same name is accepted when it defines the same fields and
 //! refused when it does not: a different definition under a name ROS fixes is
 //! a mistake, and reading or hashing by it would be a confident misreading.
@@ -68,12 +82,20 @@ pub(crate) const EMPTY_MEMBER: &str = "structure_needs_at_least_one_member";
 /// The message a service's event carries as its `info`.
 const SERVICE_EVENT_INFO: &str = "service_msgs/msg/ServiceEventInfo";
 
+/// The message an action's goal is identified by.
+const UUID: &str = "unique_identifier_msgs/msg/UUID";
+
+/// The message an accepted goal is stamped with.
+const TIME: &str = "builtin_interfaces/msg/Time";
+
 /// The messages ROS fixes that a derived type names, by full name, with their
-/// fields as their `.msg` sources declare them (`builtin_interfaces/msg/Time.msg`
-/// and `service_msgs/msg/ServiceEventInfo.msg`; the constants and comments of
-/// the sources are on neither the wire nor the hash, and are left out).
+/// fields as their `.msg` sources declare them (`builtin_interfaces/msg/Time.msg`,
+/// `service_msgs/msg/ServiceEventInfo.msg` and
+/// `unique_identifier_msgs/msg/UUID.msg`; the constants and comments of the
+/// sources are on neither the wire nor the hash, and are left out).
 const FIXED: &[(&str, &str)] = &[
-    ("builtin_interfaces/msg/Time", "int32 sec\nuint32 nanosec"),
+    (TIME, "int32 sec\nuint32 nanosec"),
+    (UUID, "uint8[16] uuid"),
     (
         SERVICE_EVENT_INFO,
         "uint8 event_type\nbuiltin_interfaces/Time stamp\nchar[16] client_gid\n\
@@ -236,7 +258,7 @@ pub(crate) struct DefinitionFile<'a> {
 /// Whether a declared file is a ROS definition (`.msg`, `.srv`) rather than
 /// a `.proto` file: the two are read by different readers.
 pub(crate) fn is_definition_file(name: &str) -> bool {
-    name.ends_with(".msg") || name.ends_with(".srv")
+    name.ends_with(".msg") || name.ends_with(".srv") || name.ends_with(".action")
 }
 
 /// Every message the declared definition files define, by full name.
@@ -259,6 +281,7 @@ pub(crate) struct TypeSet {
 enum Kind {
     Msg,
     Srv,
+    Action,
 }
 
 impl TypeSet {
@@ -286,6 +309,21 @@ impl TypeSet {
                     let response = read_fields(file.name, package, response)?;
                     let base = format!("{package}/srv/{type_name}");
                     set.service(file.name, &mut defined, &base, request, response)?;
+                }
+                Kind::Action => {
+                    let [goal, result, feedback] = sections::<3>(
+                        file.name,
+                        &lines,
+                        "an action is its goal, a line `---`, its result, a line `---`, and \
+                         its feedback",
+                    )?;
+                    let parts = ActionParts {
+                        goal: read_fields(file.name, package, goal)?,
+                        result: read_fields(file.name, package, result)?,
+                        feedback: read_fields(file.name, package, feedback)?,
+                    };
+                    let base = format!("{package}/action/{type_name}");
+                    set.action(file.name, &mut defined, &base, parts)?;
                 }
             }
             set.files.push((String::from(file.name), defined));
@@ -329,6 +367,74 @@ impl TypeSet {
         self.insert(file, defined, request_name, request)?;
         self.insert(file, defined, response_name, response)?;
         self.insert(file, defined, event_name, event)
+    }
+
+    /// An action `base`: its goal, result and feedback, and every type
+    /// rosidl_parser's `Action` derives from them, in the order its type
+    /// description adds them.
+    fn action(
+        &mut self,
+        file: &str,
+        defined: &mut Vec<String>,
+        base: &str,
+        parts: ActionParts,
+    ) -> Result<(), String> {
+        let goal = format!("{base}_Goal");
+        let result = format!("{base}_Result");
+        let feedback = format!("{base}_Feedback");
+        let send_goal = format!("{base}_SendGoal");
+        let get_result = format!("{base}_GetResult");
+        let feedback_message = format!("{base}_FeedbackMessage");
+        self.claim(file, base)?;
+        defined.push(String::from(base));
+        self.interfaces.insert(
+            String::from(base),
+            MessageDef {
+                fields: vec![
+                    member("goal", &goal, Arity::One),
+                    member("result", &result, Arity::One),
+                    member("feedback", &feedback, Arity::One),
+                    member("send_goal_service", &send_goal, Arity::One),
+                    member("get_result_service", &get_result, Arity::One),
+                    member("feedback_message", &feedback_message, Arity::One),
+                ],
+            },
+        );
+        self.insert(file, defined, goal.clone(), parts.goal)?;
+        self.insert(file, defined, result.clone(), parts.result)?;
+        self.insert(file, defined, feedback.clone(), parts.feedback)?;
+        self.service(
+            file,
+            defined,
+            &send_goal,
+            vec![
+                member("goal_id", UUID, Arity::One),
+                member("goal", &goal, Arity::One),
+            ],
+            vec![
+                primitive("accepted", Primitive::Bool),
+                member("stamp", TIME, Arity::One),
+            ],
+        )?;
+        self.service(
+            file,
+            defined,
+            &get_result,
+            vec![member("goal_id", UUID, Arity::One)],
+            vec![
+                primitive("status", Primitive::Int8),
+                member("result", &result, Arity::One),
+            ],
+        )?;
+        self.insert(
+            file,
+            defined,
+            feedback_message,
+            vec![
+                member("goal_id", UUID, Arity::One),
+                member("feedback", &feedback, Arity::One),
+            ],
+        )
     }
 
     fn insert(
@@ -436,6 +542,22 @@ fn code(line: &str) -> &str {
     line.split_once('#').map_or(line, |(code, _)| code).trim()
 }
 
+/// The three parts of an action file, read.
+struct ActionParts {
+    goal: Vec<FieldDef>,
+    result: Vec<FieldDef>,
+    feedback: Vec<FieldDef>,
+}
+
+/// A field of a derived type that holds one primitive `of`.
+fn primitive(name: &str, of: Primitive) -> FieldDef {
+    FieldDef {
+        name: String::from(name),
+        base: Base::Primitive(of),
+        arity: Arity::One,
+    }
+}
+
 /// A field of a derived type that holds the message `of`.
 fn member(name: &str, of: &str, arity: Arity) -> FieldDef {
     FieldDef {
@@ -468,14 +590,18 @@ fn sections<'l, 't, const N: usize>(
 fn file_parts(name: &str) -> Result<(&str, Kind, &str), String> {
     let bad = || {
         format!(
-            "{name}: a definition file is named <package>/msg/<Type>.msg or \
-             <package>/srv/<Type>.srv"
+            "{name}: a definition file is named <package>/msg/<Type>.msg, \
+             <package>/srv/<Type>.srv or <package>/action/<Type>.action"
         )
     };
-    let (stem, kind) = match (name.strip_suffix(".msg"), name.strip_suffix(".srv")) {
-        (Some(stem), _) => (stem, Kind::Msg),
-        (_, Some(stem)) => (stem, Kind::Srv),
-        _ => return Err(bad()),
+    let (stem, kind) = if let Some(stem) = name.strip_suffix(".msg") {
+        (stem, Kind::Msg)
+    } else if let Some(stem) = name.strip_suffix(".srv") {
+        (stem, Kind::Srv)
+    } else if let Some(stem) = name.strip_suffix(".action") {
+        (stem, Kind::Action)
+    } else {
+        return Err(bad());
     };
     let mut parts = stem.split('/');
     let (Some(package), Some(dir), Some(type_name), None) =
@@ -486,6 +612,7 @@ fn file_parts(name: &str) -> Result<(&str, Kind, &str), String> {
     let dir_matches = match kind {
         Kind::Msg => dir == "msg",
         Kind::Srv => dir == "srv",
+        Kind::Action => dir == "action",
     };
     if !dir_matches || !is_identifier(package) || !is_identifier(type_name) {
         return Err(bad());
@@ -735,6 +862,102 @@ mod tests {
             ]
         );
         assert_eq!(set.check("demo/srv/Add_Event"), Ok(()));
+    }
+
+    /// An action file defines its goal, result and feedback and every type
+    /// rosidl derives from them, under `<package>/action/`, in the order rosidl
+    /// adds them; the derived requests and responses name the UUID and the
+    /// time ROS fixes; and a file with another number of parts is refused.
+    #[test]
+    fn an_action_defines_what_rosidl_derives_from_it() {
+        let set = set_of(&[(
+            "demo/action/Fib.action",
+            "# Goal\nint32 order\n---\nint32[] sequence\n---\nint32[] partial",
+        )])
+        .expect("an action");
+        let base = "demo/action/Fib";
+        let names: Vec<String> = [
+            "",
+            "_Goal",
+            "_Result",
+            "_Feedback",
+            "_SendGoal",
+            "_SendGoal_Request",
+            "_SendGoal_Response",
+            "_SendGoal_Event",
+            "_GetResult",
+            "_GetResult_Request",
+            "_GetResult_Response",
+            "_GetResult_Event",
+            "_FeedbackMessage",
+        ]
+        .iter()
+        .map(|suffix| format!("{base}{suffix}"))
+        .collect();
+        assert_eq!(
+            set.types_of_file("demo/action/Fib.action"),
+            Some(names.as_slice())
+        );
+        let spell = |name: &str| -> Vec<String> {
+            set.message(name)
+                .expect(name)
+                .fields
+                .iter()
+                .map(|f| format!("{} {}", f.spelling(), f.name))
+                .collect()
+        };
+        assert_eq!(spell("demo/action/Fib_Goal"), vec!["int32 order"]);
+        assert_eq!(
+            spell("demo/action/Fib_SendGoal_Request"),
+            vec![
+                "unique_identifier_msgs/msg/UUID goal_id",
+                "demo/action/Fib_Goal goal"
+            ]
+        );
+        assert_eq!(
+            spell("demo/action/Fib_SendGoal_Response"),
+            vec!["bool accepted", "builtin_interfaces/msg/Time stamp"]
+        );
+        assert_eq!(
+            spell("demo/action/Fib_GetResult_Request"),
+            vec!["unique_identifier_msgs/msg/UUID goal_id"]
+        );
+        assert_eq!(
+            spell("demo/action/Fib_GetResult_Response"),
+            vec!["int8 status", "demo/action/Fib_Result result"]
+        );
+        assert_eq!(
+            spell("demo/action/Fib_FeedbackMessage"),
+            vec![
+                "unique_identifier_msgs/msg/UUID goal_id",
+                "demo/action/Fib_Feedback feedback"
+            ]
+        );
+        assert_eq!(
+            spell("unique_identifier_msgs/msg/UUID"),
+            vec!["uint8[16] uuid"]
+        );
+        assert!(set.message(base).is_none());
+        assert!(set.message("demo/action/Fib_SendGoal").is_none());
+        let own = set.definition(base).expect("the action's own type");
+        assert_eq!(
+            own.fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "goal",
+                "result",
+                "feedback",
+                "send_goal_service",
+                "get_result_service",
+                "feedback_message"
+            ]
+        );
+        assert_eq!(set.check("demo/action/Fib_FeedbackMessage"), Ok(()));
+        let two =
+            set_of(&[("demo/action/Two.action", "int32 a\n---\nint32 b")]).expect_err("two parts");
+        assert!(two.contains("an action is its goal"), "{two}");
     }
 
     /// A declared file under a name ROS fixes is accepted when it defines the
