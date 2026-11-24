@@ -2222,6 +2222,39 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
     now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
 }
 
+/// The generation the next link, or the next join of a group, answers its queries under: the
+/// counter's next value. The counter wraps as `fetch_add` does, and a value equal to
+/// `query::LOCAL_QUERY`, which names the session's own queries and no link's, is stepped over.
+#[cfg(feature = "queryable")]
+fn next_generation(counter: &AtomicU64) -> u64 {
+    loop {
+        let generation = counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if generation != query::LOCAL_QUERY {
+            return generation;
+        }
+    }
+}
+
+/// A group member's key (`SessionEngine::next_group_member`): its group's place in the session's
+/// groups in the high half, its place in the group's member table in the low one, so the keys
+/// order by group first. Each half is a `u32`, so the two never overlap.
+#[cfg(feature = "group")]
+fn member_key(group: u32, member: u32) -> u64 {
+    let [g0, g1, g2, g3] = group.to_be_bytes();
+    let [m0, m1, m2, m3] = member.to_be_bytes();
+    u64::from_be_bytes([g0, g1, g2, g3, m0, m1, m2, m3])
+}
+
+/// The group's place and the member's place a key is made of (`member_key`).
+#[cfg(feature = "group")]
+fn member_places(key: u64) -> (u32, u32) {
+    let [g0, g1, g2, g3, m0, m1, m2, m3] = key.to_be_bytes();
+    (
+        u32::from_be_bytes([g0, g1, g2, g3]),
+        u32::from_be_bytes([m0, m1, m2, m3]),
+    )
+}
+
 /// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2630,7 +2663,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
         let link = self.transport.place_gate(gate, endpoint)?;
         #[cfg(feature = "queryable")]
-        let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = next_generation(&self.session.plane.generation);
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
             face,
@@ -2700,7 +2733,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     continue;
                 }
             };
-            let next = at + 1;
+            // A resume past every row dials none, so one held at `usize::MAX` still means the
+            // rows are done; `at` is below the count of rows, so it is never held there.
+            let next = at.saturating_add(1);
             let deadline_us = self.open_deadline_us();
             match row {
                 DialRow::Pending(dial) => {
@@ -3018,22 +3053,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// next pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
-        let mut told = 0;
-        for at in 0..self.transport.links.faces().len() {
-            let actions = match &self.transport.links.faces()[at].link {
-                Link::Up(wire) => wire.actions.clone(),
-                _ => continue,
-            };
-            match self.begin_replay(at, &actions, now_ms) {
-                TurnEnd::Kept => told += 1,
-                TurnEnd::EndsLink => {
-                    if let Link::Up(wire) = &self.transport.links.faces()[at].link {
-                        wire.abort();
-                    }
+        let faces = self.transport.links.faces().len();
+        (0..faces)
+            .filter(|&at| self.redeclare_on(at, now_ms))
+            .count()
+    }
+
+    /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
+    /// whether it was told, which a place with no face, or a face whose link is not up, is not.
+    fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
+        let actions = match self.transport.links.faces().get(at).map(|face| &face.link) {
+            Some(Link::Up(wire)) => wire.actions.clone(),
+            _ => return false,
+        };
+        match self.begin_replay(at, &actions, now_ms) {
+            TurnEnd::Kept => true,
+            TurnEnd::EndsLink => {
+                if let Some(Link::Up(wire)) =
+                    self.transport.links.faces().get(at).map(|face| &face.link)
+                {
+                    wire.abort();
                 }
+                false
             }
         }
-        told
     }
 
     /// The face at `at`, whose handshake completed, holds its link up: what the session holds is
@@ -3133,7 +3176,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A member's query is held, and answered, under the group's own generation, as a link's
         // is under its; each join of the group is a generation of its own.
         #[cfg(feature = "queryable")]
-        let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = next_generation(&self.session.plane.generation);
         #[cfg(feature = "queryable")]
         let dispatch = group::dispatch(
             self.session.registry.clone(),
@@ -3236,16 +3279,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let now_us = self.clock.now_us();
         let again_at = |ms: u64| now_us.saturating_add(ms.saturating_mul(1000));
         for at in 0..self.transport.groups.len() {
-            let id = self.transport.groups[at].id();
-            if let Some(outcome) = self.transport.groups[at].take_outcome(&self.local) {
+            let Some(group) = self.transport.groups.get_mut(at) else {
+                continue;
+            };
+            let id = group.id();
+            if let Some(outcome) = group.take_outcome(&self.local) {
                 self.lose_link(id);
                 if let (true, Some(ms)) = (outcome.warrants_rejoin(), redial_ms) {
-                    self.transport.groups[at].wait_to_rejoin(again_at(ms));
+                    self.rejoin_group_at(at, again_at(ms));
                 }
                 continue;
             }
-            if self.transport.groups[at].rejoin_due(now_us) {
-                let join = self.transport.groups[at].group_join().clone();
+            let due = self
+                .transport
+                .groups
+                .get(at)
+                .filter(|group| group.rejoin_due(now_us))
+                .map(|group| group.group_join().clone());
+            if let Some(join) = due {
                 match self.join_group(id, join) {
                     Ok(face) => {
                         // The liveliness subscribers ask the group again, as they would have
@@ -3265,18 +3316,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                                 row.history(),
                             );
                         }
-                        // A departure owed to a replaying listener outlives the join that ended.
-                        #[cfg(feature = "connectivity")]
-                        face.keep_tombs_of(&self.transport.groups[at]);
-                        self.transport.groups[at] = face;
+                        if let Some(ended) = self.transport.groups.get_mut(at) {
+                            // A departure owed to a replaying listener outlives the join that
+                            // ended.
+                            #[cfg(feature = "connectivity")]
+                            face.keep_tombs_of(ended);
+                            *ended = face;
+                        }
                     }
                     Err(_) => {
                         if let Some(ms) = redial_ms {
-                            self.transport.groups[at].wait_to_rejoin(again_at(ms));
+                            self.rejoin_group_at(at, again_at(ms));
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Join the group at place `at` again at `at_us`, on the session's clock; a place no group
+    /// stands at waits for nothing.
+    #[cfg(feature = "group")]
+    fn rejoin_group_at(&mut self, at: usize, at_us: u64) {
+        if let Some(group) = self.transport.groups.get_mut(at) {
+            group.wait_to_rejoin(at_us);
         }
     }
 
@@ -5840,7 +5903,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "group")]
     fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
         let core = self.live()?;
-        let (first_group, first_member) = (from >> 32, from & u64::from(u32::MAX));
+        let (first_group, first_member) = member_places(from);
         core.0
             .transport
             .groups
@@ -5848,13 +5911,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .enumerate()
             .skip(usize::try_from(first_group).ok()?)
             .find_map(|(at, group)| {
-                let from_member = if at as u64 == first_group {
+                // A group, or a member, whose place does not fit its half of a key has no key,
+                // and so is not listed.
+                let place = u32::try_from(at).ok()?;
+                let from_member = if place == first_group {
                     first_member
                 } else {
                     0
                 };
                 let (member, zid) = group.member_zid_from(usize::try_from(from_member).ok()?)?;
-                Some((((at as u64) << 32) | member as u64, zid))
+                Some((member_key(place, u32::try_from(member).ok()?), zid))
             })
     }
 
@@ -7995,5 +8061,55 @@ mod leg_deadline_tests {
             leg_deadline_ms(u64::MAX, u32::MAX),
             18_446_744_073_709_552 + 4_294_967_295
         );
+    }
+}
+
+#[cfg(all(test, feature = "queryable"))]
+mod generation_tests {
+    //! The generations a session's links and groups answer their queries under.
+    use super::{next_generation, query};
+    use core::sync::atomic::Ordering;
+    use portable_atomic::AtomicU64;
+
+    /// A link's generation is the counter's next value, and where the counter wraps the
+    /// session's own queries' generation is stepped over.
+    ///
+    /// # Control
+    ///
+    /// Returning the wrapped value without the step over `query::LOCAL_QUERY` reds the second
+    /// assertion.
+    #[test]
+    fn a_links_generation_is_never_the_sessions_own() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(next_generation(&counter), 1);
+        let counter = AtomicU64::new(query::LOCAL_QUERY.wrapping_sub(1));
+        let after = query::LOCAL_QUERY.wrapping_add(1);
+        assert_eq!(
+            next_generation(&counter),
+            after,
+            "LOCAL_QUERY is stepped over"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), after);
+    }
+}
+
+#[cfg(all(test, feature = "group"))]
+mod member_key_tests {
+    //! How a group member's key names its group and its place in the group's member table.
+    use super::{member_key, member_places};
+
+    /// A member's key holds its group's place above its own, and gives both back; the key past a
+    /// group's last place is the next group's first.
+    ///
+    /// # Control
+    ///
+    /// Swapping the halves in `member_key` reds the first assertion.
+    #[test]
+    fn a_members_key_holds_its_group_above_its_place() {
+        assert_eq!(member_key(1, 2), 0x0000_0001_0000_0002);
+        assert_eq!(member_places(0x0000_0001_0000_0002), (1, 2));
+        assert_eq!(member_key(u32::MAX, u32::MAX), u64::MAX);
+        assert_eq!(member_places(u64::MAX), (u32::MAX, u32::MAX));
+        assert_eq!(member_places(member_key(3, u32::MAX) + 1), (4, 0));
     }
 }
