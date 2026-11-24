@@ -613,20 +613,7 @@ impl OpenKeyIds {
     }
 }
 
-/// What a session's open decided before its state is built ([`CoopEngine::engine_over`]): its
-/// policies, the zid it announces and, with `shared-key-ids`, the key ids it holds and the
-/// key-wire form of each link. Small values, apart from the config and the stack's values the
-/// stage is handed as they are.
-struct OpenDecided {
-    policy: SessionPolicy,
-    zid: SessionZid,
-    #[cfg(feature = "shared-key-ids")]
-    key_ids: OpenKeyIds,
-    #[cfg(feature = "shared-key-ids")]
-    key_forms: LinkKeyForms,
-}
-
-/// What the open lent the engine apart from the session's state ([`CoopEngine::engine_over`]): the
+/// What the open lent the engine apart from the session's state ([`CoopEngine::assemble`]): the
 /// place of the ABI's handle, the places of the publishes kept for the session's other faces,
 /// which a publish reaches with the session held by another, and the ring of the advanced
 /// publishers' caches, which the engine locks apart from the state.
@@ -3775,12 +3762,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// The engine [`Self::open_made_in`] opens, built where it is kept and not yet bound, joined
     /// or dialled: the config made, the key-wire form judged, the arena reserved and its tables
-    /// lent, the zid decided. Never inlined, for the stack: the session's state is put together in
-    /// this frame and moved into the engine's allocation, and the frame has returned before the
-    /// first link is opened.
+    /// lent, the zid decided; then the links lent their buffers and cells, the task and timer
+    /// tables reserved, the dial role's face and every table in place. Never inlined, for the
+    /// stack: the frame has returned before the first link is opened.
+    ///
+    /// One frame from the config to the state: the links, the config, the entropy and what the
+    /// arena lent are each borrowed while the open decides, and a value borrowed once is copied
+    /// when it is handed on by value. Made here, each is moved only into the state, which is moved
+    /// once, into the engine's allocation ([`Self::engine_of`]).
     #[inline(never)]
     fn assemble(
-        links: L,
+        mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         source: impl OpenSource,
@@ -3803,44 +3795,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         write_endpoints(&mut EndpointWriter::over(&mut lent.endpoints))?;
         let mut entropy = SessionEntropy::new(entropy);
         let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
-        let decided = OpenDecided {
-            policy,
-            zid: wire,
-            #[cfg(feature = "shared-key-ids")]
-            key_ids,
-            #[cfg(feature = "shared-key-ids")]
-            key_forms,
-        };
-        Ok(Self::engine_over(
-            links, clock, entropy, config, decided, &plan, lent,
-        ))
-    }
-
-    /// The engine over the session's state on `links`, `clock` and `entropy`, out of `config`,
-    /// what its open decided (`decided`) and lent (`lent`, as `plan` laid it out): the links lent
-    /// their buffers and cells, the task and timer tables reserved, the dial role's face and every
-    /// table in place. The state is made in this frame and moved once, into the engine's
-    /// allocation ([`Self::engine_of`]): handed back with what was lent apart, it would be moved
-    /// again in the open's frame to be parted from it. Out of line, so the open's measure shows it
-    /// apart.
-    #[inline(never)]
-    fn engine_over(
-        mut links: L,
-        clock: C,
-        entropy: SessionEntropy,
-        config: CoopConfig<Counted>,
-        decided: OpenDecided,
-        plan: &ArenaPlan,
-        lent: SessionLent,
-    ) -> Arc<Self> {
-        let OpenDecided {
-            policy,
-            zid: wire,
-            #[cfg(feature = "shared-key-ids")]
-            key_ids,
-            #[cfg(feature = "shared-key-ids")]
-            key_forms,
-        } = decided;
         links.lend_buffers(lent.link_tables);
         #[cfg(feature = "listen")]
         links.lend_port_rows(lent.port_rows);
@@ -3965,7 +3919,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
         };
-        Self::engine_of(core, apart)
+        Ok(Self::engine_of(core, apart))
     }
 
     /// The engine over `core`, held where its own handle (`this`) reaches it, with what the open
