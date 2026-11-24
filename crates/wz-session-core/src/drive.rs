@@ -1979,38 +1979,27 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath {
-    // A link that keeps its datagram: the dispatch reads it where it lies and stops where the
-    // host has no room, to go on from there when the link lends it again.
+    // A link that keeps its datagram is read where it lies and stopped where the host has no
+    // room, to go on from there when the link lends it again; with no allocator, none keeps it.
     #[cfg(feature = "alloc")]
-    if on_event.holds_datagram() {
-        return dispatch_kept(unit, actions, on_event, &mut |unit, resume, on_event| {
-            dispatch_datagram_unit(unit, resume, true, actions, engine, record, on_event)
-        });
-    }
-    let (path, used, _) =
-        dispatch_datagram_unit(unit, None, false, actions, engine, record, on_event);
-    // A datagram that holds more than one message is read on where it lies, a message at a
-    // time, as upstream's batch walk does: nothing of it is copied to wait for a later turn.
-    let mut at = used;
-    while at > 0 && at < unit.len() {
-        let Some(rest) = unit.get(at..) else {
-            break;
-        };
-        let (_, used, _) =
-            dispatch_datagram_unit(rest, None, false, actions, engine, record, on_event);
-        at = if used == 0 {
-            unit.len()
-        } else {
-            at.saturating_add(used)
-        };
-    }
-    path
+    let kept = on_event.holds_datagram();
+    #[cfg(not(feature = "alloc"))]
+    let kept = false;
+    dispatch_units(
+        unit,
+        actions,
+        kept,
+        on_event,
+        &mut |unit, resume, on_event| {
+            dispatch_datagram_unit(unit, resume, kept, actions, engine, record, on_event)
+        },
+    )
 }
 
-/// How [`dispatch_kept`] reads one unit of a datagram: the unit, where the next record of a `Frame`
-/// an earlier step stopped in starts, and the sink; answered with the path it took, the bytes of
-/// the unit it went through, and whether it stopped before a record.
-#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+/// How [`dispatch_units`] reads one unit of a datagram: the unit, where the next record of a
+/// `Frame` an earlier step stopped in starts, and the sink; answered with the path it took, the
+/// bytes of the unit it went through, and whether it stopped before a record.
+#[cfg(feature = "codec-frame")]
 type ReadUnit<'a> = dyn FnMut(
         &[u8],
         Option<usize>,
@@ -2018,40 +2007,54 @@ type ReadUnit<'a> = dyn FnMut(
     ) -> (DatagramPath, usize, bool)
     + 'a;
 
-/// The dispatch of a datagram its link keeps ([`crate::driver_loop::EventSink::holds_datagram`]):
-/// its transport messages one after the other where the datagram lies, from where the last step
-/// stopped, `unit_at` reading each (its unit, where the next record of a `Frame` stopped in
-/// starts). Before each message after the first, and inside a `Frame` before each record after
-/// the first, the host is asked whether it takes another; where it does not, the dispatch notes
-/// where it stopped ([`SessionLinkActions::set_datagram_resume`]) and the link keeps the datagram
-/// for a later step. Nothing is copied to wait: the datagram stays in the link's buffer, which it
-/// does not read into again until the dispatch has gone through it.
-#[cfg(all(feature = "alloc", feature = "codec-frame"))]
-fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
+/// The dispatch of a datagram: its transport messages one after the other where the datagram
+/// lies, `unit_at` reading each (its unit, where the next record of a `Frame` stopped in
+/// starts), and the path of the first. A datagram that holds more than one message is read on a
+/// message at a time, as upstream's batch walk does: nothing of it is copied to wait for a later
+/// turn.
+///
+/// A datagram its link keeps (`kept`, [`crate::driver_loop::EventSink::holds_datagram`]) is
+/// read from where the last step stopped, and before each message after the first, and inside a
+/// `Frame` before each record after the first, the host is asked whether it takes another; where
+/// it does not, the dispatch notes where it stopped
+/// ([`SessionLinkActions::set_datagram_resume`]) and the link keeps the datagram for a later
+/// step, in its own buffer, which it does not read into again until the dispatch has gone
+/// through it.
+#[cfg(feature = "codec-frame")]
+fn dispatch_units<R: SessionRuntime, T: TimeSource>(
     datagram: &[u8],
     actions: &SessionLinkActions<R, T>,
+    kept: bool,
     on_event: &mut dyn crate::driver_loop::EventSink,
     unit_at: &mut ReadUnit<'_>,
 ) -> DatagramPath {
-    use crate::session_actions::DatagramResume;
-    let resume = actions.take_datagram_resume();
-    let mut at = resume.map_or(0, |resume| resume.unit);
-    let mut next_record = resume.and_then(|resume| resume.record);
+    // Only a kept datagram has a step to go on from, and only a build with an allocator keeps one.
+    #[cfg(feature = "alloc")]
+    let resume = if kept {
+        actions
+            .take_datagram_resume()
+            .map(|resume| (resume.unit, resume.record))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "alloc"))]
+    let resume: Option<(usize, Option<usize>)> = None;
+    let mut at = resume.map_or(0, |(unit, _)| unit);
+    let mut next_record = resume.and_then(|(_, record)| record);
     let mut path = None;
-    // Where the dispatch stopped, noted once after the walk: the host asked for no more before a
-    // unit, or a `Frame` stopped before a record.
+    // Where the dispatch stopped (the unit, and the record of a `Frame` it stopped in), noted
+    // once after the walk: the host asked for no more before a unit, or a `Frame` stopped before
+    // a record.
     let mut stop = None;
-    // The host is asked before each unit after the first, so the question closes the loop and
-    // the walk has one call of `unit_at`.
-    if at < datagram.len() {
+    // A lent datagram is read from its first unit, an empty one too; a kept one that a step read
+    // to its end has nothing left. The host is asked before each unit after the first, so the
+    // question closes the loop and the walk has one call of `unit_at`.
+    if !kept || at < datagram.len() {
         while let Some(rest) = datagram.get(at..) {
             let (read_by, used, stopped) = unit_at(rest, next_record.take(), &mut *on_event);
             path.get_or_insert(read_by);
             if stopped {
-                stop = Some(DatagramResume {
-                    unit: at,
-                    record: Some(used),
-                });
+                stop = Some((at, Some(used)));
                 break;
             }
             if used == 0 {
@@ -2061,18 +2064,18 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
             if at >= datagram.len() {
                 break;
             }
-            if !on_event.takes_another() {
-                stop = Some(DatagramResume {
-                    unit: at,
-                    record: None,
-                });
+            if kept && !on_event.takes_another() {
+                stop = Some((at, None));
                 break;
             }
         }
     }
-    if let Some(stop) = stop {
-        actions.set_datagram_resume(stop);
+    #[cfg(feature = "alloc")]
+    if let Some((unit, record)) = stop {
+        actions.set_datagram_resume(crate::session_actions::DatagramResume { unit, record });
     }
+    #[cfg(not(feature = "alloc"))]
+    let _ = (stop, actions);
     path.unwrap_or(DatagramPath::InPlace)
 }
 
@@ -2215,33 +2218,25 @@ where
 {
     // A link that keeps its datagram, as [`dispatch_datagram`] reads it.
     #[cfg(feature = "alloc")]
-    if on_event.holds_datagram() {
-        return dispatch_kept(unit, actions, on_event, &mut |unit, resume, on_event| {
+    let kept = on_event.holds_datagram();
+    #[cfg(not(feature = "alloc"))]
+    let kept = false;
+    dispatch_units(
+        unit,
+        actions,
+        kept,
+        on_event,
+        &mut |unit, resume, on_event| {
             dispatch_datagram_reassembling_unit(
                 unit,
                 resume,
-                true,
+                kept,
                 engine,
                 record,
                 &mut through_hand_off(reasm, actions, now_ms, on_event),
             )
-        });
-    }
-    // One hand-off and one call for every unit of the datagram: a datagram that holds more than
-    // one message is read on where it lies, as [`dispatch_datagram`] reads it.
-    let mut hand = through_hand_off(reasm, actions, now_ms, on_event);
-    let mut path = None;
-    let mut at = 0usize;
-    while let Some(rest) = unit.get(at..) {
-        let (read_by, used, _) =
-            dispatch_datagram_reassembling_unit(rest, None, false, engine, record, &mut hand);
-        path.get_or_insert(read_by);
-        at = at.saturating_add(used);
-        if used == 0 || at >= unit.len() {
-            break;
-        }
-    }
-    path.unwrap_or(DatagramPath::InPlace)
+        },
+    )
 }
 
 /// [`dispatch_datagram_reassembling`] for the unit at the front of `unit`, with the
