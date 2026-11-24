@@ -49,8 +49,8 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, OpenStorage,
-    PlaceTables, SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
+    SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
@@ -646,9 +646,6 @@ struct SessionLent {
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
-    /// How many rows each table of the engine's record of the declarations is lent, as the plan
-    /// laid them out.
-    entities: EntityRows,
     /// The links the plan holds buffers for: the rows of the session's link admission.
     #[cfg(feature = "listen")]
     links: usize,
@@ -831,7 +828,6 @@ fn lend_session(
         pending_gets,
         handle_place,
         places,
-        entities: plan.entities(),
         #[cfg(feature = "listen")]
         links: plan.links(),
         #[cfg(feature = "listen")]
@@ -1662,8 +1658,8 @@ impl SessionParts for CoopSession {
     type Watchers = Arc<FacePlane>;
     #[cfg(not(feature = "connectivity"))]
     type Watchers = ();
-    /// What a write filter of each plane is held to, the filters sharing one table.
-    type Entities = EntityRows;
+    /// The tables hold each plane's write filters to its own bound: nothing is kept apart.
+    type Entities = ();
     #[cfg(feature = "queryable")]
     type Queryables = Arc<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
@@ -3898,7 +3894,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 watchers: Arc::new(FacePlane::with_room(face_rows)),
                 #[cfg(not(feature = "connectivity"))]
                 watchers: (),
-                entities: lent.entities,
+                entities: (),
                 keys: lent.keys,
                 #[cfg(feature = "shared-key-ids")]
                 key_ids: key_ids.at_open.ids,
@@ -6623,24 +6619,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
-        // A publisher's filter is held to MAX_PUBLISHERS and a querier's to MAX_QUERIERS, in the
-        // one table lent for both: one past its plane's count is refused before its Interest is
-        // asked or an id taken.
-        let most = match plane {
-            FilterPlane::Subscribers => core.session.entities.publishers,
-            FilterPlane::Queryables { .. } => core.session.entities.queriers,
-        };
-        let kind = plane_of(plane).interest_kind();
-        let held_of_plane = tables(&core.session.registry)
-            .write_filters()
-            .iter()
-            .filter(|(_, row)| row.plane().interest_kind() == kind)
-            .count();
-        if held_of_plane >= most {
-            return Err(Declined::TableFull);
-        }
-        // A full table, a key the session cannot hold, or an Interest it cannot hold or number
-        // refuses the filter, with nothing held, asked or numbered.
+        // A full table, a plane at its own bound (a publisher's MAX_PUBLISHERS, a querier's
+        // MAX_QUERIERS, in the one table lent for both), a key the session cannot hold, or an
+        // Interest it cannot hold or number refuses the filter, with nothing held, asked or
+        // numbered.
         let name = ask.map(|form| InterestName {
             mapping_id: form.mapping_id,
             suffix: form.suffix,
