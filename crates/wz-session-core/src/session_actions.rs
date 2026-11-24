@@ -4692,6 +4692,55 @@ impl LinkSeed {
     }
 }
 
+/// The two halves of a link's action bundle, not yet made: what
+/// [`SessionLinkActions::build_held`] hands the holder of the halves, which writes them where it
+/// keeps them ([`Self::write`]) or takes them as values ([`Self::into_values`]). Written in place,
+/// the session's kernel, the larger half, is never a value of the frame that makes the link.
+#[cfg(not(feature = "session-slot"))]
+pub struct HalvesMaking<R: SessionRuntime, T: TimeSource> {
+    driver: R::LinkSink,
+    params: SessionInitParams,
+    clock: T,
+    seed: LinkSeed,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl<R: SessionRuntime, T: TimeSource> HalvesMaking<R, T> {
+    /// Write the link's half at `link` and the session's kernel at `core`, each field by field.
+    ///
+    /// # Safety
+    ///
+    /// `link` and `core` are valid for writes of their types, do not overlap and hold no live
+    /// value, which is not dropped. Both are whole once this returns; a write that unwinds leaves
+    /// them partly written, and whoever reserved them then neither reads nor drops them.
+    pub unsafe fn write(self, link: *mut LinkState<R>, core: *mut SessionCore<R, T>) {
+        let Self {
+            driver,
+            params,
+            clock,
+            seed,
+        } = self;
+        // SAFETY: the caller's contract, which is each writer's: a place of each half's type
+        // that holds nothing, apart from the other.
+        unsafe {
+            SessionLinkActions::<R, T>::init_link(link, driver, &seed);
+            SessionLinkActions::<R, T>::init_core(core, params, clock, seed);
+        }
+    }
+
+    /// The two halves as values, for a holder that keeps each behind a pointer it makes of a
+    /// value (the runtime's `ShareValues::share`).
+    pub fn into_values(self) -> (LinkState<R>, SessionCore<R, T>) {
+        let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
+        let mut kernel = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
+        // SAFETY: both are uninitialised locals, apart, and `write` leaves each whole.
+        unsafe {
+            self.write(link.as_mut_ptr(), kernel.as_mut_ptr());
+            (link.assume_init(), kernel.assume_init())
+        }
+    }
+}
+
 /// Generic-`R` constructor (Stage 2c) — the runtime-agnostic body behind the
 /// concrete `new_session_actions` AP wrapper (in `wz-runtime-tokio`). Every
 /// mutex slot is staged via `R::new_mutex` so the lwIP MCU profile composes
@@ -4743,7 +4792,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         R: ShareValues,
     {
-        let held = Self::build_held(driver, params, clock, |link, kernel| {
+        let held = Self::build_held(driver, params, clock, |halves| {
+            let (link, kernel) = halves.into_values();
             Ok::<_, core::convert::Infallible>((Self::hold_link(link), Self::hold_core(kernel)))
         });
         match held {
@@ -4752,31 +4802,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// The bundle built from its parts, each half held where `hold` puts it: the runtime's
-    /// shared pointer for [`Self::build`], or a place its caller reserved (a session's arena),
-    /// so a link made after the session opened takes no memory of the heap for them. `Err` with
-    /// what `hold` refused, the halves dropped.
+    /// The bundle built from its parts, each half made where `hold` keeps it: written in a place
+    /// its caller reserved (a session's arena, [`HalvesMaking::write`]), so a link made after the
+    /// session opened takes no memory of the heap for them and neither half is a value of the
+    /// maker's frame, or made as a value and shared ([`Self::build`]). `Err` with what `hold`
+    /// refused, the parts it was handed dropped.
     #[cfg(not(feature = "session-slot"))]
     pub fn build_held<E>(
         driver: R::LinkSink,
         params: SessionInitParams,
         clock: T,
         hold: impl FnOnce(
-            LinkState<R>,
-            SessionCore<R, T>,
+            HalvesMaking<R, T>,
         ) -> Result<(R::Shared<LinkState<R>>, R::Shared<SessionCore<R, T>>), E>,
     ) -> Result<Self, E> {
         let seed = LinkSeed::open::<R>(&driver);
-        let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
-        let mut kernel = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
-        // SAFETY: both are uninitialised locals, and each function writes every field of what
-        // it is given (the field list is checked to be whole), so both are whole after.
-        let (link, kernel) = unsafe {
-            Self::init_link(link.as_mut_ptr(), driver, &seed);
-            Self::init_core(kernel.as_mut_ptr(), params, clock, seed);
-            (link.assume_init(), kernel.assume_init())
-        };
-        let (link, core) = hold(link, kernel)?;
+        let (link, core) = hold(HalvesMaking {
+            driver,
+            params,
+            clock,
+            seed,
+        })?;
         Ok(Self {
             link,
             core,

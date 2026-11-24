@@ -247,20 +247,59 @@ impl<A, B> CellRc<(A, B)> {
         second: B,
     ) -> Result<(CellRc<A>, CellRc<B>), (A, B)> {
         let pair = Self::in_cells(cells, (first, second))?;
+        Ok(pair.into_halves())
+    }
+
+    /// Two values `write` writes together in one cell of `cells` ([`Self::in_cells`], or one of
+    /// the heap when no table is lent), where they stay, and a handle on each, as [`Self::halves`]
+    /// answers: neither value is made in a frame and moved into the cell. `None` when no cell
+    /// takes them, `write` not called and let go of with what it holds.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `A` at the first place it is handed and a whole `B` at the second
+    /// when it returns. One that unwinds keeps the cell, which is then never given back.
+    pub unsafe fn halves_in(
+        cells: Option<&LentByteCells>,
+        write: impl FnOnce(*mut A, *mut B),
+    ) -> Option<(CellRc<A>, CellRc<B>)> {
+        let head = head_in(cells, Layout::new::<Slot<(A, B)>>())?;
+        let slot = head.cast::<Slot<(A, B)>>().as_ptr();
+        // SAFETY: the head heads a cell of `Slot<(A, B)>`'s layout, written with one handle and
+        // named by none, whose value is not written: its two fields are places of `A` and `B`,
+        // aligned, apart and this call's alone, which `write` leaves whole (the caller's
+        // contract), so the pair is whole when the handle names it.
+        let pair = unsafe {
+            let at = core::ptr::addr_of_mut!((*slot).value);
+            write(
+                core::ptr::addr_of_mut!((*at).0),
+                core::ptr::addr_of_mut!((*at).1),
+            );
+            Self {
+                head,
+                value: NonNull::new_unchecked(at),
+                _owns: PhantomData,
+            }
+        };
+        Some(pair.into_halves())
+    }
+
+    /// This handle on a pair as one handle on each of its halves, the cell given back with the
+    /// last of them, which drops the pair whole.
+    fn into_halves(self) -> (CellRc<A>, CellRc<B>) {
         // The last handle names one half, so it drops the pair through this, not through its view.
-        pair.head().whole.set(Some(drop_whole::<(A, B)>));
-        let other = pair.clone();
+        self.head().whole.set(Some(drop_whole::<(A, B)>));
+        let other = self.clone();
         // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
         // lives as long as the cell does; the cell's `whole` drops the pair it was placed as.
         unsafe {
-            Ok((
-                pair.part(|pair| {
+            (
+                self.part(|pair| {
                     NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).0))
                 }),
                 other.part(|pair| {
                     NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).1))
                 }),
-            ))
+            )
         }
     }
 }
@@ -626,5 +665,76 @@ mod tests {
             .ok()
             .expect("the heap when no table is lent");
         assert_eq!((*boxed, cells.in_use()), (8, 0), "the heap's takes no cell");
+    }
+
+    /// Halves written in place lie where their writer wrote them: the places it is handed are the
+    /// ones the handles name, in the table's cell, and no memory of the heap is taken. With every
+    /// cell taken the writer is not called and what it holds is let go of, once. Turned red by
+    /// halves made in a frame and moved into the cell, or by a writer called with no cell to
+    /// write in.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn halves_written_in_place_lie_where_they_were_written() {
+        let cells = table(CellRc::<(Counted, u32)>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let mut written = (
+            core::ptr::null_mut::<Counted>(),
+            core::ptr::null_mut::<u32>(),
+        );
+        let counted = Counted(drops.clone());
+        let (placed, made) = crate::table_tests::allocations(|| {
+            // SAFETY: the writer writes a whole value at each place it is handed.
+            unsafe {
+                CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
+                    first.write(counted);
+                    second.write(7);
+                    written = (first, second);
+                })
+            }
+        });
+        let (first, second) = placed.expect("a cell");
+        assert_eq!(
+            made, 0,
+            "halves written in a lent table take no memory of the heap"
+        );
+        assert_eq!(
+            (CellRc::as_ptr(&first), CellRc::as_ptr(&second)),
+            (written.0.cast_const(), written.1.cast_const()),
+            "the handles name the places the writer wrote"
+        );
+        assert_eq!((first.name(), *second, cells.in_use()), (7, 7, 1));
+        // SAFETY: as above.
+        let other = unsafe {
+            CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
+                first.write(Counted(drops.clone()));
+                second.write(8);
+            })
+        }
+        .expect("the table's second cell");
+        let refused_drops = Rc::new(Cell::new(0));
+        let held = Counted(refused_drops.clone());
+        let mut called = false;
+        // SAFETY: as above.
+        let refused = unsafe {
+            CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
+                called = true;
+                first.write(held);
+                second.write(9);
+            })
+        };
+        assert!(refused.is_none(), "every cell is taken");
+        assert_eq!(
+            (called, refused_drops.get(), cells.in_use()),
+            (false, 1, 2),
+            "the writer is let go of uncalled, what it held dropped once"
+        );
+        drop((first, other));
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (1, 1),
+            "a pair goes whole with its last handle, the other stays"
+        );
+        drop(second);
+        assert_eq!((drops.get(), cells.in_use()), (2, 0));
     }
 }

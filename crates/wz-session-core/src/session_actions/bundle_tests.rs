@@ -212,6 +212,74 @@ fn bundle() -> (
     (actions, link)
 }
 
+/// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
+/// half holds the sink handed and the kernel the parameters. A holder that refuses has its refusal
+/// answered and lets go of what it was handed, the sink's handle with it. Turned red by a bundle
+/// that holds halves other than the ones written, or by parts kept past a refusal.
+#[test]
+fn the_halves_a_holder_writes_make_the_bundle() {
+    use core::mem::MaybeUninit;
+
+    use super::{LinkState, SessionCore};
+
+    let link = Arc::new(CountingLink::default());
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    let built = SessionLinkActions::<PlainRuntime, StillClock>::build_held(
+        sink,
+        params(),
+        StillClock,
+        |halves| {
+            let mut link_half = MaybeUninit::<LinkState<PlainRuntime>>::uninit();
+            let mut kernel = MaybeUninit::<SessionCore<PlainRuntime, StillClock>>::uninit();
+            // SAFETY: two uninitialised places of the halves' types, apart; `write` leaves each
+            // whole.
+            let (link_half, kernel) = unsafe {
+                halves.write(link_half.as_mut_ptr(), kernel.as_mut_ptr());
+                (link_half.assume_init(), kernel.assume_init())
+            };
+            Ok::<_, &str>((Arc::new(link_half), Arc::new(kernel)))
+        },
+    );
+    let Ok(actions) = built else {
+        panic!("a holder that keeps the halves is answered with the bundle");
+    };
+    assert_eq!(
+        Arc::strong_count(&link),
+        2,
+        "the link's half holds the sink"
+    );
+    assert_eq!(
+        (actions.core.params.batch_size, actions.core.params.lease_ms),
+        (1024, 10_000),
+        "the kernel holds the parameters"
+    );
+    drop(actions);
+    assert_eq!(Arc::strong_count(&link), 1);
+
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    let refused = SessionLinkActions::<PlainRuntime, StillClock>::build_held(
+        sink,
+        params(),
+        StillClock,
+        |halves| {
+            drop(halves);
+            Err::<
+                (
+                    Arc<LinkState<PlainRuntime>>,
+                    Arc<SessionCore<PlainRuntime, StillClock>>,
+                ),
+                _,
+            >("no place")
+        },
+    );
+    assert!(matches!(refused, Err("no place")));
+    assert_eq!(
+        Arc::strong_count(&link),
+        1,
+        "the refused parts let the sink go"
+    );
+}
+
 #[cfg(feature = "action-trace")]
 mod action_trace {
     use alloc::sync::Arc;

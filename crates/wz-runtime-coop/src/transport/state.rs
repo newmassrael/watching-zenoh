@@ -28,7 +28,7 @@ use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
-use wz_session_core::session_actions::SessionLinkActions;
+use wz_session_core::session_actions::{HalvesMaking, LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::session_zid::SessionZid;
@@ -59,6 +59,15 @@ use crate::session_drive::{
 };
 use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+
+/// The two halves of the actions of a link on the session's clock `C`, not yet made.
+type LinkHalves<C> = HalvesMaking<CoopRuntime<C>, CoopTime<C>>;
+
+/// A handle on each half of the actions of a link on the session's clock `C`, as they hold them.
+type HalvesHeld<C> = (
+    CellRc<LinkState<CoopRuntime<C>>>,
+    CellRc<SessionCore<CoopRuntime<C>, CoopTime<C>>>,
+);
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
@@ -382,18 +391,26 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// The two halves of the actions of a link the session makes, its own state and the session's
-    /// kernel, placed together in their cell of the session's table: a handle on each, as the
-    /// actions hold them. A link past the cells is refused as one past the stack's buffers is.
-    // Always inlined: its one caller held these values in its own frame.
+    /// kernel, written together in their cell of the session's table, where they stay: a handle on
+    /// each, as the actions hold them. Neither half is a value of a frame on the way to the cell.
+    /// A link past the cells is refused as one past the stack's buffers is, its halves never made.
+    // Always inlined, as the other steps of its one caller, `make_wire`, are.
     #[inline(always)]
-    pub fn place_halves<A, B>(
+    pub fn place_halves(
         &self,
-        link: A,
-        kernel: B,
+        halves: LinkHalves<T::Clock>,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<(CellRc<A>, CellRc<B>), TransportRefusal> {
-        CellRc::halves(self.halves_cells.as_ref(), link, kernel)
-            .map_err(|_| self.cells_exhausted(endpoint))
+    ) -> Result<HalvesHeld<T::Clock>, TransportRefusal> {
+        let write =
+            |link: *mut LinkState<CoopRuntime<T::Clock>>,
+             kernel: *mut SessionCore<CoopRuntime<T::Clock>, CoopTime<T::Clock>>| {
+                // SAFETY: `halves_in` hands the two fields of the pair its cell holds: each of its
+                // half's type, apart from the other and holding nothing yet.
+                unsafe { halves.write(link, kernel) }
+            };
+        // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
+        unsafe { CellRc::halves_in(self.halves_cells.as_ref(), write) }
+            .ok_or_else(|| self.cells_exhausted(endpoint))
     }
 
     /// The key-wire form of a link dialled to or taken on `endpoint`: the one stated for the
@@ -698,7 +715,7 @@ impl<T: TransportFaces> TransportState<T> {
             sink,
             params,
             clock.clone(),
-            |link, kernel| self.place_halves(link, kernel, endpoint),
+            |halves| self.place_halves(halves, endpoint),
         )?;
         let actions = self.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
