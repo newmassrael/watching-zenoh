@@ -666,9 +666,10 @@ impl<'a> QueryOptionsOf<'a> {
     /// [`Self::with_parameters_lent`], and with `anyke` the reply-keyexpr-any flag sent after
     /// them, as [`Self::with_accept_replies`] would have written it into a copy: the flag is
     /// written where the parameters are, so nothing is copied. The caller has read that the
-    /// parameters do not carry the flag already (pico's `implicit_anyke = _anyke_option &&
-    /// !_anyke_in_parameters`, `vendor/zenoh-pico/src/net/primitives.c:575-578`), so the get
-    /// sends it once. The parameters are one state still: every reading of them goes through
+    /// parameters do not carry the flag already, as pico reads them before it adds the flag
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `bool implicit_anyke = _anyke_option && !_anyke_in_parameters;`), so the get sends it
+    /// once. The parameters are one state still: every reading of them goes through
     /// [`Self::sent_parameters`], `effective_accept_replies` or `query_parts`.
     #[cfg(feature = "query-selector-parameters")]
     pub fn with_parameters_lent_anyke(mut self, parameters: &'a [u8], anyke: bool) -> Self {

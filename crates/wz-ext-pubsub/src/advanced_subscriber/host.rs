@@ -1090,13 +1090,12 @@ fn declare_detection_token<E: SessionEngine + ?Sized>(
         detection.metadata.as_deref(),
     );
     let form = form_of(options.forms.as_ref(), |f| f.token(&ke));
-    let retraction = form.names_key_on_retraction().then(|| RetractionKey {
-        mapping_id: form.mapping_id(),
-        suffix: if form.is_literal() {
-            ke.clone()
+    let retraction = form.names_key_on_retraction().then(|| {
+        if form.is_literal() {
+            RetractionKey::literal()
         } else {
-            form.suffix().unwrap_or_default().to_owned()
-        },
+            RetractionKey::declared(form.mapping_id(), form.suffix().unwrap_or_default())
+        }
     });
     let token = engine
         .declare_liveliness_token_on_wire(&ke, wire_of(&form), retraction)

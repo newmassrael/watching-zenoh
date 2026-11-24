@@ -366,6 +366,11 @@ impl<Key: KeyBacking> EntityKey<Key> {
     pub fn names_key(&self) -> bool {
         self.names_key
     }
+
+    /// The key as the row keeps it: a clone is one more holder of it, for a reader past the row.
+    pub fn backing(&self) -> &Key {
+        &self.key
+    }
 }
 
 /// An entity's key as the wire carries it: a key expression declaration's id, `0` for none, and

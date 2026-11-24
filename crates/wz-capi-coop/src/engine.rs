@@ -89,14 +89,14 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceLife, Next};
+use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next};
 use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
+    DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
     LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
@@ -113,8 +113,10 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+use wz_runtime_coop::transport::{
+    DialRow, FaceStep, TransportFaces, TransportRefusal, TransportSession,
+};
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
-use wz_runtime_coop::transport::{TransportRefusal, TransportSession};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -125,7 +127,7 @@ use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
-use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
+use wz_session_core::link_admission::LinkRegistry;
 use wz_session_core::locality::Locality;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
@@ -202,7 +204,9 @@ use replay::{Kind, Replay, TurnEnd};
 mod faces_added;
 
 mod transport;
-use transport::{DialRow, FaceStep, TransportState};
+#[cfg(feature = "group")]
+use transport::TellGroups;
+use transport::TransportState;
 
 #[cfg(feature = "ticker")]
 mod ticker;
@@ -1839,17 +1843,17 @@ impl SubscriberRow {
             .is_ok()
     }
 
-    /// Retract subscriber `id` over `actions`, naming its key as `retraction` does when its
-    /// declaration asked to. Read off the row before it is undeclared: a row a call of which runs
-    /// is kept out of every lookup until the call ends.
+    /// Retract subscriber `id` over `actions`, naming its key as `names` says (the declaration's
+    /// id and the rest of the key) when its declaration asked to. Read off the row before it is
+    /// undeclared: a row a call of which runs is kept out of every lookup until the call ends.
     fn retract<C: ClockSource + 'static>(
         id: SubId,
-        retraction: Option<&RetractionKey>,
+        names: Option<(ExprId, &str)>,
         actions: &McuActions<C>,
     ) {
-        match retraction {
-            Some(key) => {
-                actions.send_undeclare_subscriber_naming(u64::from(id), key.mapping_id, &key.suffix)
+        match names {
+            Some((mapping, suffix)) => {
+                actions.send_undeclare_subscriber_naming(u64::from(id), mapping, suffix)
             }
             None => actions.send_undeclare_subscriber(u64::from(id)),
         }
@@ -2826,14 +2830,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
         }
         // What became of the link is the face's value's to say (`FaceLife`), from what the
-        // transport reads of the link here; carrying it out is the session's.
+        // transport reads of the link here; carrying it out is the session's. The dial role's face
+        // is the one whose link is dialled again.
+        let role = if id == DIAL_FACE {
+            FaceRole::Dial
+        } else {
+            FaceRole::Taken
+        };
         let FaceStep {
             life,
             effect,
             answer,
         } = self
             .transport
-            .face_step(at, id, redial_ms.is_some(), now_us);
+            .face_step(at, id, role, redial_ms.is_some(), now_us);
         self.carry_out(at, &life, effect, answer, redial_ms, now_us)
     }
 
@@ -3303,23 +3313,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
-    /// takes now, and tell the round whether any is still owed: while one is, no link is read, so a
-    /// token's `Delete` comes before anything a link brings after its loss, and none is dropped.
-    /// Each `Delete` is a record of a token for every liveliness subscriber.
+    /// takes now (`SessionState::retract_owed`). Each `Delete` is a record of a token for every
+    /// liveliness subscriber the session's limits admit.
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self) {
-        let round = Arc::clone(&self.session.lane);
-        let record_room = crate::round::ReadRoom {
-            // A token's record owes a callback to each liveliness subscriber the session admits.
-            callbacks: crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
-                &resolve_limits(&self.config),
-            )
-            .max(1),
-        };
-        // SAFETY: `Core` is reached under the session's lock alone.
-        let mut fits = || unsafe { round.has_room(record_room) };
-        let done = self.session.registry.borrow_mut().retract_owed(&mut fits);
-        round.owe(!done);
+        // A token's record owes a callback to each liveliness subscriber the session admits.
+        let callbacks = crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
+            &resolve_limits(&self.config),
+        )
+        .max(1);
+        // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
+        unsafe { self.session.retract_owed(callbacks) };
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -6152,7 +6156,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (
                         handle,
                         row.key().prefix(),
-                        row.callback().retraction.clone(),
+                        // Read against the key, held past the row.
+                        row.callback()
+                            .retraction
+                            .map(|names| (names, row.key().backing().clone())),
                     )
                 })?;
             // The links are asked while the rows stand, which are their places in the replay's
@@ -6166,7 +6173,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions| {
-                SubscriberRow::retract(id, retraction.as_ref(), actions);
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                SubscriberRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.
@@ -7107,7 +7115,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (
                         handle,
                         row.key().prefix(),
-                        row.callback().retraction().cloned(),
+                        // Read against the key, held past the row.
+                        row.callback()
+                            .retraction()
+                            .map(|names| (*names, row.key().backing().clone())),
                     )
                 })?;
             // The links are asked while the rows stand, which are their places in the replay's
@@ -7120,7 +7131,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions| {
-                QueryableRow::retract(id, retraction.as_ref(), actions);
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                QueryableRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.

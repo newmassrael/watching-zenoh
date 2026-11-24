@@ -1158,7 +1158,10 @@ where
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    let options = options.with_retraction_naming(form.retraction().cloned());
+    let options = options.with_retraction_naming(
+        form.retraction()
+            .map(|key| crate::session::RetractionName::of(*key, keyexpr)),
+    );
     let subscriber = if form.is_literal() {
         session.declare_subscriber(keyexpr.to_owned(), options, callback)?
     } else {

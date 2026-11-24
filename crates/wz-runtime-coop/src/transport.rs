@@ -23,6 +23,13 @@ use crate::session_drive::{LinkOpenError, LinkWait};
 use crate::session_runtime::SessionHandle;
 use crate::ClockSource;
 
+// The transport's state over the session's one reassembly Router, which the engine's builds keep.
+// Documented in its own `//!`.
+#[cfg(feature = "reassembly")]
+mod state;
+#[cfg(feature = "reassembly")]
+pub use state::{DialRow, FaceStep, TransportFaces, TransportState};
+
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
 /// given, and why.
 // Typed and not a text: the C ABIs answer a refusal with a code and never read its words, so the
