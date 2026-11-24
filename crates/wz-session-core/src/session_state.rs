@@ -430,7 +430,7 @@ mod tests {
             .unwrap()
     }
 
-    fn state<P>() -> SessionState<P>
+    fn new_state<P>() -> SessionState<P>
     where
         P: SessionParts<
             Registry = RefCell<Registry>,
@@ -472,12 +472,12 @@ mod tests {
     /// of; a session that holds no rows refuses every leg so.
     #[test]
     fn a_leg_past_the_rows_is_ended_where_it_was_registered() {
-        let mut state = state::<Legs>();
+        let mut state = new_state::<Legs>();
         assert!(state.note_pending(leg(1, 1)));
         assert!(state.note_pending(leg(2, 2)));
         assert!(!state.note_pending(leg(3, 3)));
         assert_eq!(state.faces_told().ended, [(3, GetKind::Query(3))]);
-        let mut none = state::<Unwatched>();
+        let mut none = new_state::<Unwatched>();
         let refused = PendingGet {
             face: 5,
             leg: 5,
@@ -492,7 +492,7 @@ mod tests {
     /// keeps the legs of the other faces.
     #[test]
     fn a_lost_face_ends_the_legs_asked_of_it_and_keeps_the_rest() {
-        let mut state = state::<Legs>();
+        let mut state = new_state::<Legs>();
         assert!(state.note_pending(leg(1, 1)));
         assert!(state.note_pending(leg(2, 2)));
         state.lose_face(1);
@@ -514,7 +514,7 @@ mod tests {
     /// callbacks given, and tells it one is still owed; once the round takes the rest, none is.
     #[test]
     fn the_state_retracts_what_the_round_takes_and_says_what_is_owed() {
-        let state = state::<Rounds>();
+        let state = new_state::<Rounds>();
         state.registry.borrow_mut().owed_tokens = 3;
         state.lane.room.set(2);
         // SAFETY: the test's thread is the round's one writer.
@@ -545,7 +545,7 @@ mod tests {
     /// The state numbers the session's entities by the ids its tables hand out, each once.
     #[test]
     fn the_state_takes_each_entity_id_from_its_tables_once() {
-        let state = state::<Unwatched>();
+        let state = new_state::<Unwatched>();
         assert_eq!(state.take_entity_id(), Some(1));
         assert_eq!(state.take_entity_id(), Some(2));
         assert_eq!(
@@ -559,7 +559,7 @@ mod tests {
     /// none for a wire that names none.
     #[test]
     fn the_state_names_a_key_by_the_declaration_its_tables_hold() {
-        let state = state::<Unwatched>();
+        let state = new_state::<Unwatched>();
         let declared = state.tables_mut().declare_keyexpr("demo/").unwrap();
         assert_eq!(
             state.key_form(declared.id, true),
@@ -627,7 +627,7 @@ mod tests {
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
     fn a_state_that_watches_no_face_makes_no_snapshot() {
-        let state = state::<Unwatched>();
+        let state = new_state::<Unwatched>();
         let mut made = false;
         assert!(state
             .face_of(|| {
@@ -643,7 +643,7 @@ mod tests {
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
     fn a_state_reports_a_face_to_its_plane_while_it_is_watched() {
-        let state = state::<Watched>();
+        let state = new_state::<Watched>();
         assert!(
             state.face_of(|| Some(face())).is_none(),
             "nothing watches yet"
