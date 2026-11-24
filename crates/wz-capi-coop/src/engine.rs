@@ -2455,15 +2455,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // One handle to the link, which its gates hold: a stack whose pump is a shared handle
         // already gives that one (`SessionLinks::share_pump`).
         let pump = L::share_pump(pump);
-        // What the session's read waits on for the link, read off it before its gates take it.
-        let (input, room) = (pump.input_wait(), pump.room_wait());
+        // What the session's read waits on for the link's input and its room, read off it before
+        // its gates take it.
+        let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
         let admitted = Admitted::default();
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it.
-        let room = crate::round::read_room::<
+        let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
             { caps::MAX_SUBSCRIPTIONS },
@@ -2478,12 +2479,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             RoundGate::new(
                 AdmissionGate::new(pump, actions.clone(), admitted.clone()),
                 self.lane.clone(),
-                room,
+                record_room,
             )
         };
         #[cfg(not(feature = "listen"))]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let gate: LinkGate<C> = unsafe { RoundGate::new(pump, self.lane.clone(), room) };
+        let gate: LinkGate<C> = unsafe { RoundGate::new(pump, self.lane.clone(), record_room) };
         // The gates go in the link's cell of the session's table, as the link's driver goes in
         // one of the stack's: a link past the cells is refused as one past the buffers is.
         let link = CellRc::in_cells(self.gate_cells.as_ref(), gate)
@@ -2537,8 +2538,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             },
             task,
             link,
-            input,
-            room,
+            input_wait,
+            room_wait,
         ))
     }
 
@@ -3040,7 +3041,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the round of deliveries has the
         // room one record of the group's batch can take (decision Q4), as a link is.
-        let room = crate::round::read_room::<
+        let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
             { caps::MAX_SUBSCRIPTIONS },
@@ -3051,7 +3052,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         // SAFETY: a group's transport is driven by the session's step alone, under its lock.
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
-            crate::round::takes_a_group_read(self.lane.clone(), room)
+            crate::round::takes_a_group_read(self.lane.clone(), record_room)
         });
         let face = GroupFace::join(
             &self.local,
@@ -3320,12 +3321,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self) {
         let round = Arc::clone(&self.lane);
-        let room = crate::round::ReadRoom {
+        let record_room = crate::round::ReadRoom {
             bytes: 0,
             callbacks: caps::MAX_LIVELINESS_SUBSCRIPTIONS.max(1),
         };
         // SAFETY: `Core` is reached under the session's lock alone.
-        let mut fits = || unsafe { round.has_room(room) };
+        let mut fits = || unsafe { round.has_room(record_room) };
         let done = self.registry.borrow_mut().retract_owed(&mut fits);
         round.owe(!done);
     }
