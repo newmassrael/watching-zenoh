@@ -519,6 +519,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         feature = "alloc",
         feature = "codec-declare"
     ))]
+    #[inline(never)]
     fn told_as(&self, key: &str) -> Option<u64> {
         self.declared
             .entries()
@@ -1105,6 +1106,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
+    #[inline(never)]
     pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
@@ -1143,6 +1145,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// counting past the table's room or a row's text), fan it to the observers
     /// through the no-heap SSOT, and re-evaluate the matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    #[inline(never)]
     fn apply_declared<Q: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
@@ -1218,6 +1221,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// fired from inside the `on_undecl` chain observes the post-undeclare state),
     /// fan it to the observers, and re-evaluate the matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    #[inline(never)]
     fn apply_undeclared<Q: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,

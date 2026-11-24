@@ -799,6 +799,7 @@ pub fn id_and_suffix_view<'k, D: WireexprLentStorage>(
 /// in place does exactly that (`pubsub::SubscriberRegistry`), and counts it.
 // The frame's lifetime `'f` is its own: the borrowed wireexpr is invariant in it, so it cannot
 // shrink to the caller's buffer, and the suffix it lends outlives the answer.
+#[inline(never)]
 pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
