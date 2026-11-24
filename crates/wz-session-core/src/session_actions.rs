@@ -304,8 +304,6 @@ use crate::interest_build::*;
 use crate::interest_build::InterestKinds;
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::push_build::*;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use crate::response_final_build::*;
 
 /// R311jp — TX batching accumulator state (zenoh-pico
 /// `_z_transport_common_t::{_batch_state,_batch_count}` plus the shared TX
@@ -17281,10 +17279,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         request_id: crate::wire_id::RequestId,
         qos: crate::sample::QosLevel,
     ) {
-        // With no allocator the terminator is written from its two numbers through the
-        // borrowed writer of `lent_control`, routed as `dispatch_response_final` routes
-        // it: on the band its own `ext_qos` names, as control plane.
-        #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
+        // The terminator is written from its two numbers through the borrowed writer of
+        // `lent_control`, routed as `dispatch_response_final` routes it: on the band its own
+        // `ext_qos` names, as control plane. An owned one would hold a query's QoS in an
+        // extension chain on the heap, once for every query answered.
+        #[cfg(feature = "codec-response-final")]
         {
             let _ = self
                 .dispatch_network_message_at(
@@ -17303,13 +17302,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     }),
                 )
                 .map(|_| ());
-        }
-        #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-        {
-            let response_final = build_response_final(request_id, qos);
-            // F2 — this surface has no error channel; a transport-down
-            // reject drops the emit exactly as the dead link would.
-            let _ = self.dispatch_response_final(response_final, /*reliable=*/ true);
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = (request_id, qos);

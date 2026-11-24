@@ -13,9 +13,10 @@
 //! never runs there (decision D8), so the sink ([`LegSink`]) hands each reply on to be called
 //! after the lock: to the thread that made it, for an answer of the session's own queryables; to
 //! the session's round of deliveries otherwise (`crate::round`), read where it lies in a datagram a
-//! link lends. What the entry's consolidation held to its end waits in the plane's held table,
-//! given up whole, and the leg's END is said when the entry is dropped (its Final, its deadline,
-//! its cancellation, the loss of its link) by a guard the sink owns, with the request id of the
+//! link lends. What the entry's consolidation held to its end waits in the rows it was held in,
+//! due, and what the entry gave up whole in the plane's held table, and the leg's END is said when
+//! the entry is dropped (its Final, its deadline, its cancellation, the loss of its link) by a
+//! guard the sink owns, with the request id of the
 //! timeout that ended it when one did. The deliveries hand them out with no lock held, the end once
 //! the round has handed every reply held before it and the held table every reply held, as the
 //! drop of the leg's callback, which is how a C program learns its get is over.
@@ -45,7 +46,7 @@ use alloc::collections::VecDeque;
 use wz_capi_port::sync::{Lock, SessionHeld};
 use wz_capi_port::ReplyCallback;
 use wz_session_core::reply::InboundReply;
-use wz_session_core::reply_hold::{HeldReplies, HoldRefused, ReplyHold};
+use wz_session_core::reply_hold::{HeldReplies, HeldReply, HoldRefused, ReplyHold};
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
 use wz_session_core::timestamp_visibility::HiddenReplyTimestamp;
 use wz_session_core::wire_id::RequestId;
@@ -297,6 +298,7 @@ impl GetPlane {
             let Some(ended) = next else {
                 break;
             };
+            self.forget_due(ended.leg);
             drop(self.release(ended.row));
         }
         drop(self.take_all_held());
@@ -323,6 +325,18 @@ impl GetPlane {
     /// Everything held for every leg, taken out: the session is closed.
     pub(super) fn take_all_held(&self) -> VecDeque<(u64, InboundReply)> {
         core::mem::take(&mut *self.held.lock())
+    }
+
+    /// The next reply leg `leg`'s consolidation made due at its end, taken out of its row for the
+    /// caller to hand to the leg's callback with no lock held ([`LegHold`]); `None` once there is
+    /// none.
+    pub(super) fn take_due(&self, leg: u64) -> Option<HeldReply<u64, Lent>> {
+        self.replies.with(|replies| replies.take(leg))
+    }
+
+    /// Let go of every reply leg `leg` holds, due or not: a leg ended with nothing handed.
+    pub(super) fn forget_due(&self, leg: u64) {
+        self.replies.with(|replies| replies.forget(leg));
     }
 }
 
@@ -477,10 +491,16 @@ impl ReplySink for LegSink {
 /// What a consolidating get holds of its replies until its Final: rows of the session's
 /// ([`GetPlane::replies`]), tagged with the leg, so a held reply is copied into the session's
 /// memory and takes none of its own. A full table refuses the reply, as a fixed room does, and
-/// counts it. A leg that ends with replies still held (cancelled, or its face gone) lets them go.
+/// counts it. At the get's end (its Final, or its deadline) the replies it held are DUE: they stay
+/// in their rows and are handed to the leg's callback from there once the session's lock is let go
+/// ([`GetPlane::take_due`]), before the leg's end, so none of them is copied into the round of
+/// deliveries, which has no place for a part that lies in a row. A leg that ends with replies held
+/// and none due (cancelled, or its face gone) lets them go.
 pub(crate) struct LegHold {
     leg: u64,
     plane: Arc<GetPlane>,
+    /// Whether the get's end made what it holds due.
+    due: bool,
 }
 
 impl LegHold {
@@ -489,6 +509,7 @@ impl LegHold {
         Self {
             leg,
             plane: Arc::clone(plane),
+            due: false,
         }
     }
 }
@@ -507,18 +528,21 @@ impl ReplyHold for LegHold {
             .with(|replies| replies.of(leg).hold(reply, whole))
     }
 
-    fn drain(&mut self, each: &mut dyn FnMut(&dyn ReplyView)) {
-        let leg = self.leg;
-        self.plane
-            .replies
-            .with(|replies| replies.of(leg).drain(each));
+    /// The get ended: what it holds is due, and stays in its rows for the leg's callback to be
+    /// handed it with no lock held ([`GetPlane::take_due`]). Nothing is handed to `each`, which
+    /// would hold it in the round of deliveries.
+    fn drain(&mut self, _each: &mut dyn FnMut(&dyn ReplyView)) {
+        self.due = true;
     }
 }
 
 impl Drop for LegHold {
     fn drop(&mut self) {
-        let leg = self.leg;
-        self.plane.replies.with(|replies| replies.forget(leg));
+        // What is due waits for the leg's end; what the get held with none due goes with it.
+        if !self.due {
+            let leg = self.leg;
+            self.plane.replies.with(|replies| replies.forget(leg));
+        }
     }
 }
 
@@ -618,12 +642,21 @@ mod tests {
         );
         let mut drained = std::vec::Vec::new();
         one.drain(&mut |reply| drained.push(reply.payload().to_vec()));
-        assert_eq!(drained, [b"first".to_vec()], "a leg drains its own");
-        drop(two);
         assert!(
-            plane.replies.with(|replies| replies.is_empty()),
-            "a leg that goes lets go of what it held"
+            drained.is_empty(),
+            "the end hands nothing on: what it held is due in its rows"
         );
+        drop(one);
+        drop(two);
+        assert_eq!(
+            plane.replies.with(|replies| replies.len()),
+            1,
+            "a leg that goes with nothing due lets go of what it held; a due one keeps it"
+        );
+        let due = plane.take_due(1).expect("the due reply");
+        assert_eq!(due.payload(), b"first", "a leg is handed its own");
+        assert!(plane.take_due(1).is_none());
+        assert!(plane.replies.with(|replies| replies.is_empty()));
     }
 
     /// What a test's leg callback was handed, and how often it was let go of.
