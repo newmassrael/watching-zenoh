@@ -693,3 +693,59 @@ fn a_session_announces_the_zid_its_config_states_without_its_trailing_zeros() {
     let (node, _) = listening(|config| config.zid = Some(SessionZid::from([0x5a, 0x5b, 0, 0])));
     assert_eq!(SessionEngine::session_zid(&*node), [0x5a, 0x5b]);
 }
+
+/// A key a peer names by its declaration and a suffix one byte past the row the listener composes
+/// keys in is refused where it lies and counted, and the session reads the count off its faces
+/// (`CoopEngine::in_place_fallbacks`). The CONTROL is a key named the same way that fits the row:
+/// it is composed there, heard, and counted nowhere. Turned red by a face whose counts the session
+/// does not read (`Registry::in_place_fallbacks` folding no face).
+#[test]
+fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
+    let (listener, endpoint) = listening(|_| {});
+    let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+    let into = heard.clone();
+    listener
+        .declare_subscriber_on_wire(
+            "**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.keyexpr().to_owned());
+            }),
+        )
+        .expect("the session declares the subscriber");
+    let peer = client(&endpoint, 0xc1);
+    eventually("the listener to hold the client's face", || {
+        listener.faces_up() == 1
+    });
+    // One chunk one byte short of the bound: the declaration fits, and with `/x` after it the
+    // key is one byte past the row.
+    let long = "a".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES - 1);
+    let fits = peer
+        .acquire_keyexpr("demo/c")
+        .expect("room for a declaration");
+    let past = peer.acquire_keyexpr(&long).expect("room for a declaration");
+    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    let long_key = format!("{long}/x");
+    for (id, key) in [(fits, "demo/c/x"), (past, long_key.as_str())] {
+        peer.publish_on_wire_all(
+            key,
+            &WireKey::aliased(id, Some("/x".to_owned())),
+            b"v",
+            &remote,
+        )
+        .expect("a put the link carries");
+    }
+    // The literal put after them on the same reliable link is the mark that both have arrived.
+    peer.publish_on_wire_all("demo/mark", &WireKey::literal(), b"m", &remote)
+        .expect("a put the link carries");
+    eventually("the listener to hear the mark", || {
+        heard.lock().unwrap().iter().any(|key| key == "demo/mark")
+    });
+    assert!(
+        heard.lock().unwrap().iter().any(|key| key == "demo/c/x"),
+        "CONTROL: a composed key that fits the row is heard"
+    );
+    assert_eq!(listener.in_place_fallbacks().keyexpr_past_bound, 1);
+}

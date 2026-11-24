@@ -166,6 +166,15 @@ pub trait Storage {
     /// for it.
     type Epoch: EpochCounter;
 
+    /// Where the peer's side of a table of this policy composes a key it cannot lend while it
+    /// delivers one of the peer's messages (a mapping's literal with the message's suffix after
+    /// it, or a literal of the session's own space): the delivering call's own buffer on the
+    /// growable and the static policy, and on the lent one a row lent at open
+    /// ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)), so composing a key takes no
+    /// memory after it.
+    #[cfg(feature = "storage-profile")]
+    type Compose: crate::wireexpr_resolve::ComposeRoom;
+
     /// A peer's keyexpr-alias table of this policy as the id space a
     /// [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads. The policy knows
     /// which table it keeps, so a reader that holds one through a generic table never
@@ -416,6 +425,8 @@ impl Storage for Heap {
     type Epoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
     #[cfg(not(target_has_atomic = "64"))]
     type Epoch = ();
+    #[cfg(feature = "storage-profile")]
+    type Compose = ();
 
     #[cfg(feature = "storage-profile")]
     fn peer_space(
@@ -448,6 +459,8 @@ impl Storage for Static {
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
+    #[cfg(feature = "storage-profile")]
+    type Compose = ();
 
     #[cfg(feature = "storage-profile")]
     fn peer_space(
@@ -504,6 +517,8 @@ impl Storage for Lent {
     #[cfg(not(feature = "peer-row-pools"))]
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
+    #[cfg(feature = "storage-profile")]
+    type Compose = crate::wireexpr_resolve::ComposeRow;
 
     #[cfg(feature = "storage-profile")]
     fn peer_space(

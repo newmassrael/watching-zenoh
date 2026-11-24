@@ -55,7 +55,7 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
-use crate::bounded::{Static, Storage};
+use crate::bounded::{BoundedString, Static, Storage};
 use crate::caps;
 use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
@@ -215,7 +215,7 @@ pub trait OwnMappingSpace {
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         let literal = self.resolve_own_mapping(id)?;
         Some(out.push_str(&literal))
@@ -227,7 +227,7 @@ pub trait OwnMappingSpace {
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>>;
 }
 
@@ -242,7 +242,7 @@ impl OwnMappingSpace for HashMap<crate::wire_id::ExprId, String> {
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         self.get(&id).map(|literal| out.push_str(literal))
     }
@@ -401,7 +401,7 @@ impl OwnMappingSpace for OwnSpace<'_> {
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         match self.0 {
             OwnSpaceRepr::Handle(own) => own.append_own_mapping(id, out),
@@ -524,7 +524,7 @@ impl OwnMappingSpace for PeerSpaceView<'_> {
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         self.get(&id).map(|literal| out.push_str(literal))
     }
@@ -779,6 +779,114 @@ pub type KeyexprBuf = crate::bounded::BoundedString<{ crate::caps::MAX_KEYEXPR_B
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyexprPastBound;
 
+/// Where a keyexpr is composed: a [`KeyexprBuf`] of whichever storage policy holds it, in the
+/// delivering call's frame or in a row lent at open ([`ComposeRoom`]). The resolvers write
+/// through it, so one resolver serves every buffer, and a buffer whose capacity is fixed refuses
+/// a key past it ([`KeyexprPastBound`]).
+pub trait KeyexprOut {
+    /// Append `text`; refused, the buffer left as it was, where it does not fit.
+    fn push_str(&mut self, text: &str) -> Result<(), crate::bounded::CapacityFull<()>>;
+    /// Empty the buffer.
+    fn clear(&mut self);
+    /// What the buffer holds.
+    fn as_str(&self) -> &str;
+}
+
+impl<P: Storage> KeyexprOut for BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> {
+    fn push_str(&mut self, text: &str) -> Result<(), crate::bounded::CapacityFull<()>> {
+        BoundedString::push_str(self, text)
+    }
+    fn clear(&mut self) {
+        BoundedString::clear(self);
+    }
+    fn as_str(&self) -> &str {
+        BoundedString::as_str(self)
+    }
+}
+
+/// A [`KeyexprBuf`] of the static policy whatever the build's profile: the row a peer's side of
+/// the lent policy composes in ([`ComposeRow`]), which refuses a key past
+/// [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES).
+pub type KeyexprRow = BoundedString<{ caps::MAX_KEYEXPR_BYTES }, Static>;
+
+/// Where the peer's side of a table of a storage policy composes a key it cannot lend while it
+/// delivers one of the peer's messages ([`Storage::Compose`]).
+pub trait ComposeRoom: Default {
+    /// What the delivering call keeps in its own frame for [`Self::buffer`]: the buffer itself
+    /// where the policy composes there, nothing where it composes in a row lent at open.
+    type Frame: Default;
+
+    /// The buffer a key is composed in: `frame`, or the row lent to this room.
+    fn buffer<'a>(&'a mut self, frame: &'a mut Self::Frame) -> &'a mut dyn KeyexprOut;
+}
+
+/// The growable and the static policy compose in the delivering call's frame: a key past
+/// [`KeyexprBuf`] is composed on the growable backing and refused on the fixed one.
+impl ComposeRoom for () {
+    type Frame = KeyexprBuf;
+
+    fn buffer<'a>(&mut self, frame: &'a mut KeyexprBuf) -> &'a mut dyn KeyexprOut {
+        frame
+    }
+}
+
+/// The lent policy's room: one [`KeyexprRow`] lent from the session's arena at open
+/// ([`Self::lent`]), so a key composed after it takes no memory, and one past the row is refused
+/// and counted where its message is. A room lent no row refuses every key it would compose, as a
+/// table lent no row refuses every value; a key that needs no composing never asks it.
+#[derive(Default)]
+pub struct ComposeRow {
+    row: crate::bounded::BoundedVec<KeyexprRow, 1, crate::bounded::Lent>,
+    unlent: Unlent,
+}
+
+impl ComposeRow {
+    /// A room whose row is lent from `arena`. Refused as [`Arena::lend`] refuses one row.
+    ///
+    /// [`Arena::lend`]: crate::bounded::Arena::lend
+    pub fn lent(arena: &mut crate::bounded::Arena) -> Result<Self, crate::bounded::LendRefused> {
+        let mut row: crate::bounded::BoundedVec<KeyexprRow, 1, crate::bounded::Lent> =
+            arena.lend(1)?;
+        // A table lent one row takes one value; a room whose row it refused would refuse what it
+        // composes, as a room lent none does.
+        let _ = row.push(KeyexprRow::new_static());
+        Ok(Self {
+            row,
+            unlent: Unlent,
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
+    pub const fn arena_bytes() -> Option<usize> {
+        crate::bounded::Arena::table_bytes::<KeyexprRow>(1)
+    }
+}
+
+impl ComposeRoom for ComposeRow {
+    type Frame = ();
+
+    fn buffer(&mut self, _frame: &mut ()) -> &mut dyn KeyexprOut {
+        match self.row.first_mut() {
+            Some(row) => row,
+            None => &mut self.unlent,
+        }
+    }
+}
+
+/// The buffer of a room lent no row: it holds nothing and takes nothing.
+#[derive(Default)]
+struct Unlent;
+
+impl KeyexprOut for Unlent {
+    fn push_str(&mut self, _text: &str) -> Result<(), crate::bounded::CapacityFull<()>> {
+        Err(crate::bounded::CapacityFull(()))
+    }
+    fn clear(&mut self) {}
+    fn as_str(&self) -> &str {
+        ""
+    }
+}
+
 /// The `(id, suffix)` a wireexpr carries as it is decoded, where its frame
 /// lies: [`id_and_suffix`] over the borrowed form, at any profile the lent form
 /// holds its lists in (a wireexpr holds none, so the answer is the same).
@@ -811,7 +919,7 @@ pub fn id_and_suffix_view<'k, D: WireexprLentStorage>(
 pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     resolve_wireexpr_view_over(body, spaces, None, out)
 }
@@ -824,7 +932,7 @@ pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix) = id_and_suffix_view(body);
     let arm = match body {
@@ -843,7 +951,7 @@ pub fn resolve_wireexpr_view_held_over<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
     if let WireexprVariantIn::WireexprLocal(_) = body {
         let (id, suffix) = id_and_suffix_view(body);
@@ -880,7 +988,7 @@ pub fn id_suffix_and_space_viewed<'f>(
 pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
     let body = match body {
@@ -896,7 +1004,7 @@ pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
 pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
     let body = match body {
@@ -921,7 +1029,7 @@ pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
 pub fn resolve_wireexpr_into<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     resolve_wireexpr_into_over(body, spaces, None, out)
 }
@@ -932,7 +1040,7 @@ pub fn resolve_wireexpr_into_over<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix) = id_and_suffix(body);
     let arm = match body {
@@ -950,7 +1058,7 @@ pub fn resolve_plain_parts<'k>(
     id: crate::wire_id::ExprId,
     suffix: Option<&'k str>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     resolve_plain_parts_over(sender_mapping, id, suffix, spaces, None, out)
 }
@@ -963,7 +1071,7 @@ pub fn resolve_plain_parts_over<'k>(
     suffix: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let arm = if sender_mapping {
         Space::Peer
@@ -984,7 +1092,7 @@ fn resolve_parts<'k>(
     suffix_opt: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
         return Ok(suffix_opt);
@@ -1026,7 +1134,7 @@ fn resolve_parts<'k>(
             }
         }
     }
-    let out: &'k KeyexprBuf = out;
+    let out: &'k dyn KeyexprOut = out;
     Ok(Some(out.as_str()))
 }
 
@@ -1141,7 +1249,7 @@ pub fn resolve_declared_keyexpr<S: WireexprStorage>(
 pub fn resolve_declared_keyexpr_into<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     resolve_declared_keyexpr_into_over(body, spaces, None, out)
 }
@@ -1152,7 +1260,7 @@ pub fn resolve_declared_keyexpr_into_over<'k, S: WireexprStorage>(
     body: &'k WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix_opt) = id_and_suffix(body);
     resolve_declared_parts(id, suffix_opt, spaces, own, out)
@@ -1164,7 +1272,7 @@ pub fn resolve_declared_keyexpr_into_over<'k, S: WireexprStorage>(
 pub fn resolve_declared_keyexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     resolve_declared_keyexpr_view_over(body, spaces, None, out)
 }
@@ -1175,7 +1283,7 @@ pub fn resolve_declared_keyexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix_opt) = id_and_suffix_view(body);
     resolve_declared_parts(id, suffix_opt, spaces, own, out)
@@ -1188,7 +1296,7 @@ fn resolve_declared_parts<'k>(
     suffix_opt: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     own: Option<OwnSpace<'_>>,
-    out: &'k mut KeyexprBuf,
+    out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
         return Ok(suffix_opt);
@@ -1217,7 +1325,7 @@ fn resolve_declared_parts<'k>(
             };
             out.push_str(base).map_err(|_| KeyexprPastBound)?;
             out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
-            let out: &'k KeyexprBuf = out;
+            let out: &'k dyn KeyexprOut = out;
             return Ok(Some(out.as_str()));
         }
     }
@@ -1225,7 +1333,7 @@ fn resolve_declared_parts<'k>(
     if let Some(suffix) = suffix_opt {
         out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
     }
-    let out: &'k KeyexprBuf = out;
+    let out: &'k dyn KeyexprOut = out;
     Ok(Some(out.as_str()))
 }
 
@@ -1236,7 +1344,7 @@ fn own_append(
     spaces: MappingSpaces<'_>,
     own: Option<OwnSpace<'_>>,
     id: crate::wire_id::ExprId,
-    out: &mut KeyexprBuf,
+    out: &mut dyn KeyexprOut,
 ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
     match spaces.own {
         Some(installed) => installed.append_own_mapping(id, out),

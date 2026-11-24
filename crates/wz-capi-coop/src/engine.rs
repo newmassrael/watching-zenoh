@@ -4134,6 +4134,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.samples.counts()
     }
 
+    /// What the in-place receive cost the peers of the faces the session holds now
+    /// ([`InPlaceFallbacks`](wz_session_core::pubsub::InPlaceFallbacks)): a message whose key,
+    /// composed from the peer's declaration and the message's suffix, is past the row a face
+    /// composes keys in is refused where it lies and counted there. A face's counts leave with it;
+    /// a closed session reports none.
+    pub fn in_place_fallbacks(&self) -> wz_session_core::pubsub::InPlaceFallbacks {
+        self.live().map_or_else(Default::default, |core| {
+            let registry = core.0.session.registry.borrow();
+            registry.in_place_fallbacks()
+        })
+    }
+
     /// The waits for room a publish that finds the session held asks. Compiled where its
     /// readers are: the group tests over the program's transport (`tests::group`).
     #[cfg(all(test, feature = "group", feature = "app-transport"))]

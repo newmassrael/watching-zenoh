@@ -264,6 +264,39 @@ const DECLARED: &CStr = c"noheap/declared";
 /// carries on the wire. Synthetic.
 const ENCODED: &CStr = c"text/plain;utf8";
 
+/// The prefix of `DATA_KEY` the dialler declares, and the rest of the key after it: a put on the
+/// key made from the declaration names its id and the rest, which the listener composes.
+const COMPOSED_PREFIX: &CStr = c"faults";
+const COMPOSED_REST: &str = "/data";
+
+/// The dialler's declaration of `COMPOSED_PREFIX`, and `DATA_KEY` made from it with
+/// `COMPOSED_REST`, which keeps the declaration.
+unsafe fn composed_key(pair: &Pair) -> (z_owned_keyexpr_t, z_owned_keyexpr_t) {
+    let prefix_view = view(COMPOSED_PREFIX);
+    let mut prefix: z_owned_keyexpr_t = std::mem::zeroed();
+    assert_eq!(
+        z_declare_keyexpr(
+            z_session_loan(pair.dialler()),
+            &mut prefix,
+            z_view_keyexpr_loan(&prefix_view),
+        ),
+        Z_OK,
+        "the prefix of the key the listener hears is declared"
+    );
+    let mut composed: z_owned_keyexpr_t = std::mem::zeroed();
+    assert_eq!(
+        wz_capi_pico::z_keyexpr_concat(
+            &mut composed,
+            wz_capi_pico::z_keyexpr_loan(&prefix),
+            COMPOSED_REST.as_ptr().cast(),
+            COMPOSED_REST.len(),
+        ),
+        Z_OK,
+        "the key the listener hears is made from the declaration"
+    );
+    (prefix, composed)
+}
+
 /// One round of the `idle` family: this long with no call made.
 const IDLE_SLICE: Duration = Duration::from_millis(10);
 
@@ -296,6 +329,7 @@ enum Round {
     Delete,
     PutEncoded,
     PutTimestamped,
+    PutComposed,
     AdvancedPut,
     AdvancedHistory,
     GroupReceive,
@@ -311,7 +345,7 @@ enum Round {
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 33] = [
+    const ALL: [Round; 34] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -334,6 +368,7 @@ impl Round {
         Round::Delete,
         Round::PutEncoded,
         Round::PutTimestamped,
+        Round::PutComposed,
         Round::AdvancedPut,
         Round::AdvancedHistory,
         Round::GroupReceive,
@@ -401,7 +436,8 @@ impl Round {
             | Round::PublisherPut
             | Round::Delete
             | Round::PutEncoded
-            | Round::PutTimestamped => true,
+            | Round::PutTimestamped
+            | Round::PutComposed => true,
         }
     }
 }
@@ -418,7 +454,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 37] = [
+const FAMILIES: [(&str, Round, Part); 38] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -448,6 +484,13 @@ const FAMILIES: [(&str, Round, Part); 37] = [
     ("delete", Round::Delete, Part::Calling),
     ("put-encoded", Round::PutEncoded, Part::Calling),
     ("put-timestamped", Round::PutTimestamped, Part::Calling),
+    // What the listener's receive takes of a put whose key it composes from the dialler's
+    // declaration of a prefix and the rest of the key the put names.
+    (
+        "subscriber-receive-composed",
+        Round::PutComposed,
+        Part::Others,
+    ),
     ("advanced-put", Round::AdvancedPut, Part::Calling),
     (
         "advanced-subscriber-receive",
@@ -1378,6 +1421,10 @@ struct Bench {
     /// The dialling session's publisher on the key the listener hears, which a publisher's put
     /// goes through and a matching listener is declared on.
     publisher: z_owned_publisher_t,
+    /// The dialling session's declaration of the prefix of the key the listener hears, and that
+    /// key made from it, which keeps the declaration: a put on it names the declaration's id and
+    /// the rest of the key, which the listener composes.
+    composed: (z_owned_keyexpr_t, z_owned_keyexpr_t),
     /// The dialling session's querier on the key the listener's queryable answers.
     #[cfg(feature = "query")]
     querier: wz_capi_pico::z_owned_querier_t,
@@ -1460,6 +1507,7 @@ impl Bench {
             Z_OK,
             "the publisher a publisher's put goes through is declared"
         );
+        let composed = composed_key(&pair);
         #[cfg(feature = "query")]
         let querier = {
             let ke = view(pipe_pair::ASK_KEY);
@@ -1480,6 +1528,7 @@ impl Bench {
             pair,
             batch: vec![0x5A; batch_len],
             publisher,
+            composed,
             #[cfg(feature = "query")]
             querier,
             #[cfg(feature = "liveliness-get")]
@@ -1570,6 +1619,7 @@ impl Bench {
             Round::Delete => self.delete(),
             Round::PutEncoded => self.put_encoded(),
             Round::PutTimestamped => self.put_timestamped(),
+            Round::PutComposed => self.put_composed(),
             Round::AdvancedPut => {
                 #[cfg(feature = "advanced")]
                 self.advanced.put_and_hear(&self.pair.counts);
@@ -1946,6 +1996,28 @@ impl Bench {
         );
     }
 
+    /// Put from the dialler on the key it names by its declaration of a prefix and the rest, and
+    /// wait for the listener to hear it.
+    unsafe fn put_composed(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            z_put(
+                z_session_loan(self.pair.dialler()),
+                wz_capi_pico::z_keyexpr_loan(&self.composed.1),
+                z_bytes_move(&mut bytes),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a put on a key made from a declaration is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put on a key made from a declaration did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
     /// Delete on the key the listener hears and wait for it to hear the delete.
     unsafe fn delete(&self) {
         let counts = &self.pair.counts;
@@ -2134,6 +2206,15 @@ impl Bench {
         let mut publisher = self.publisher;
         assert_eq!(
             z_undeclare_publisher(z_publisher_move(&mut publisher)),
+            Z_OK
+        );
+        let (mut prefix, mut composed) = self.composed;
+        wz_capi_pico::z_keyexpr_drop(z_keyexpr_move(&mut composed));
+        assert_eq!(
+            z_undeclare_keyexpr(
+                z_session_loan(self.pair.dialler()),
+                z_keyexpr_move(&mut prefix)
+            ),
             Z_OK
         );
         self.pair.close()

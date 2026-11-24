@@ -4208,7 +4208,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     fn append_own_mapping(
         &self,
         id: crate::wire_id::ExprId,
-        out: &mut crate::wireexpr_resolve::KeyexprBuf,
+        out: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         self.with_facts(|facts| {
             let keys = &mut facts.own_keyexprs;
@@ -4223,7 +4223,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     fn append_own_mapping(
         &self,
         _id: crate::wire_id::ExprId,
-        _out: &mut crate::wireexpr_resolve::KeyexprBuf,
+        _out: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         None
     }
