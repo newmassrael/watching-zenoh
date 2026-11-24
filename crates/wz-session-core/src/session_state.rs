@@ -476,7 +476,7 @@ mod tests {
         assert!(state.note_pending(leg(1, 1)));
         assert!(state.note_pending(leg(2, 2)));
         assert!(!state.note_pending(leg(3, 3)));
-        assert_eq!(state.faces_told().ended, [(3, GetKind::Query(3))]);
+        assert_eq!(faces_told(&state).ended, [(3, GetKind::Query(3))]);
         let mut none = new_state::<Unwatched>();
         let refused = PendingGet {
             face: 5,
@@ -485,7 +485,7 @@ mod tests {
             fan: None::<core::convert::Infallible>,
         };
         assert!(!none.note_pending(refused));
-        assert_eq!(none.faces_told().ended, [(5, GetKind::Query(5))]);
+        assert_eq!(faces_told(&none).ended, [(5, GetKind::Query(5))]);
     }
 
     /// A lost face takes what its peer declared first, then ends each leg asked of it, once, and
@@ -496,18 +496,18 @@ mod tests {
         assert!(state.note_pending(leg(1, 1)));
         assert!(state.note_pending(leg(2, 2)));
         state.lose_face(1);
-        assert_eq!(state.faces_told().lost, [1]);
-        assert_eq!(state.faces_told().ended, [(1, GetKind::Query(1))]);
+        assert_eq!(faces_told(&state).lost, [1]);
+        assert_eq!(faces_told(&state).ended, [(1, GetKind::Query(1))]);
         let kept: std::vec::Vec<u64> = state.pending_gets.iter().map(|leg| leg.leg).collect();
         assert_eq!(kept, [2]);
         assert_eq!(state.next_get_deadline_ms(), Some(40), "read off the faces");
     }
 
-    impl<P: SessionParts<Registry = RefCell<Registry>>> SessionState<P> {
-        /// What the faces were told, read back.
-        fn faces_told(&self) -> Ref<'_, Registry> {
-            self.registry.borrow()
-        }
+    /// What the faces of `state` were told, read back.
+    fn faces_told<P: SessionParts<Registry = RefCell<Registry>>>(
+        state: &SessionState<P>,
+    ) -> Ref<'_, Registry> {
+        state.registry.borrow()
     }
 
     /// The state retracts the owed tokens the round has room for, asking it for records of the
@@ -519,13 +519,13 @@ mod tests {
         state.lane.room.set(2);
         // SAFETY: the test's thread is the round's one writer.
         unsafe { state.retract_owed(4) };
-        assert_eq!(state.faces_told().owed_tokens, 1, "two retracted, one left");
+        assert_eq!(faces_told(&state).owed_tokens, 1, "two retracted, one left");
         assert_eq!(state.lane.asked.get(), Some(4));
         assert_eq!(state.lane.owes.get(), Some(true), "one still owed");
         state.lane.room.set(5);
         // SAFETY: as above.
         unsafe { state.retract_owed(4) };
-        assert_eq!(state.faces_told().owed_tokens, 0);
+        assert_eq!(faces_told(&state).owed_tokens, 0);
         assert_eq!(state.lane.owes.get(), Some(false), "none owed");
     }
 
