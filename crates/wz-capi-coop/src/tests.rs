@@ -2083,6 +2083,40 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
 }
 
+/// A place the ABI gives back on the thread that holds its session's lock (the last count of a
+/// get let go of by a drop made under the lock) would wait on itself: a debug build fails there at
+/// once, so no such path survives a test. Turned red by a hold of the lock the thread does not
+/// mark.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "taken again on the thread that holds it")]
+fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
+    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_capi_port::PlaceLender;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(48, 8).expect("a layout");
+    let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
+    let router = Router::start(CatchAll::None);
+    let engine = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        &AllocatorMemory,
+        held,
+    )
+    .expect("the session opens");
+    let place = engine
+        .claim_place(EntityKind::Subscriber)
+        .expect("a place for a subscriber");
+    let _ = engine.under_the_lock(|| engine.give_back_place(place));
+}
+
 /// A session of the `advanced-cache` build keeps a ring of `ADVANCED_CACHE_BYTES` for its caches,
 /// zeroed at its open and its own: what one call writes the next reads, and another session's
 /// ring is another span.
