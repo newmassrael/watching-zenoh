@@ -1018,6 +1018,23 @@ impl<T, const N: usize, P: Storage> DerefMut for BoundedVec<T, N, P> {
     }
 }
 
+// A table is its rows: two are equal when they hold equal rows in the same order, and one reads
+// as the list of them, whatever room each was given. Through the slice, so a type that holds a
+// table derives its own equality and its own reading with no field written out by hand.
+impl<T: PartialEq, const N: usize, P: Storage> PartialEq for BoundedVec<T, N, P> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Eq, const N: usize, P: Storage> Eq for BoundedVec<T, N, P> {}
+
+impl<T: fmt::Debug, const N: usize, P: Storage> fmt::Debug for BoundedVec<T, N, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 // ---- The lent policy's rows, and the arena that lends them ---------------------------------
 
 /// The rows of a table of the [`Lent`] policy: a span of an [`Arena`], its values at the start.
@@ -1989,6 +2006,28 @@ mod tests {
         }
         assert_eq!(v.len(), 4);
         assert_eq!(v.iter().sum::<u32>(), 6);
+    }
+
+    /// Two tables are equal when they hold the same rows in order, and a table reads as the list
+    /// of its rows and of nothing past them. Turned red by an equality or a reading of the room
+    /// rather than the rows.
+    #[test]
+    fn a_table_is_equal_to_and_reads_as_its_rows() {
+        use core::fmt::Write;
+
+        let mut one: BoundedVec<u32, 4, Static> = BoundedVec::new_static();
+        let mut other: BoundedVec<u32, 4, Static> = BoundedVec::new_static();
+        assert_eq!(one, other);
+        assert!(one.push(1).is_ok());
+        assert_ne!(one, other);
+        assert!(other.push(1).is_ok());
+        assert_eq!(one, other);
+        assert!(one.push(2).is_ok());
+        assert!(other.push(3).is_ok());
+        assert_ne!(one, other);
+        let mut text: heapless::String<16> = heapless::String::new();
+        assert!(write!(text, "{one:?}").is_ok());
+        assert_eq!(text.as_str(), "[1, 2]");
     }
 
     #[test]

@@ -887,6 +887,7 @@ impl PlaceRows {
 /// What a session's arena holds, row by row, and the rows each layer lends its tables from
 /// ([`Self::transport`], [`Self::session`], [`Self::places`]). The arena is the sum of the rows'
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
     /// The rows laid out, in order, and only those: a row is written when it is laid out, so a
     /// vacant plan writes its length and no row.
@@ -902,31 +903,6 @@ pub struct ArenaPlan {
     session: SessionRows,
     /// The rows of the ABI's places.
     places: PlaceRows,
-}
-
-/// Two plans are the same when they laid out the same rows and kept the same counts and refusal.
-impl PartialEq for ArenaPlan {
-    fn eq(&self, other: &Self) -> bool {
-        *self.rows == *other.rows
-            && self.refused == other.refused
-            && self.transport == other.transport
-            && self.session == other.session
-            && self.places == other.places
-    }
-}
-
-impl Eq for ArenaPlan {}
-
-impl core::fmt::Debug for ArenaPlan {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ArenaPlan")
-            .field("rows", &&*self.rows)
-            .field("refused", &self.refused)
-            .field("transport", &self.transport)
-            .field("session", &self.session)
-            .field("places", &self.places)
-            .finish()
-    }
 }
 
 impl ArenaPlan {
