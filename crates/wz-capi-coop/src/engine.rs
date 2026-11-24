@@ -2218,6 +2218,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The form an entity the ABI declares with `wire` takes in the session's tables: named by the
     /// key expression declaration `wire` names, which the entity's row holds for as long as it
     /// stands, and with its key named in its retraction when `names_key`.
+    // Out of line: the three declarations of an entity on a key ask it, each a copy inlined.
     #[inline(never)]
     fn key_form(
         &self,
@@ -4134,6 +4135,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// The session's state, for one operation. `None` once the session is closed.
+    // Out of line: every entry point of the engine takes the session through it, each a copy
+    // inlined.
     #[inline(never)]
     fn live(&self) -> Option<LiveCore<'_, L, C>> {
         if self.closed.load(Ordering::Acquire) {
@@ -4170,6 +4173,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// send and lets go once its step is done. Either drop is the faces' it names alone, as each
     /// of zenoh's transports drops on its own queue: the publish is still owed to the others
     /// ([`ToPublish::DroppedOn`], [`Self::hand_off`]).
+    // Out of line: the loop that asks the faces for room is taken only when the session is held.
     #[inline(never)]
     fn live_to_publish(&self, droppable: bool) -> ToPublish<'_, L, C> {
         if !droppable {
@@ -4502,6 +4506,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
     /// wire. A link that is down skips it, as a send over it would.
+    // Out of line: the publish that calls it measured smaller with its link leg apart, the
+    // held-session paths of the leg (`live_to_publish`, `hand_off`) then apart of it too.
     #[inline(never)]
     fn publish_to_link(
         &self,
@@ -4800,6 +4806,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// when the session is free by now. Past the legs of its priority the session holds at most
     /// it is dropped on the other faces too, as a message that finds its queue full is, and
     /// counted as the one drop it already is.
+    // Out of line: the copy of a dropped leg is taken only when a holder drops the publish.
     #[inline(never)]
     fn hand_off(&self, leg: HandedLeg) {
         let priority = leg.opts.priority_band();
@@ -4836,6 +4843,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The queue is taken whole, not drained into another collection: the legs leave in the order
     /// they were handed either way, and a drain links the queue's drain and drop-guard code into
     /// every cooperative build for nothing it needs (measured 2026-11-21).
+    // Out of line: four sends of a publish and of its hand-off ask it, each a copy inlined.
     #[inline(never)]
     fn send_handed(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
         if !self.owed.load(Ordering::SeqCst) {
