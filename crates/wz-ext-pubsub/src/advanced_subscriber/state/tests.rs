@@ -1050,3 +1050,32 @@ fn a_timestamped_sample_held_for_the_history_takes_no_memory() {
     assert_eq!(*record.lock().unwrap(), vec![(true, 0xC1), (true, 0xC3)]);
     assert_eq!(during, 0, "the row and the held samples took no memory");
 }
+
+/// The state's lock is handed out while healthy, and refused with the state's own message once a
+/// panic of its holder poisoned it, as `std`'s `expect` refused it. Turned red by a `lock_state`
+/// that hands a poisoned lock out or panics with another message.
+#[cfg(feature = "std")]
+#[test]
+fn a_state_lock_its_holder_panicked_in_is_refused_with_the_state_message() {
+    let lock = std::sync::Arc::new(StateLock::new(State::new(
+        owned_samples(|_| {}),
+        MissHandlers::default(),
+    )));
+    drop(lock_state(&lock));
+    let holder = {
+        let lock = std::sync::Arc::clone(&lock);
+        std::thread::spawn(move || {
+            let _guard = lock_state(&lock);
+            panic!("the holder panics with the state locked");
+        })
+    };
+    assert!(holder.join().is_err(), "the holder panicked");
+    let refused = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        drop(lock_state(&lock));
+    }));
+    let payload = refused.expect_err("a poisoned state lock is refused");
+    assert_eq!(
+        payload.downcast_ref::<String>().map(String::as_str),
+        Some(STATE_POISONED)
+    );
+}

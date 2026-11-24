@@ -51,5 +51,6 @@ pub use plans::{
 #[cfg(feature = "advanced-recovery")]
 pub use state::RecoveryRequest;
 pub use state::{
-    owned_samples, Delivery, Miss, MissHandlers, OnSample, SampleMissListener, State, StateCell,
+    lock_state, owned_samples, Delivery, Miss, MissHandlers, OnSample, SampleMissListener, State,
+    StateCell, StateLock,
 };

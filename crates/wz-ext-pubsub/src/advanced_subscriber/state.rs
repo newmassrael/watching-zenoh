@@ -26,7 +26,7 @@ use wz_session_core::sink::SampleView;
 #[cfg(feature = "advanced-recovery")]
 use crate::advanced_cache::ring::{Order, RecordRing};
 use crate::prelude::*;
-use crate::sync::{lock_or_panic, Mutex};
+use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
 mod sources;
 
@@ -240,15 +240,25 @@ impl OnSample {
 // any thread (`OnSample::lent`).
 unsafe impl Send for OnSample {}
 
+/// The lock a subscriber's state is under. A host that holds the state behind it hands a miss
+/// listener that lock itself ([`StateCell`]), so it is the one type every host makes.
+pub type StateLock = Mutex<State>;
+
+/// The state under `lock`, locked. A lock a panic of its holder poisoned panics with the state's
+/// own message: what it guards may be half changed.
+pub fn lock_state(lock: &StateLock) -> MutexGuard<'_, State> {
+    lock_or_panic(lock, STATE_POISONED)
+}
+
 /// What a miss listener reaches its subscriber's state through: the state's own lock, or what
 /// holds the lock with the rest of the subscriber.
 pub trait StateCell: Send + Sync {
     /// The subscriber's state, under its lock.
-    fn state_cell(&self) -> &Mutex<State>;
+    fn state_cell(&self) -> &StateLock;
 }
 
-impl StateCell for Mutex<State> {
-    fn state_cell(&self) -> &Mutex<State> {
+impl StateCell for StateLock {
+    fn state_cell(&self) -> &StateLock {
         self
     }
 }
@@ -347,7 +357,7 @@ impl SampleMissListener {
         match &self.statesref {
             StatesRef::Weak(statesref) => {
                 if let Some(cell) = statesref.upgrade() {
-                    lock_or_panic(cell.state_cell(), STATE_POISONED)
+                    lock_state(cell.state_cell())
                         .miss_handlers
                         .unregister(self.id);
                 }
