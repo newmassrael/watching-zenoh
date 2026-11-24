@@ -242,6 +242,7 @@ mod tests {
             is_multicast: false,
             is_shm: false,
             link,
+            links: link.saturating_add(1),
             src: RowText::of(""),
             dst: RowText::of(""),
             kind: None,

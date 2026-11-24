@@ -132,10 +132,10 @@ impl PicoSessionExt {
         #[cfg(feature = "connectivity")]
         let watch_id = {
             let sink = Arc::clone(&connectivity);
-            SessionEngine::watch_faces(
+            SessionEngine::watch_face_rows(
                 Arc::as_ref(engine),
-                Arc::new(move |kind, snapshot| {
-                    sink.on_face_event(kind, snapshot);
+                Arc::new(move |kind, row| {
+                    sink.on_face_row(kind, row);
                 }),
             )
         };

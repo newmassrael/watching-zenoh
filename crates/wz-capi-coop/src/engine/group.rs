@@ -396,8 +396,11 @@ impl MemberEvents {
         if !self.watchers.watched() {
             return;
         }
-        if let Some(snapshot) = self.label.snapshot(member) {
-            self.watchers.happened(kind, snapshot);
+        let label = &self.label;
+        if let Some(row) =
+            FaceLinkRow::of_group_member(member, &label.group, &label.endpoint, label.is_shm)
+        {
+            self.watchers.happened(kind, row);
         }
     }
 }
