@@ -1538,10 +1538,18 @@ pub(crate) fn for_each_record<'f>(
 /// transport message of a batch (a second Frame header: the sender puts a message of the other
 /// reliability behind one) begins where the last record ends. The walk of a Frame stops there
 /// and leaves what follows to the reader of the batch.
-#[cfg(feature = "codec-frame")]
-// Read by the record walk, the heap profile's frame, the best-effort walk and the dissector; a
-// build with none of them reads nothing.
-#[allow(dead_code)]
+// Gated by its readers: the record walk (`walk_records`, a unicast session's or an allocator-free
+// group's), and with an allocator the best-effort walk, which the heap profile's frame and the
+// dissector reach through it or beside it.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        test,
+        feature = "alloc",
+        feature = "session-unicast",
+        feature = "session-multicast"
+    )
+))]
 pub(crate) fn is_transport_mid(mid: u8) -> bool {
     mid <= wz_codecs::wire_const::T_MID_JOIN
 }
