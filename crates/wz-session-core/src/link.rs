@@ -1425,6 +1425,12 @@ pub const SESSION_TX_CONDUITS: usize = 1;
 /// a transport message). A link that lends this many from storage of its own always has a slot
 /// for the session's next frame, so a frame whose sequence number is minted is never refused for
 /// want of one.
+///
+/// The extra one is for a link whose writer keeps a slot after [`BoxedLinkDriver::tx_slot_send`]
+/// returns (a stream that took the frame in part, a queue a writer task drains). A link whose
+/// send copies the frame out and frees the slot before it returns needs one slot per conduit,
+/// since a session drains its windows before a transport message: the lwIP datagram driver
+/// lends one (`wz-session-lwip`'s `LENT_MAX`, `limits.tx_lend_slots` in the deploy tables).
 pub const SESSION_TX_SLOTS: usize = SESSION_TX_CONDUITS + 1;
 
 /// Whether a session of this build can carry more than one link to its peer: the

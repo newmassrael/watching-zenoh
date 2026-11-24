@@ -7,7 +7,9 @@
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
+use core::mem::MaybeUninit;
 use core::net::SocketAddr;
+use core::ptr::addr_of_mut;
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::Datagram;
@@ -21,13 +23,21 @@ use wz_session_core::reliability::Reliability;
 
 /// How many outbound slots this driver lends at once: the one it reserves for its
 /// link, as zenoh-pico writes every frame of a transport into its one write
-/// buffer. One is every slot a session of this link asks for at once: it encodes
-/// and sends a frame under its conduit lock, holds a slot past that call only for
-/// the batch window of its one conduit, and drains the window before it sends a
-/// transport message. A lend past it is not granted: the session encodes on the
-/// heap, or under `tx-lend-only` (fixed-memory step S4) refuses the send as a
-/// counted `LinkDropCause::NoTxSlot`, which `tests/tx_allocations.rs` holds the
-/// slot to witness. Public so that witness can pin the capacity it fills.
+/// buffer. The deploy tables state it per link (`limits.tx_lend_slots`).
+///
+/// One is enough because the send gives the slot back before it returns: the bytes
+/// written are copied into the pbuf lwIP sends (`LwipUdpSocket::send_to`, which
+/// returns once lwIP has the datagram), so no frame still being sent holds the
+/// slot when the next one asks for it. That leaves only what a session holds past
+/// the call that took a slot: the batch window of its one conduit, which it drains
+/// before it sends a transport message and before it opens the next frame. This is
+/// why the lwIP link needs fewer slots than `SESSION_TX_SLOTS`, the count for a
+/// link whose writer keeps a slot after the send call returns.
+///
+/// A lend past it is not granted: the session encodes on the heap, or under
+/// `tx-lend-only` (fixed-memory step S4) refuses the send as a counted
+/// `LinkDropCause::NoTxSlot`, which `tests/tx_allocations.rs` holds the slot to
+/// witness. Public so that witness can pin the capacity it fills.
 pub const LENT_MAX: usize = 1;
 
 /// The session socket shared by the drive loop (inbound `try_recv` /
@@ -128,9 +138,10 @@ pub struct LwipUdpDriver {
     /// changes after, so neither do they.
     ends: OnceCell<(SocketAddr, SocketAddr)>,
     /// ARCHITECTURE section 9.1 — the link's one outbound slot, as wide as the
-    /// datagram its socket carries. Held by value, so it is reserved with the link,
-    /// where the link is (the session's slot on the `session-slot` profile), and no
-    /// frame takes a buffer of lwIP's heap to be encoded in.
+    /// datagram its socket carries. Reserved with the link and made where the link is
+    /// kept ([`Self::new_in`]: its cell, or the session's slot on the
+    /// `session-slot` profile), so no frame takes a buffer of lwIP's heap to be
+    /// encoded in and no move of the driver carries the slot.
     tx_slot: UnsafeCell<[u8; SESSION_RX_SLOT_SIZE]>,
     /// Whether `tx_slot` is lent to the session and not yet sent or given back.
     tx_lent: Cell<bool>,
@@ -159,26 +170,83 @@ impl LwipUdpDriver {
     ///
     /// Under `rx-in-place` the socket is asked to hold the frames its MAC lends
     /// in place ([`recv_with`](Self::recv_with) reads them where they lie).
+    ///
+    /// Returned by value, with its outbound slot in it: for a host that keeps the
+    /// driver itself. A node makes the driver where it is kept
+    /// ([`Self::new_in`]), so the slot is never a value on the stack that opens
+    /// the link.
     pub fn new(socket: SharedSessionSocket, peer_addr: u32, peer_port: u16) -> Self {
-        Self::with_binding(socket, PeerBinding::dialled((peer_addr, peer_port)))
+        let mut place = MaybeUninit::uninit();
+        Self::new_in(&mut place, socket, peer_addr, peer_port);
+        // SAFETY: `new_in` wrote every field of the place.
+        unsafe { place.assume_init() }
     }
 
     /// The link of an acceptor that owns `socket`: no peer until the first
-    /// `InitSyn` it takes names one.
+    /// `InitSyn` it takes names one. By value, as [`Self::new`] is; a node makes
+    /// it in place ([`Self::accepting_in`]).
     pub fn accepting(socket: SharedSessionSocket) -> Self {
-        Self::with_binding(socket, PeerBinding::accepting())
+        let mut place = MaybeUninit::uninit();
+        Self::accepting_in(&mut place, socket);
+        // SAFETY: `accepting_in` wrote every field of the place.
+        unsafe { place.assume_init() }
     }
 
-    fn with_binding(socket: SharedSessionSocket, binding: PeerBinding<(u32, u16)>) -> Self {
+    /// [`Self::new`], made in `place`, where the driver is kept (the cell of its
+    /// link, the session's slot), and lent back from there.
+    pub fn new_in(
+        place: &mut MaybeUninit<Self>,
+        socket: SharedSessionSocket,
+        peer_addr: u32,
+        peer_port: u16,
+    ) -> &mut Self {
+        Self::made_in(place, socket, PeerBinding::dialled((peer_addr, peer_port)))
+    }
+
+    /// [`Self::accepting`], made in `place`, as [`Self::new_in`] makes a dialled
+    /// link.
+    pub fn accepting_in(place: &mut MaybeUninit<Self>, socket: SharedSessionSocket) -> &mut Self {
+        Self::made_in(place, socket, PeerBinding::accepting())
+    }
+
+    /// The driver written field by field into `place`, its outbound slot zeroed
+    /// where it lies: the slot is as wide as a datagram, and built in a frame and
+    /// moved it would be that much more of the stack of every path that opens a
+    /// link.
+    fn made_in(
+        place: &mut MaybeUninit<Self>,
+        socket: SharedSessionSocket,
+        binding: PeerBinding<(u32, u16)>,
+    ) -> &mut Self {
         #[cfg(feature = "rx-in-place")]
         socket.borrow_mut().hold_lent_rx(true);
-        let driver = Self {
-            socket,
-            binding,
-            ends: OnceCell::new(),
-            tx_slot: UnsafeCell::new([0; SESSION_RX_SLOT_SIZE]),
-            tx_lent: Cell::new(false),
+        // A field added to the driver and not written below would be read uninitialised.
+        // This names every field with no `..`, so adding one without naming it here (and
+        // so without writing it below) does not compile.
+        let _every_field_is_written = |driver: &Self| {
+            let Self {
+                socket: _,
+                binding: _,
+                ends: _,
+                tx_slot: _,
+                tx_lent: _,
+            } = driver;
         };
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is the place, aligned for the driver and this call's alone; each
+        // field is written once, in place, and the slot's bytes are zeroed through a
+        // pointer to them (`UnsafeCell` lays out as the array it holds).
+        unsafe {
+            addr_of_mut!((*at).socket).write(socket);
+            addr_of_mut!((*at).binding).write(binding);
+            addr_of_mut!((*at).ends).write(OnceCell::new());
+            addr_of_mut!((*at).tx_slot)
+                .cast::<u8>()
+                .write_bytes(0, SESSION_RX_SLOT_SIZE);
+            addr_of_mut!((*at).tx_lent).write(Cell::new(false));
+        }
+        // SAFETY: every field of the driver was written above.
+        let driver = unsafe { place.assume_init_mut() };
         driver.note_endpoints();
         driver
     }
@@ -601,6 +669,42 @@ mod tests {
             "the slot lies inside the link's driver"
         );
         driver.tx_slot_abort(large.slot);
+    }
+
+    /// A driver made in place keeps its outbound slot where it was made: the slot a
+    /// lend names lies inside the place it was handed, zeroed there, so a node that
+    /// makes its link in its cell carries no slot through the frames that open it.
+    #[test]
+    fn a_driver_made_in_place_lends_the_slot_inside_its_place() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let socket: SharedSessionSocket = Rc::new(RefCell::new(
+            bind_session_rx(&link, 7489).expect("bind session rx"),
+        ));
+        let mut place = std::boxed::Box::new(MaybeUninit::<LwipUdpDriver>::uninit());
+        let start = place.as_ptr() as usize;
+        let inside = start..start + core::mem::size_of::<LwipUdpDriver>();
+        {
+            let driver = LwipUdpDriver::new_in(&mut place, socket, ipv4_addr_loopback(), 7489);
+            std::assert_eq!(
+                driver as *const LwipUdpDriver as usize,
+                start,
+                "the driver is the place it was handed"
+            );
+            let grant = driver
+                .tx_slot_acquire(8, Priority::DEFAULT)
+                .expect("the slot");
+            let (at, capacity) = driver.tx_slot_storage(grant.slot);
+            std::assert!(
+                inside.contains(&(at as usize)) && inside.contains(&(at as usize + capacity - 1)),
+                "the slot lies inside the place"
+            );
+            // SAFETY: the slot is lent to this test, which reads it and writes nothing.
+            let bytes = unsafe { core::slice::from_raw_parts(at, capacity) };
+            std::assert!(bytes.iter().all(|&b| b == 0), "zeroed where it lies");
+            driver.tx_slot_abort(grant.slot);
+        }
+        // SAFETY: `new_in` wrote the driver, which nothing refers to any more.
+        unsafe { place.assume_init_drop() };
     }
 
     /// A send from the slot on a link with no peer yet is dropped, and the slot

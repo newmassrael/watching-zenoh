@@ -167,9 +167,16 @@ where
     where
         F: EventSink + 'static,
     {
-        let Admission { driver, lane } = admission;
-        self.host
-            .open(driver, Some(lane), entropy, params, config, on_event)
+        let peer = admission.peer();
+        let (socket, lane) = admission.into_parts();
+        self.host.open_in(
+            |place| Admission::driver_in(socket, peer, place),
+            Some(lane),
+            entropy,
+            params,
+            config,
+            on_event,
+        )
     }
 
     /// Dial `target`'s peer over UDP: bind a socket on a port the stack picks (out of the pool
@@ -190,11 +197,7 @@ where
     {
         let DialTarget { peer, expected_zid } = target;
         self.host.dial(
-            |out| {
-                links.bind_driver(0, peer).map(|driver| {
-                    out.write(driver);
-                })
-            },
+            |out| links.bind_driver_in(out, 0, peer),
             expected_zid,
             entropy,
             params,
