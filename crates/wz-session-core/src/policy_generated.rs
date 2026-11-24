@@ -555,11 +555,11 @@ impl Default for ClockQualityStamping {
     }
 }
 
-/// `routing-face-drive`: How a node that routes for others serves its links. `task-per-
-/// face` gives each link a task of its own on the node's worker threads: a node with many
-/// peers uses more than one core, and a link that is slow to serve holds up only itself.
-/// `one-task` serves every link from the node's one task, one message at a time, on one
-/// core: the order in which the node handles what its links bring is then the order the
+/// `routing-face-drive`: How a node that routes for others serves its links.
+/// `task-per-face` gives each link a task of its own on the node's worker threads: a node
+/// with many peers uses more than one core, and a link that is slow to serve holds up only
+/// itself. `one-task` serves every link from the node's one task, one message at a time, on
+/// one core: the order in which the node handles what its links bring is then the order the
 /// task polled them, which a run replayed for a test needs, and a host with one core loses
 /// nothing by it. Neither changes what a peer is sent or in what order one link's messages
 /// are routed.
@@ -1010,8 +1010,10 @@ impl Default for KeyWireForm {
 /// Upstream: Gives each transport a transmission queue of its own, so a droppable message
 /// that one transport's full queue drops is still queued on the session's other transports:
 /// `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a
-/// droppable message that finds it held is dropped for all of them (`vendor/zenoh-
-/// pico/src/transport/common/tx.c` @ `Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
+/// droppable message that finds it held is dropped for all of them
+/// (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`):
+/// `every-face`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldPublishDrop {
     /// `held-faces`.
@@ -1186,7 +1188,8 @@ pub struct SessionPolicy {
     /// session's other transports: `held-faces`. zenoh-pico's peers of one unicast
     /// transport share one transmit lock, and a droppable message that finds it held is
     /// dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @
-    /// `Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
+    /// `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`):
+    /// `every-face`.
     held_publish_drop: HeldPublishDropBound,
 }
 

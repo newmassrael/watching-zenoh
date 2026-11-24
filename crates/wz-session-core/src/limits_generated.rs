@@ -997,8 +997,8 @@ const _: LimitDomain = TxNoProgressWindowUs::DOMAIN;
 pub type TxNoProgressWindowUsHeld = Limited<TxNoProgressWindowUs, { TxNoProgressWindowUs::HELD }>;
 
 /// `TX_EXPIRY_CLOSE_AFTER`: How many blocking messages in a row may find no room within
-/// their deadline before the session is closed as unresponsive, when the tx-expiry-keeps-
-/// session policy is on.
+/// their deadline before the session is closed as unresponsive, when the
+/// tx-expiry-keeps-session policy is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxExpiryCloseAfter;
 
@@ -1724,9 +1724,9 @@ const _: LimitDomain = PicoFragMaxBytes::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type PicoFragMaxBytesHeld = Limited<PicoFragMaxBytes, { PicoFragMaxBytes::HELD }>;
 
-/// `PICO_ACCEPT_TIMEOUT_MS`: How long, in milliseconds, a listening session of the zenoh-
-/// pico interface gives an inbound link to complete its whole handshake, link handshake
-/// included, before it drops the link without a word, as zenoh-pico's
+/// `PICO_ACCEPT_TIMEOUT_MS`: How long, in milliseconds, a listening session of the
+/// zenoh-pico interface gives an inbound link to complete its whole handshake, link
+/// handshake included, before it drops the link without a word, as zenoh-pico's
 /// Z_TRANSPORT_ACCEPT_TIMEOUT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PicoAcceptTimeoutMs;
