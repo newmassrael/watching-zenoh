@@ -358,7 +358,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// over a new link.
     pub(super) fn announce(&mut self, kind: Kind, send: &dyn Fn(&McuActions<C>) -> bool) {
         let place = self.end_of(kind);
-        self.announce_with(place, OnRefusal::Forget, send, &|_| {});
+        self.announce_with(place, OnRefusal::Forget, send, &undo_nothing::<C>);
     }
 
     /// The place in the replay's order of the subscriber `handle` names, the one past the last for
@@ -393,7 +393,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 told
             },
-            &|_| {},
+            &undo_nothing::<C>,
         );
     }
 
@@ -431,7 +431,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 told
             },
-            &|_| {},
+            &undo_nothing::<C>,
         );
     }
 
@@ -492,7 +492,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 taken
             },
-            &|_| {},
+            &undo_nothing::<C>,
         );
     }
 
@@ -532,7 +532,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     });
                 asked
             },
-            &|_| {},
+            &undo_nothing::<C>,
         );
     }
 
@@ -560,6 +560,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 }
+
+/// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
+/// for every such caller, so the call through `&dyn Fn` is made once.
+fn undo_nothing<C: ClockSource + 'static>(_actions: &McuActions<C>) {}
 
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every

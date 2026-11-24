@@ -1869,6 +1869,18 @@ fn counted(plane: FilterPlane, count_local: bool) -> Locality {
     }
 }
 
+/// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
+/// for every caller that sends it, so its body and its call through `&dyn Fn` are made once.
+fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&McuActions<C>) {
+    move |actions| actions.send_undeclare_kexpr(mapping_id)
+}
+
+/// What tells a link that the Interest `id` ends, one closure type for every caller as
+/// [`undeclare_kexpr`] is.
+fn interest_final<C: ClockSource + 'static>(id: u64) -> impl Fn(&McuActions<C>) {
+    move |actions| actions.send_interest_final(id)
+}
+
 /// What a get answers when its session closes while its legs are issued: the legs issued so far,
 /// which the close has ended, or the close itself when it came before the first.
 #[cfg(any(feature = "query", feature = "liveliness-get"))]
@@ -3114,7 +3126,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let (Some(place), Some(mapping_id)) = (place, mapping_id) else {
             return;
         };
-        self.retract_at(place, &|actions| actions.send_undeclare_kexpr(mapping_id));
+        self.retract_at(place, &undeclare_kexpr::<C>(mapping_id));
         #[cfg(feature = "group")]
         for group in &self.groups {
             group.retract_keyexpr(mapping_id);
@@ -5407,9 +5419,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.interests[at].holds -= 1;
         if core.interests[at].holds == 0 {
             let hold = core.interests.remove(at);
-            core.retract(Kind::Interest, at, &|actions| {
-                actions.send_interest_final(hold.interest_id);
-            });
+            core.retract(Kind::Interest, at, &interest_final::<C>(hold.interest_id));
         }
     }
 
@@ -5990,7 +6000,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             let undeclared = tables_mut(&core.registry).undeclare_liveliness_subscriber(handle)?;
             // The row went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions| actions.send_interest_final(u64::from(id)));
+            core.retract_at(place, &interest_final::<C>(u64::from(id)));
             Some((handle, undeclared.row.map(|row| row.into_callback())))
         });
         // The row, and its callback with it, is let go of here with no lock held; one a call of
@@ -6086,7 +6096,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let taken = core.announce_or_undo_at(
             place,
             &|actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
-            &|actions| actions.send_undeclare_kexpr(id),
+            &undeclare_kexpr::<C>(id),
         );
         if !taken {
             tables_mut(&core.registry).undeclare_keyexpr(declared.handle);
