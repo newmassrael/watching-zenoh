@@ -182,6 +182,21 @@ impl<T> Slot<T> {
         }
         at
     }
+
+    /// [`Self::fill_in_place`] with a `write` that can be refused: refused, the place is given
+    /// back with nothing in it dropped, and the refusal handed back.
+    ///
+    /// # Safety
+    /// `write` leaves a valid `T` at the place it is handed when it answers `Ok`, and nothing
+    /// there to drop when it answers `Err`; the place is sized and aligned for one and holds none.
+    pub(crate) unsafe fn try_fill_in_place<E>(
+        self,
+        write: impl FnOnce(*mut T) -> Result<(), E>,
+    ) -> Result<*mut T, E> {
+        write(self.place.as_ptr().cast::<T>())?;
+        // SAFETY: the caller's: the place holds the `T` written above, which writing nothing keeps.
+        Ok(unsafe { self.fill_in_place(|_| {}) })
+    }
 }
 
 impl<T> Drop for Slot<T> {

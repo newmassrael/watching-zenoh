@@ -400,19 +400,27 @@ impl SampleMarshal {
     /// reached its final address and [`Self::bind`] has run, which is its whole contract.
     #[cfg(any(feature = "query", test))]
     pub(crate) fn deep_copy(&self) -> Result<Self, NoRoom> {
-        let parts = self.kept_parts()?;
         let mut copy = core::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: `copy` is room for a marshal that holds none, and `write_copy` writes it whole.
+        // SAFETY: `copy` is room for a marshal that holds none; `write_copy` writes it whole, or
+        // leaves nothing in it to drop.
         unsafe {
-            self.write_copy(parts, copy.as_mut_ptr());
+            self.write_copy(copy.as_mut_ptr())?;
             Ok(copy.assume_init())
         }
     }
 
-    /// What a copy of this marshal owns apart from it and can be refused room for: its payload,
-    /// its attachment and its encoding's schema, each copied before any of the copy is written.
-    fn kept_parts(&self) -> Result<KeptParts, NoRoom> {
-        let payload = self.payload.try_clone()?;
+    /// Write at `at` the copy of this marshal that owns its payload, its attachment, its
+    /// encoding's schema and a key of its own, its views unbound ([`Self::deep_copy`]). The copy
+    /// is this marshal's bytes with the four fields it owns written over them: every other field
+    /// is a plain value, the same in both, and every view is written again by [`Self::bind`].
+    ///
+    /// The payload is copied last and straight into its field, so the largest part is not moved
+    /// through the stack on its way. Refused room for any part, the copy answers [`NoRoom`],
+    /// `at` holding nothing to drop and the parts copied before let go.
+    ///
+    /// # Safety
+    /// `at` is valid for the write of a marshal and holds none, so nothing there is dropped.
+    unsafe fn write_copy(&self, at: *mut Self) -> Result<(), NoRoom> {
         let attachment = match &self.attachment {
             Some(attachment) => Some(attachment.try_clone()?),
             None => None,
@@ -422,47 +430,19 @@ impl SampleMarshal {
             .as_ref()
             .map(crate::encoding::EncodingState::kept)
             .transpose()?;
-        Ok(KeptParts {
-            payload,
-            attachment,
-            encoding,
-        })
-    }
-
-    /// Write at `at` the copy of this marshal that owns `parts` and a key of its own, its views
-    /// unbound ([`Self::deep_copy`]). The copy is this marshal's bytes with the four fields it
-    /// owns written over them: every other field is a plain value, the same in both, and every
-    /// view is written again by [`Self::bind`]. One copy of the whole and four writes, rather
-    /// than each field written apart.
-    ///
-    /// # Safety
-    /// `at` is valid for the write of a marshal and holds none, so nothing there is dropped.
-    unsafe fn write_copy(&self, parts: KeptParts, at: *mut Self) {
         let keyexpr = KeyText::Owned(self.keyexpr.as_str().to_owned());
-        let KeptParts {
-            payload,
-            attachment,
-            encoding,
-        } = parts;
         // SAFETY: the caller's. The bitwise copy holds this marshal's key, payload, attachment
-        // and encoding until each is written over, without a drop, by the copy's own; nothing in
-        // between reads them or can unwind.
+        // and encoding until each is written over, without a drop, by the copy's own; a refused
+        // payload leaves it so, which nothing drops, and nothing else in between can unwind.
         unsafe {
             core::ptr::copy_nonoverlapping(self, at, 1);
+            core::ptr::addr_of_mut!((*at).payload).write(self.payload.try_clone()?);
             core::ptr::addr_of_mut!((*at).keyexpr).write(keyexpr);
-            core::ptr::addr_of_mut!((*at).payload).write(payload);
             core::ptr::addr_of_mut!((*at).attachment).write(attachment);
             core::ptr::addr_of_mut!((*at).encoding).write(encoding);
         }
+        Ok(())
     }
-}
-
-/// What a copy of a [`SampleMarshal`] owns apart from the marshal it is copied from
-/// ([`SampleMarshal::kept_parts`]).
-struct KeptParts {
-    payload: ByteBuf,
-    attachment: Option<ByteBuf>,
-    encoding: Option<crate::encoding::EncodingState>,
 }
 
 // --- the OWNED sample family ------------------------------------------------
@@ -489,9 +469,10 @@ unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_v
     let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Sample) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
-    let parts = marshal.kept_parts().map_err(NoRoom::code)?;
-    // What can be refused is taken above; the copy itself is written where it lies.
-    let owned = slot.fill_in_place(|at: *mut SampleMarshal| marshal.write_copy(parts, at));
+    // The copy is written where it lies; refused room, the place is given back with nothing in it.
+    let owned = slot
+        .try_fill_in_place(|at: *mut SampleMarshal| marshal.write_copy(at))
+        .map_err(NoRoom::code)?;
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -4191,6 +4172,36 @@ mod tests {
             assert_eq!(encoding.view().schema, Some(&b"utf8"[..]));
             free_sample_marshal(second.cast::<c_void>());
         }
+    }
+
+    /// A clone refused room for its payload is no copy: it answers pico's out-of-memory code, the
+    /// attachment it copied first is let go again, and the original keeps what it holds. Turned
+    /// red by a copy that writes its attachment into the place before its payload is refused.
+    #[test]
+    fn a_clone_refused_room_for_its_payload_lets_go_of_what_it_copied() {
+        let view = HeldView {
+            key: "demo/refused",
+            payload: b"payload",
+            attachment: b"attachment",
+        };
+        // SAFETY: the marshal is let go before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.payload = ByteBuf::copy_of(b"payload").expect("room");
+        marshal.attachment = Some(ByteBuf::copy_of(b"attachment").expect("room"));
+        marshal.bind();
+        let past = isize::MAX as usize + 1;
+        marshal.payload.set_holders(past);
+        // SAFETY: a marshal this crate made and bound.
+        let refused = unsafe { clone_sample_marshal(marshal.as_loaned()) };
+        assert_eq!(
+            refused.err(),
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+        assert_eq!(marshal.payload.holders(), past, "no share of it is taken");
+        let attachment = marshal.attachment.as_ref().expect("set above");
+        assert_eq!(attachment.holders(), 1, "its copy is let go again");
+        marshal.payload.set_holders(1);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
     }
 
     /// The marshal a callback is handed holds nothing of its own: its key, payload, attachment and
