@@ -28,6 +28,7 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
+#[cfg(feature = "group")]
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
@@ -191,7 +192,7 @@ use deliveries::Deliveries;
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
-use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
+use registry::{FaceId, HeldFace, Registry, SharedRegistry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
@@ -1653,7 +1654,7 @@ type SessionState = wz_session_core::session_state::SessionState<CoopSession>;
 enum CoopSession {}
 
 impl SessionParts for CoopSession {
-    type Registry = Rc<RefCell<Registry>>;
+    type Registry = SharedRegistry;
     type Faces = Registry;
     type Callbacks = CoopRows;
     type Storage = Lent;
@@ -2359,7 +2360,7 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
 /// it staged (the replies of a queryable that answers in place, declare replies, get prunes) goes
 /// out at once. Without it everything the dispatch staged goes out at once.
 pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
-    registry: Rc<RefCell<Registry>>,
+    registry: SharedRegistry,
     /// The face the link serves, its set found by its place for every frame and not looked for.
     face: HeldFace,
     actions: SessionHandle<C>,
@@ -3883,7 +3884,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 lend: RouterLend::new(),
             },
             session: SessionState {
-                registry: Rc::new(RefCell::new(lent.registry)),
+                registry: SharedRegistry::new(lent.registry),
                 // No watcher yet: the queue's rows are reserved now, so a program that watches
                 // after the open is told its faces with nothing allocated.
                 #[cfg(feature = "connectivity")]

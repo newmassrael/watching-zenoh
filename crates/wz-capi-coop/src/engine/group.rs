@@ -86,7 +86,7 @@ use {
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use super::registry::{FaceId, HeldFace, Registry};
+use super::registry::{FaceId, HeldFace, SharedRegistry};
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -1523,7 +1523,7 @@ pub(super) struct GroupPut<'a> {
 /// `generation`, so the answer it is owed is the group's and no link's.
 #[cfg(feature = "queryable")]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: SharedRegistry,
     face: HeldFace,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
@@ -1546,7 +1546,7 @@ pub(super) fn dispatch(
 /// staged queued on the group at once.
 #[cfg(not(feature = "queryable"))]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: SharedRegistry,
     face: HeldFace,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
