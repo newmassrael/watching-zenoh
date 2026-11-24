@@ -645,9 +645,6 @@ pub struct PlaceRows {
     /// The bytes of each place the ABI keeps an entity of a kind in, by [`EntityKind`], none for
     /// no place.
     entity_bytes: [usize; ENTITY_KINDS],
-    /// How many places of each kind, by [`EntityKind`]: a place for each row the session keeps
-    /// of the kind.
-    entity_rows: [usize; ENTITY_KINDS],
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
@@ -660,18 +657,18 @@ pub(crate) struct PlaceTables {
 
 impl PlaceRows {
     /// The places, lent by `lend` in the order the plan laid them out: the handle's first, then
-    /// each kind's in the order of [`EntityKind::ALL`].
-    pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> PlaceTables {
+    /// each kind's in the order of [`EntityKind::ALL`], a place for each row `rows` counts of
+    /// the kind, the session's own count, which the plan reads rather than keeps a second copy of.
+    pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>, rows: EntityRows) -> PlaceTables {
         let handle = (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1));
         let mut entities = EntityPlaces::NONE;
-        for ((bytes, rows), cells) in self
-            .entity_bytes
+        for ((kind, bytes), cells) in EntityKind::ALL
             .into_iter()
-            .zip(self.entity_rows)
+            .zip(self.entity_bytes)
             .zip(entities.cells.iter_mut())
         {
             if bytes != 0 {
-                *cells = Some(lend.byte_cells(bytes, rows));
+                *cells = Some(lend.byte_cells(bytes, rows.of_kind(kind)));
             }
         }
         PlaceTables { handle, entities }
@@ -737,9 +734,10 @@ impl ArenaPlan {
                 rx_buffers: links,
                 tx_slots: links,
                 link_bytes,
+                reassembly_bytes: 0,
                 reassembly_chains: LENT_CHAINS,
                 endpoint_rows: (config.endpoints.count(), config.listen.count()),
-                ..TransportRows::default()
+                cell_bytes: LinkCells::default(),
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -1294,13 +1292,8 @@ impl ArenaPlan {
             }
             let (flags, places, basis) = place_rows(kind);
             self.put_table([flags, places], basis, count, place.size());
-            let at = kind as usize;
-            if let (Some(bytes), Some(rows)) = (
-                self.places.entity_bytes.get_mut(at),
-                self.places.entity_rows.get_mut(at),
-            ) {
+            if let Some(bytes) = self.places.entity_bytes.get_mut(kind as usize) {
                 *bytes = place.size();
-                *rows = count;
             }
         }
         self.settled()

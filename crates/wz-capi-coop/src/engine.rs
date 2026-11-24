@@ -740,19 +740,29 @@ fn lend_session(
         reassembly,
         endpoints,
     } = plan.transport().lent_from(&mut lend);
-    let state = plan
+    // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
+    // moves the others out of one by one would need its own drop on each refusal below.
+    let StateTables {
+        lane,
+        filters,
+        interests,
+        matches,
+        keys,
+        #[cfg(feature = "query")]
+        legs,
+    } = plan
         .session()
         .lent_from(&mut lend, config.limits.max_keyexpr_bytes_held());
     let PlaceTables {
         handle,
         entities: places,
-    } = plan.places().lent_from(&mut lend);
-    let keys = lend.finish_keys(state.keys).map_err(ArenaRefused::Lend)?;
+    } = plan.places().lent_from(&mut lend, plan.entities());
+    let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
     let ClaimedPlaces {
         lane_area,
         lane_bytes,
         handle: handle_place,
-    } = plan.claim_lane_and_handle(state.lane, handle)?;
+    } = plan.claim_lane_and_handle(lane, handle)?;
     let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
@@ -789,15 +799,15 @@ fn lend_session(
         samples,
         router,
         endpoints,
-        filters: state.filters,
-        interests: state.interests,
-        matches: state.matches,
+        filters,
+        interests,
+        matches,
         keys,
         #[cfg(feature = "queryable")]
         plane,
         registry,
         #[cfg(feature = "query")]
-        ended: EndedLegs::over(state.legs),
+        ended: EndedLegs::over(legs),
         handle_place,
         places,
         arena,
