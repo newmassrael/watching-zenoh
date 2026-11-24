@@ -163,12 +163,7 @@ impl LivelinessRow {
         if wire.is_literal() {
             actions.send_interest_liveliness_subscriber(id, history, 0, Some(keyexpr))
         } else {
-            actions.send_interest_liveliness_subscriber(
-                id,
-                history,
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-            )
+            actions.send_interest_liveliness_subscriber(id, history, wire.mapping_id, wire.suffix())
         }
         .is_ok()
     }

@@ -55,7 +55,7 @@ use crate::arena::{
     PlaceTables, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{KeyBacking, Lent, TableLender};
+use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
 #[cfg(feature = "query")]
@@ -1629,11 +1629,6 @@ pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
 #[cfg(feature = "query")]
 type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, Lent>;
 
-/// A key as a row of the session's own declarations keeps it: a block of the session's key arena
-/// (`KEY_ARENA_BYTES`) as long as the key, which the row holds by its place, and which is given
-/// back when the row goes.
-pub(super) type RowKey = KeyRef;
-
 /// The session's state under its one lock, in the layers that own it: the driver's tasks, clock,
 /// policy and arena stay here beside the ABI's places, what the links carry is the transport's
 /// ([`TransportState`]) and what the session declared and asked is the session's
@@ -2518,23 +2513,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         tables_mut(&self.session.registry).take_entity_id()
     }
 
-    /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
-    /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
-    /// key the session cannot hold is refused, never cut short, and the declaration with it,
-    /// before an id is taken or anything is sent. A text the arena keeps already, whoever holds it
-    /// (a row of the session's record, a table of the registry, an object of the program), is that
-    /// block shared ([`KeySpace::kept`]), so a key the session's declarations and the program's
-    /// objects name alike takes one block, whichever of them came first.
-    fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
-        if !self.session.keys.holds_key(keyexpr.len()) {
-            return None;
-        }
-        self.session
-            .keys
-            .kept(keyexpr)
-            .or_else(|| self.session.keys.key(keyexpr).ok())
-    }
-
     /// The form an entity the ABI declares with `wire` takes in the session's tables: named by the
     /// key expression declaration `wire` names, which the entity's row holds for as long as it
     /// stands, and with its key named in its retraction when `names_key`.
@@ -2545,12 +2523,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         wire: &WireKey,
         names_key: bool,
     ) -> wz_session_core::session_tables::KeyForm {
-        let prefix = if wire.mapping_id == 0 {
-            None
-        } else {
-            tables(&self.session.registry).keyexpr_by_id(wire.mapping_id)
-        };
-        wz_session_core::session_tables::KeyForm { prefix, names_key }
+        tables(&self.session.registry).key_form(wire.mapping_id, names_key)
     }
 
     /// Note leg `pending` the session's, for its cancellation, its link's loss and the close to
@@ -4341,7 +4314,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// node's is before a client has come: synced is a statement about established sessions, not
     /// about whether a session exists.
     pub fn declarations_synced(&self) -> bool {
-        self.live().map_or(true, |core| {
+        self.live().is_none_or(|core| {
             core.0
                 .transport
                 .links
@@ -5674,14 +5647,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             target: opts.effective_target(),
             qos,
         };
-        let query = opts.loopback_query();
+        // A body the codec refuses is one no link could carry either: no queryable is asked, and
+        // the Final is owed as one that matched none.
+        let query = opts.loopback_query().ok();
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`), so none stages a reply here: the stage they are handed has no
         // room.
         let mut staged = ReplyStage::<Lent>::default();
         let mut registry = core.session.registry.borrow_mut();
-        self.plane
-            .asking_locally(|| registry.ask_own_queryables(envelope, keyexpr, &query, &mut staged));
+        if let Some(query) = &query {
+            self.plane.asking_locally(|| {
+                registry.ask_own_queryables(envelope, keyexpr, query, &mut staged)
+            });
+        }
         let gets = &mut registry.local;
         lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
         if own.release().is_some() {
@@ -6362,7 +6340,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let usable = |id: ExprId| -> bool {
             #[cfg(feature = "shared-key-ids")]
             {
-                shared.map_or(true, |ids| ids.next_free_id(id) == Some(id))
+                shared.is_none_or(|ids| ids.next_free_id(id) == Some(id))
             }
             #[cfg(not(feature = "shared-key-ids"))]
             {
@@ -6895,7 +6873,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
-                (wire.mapping_id, wire.suffix.as_deref())
+                (wire.mapping_id, wire.suffix())
             };
             // The query is written from the options where they lie, with nothing copied.
             let sent = match wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix) {
@@ -7192,7 +7170,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
-                (wire.mapping_id, wire.suffix.as_deref())
+                (wire.mapping_id, wire.suffix())
             };
             if actions
                 .send_interest_liveliness_get(interest_id, mapping_id, suffix)
@@ -7500,13 +7478,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys fo
         };
         let core = &core.0;
         match ask {
-            KeyAsk::Hold(text) if !core.session.keys.holds_key(text.len()) => {
-                Err(KeyNotHeld::TooLong)
-            }
-            KeyAsk::Hold(text) => core
-                .row_key(text)
-                .map(|key| Some(HeldKey::of(key)))
-                .ok_or(KeyNotHeld::NoRoom),
+            // A text the arena keeps already, whoever holds it, is that block shared, so a key the
+            // session's declarations and the program's objects name alike takes one block.
+            KeyAsk::Hold(text) => match LentKeys::from(core.session.keys).shared(text) {
+                Ok(key) => Ok(Some(HeldKey::of(key))),
+                Err(KeyUnkept::TooLong) => Err(KeyNotHeld::TooLong),
+                Err(KeyUnkept::NoRoom) => Err(KeyNotHeld::NoRoom),
+            },
             // SAFETY: the session's lock is held (`core`), and the key is its arena's.
             KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&core.session.keys) })),
             KeyAsk::Release(key) => {

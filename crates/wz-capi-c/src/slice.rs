@@ -195,7 +195,7 @@ pub unsafe extern "C" fn z_slice_empty(this_: *mut z_owned_slice_t) {
 pub unsafe extern "C" fn z_slice_is_empty(this_: *const z_loaned_slice_t) -> bool {
     guard_val(true, || {
         // SAFETY: the caller's contract.
-        unsafe { slice_bytes(this_) }.map_or(true, <[u8]>::is_empty)
+        unsafe { slice_bytes(this_) }.is_none_or(<[u8]>::is_empty)
     })
 }
 

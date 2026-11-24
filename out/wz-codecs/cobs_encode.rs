@@ -1,7 +1,7 @@
 // SCE-MAP: cobs_encode:56 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -20,22 +20,22 @@ pub fn cobs_encode(data: &[u8], out: &mut SceBytes<1516>) -> Result<(), Capacity
     let mut done: bool = false;
     while done == false {
         let mut q: u32 = p;
-        while q < n && q - p < 254 && data[(q) as usize] != 0 {
-            q = q + 1;
+        while q < n && sce_forge_runtime::algorithm::proven::sub::<u32>(q, p) < 254 && sce_forge_runtime::algorithm::proven::at(&data, q) != 0 {
+            q = sce_forge_runtime::algorithm::proven::add::<u32>(q, 1);
         }
-        let run: u16 = (q - p) as u16;
-        let code: u8 = (run + 1) as u8;
+        let run: u16 = sce_forge_runtime::algorithm::proven::sub::<u32>(q, p) as u16;
+        let code: u8 = sce_forge_runtime::algorithm::proven::add::<u16>(run, 1) as u8;
         out.push(code)?;
         let mut k: u32 = p;
         while k < q {
-            out.push(data[(k) as usize])?;
-            k = k + 1;
+            out.push(sce_forge_runtime::algorithm::proven::at(&data, k))?;
+            k = sce_forge_runtime::algorithm::proven::add::<u32>(k, 1);
         }
         if q >= n {
             done = true;
         } else {
             if run < 254 {
-                p = q + 1;
+                p = sce_forge_runtime::algorithm::proven::add::<u32>(q, 1);
                 if p >= n {
                     let last: u8 = 1;
                     out.push(last)?;

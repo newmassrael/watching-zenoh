@@ -325,6 +325,11 @@ pub const MAX_ADVANCED_PUBLISHERS: usize = generated::MAX_ADVANCED_PUBLISHERS;
 /// session's own. A declaration past it is refused, having declared nothing.
 pub const MAX_ADVANCED_SUBSCRIBERS: usize = generated::MAX_ADVANCED_SUBSCRIBERS;
 
+/// The sample-miss listeners one advanced subscriber of the zenoh-pico interface holds at once,
+/// owned and background, each in a room of the subscriber's place. A declaration past them is
+/// refused, its closure let go of.
+pub const MAX_SAMPLE_MISS_LISTENERS: usize = generated::MAX_SAMPLE_MISS_LISTENERS;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;

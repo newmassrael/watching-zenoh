@@ -4,7 +4,7 @@
 // SCE-MAP: key_facts.scxml:26 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -35,7 +35,7 @@ pub fn key_facts(text: &[u8], bounded: bool, chunk_bound: u32) -> key_facts_sche
                 doubled = true;
             }
             if slashes < chunk_bound {
-                slashes = slashes + 1;
+                slashes = sce_forge_runtime::algorithm::proven::add::<u32>(slashes, 1);
             }
         }
         previous = b;

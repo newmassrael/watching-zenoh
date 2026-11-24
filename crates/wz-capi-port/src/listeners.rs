@@ -84,29 +84,6 @@ impl<C> ListenerSet<C> {
         self.inner.with(|entries| entries.by_id.remove(&id))
     }
 
-    /// Call `call` with each listener the set holds as it starts, in declaration order, with the
-    /// set unlocked for each call, as [`Self::snapshot`] lets them be called, and with nothing
-    /// copied out but the one listener being called: a listener may remove itself or another from
-    /// inside its call, and one added during the calls is not called.
-    pub fn each(&self, mut call: impl FnMut(&C)) {
-        let end = self.inner.with(|entries| entries.next_id);
-        let mut from = 0;
-        while from < end {
-            let next = self.inner.with(|entries| {
-                entries
-                    .by_id
-                    .range(from..end)
-                    .next()
-                    .map(|(id, listener)| (*id, Arc::clone(listener)))
-            });
-            let Some((id, listener)) = next else {
-                break;
-            };
-            call(&listener);
-            from = id.wrapping_add(1);
-        }
-    }
-
     /// Every current listener, in declaration order, copied out so they can
     /// be called with the set unlocked.
     pub fn snapshot(&self) -> Vec<Arc<C>> {
@@ -119,31 +96,6 @@ impl<C> ListenerSet<C> {
 mod tests {
     use super::*;
     use alloc::vec;
-
-    /// Each listener present when the calls start is called once, in order, with the set
-    /// unlocked: a call removes a later listener, which is then not called, and adds one, which
-    /// is not called either. Turned red by calls made under the set's lock (the removal inside a
-    /// call deadlocks) or a walk that reads past where it started.
-    #[test]
-    fn each_calls_the_listeners_present_at_its_start_unlocked() {
-        let set = ListenerSet::new();
-        let first = set.insert(Arc::new("first"));
-        let second = set.insert(Arc::new("second"));
-        let _third = set.insert(Arc::new("third"));
-        let mut called = Vec::new();
-        set.each(|listener| {
-            called.push(*listener);
-            if *listener == "first" {
-                drop(set.remove(second));
-                let _ = set.insert(Arc::new("added"));
-            }
-        });
-        assert_eq!(called, vec!["first", "third"]);
-        assert!(
-            set.remove(first).is_some(),
-            "a call leaves the set as it found it"
-        );
-    }
 
     /// The two claims the slot this replaced got wrong: a second listener
     /// does not displace the first, and removing one leaves the other.

@@ -194,7 +194,7 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let options = {
-            let raw = cursor.peek_slice(1)?;
+            let raw = cursor.peek_array::<1>()?;
             let _v = raw[0];
             cursor.advance(1)?;
             _v
@@ -223,7 +223,7 @@ impl<S: LinkstateStorage> LinkstateIn<S> {
         let zid = zid.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
         let zid = ::sce_forge_runtime::codec::note_held(zid.map(|_v| _v.store::<S, LinkstateZidField>()).transpose(), &mut _over)?;
         let whatami = if (options & 0x02u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
+            let raw = cursor.peek_array::<1>()?;
             let _v = raw[0];
             cursor.advance(1)?;
             Some(_v)
@@ -837,7 +837,7 @@ impl<'a> LinkstateView<'a> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let options = {
-            let raw = cursor.peek_slice(1)?;
+            let raw = cursor.peek_array::<1>()?;
             let _v = raw[0];
             cursor.advance(1)?;
             _v
@@ -865,7 +865,7 @@ impl<'a> LinkstateView<'a> {
         };
         let zid = zid.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
         let whatami = if (options & 0x02u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
+            let raw = cursor.peek_array::<1>()?;
             let _v = raw[0];
             cursor.advance(1)?;
             Some(_v)

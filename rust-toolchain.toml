@@ -42,7 +42,7 @@
 # mangled; a distribution `arm-none-eabi-nm` can predate the v0 mangling, as the
 # hosted cross runner's did. The gate takes this component's `llvm-nm` first.
 #
-# workspace MSRV (crates/Cargo.toml rust-version = 1.81) is a separate,
+# workspace MSRV (crates/Cargo.toml rust-version = 1.83) is a separate,
 # lower-bound contract for downstream consumers; this pin is the build compiler.
 [toolchain]
 channel = "1.97.0"

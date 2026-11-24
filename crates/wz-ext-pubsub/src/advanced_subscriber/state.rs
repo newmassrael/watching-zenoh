@@ -1389,9 +1389,7 @@ impl State {
     #[cfg(feature = "advanced-history")]
     pub fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
         for (source, state) in self.sequenced.iter_mut() {
-            // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
-            // only since 1.82 and this crate's MSRV is 1.81.
-            if source.zid() == zid && eid.map_or(true, |e| e == source.eid()) {
+            if source.zid() == zid && eid.is_none_or(|e| e == source.eid()) {
                 state.retention.alive = alive;
             }
         }

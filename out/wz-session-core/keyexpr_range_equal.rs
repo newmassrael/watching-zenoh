@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_range_equal.scxml:11 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -23,11 +23,11 @@ pub fn keyexpr_range_equal(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_start
     let mut i: u32 = a_start;
     let mut j: u32 = b_start;
     while i < a_end && j < b_end {
-        if a[(i) as usize] != b[(j) as usize] {
+        if sce_forge_runtime::algorithm::proven::at(&a, i) != sce_forge_runtime::algorithm::proven::at(&b, j) {
             return false;
         }
-        i = i + 1;
-        j = j + 1;
+        i = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
+        j = sce_forge_runtime::algorithm::proven::add::<u32>(j, 1);
     }
     return i == a_end && j == b_end;
 }

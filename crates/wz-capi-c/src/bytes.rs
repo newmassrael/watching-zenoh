@@ -1214,7 +1214,7 @@ pub unsafe extern "C" fn z_bytes_from_str(
 pub unsafe extern "C" fn z_bytes_is_empty(this_: *const z_loaned_bytes_t) -> bool {
     crate::ffi::guard_val(true, || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { bytes_slice(this_) }.map_or(true, <[u8]>::is_empty)
+        unsafe { bytes_slice(this_) }.is_none_or(<[u8]>::is_empty)
     })
 }
 

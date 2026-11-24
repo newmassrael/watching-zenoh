@@ -13214,8 +13214,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// the inter-region filter per egress, as the pin filters each query
     /// direction (`zenoh/src/net/routing/dispatcher/queries.rs` @ `dst_zid: Some(&q.dir.dst_face.zid),`).
     fn query_block_admits(&self, block: &MeshQueryBlock, dst: &Zid) -> bool {
-        // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
-        block.crossing.map_or(true, |c| {
+        block.crossing.is_none_or(|c| {
             self.crosses(
                 Crossing::Query,
                 c.src,
@@ -13451,7 +13450,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 return Ok(None);
             }
             // R2880 — a cross leg's egress passes the inter-region filter.
-            if !zid.map_or(true, |z| self.query_block_admits(block, &z)) {
+            if !zid.is_none_or(|z| self.query_block_admits(block, &z)) {
                 return Ok(None);
             }
             let qid = self.pending.guard().allocate(id, fan, deadline);

@@ -459,8 +459,7 @@ impl SegmentProfile {
             return Err(Misplaced::EmptyChunk);
         }
         let end = offset.checked_add(piece.chunk.len() as u64);
-        // `Option::is_none_or` is stable only from 1.82, above the workspace MSRV.
-        if end.map_or(true, |end| end > total) {
+        if end.is_none_or(|end| end > total) {
             return Err(Misplaced::PastTotal);
         }
         Ok((total, offset))

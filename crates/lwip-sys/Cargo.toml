@@ -60,7 +60,7 @@ tcp = []
 # beyond major-version stability.
 cc = "1"
 # bindgen 0.71 tracks the rustc edition cycle compatible with workspace
-# rust-version (1.81). Matches zenoh-pico-sys pin.
+# rust-version (1.83). Matches zenoh-pico-sys pin.
 bindgen = "0.71"
 
 [lints]

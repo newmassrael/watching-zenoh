@@ -2097,7 +2097,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # R3264 — 0.29, for `Message::Binary(Bytes)` (0.26 and later): a message the
 # writer sends can be a slot of the link's transmit pool as the `Bytes`' owner,
 # where 0.24's `Binary(Vec<u8>)` forced a copy into a vector at the seam. 0.29
-# is the newest whose MSRV (tungstenite 1.71) is within this crate's 1.81;
+# is the newest whose MSRV (tungstenite 1.71) is within this crate's 1.83;
 # 0.30 asks for 1.85. Same licence (MIT, and MIT OR Apache-2.0 for tungstenite).
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
 # R311qa — `futures-util` is OPTIONAL, activated by exactly its two consumers so a

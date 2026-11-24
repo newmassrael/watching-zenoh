@@ -61,7 +61,9 @@ advanced-publisher = [
 # `_sn` gets, the heartbeat and periodic triggers, the retention sweep) and `advanced-history` the
 # startup and late-publisher history. The tokio runtime's `ext-pubsub-advanced-subscriber`,
 # `-recovery` and `-history` forward here, and a build that leaves them off carries none of it.
-advanced-subscriber = ["dep:hashbrown", "dep:foldhash"]
+# What keeps an entity's name declared is a count the port defines (`wz-capi-port`'s `Kept`), so
+# a host that lodges its names in places of its own takes no memory for them.
+advanced-subscriber = ["dep:hashbrown", "dep:foldhash", "dep:wz-capi-port"]
 advanced-recovery = ["advanced-subscriber"]
 advanced-history = ["advanced-recovery"]
 # The subscriber hosted on an engine's port (`advanced_subscriber::host`): its declarations, its

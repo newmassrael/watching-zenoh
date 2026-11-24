@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (25) to its ratchet, which a paid row
+given (TD-219) and holds the register's lint cells (29) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -267,32 +267,27 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-031 | `wz-session-core` | `lent_push` | `expect_used` | 1 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
-| TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
-| TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing` | 1 | open |
-| TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
-| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | open |
+| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
-| TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
-| TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing` | 2 | in flight |
 | TD-168 | `wz-capi-pico` | `connectivity` | `indexing_slicing`, `arithmetic_side_effects` | 8 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
-| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
-
-TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
-fills a list of `N` zids from the text a build states. It reads the text by slice pattern; the row
-it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
-that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
-(`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
 is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
 no choice spells. Its indexing is the `ALL[index]` of `policy_generated.rs`, which `wz_config.py`
 writes. A generated key table is checked the other way: the library answers `try_new`, and the
 image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
+
+TD-109 (`reset_generations`) is SCE output: its one `unreachable!` is the `proven_duplicate`
+accessor the generator emits for each case of a tagged result
+(`out/wz-session-core/take_generation_result.rs:58`), which the module includes and never calls,
+since it matches the result's cases itself. The hand-written module holds no site; the row is
+paid by the generator (step 7), with an accessor that answers an `Option` or none for a case
+nothing reads.
 
 TD-137 (`held_list::one_entry`) is an `unreachable!` behind a fallible constructor: the
 bounds of a one-entry list are checked when the build is compiled, but `Bounded::new` answers an
@@ -311,25 +306,13 @@ TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen by
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse. TD-108
-(`query_options::loopback_query`) builds the loopback's Query body (`QueryBuilder`), whose
-bounded copies answer a `Result`: a value form moves its callers in the cooperative engine and
-the tokio session, and is made with them.
+through `Bounded::new`, over a sink that cannot refuse.
 
 The transmit buffer names its refusal (`TxBuf::Error`, `CodecError` for every buffer today). A body
 a send hands its dispatch can refuse its own message (a key or a payload past its protocol bound),
 whatever buffer it is written into, so a heap send answers that refusal as a value
 (`SendWireError::Codec`, `PushOutcome::Refused`); an owned message, which its writer cannot
 refuse, is framed through the codec's own vector sink, which refuses no write.
-
-TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn` that fills an
-array of `N` waits when the build is compiled, and TD-102 (`ext_name`) keeps it for
-`identities_of`, a `const fn` that projects a row table into a `[u8; N]` of identities. Each
-writes an element of an array whose length is a generic, which a `const fn` of Rust 1.81 can do
-only by index, as TD-207 says; both are paid with `get_mut` when the MSRV is 1.83. TD-156
-(`process_pool`) keeps it for `Plan::with`, the `const fn` that writes a kind's slots and their
-bytes into the plan the build works out when it is compiled; its two writes are the module's last
-sites, paid with `get_mut` at the same MSRV.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
