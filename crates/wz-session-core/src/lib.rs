@@ -849,7 +849,7 @@ pub mod capacity;
 /// the decoder returns an owned `Vec` of entries.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-051 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
+#[allow(clippy::panic)]
 mod ext_chain;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +

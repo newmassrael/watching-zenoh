@@ -579,7 +579,7 @@ pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 /// outer ext; the tests that build a message's chain by hand). The handshake
 /// messages, the transport composer's included, are written whole
 /// by their documents, and the lend-only Open writes its chain straight after
-/// its head through [`encode_ext_chain_into`]; none of them calls this.
+/// its head through `handshake_encode::encode_held_chain_into`; none of them calls this.
 #[cfg(all(
     feature = "alloc",
     any(
@@ -605,26 +605,21 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let mut buf = Vec::with_capacity(entries.len() * 4);
-    encode_ext_chain_into(&mut buf, entries).expect("a Vec grows, so its sink is infallible");
+    let mut buf = Vec::with_capacity(entries.len().saturating_mul(4));
+    // An owned entry is a value its writer cannot refuse, and the vector refuses no write.
+    match write_ext_chain(
+        &mut sce_forge_runtime::codec::VecSink::new(&mut buf),
+        entries,
+    ) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     buf
 }
 
-/// [`encode_ext_chain`] into a buffer the caller chose: a heap `Vec` (what the
-/// function above passes) or a link's lent slot, so a handshake message's chain
-/// is written once, where the message is, and not into a vector of its own that
-/// is then copied after the body.
-///
-/// The same bytes as the vector form, by construction: each entry is encoded
-/// from its borrowed view with the chain-continuation bit set on its header
-/// first, which is the byte the vector form patched after encoding it. A fixed
-/// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
-/// already written stay, so the caller rolls back with
-/// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
-// The Init and the Open are written by `handshake_encode` (the lend-only Open's
-// chain by `encode_held_chain_into`), so the chain is written here for the vector
-// form above and for the tests that hold the two forms to each other: gated as the
-// vector form is, which the tests below read beside it.
+/// The entries of a chain into `w`, each with its chain-continuation bit set but the last's:
+/// what [`encode_ext_chain`] writes into its vector and `encode_ext_chain_into` into a buffer
+/// the caller chose.
 #[cfg(all(
     feature = "alloc",
     any(
@@ -643,10 +638,10 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
         )
     )
 ))]
-pub(crate) fn encode_ext_chain_into(
-    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+fn write_ext_chain<K: sce_forge_runtime::codec::SceSink>(
+    w: &mut K,
     entries: &[ExtEntryOwned],
-) -> Result<(), sce_forge_runtime::codec::CodecError> {
+) -> Result<(), K::Error> {
     let last = entries.len().wrapping_sub(1);
     for (i, entry) in entries.iter().enumerate() {
         let mut view = entry.as_borrowed();
@@ -655,9 +650,47 @@ pub(crate) fn encode_ext_chain_into(
         } else {
             view.header |= 0x80;
         }
-        view.encode(&mut crate::tx_buf::TxSink::new(&mut *buf))?;
+        view.encode(w)?;
     }
     Ok(())
+}
+
+/// [`encode_ext_chain`] into a buffer the caller chose: a heap `Vec` (what the
+/// function above passes) or a link's lent slot, so a handshake message's chain
+/// is written once, where the message is, and not into a vector of its own that
+/// is then copied after the body.
+///
+/// The same bytes as the vector form, by construction: each entry is encoded
+/// from its borrowed view with the chain-continuation bit set on its header
+/// first, which is the byte the vector form patched after encoding it. A fixed
+/// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
+/// already written stay, so the caller rolls back with
+/// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
+// The Init and the Open are written by `handshake_encode` (the lend-only Open's
+// chain by `encode_held_chain_into`), and the vector form writes through the vector's
+// own sink, so this form's readers are the tests that hold the two forms to each other.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        all(
+            test,
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-close",
+            feature = "codec-frame"
+        ),
+        all(
+            test,
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body")
+        )
+    )
+))]
+pub(crate) fn encode_ext_chain_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    entries: &[ExtEntryOwned],
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    write_ext_chain(&mut crate::tx_buf::TxSink::new(buf), entries)
 }
 
 /// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
