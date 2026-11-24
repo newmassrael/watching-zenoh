@@ -62,6 +62,7 @@ use crate::qos::CongestionControl;
 use crate::query_sink::QueryView;
 use crate::reliability::Reliability;
 use crate::reply_sink::{ReplyKind, ReplyView};
+use crate::row_callback::ThreadForm;
 use crate::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo};
 use crate::session_tables::Presence;
 use crate::session_zid::ZID_MAX;
@@ -2143,11 +2144,18 @@ impl<C: RoundCalls> Round<C> {
     /// entry, the callbacks and a key of the longest left. A record's other parts lie where the
     /// round reads them. An empty table takes any record, so a link is never stopped for good.
     ///
+    /// A round whose calls all run on the thread that steps the session
+    /// ([`OneThread`](crate::row_callback::OneThread)) takes one record at a time: the record
+    /// after it is read once its callbacks returned, so a callback sees the session as the
+    /// messages before its record left it and none after, as zenoh-pico calls each callback while
+    /// it reads the batch.
+    ///
     /// # Safety
     /// The caller holds the session's lock.
     pub unsafe fn has_room(&self, room: ReadRoom) -> bool {
         match self.state.load(Ordering::Acquire) {
             EMPTY => true,
+            FILLING if !<C::Form as ThreadForm>::OTHER_THREADS => false,
             FILLING => {
                 // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
                 let table = unsafe { &*self.table.get() };

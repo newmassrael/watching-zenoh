@@ -4663,21 +4663,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// delivers nothing itself: the delivery this thread is already making goes on to hand out
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
-    fn deliver(&self) {
-        self.deliveries.within(|entered| {
-            if entered {
-                self.hand_out_entered();
-            }
-        });
+    /// Whether this call handed anything out: none inside the delivery it is already making.
+    fn deliver(&self) -> bool {
+        self.deliveries
+            .within(|entered| entered && self.hand_out_entered())
     }
 
-    /// Everything [`Self::deliver`] hands out, inside the delivery it entered.
-    fn hand_out_entered(&self) {
+    /// Everything [`Self::deliver`] hands out, inside the delivery it entered: whether its passes
+    /// handed anything out.
+    fn hand_out_entered(&self) -> bool {
         // A callback can queue more for this delivery than the pass that ran it has already passed
         // over (a queryable's answer to the session's own get lies in the next round): the passes
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
         // there.
-        while self.hand_out() {}
+        let mut handed = false;
+        while self.hand_out() {
+            handed = true;
+        }
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
         self.let_go_of_released();
         // What the declaration watches are owed and the round had no room for when it came (the
@@ -4729,6 +4731,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
         }
+        handed
     }
 
     /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
@@ -5906,6 +5909,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.read_matching(core);
         }
         Some(now_us)
+    }
+
+    /// One take of the session for a step after `wait`: its links, what publishes handed to it,
+    /// and whether a periodic job is due by the clock reading the step made. What publishes handed
+    /// to the session while it was held leaves on this step too, so a program that only reads its
+    /// session sends it; let go of once the session is. Whether the session is still open, and
+    /// the time a job is due.
+    fn step_after(&self, wait: IdleWait) -> (bool, Option<u64>) {
+        let Some(mut core) = self.live() else {
+            return (false, None);
+        };
+        let handed = matches!(wait, IdleWait::Input { .. });
+        core.0.transport.links.waited(wait);
+        if handed {
+            self.hand_back.handed_back();
+        }
+        let stepped = self.step(&mut core.0);
+        self.input_held.store(
+            stepped.is_some() && core.0.transport.holds_input(),
+            Ordering::Relaxed,
+        );
+        let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
+        #[cfg(any(feature = "listen", feature = "group"))]
+        self.send_handed_now(&core.0);
+        (stepped.is_some(), jobs_due_ms)
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -7979,30 +8007,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        // One take of the session for the step: its links, what publishes handed to it, and
-        // whether a periodic job is due by the clock reading the step made.
-        // What publishes handed to the session while it was held leaves on this step too, so a
-        // program that only reads its session sends it; let go of once the session is.
-        let (stepped, jobs_due_ms) = match self.live() {
-            Some(mut core) => {
-                let handed = matches!(wait, IdleWait::Input { .. });
-                core.0.transport.links.waited(wait);
-                if handed {
-                    self.hand_back.handed_back();
-                }
-                let stepped = self.step(&mut core.0);
-                self.input_held.store(
-                    stepped.is_some() && core.0.transport.holds_input(),
-                    Ordering::Relaxed,
-                );
-                let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
-                #[cfg(any(feature = "listen", feature = "group"))]
-                self.send_handed_now(&core.0);
-                (stepped.is_some(), jobs_due_ms)
-            }
-            None => (false, None),
-        };
-        self.deliver();
+        let (mut stepped, jobs_due_ms) = self.step_after(wait);
+        let mut handed = self.deliver();
+        // One thread: the round took one record of what the links hold (`Round::has_room`), so
+        // the step goes on in this read, each record read once the callbacks of the one before
+        // returned, until the links hold nothing more or a step hands nothing out.
+        while !<CoopForm as ThreadForm>::OTHER_THREADS
+            && handed
+            && stepped
+            && self.input_held.load(Ordering::Relaxed)
+        {
+            stepped = self.step_after(IdleWait::None).0;
+            handed = self.deliver();
+        }
         if let Some(started_ms) = jobs_due_ms {
             self.run_due_tickers(started_ms);
         }

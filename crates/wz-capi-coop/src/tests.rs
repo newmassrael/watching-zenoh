@@ -103,6 +103,9 @@ enum Command {
     /// router's space with no suffix, undeclare the id, and push `.1` on it again, which the
     /// receiver can no longer resolve.
     PushAliasThenUndeclare(wz_session_core::wire_id::ExprId, &'static [u8]),
+    /// In one batch window, so that one frame carries both: push `.2` on the key `.1`, then
+    /// retract subscriber `.0` of the router's.
+    PushThenUndeclareSubscriber(u64, &'static str, &'static [u8]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -659,6 +662,12 @@ fn run_router(
                     true,
                     false,
                 );
+            }
+            Ok(Command::PushThenUndeclareSubscriber(id, key, value)) => {
+                let _ = actions.batch_start();
+                let _ = actions.send_push_literal(key, value, true);
+                actions.send_undeclare_subscriber(id);
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushAliasThenUndeclare(id, value)) => {
                 let aliased = || {
@@ -1315,6 +1324,70 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
         received.load(Ordering::SeqCst),
         3,
         "nothing is handed to a subscriber after its undeclaration"
+    );
+}
+
+/// A Push and, after it in the same batch, the retraction of the router's subscriber that opened a
+/// write filter. In a build of one thread the retraction is applied after the Push's callback
+/// returned, so the callback sees the filter still open, as zenoh-pico calls each callback while
+/// it reads the batch (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `_z_handle_network_message`); a build of threads reads the batch whole before its callbacks,
+/// which see the filter shut. Turned red by a round of one thread that takes the next record while
+/// it has room (`Round::has_room`).
+#[test]
+fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() {
+    use wz_session_core::row_callback::ThreadForm;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let ask = Some(InterestAsk {
+        mapping_id: 0,
+        suffix: Some("demo/o"),
+        aggregate: false,
+    });
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/o",
+            &WireKey::literal(),
+            ask,
+            false,
+        )
+        .expect("a session with ids left declares");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let session = Arc::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/o", WireKey::literal(), Locality::Any, None, {
+            let seen = seen.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    seen.lock()
+                        .unwrap()
+                        .push(engine.write_filter_active(filter));
+                }
+            })
+        })
+        .expect("declared");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushThenUndeclareSubscriber(1, "demo/o", b"v"));
+    until(&engine, "the push and the retraction after it", || {
+        !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
+    });
+    let threads = <crate::round::CoopForm as ThreadForm>::OTHER_THREADS;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [threads],
+        "the callback saw the filter shut only where the batch is read whole before it"
     );
 }
 
