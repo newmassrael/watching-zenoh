@@ -150,6 +150,19 @@ impl LinkstateWeightSource for LinkstateWeightParts {
     }
 }
 
+#[allow(dead_code)]
+impl LinkstateWeightParts {
+    /// The parts of what `src` says, each accessor of [`LinkstateWeightSource`] read
+    /// once: the one form a codec that holds this one writes it from,
+    /// whatever form the value it is handed is in (docs/adr/0058).
+    #[doc(hidden)]
+    pub fn of<S: LinkstateWeightSource + ?Sized>(src: &S) -> Self {
+        Self {
+            weight: src.weight(),
+        }
+    }
+}
+
 impl LinkstateWeightSource for LinkstateWeight {
     fn weight(&self) -> u64 {
         self.weight
@@ -222,6 +235,21 @@ impl LinkstateWeightWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `LinkstateWeight` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct LinkstateWeightWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for LinkstateWeightWalk {
+    type Entry<'b> = LinkstateWeightView;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateWeightView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `LinkstateWeight` holds no bounded list, embedded body or variant, so a
 // view of it would hold what it holds. Its view is the codec itself under the
 // name every codec's view has, which lets a codec that embeds, lists or

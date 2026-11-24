@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 #[cfg(feature = "request-put-del")]
@@ -808,6 +808,21 @@ impl RequestWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `Request` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct RequestWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for RequestWalk {
+    type Entry<'b> = RequestView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        RequestView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `RequestView` is what a decode of `Request` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `Request` holds it, an embedded body or a variant arm as its
@@ -837,18 +852,10 @@ impl<'a> Default for RequestViewVariant<'a> {
     }
 }
 
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct RequestExtensionsWalk;
-
-impl ListWalk<0> for RequestExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type RequestExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -856,7 +863,7 @@ pub struct RequestView<'a> {
     pub header: u8,
     pub rid: u32,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, RequestExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
     pub body: RequestViewVariant<'a>,
 }
 

@@ -19,7 +19,7 @@ use sce_forge_runtime::codec::VecSink;
 use super::ext_unit::ExtUnit;
 use super::ext_zint::ExtZint;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::ext_entry::ExtEntryView;
 use super::ext_unit::ExtUnitView;
 use super::ext_zint::ExtZintView;
@@ -594,6 +594,21 @@ impl TransportOamWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `TransportOam` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct TransportOamWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for TransportOamWalk {
+    type Entry<'b> = TransportOamView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        TransportOamView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `TransportOamView` is what a decode of `TransportOam` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `TransportOam` holds it, an embedded body or a variant arm as its
@@ -621,25 +636,17 @@ impl<'a> Default for TransportOamViewVariant<'a> {
     }
 }
 
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct TransportOamExtensionsWalk;
-
-impl ListWalk<0> for TransportOamExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type TransportOamExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct TransportOamView<'a> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<Bounded<ListView<'a, TransportOamExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
     pub body: TransportOamViewVariant<'a>,
 }
 
