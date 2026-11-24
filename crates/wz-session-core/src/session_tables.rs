@@ -46,6 +46,7 @@ use core::fmt;
 
 use crate::bounded::{
     Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
+    TableLender,
 };
 use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
@@ -2003,7 +2004,10 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     /// [`TableRows`], their keys kept in `keys`, the session's key arena. Refused past the
     /// build's bound of a table or past what the arena has left.
     pub fn lent(arena: &mut Arena, keys: KeySpace, rows: &TableRows) -> Result<Self, LendRefused> {
-        Ok(Self {
+        // Lent whole and given up whole: a refused table leaves the ones after it rowless, and
+        // the set goes at once, not one table at a time behind each refusal.
+        let mut lend = TableLender::new(arena);
+        let tables = Self {
             keys: LentKeys::from(keys),
             next_entity: Some(1),
             next_expr: 1,
@@ -2012,18 +2016,21 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             // A table whose rows are lent at open remembers no key: each slot of the cache would
             // be rows of its own, which only the arena could give it.
             memo: MatchMemo::new(0),
-            keyexprs: SlotMap::lent(arena, rows.keyexprs)?,
-            subscribers: SlotMap::lent(arena, rows.subscribers)?,
-            queryables: SlotMap::lent(arena, rows.queryables)?,
-            tokens: SlotMap::lent(arena, rows.tokens)?,
-            liveliness_subscribers: SlotMap::lent(arena, rows.liveliness_subscribers)?,
-            interests: SlotMap::lent(arena, rows.interests())?,
-            write_filters: SlotMap::lent(arena, rows.write_filters)?,
-            matching: SlotMap::lent(arena, rows.matching_listeners)?,
-            pending_gets: SlotMap::lent(arena, rows.pending_gets)?,
+            keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
+            subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
+            queryables: SlotMap::lent_from(&mut lend, rows.queryables),
+            tokens: SlotMap::lent_from(&mut lend, rows.tokens),
+            liveliness_subscribers: SlotMap::lent_from(&mut lend, rows.liveliness_subscribers),
+            interests: SlotMap::lent_from(&mut lend, rows.interests()),
+            write_filters: SlotMap::lent_from(&mut lend, rows.write_filters),
+            matching: SlotMap::lent_from(&mut lend, rows.matching_listeners),
+            pending_gets: SlotMap::lent_from(&mut lend, rows.pending_gets),
             #[cfg(feature = "storage-profile")]
-            held: crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)?,
-        })
+            held: lend
+                .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
+        };
+        lend.finish()?;
+        Ok(tables)
     }
 
     /// The bytes [`Self::lent`] takes of an arena for `rows`. `None` past the address space.

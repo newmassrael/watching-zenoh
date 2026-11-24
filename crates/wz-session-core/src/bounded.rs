@@ -1382,6 +1382,68 @@ impl fmt::Display for LendRefused {
 
 impl core::error::Error for LendRefused {}
 
+/// Lends the tables of a set from an [`Arena`] in the order they are asked, keeping the first
+/// refusal: every table asked after it is lent no rows, as a table made without an arena is, and
+/// [`Self::finish`] hands the refusal back. The set is built whole either way and given up whole,
+/// once, so its maker has no path of its own for each table that gives up the ones before it.
+pub struct TableLender<'a> {
+    arena: &'a mut Arena,
+    refused: Option<LendRefused>,
+}
+
+impl<'a> TableLender<'a> {
+    /// A lender of the tables of one set from `arena`.
+    pub fn new(arena: &'a mut Arena) -> Self {
+        Self {
+            arena,
+            refused: None,
+        }
+    }
+
+    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// (`Arena::lend_rows`); `None`, taking nothing, when it is refused or a table before it was.
+    pub(crate) fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> Option<(NonNull<u8>, u32)> {
+        if self.refused.is_some() {
+            return None;
+        }
+        match self.arena.lend_rows(rows, ceiling, bytes) {
+            Ok(span) => Some(span),
+            Err(why) => {
+                self.refused = Some(why);
+                None
+            }
+        }
+    }
+
+    /// The table `lend` lends from the arena; the table of no rows when it is refused or a table
+    /// before it was.
+    pub fn lend_with<T: Default>(
+        &mut self,
+        lend: impl FnOnce(&mut Arena) -> Result<T, LendRefused>,
+    ) -> T {
+        if self.refused.is_none() {
+            match lend(&mut *self.arena) {
+                Ok(table) => return table,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        T::default()
+    }
+
+    /// The first refusal, if a table was refused.
+    pub fn finish(self) -> Result<(), LendRefused> {
+        match self.refused {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Arena {
     /// An arena of the `bytes` bytes at `base`, none of them lent.
     ///

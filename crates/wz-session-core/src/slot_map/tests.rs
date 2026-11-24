@@ -241,6 +241,34 @@ fn a_lent_table_whose_rows_find_no_room_is_refused() {
     assert_eq!(arena.high_water(), meta);
 }
 
+/// A lender keeps its first refusal: a table asked after it is lent no rows, takes nothing of the
+/// arena and refuses every insert, though the arena has the room for it, and `finish` hands the
+/// first refusal back. The CONTROL is the table lent before the refusal, which holds its rows.
+#[test]
+fn a_lender_lends_nothing_after_its_first_refusal() {
+    let fits = SlotMap::<Test, u32, 4, Lent>::arena_bytes(2).unwrap();
+    let mut arena = arena(fits * 2);
+    let mut lend = TableLender::new(&mut arena);
+    let mut first = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 2);
+    let mut past = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 5);
+    let mut after = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 2);
+    assert_eq!(
+        lend.finish(),
+        Err(LendRefused::OverCeiling {
+            rows: 5,
+            ceiling: 4
+        })
+    );
+    assert_eq!(arena.high_water(), fits);
+    assert_eq!((past.capacity(), after.capacity()), (0, 0));
+    assert!(past.insert(1).is_err());
+    assert!(after.insert(1).is_err());
+    assert!(
+        first.insert(1).is_ok(),
+        "CONTROL: the table lent before holds its rows"
+    );
+}
+
 #[test]
 fn a_table_made_without_rows_on_the_lent_policy_refuses_every_insert() {
     let mut map = SlotMap::<Test, u32, 4, Lent>::new();
