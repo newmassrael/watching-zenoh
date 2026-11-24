@@ -121,7 +121,7 @@ fn recovery_query_timeout_ms_clamps_to_a_live_deadline() {
 
 /// R311y442 — what the selector says is the thing a foreign peer logs: the
 /// parts are `;`-joined, the bare `_anyke` flag is ALWAYS there, and the `_time` bound is
-/// zenoh's `[now(-{age}s)..]` Display.
+/// zenoh's `[now(-<age>s)..]` Display.
 ///
 /// R311y442 REWROTE the expectations, and what they used to say is the
 /// point. This test PINNED `_max=2&_time=[now(-30s)..]` and a `None` for the
@@ -141,39 +141,112 @@ fn history_selector_emits_max_and_time() {
     assert_eq!(history_selector(None, None), "_anyke".to_string());
     assert_eq!(history_selector(Some(2), None), "_max=2;_anyke".to_string());
     assert_eq!(
-        history_selector(None, Some(30.0)),
+        history_selector(None, Some(Duration::from_secs(30))),
         "_time=[now(-30s)..];_anyke".to_string()
     );
     assert_eq!(
-        history_selector(Some(2), Some(30.0)),
+        history_selector(Some(2), Some(Duration::from_secs(30))),
         "_max=2;_time=[now(-30s)..];_anyke".to_string()
     );
 }
 
+/// An age of whole milliseconds, which is every age the C doors hand over, is written as the
+/// seconds `f64`'s `Display` prints for it, so the selector reads as zenoh's does; an age finer
+/// than a millisecond is written to the nanosecond. Turned red by a fraction written with its
+/// trailing zeros, without its leading zeros, or rounded.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn an_age_is_written_as_the_seconds_it_is() {
+    for ms in [
+        1u64,
+        10,
+        100,
+        999,
+        1_000,
+        1_500,
+        60_000,
+        86_400_123,
+        1_000_000_000_000_000,
+    ] {
+        let age = Duration::from_millis(ms);
+        assert_eq!(
+            GetParameters::history(None, Some(age)).as_str(),
+            format!("_time=[now(-{}s)..]", ms as f64 / 1000.0),
+            "{ms} ms"
+        );
+    }
+    for (age, seconds) in [
+        (Duration::from_nanos(1), "0.000000001"),
+        (Duration::from_micros(1_500), "0.0015"),
+        (Duration::new(3, 120_000_000), "3.12"),
+        (Duration::new(7, 999_999_999), "7.999999999"),
+    ] {
+        assert_eq!(
+            GetParameters::history(None, Some(age)).as_str(),
+            format!("_time=[now(-{seconds}s)..]"),
+        );
+    }
+}
+
+/// A cache reading the selector picks the samples it picked when the age was written as `f64`
+/// seconds: the two texts resolve to one range. Turned red by an age written in another unit or
+/// value than the one asked for.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn a_cache_reads_the_age_as_the_range_the_seconds_named() {
+    use crate::time_range::{ntp64_to_system_time, of_parameters};
+
+    let now = ntp64_to_system_time(1_000_000u64 << 32);
+    for age in [
+        Duration::from_millis(1),
+        Duration::from_millis(1_500),
+        Duration::from_secs(30),
+        Duration::from_millis(86_400_123),
+        Duration::from_micros(2_500),
+        Duration::from_nanos(1_234_567_891),
+    ] {
+        let written = GetParameters::history(None, Some(age));
+        let range = of_parameters(written.as_str(), now);
+        assert!(range.is_some(), "{} is a range", written.as_str());
+        assert_eq!(
+            range,
+            of_parameters(&format!("_time=[now(-{}s)..]", age.as_secs_f64()), now),
+            "{}",
+            written.as_str()
+        );
+    }
+}
+
 /// The parameters a history or recovery get lends are the selector's text without the flag,
-/// which the get writes after them; the longest a `usize` and an `f64` print fit the bound, so
-/// no part is ever left out. Turned red by a bound under the longest `f64` text.
+/// which the get writes after them; the longest `usize` and age fit the bound, so no part is
+/// ever left out. Turned red by a bound under the longest age text.
 #[cfg(feature = "advanced-history")]
 #[test]
 fn get_parameters_write_the_selector_and_the_longest_values_fit() {
     assert_eq!(GetParameters::history(None, None).as_bytes(), b"");
     assert_eq!(
-        GetParameters::history(Some(2), Some(30.0)).as_str(),
+        GetParameters::history(Some(2), Some(Duration::from_secs(30))).as_str(),
         "_max=2;_time=[now(-30s)..]"
     );
     assert_eq!(
-        GetParameters::history(None, Some(0.0)).as_str(),
+        GetParameters::history(None, Some(Duration::ZERO)).as_str(),
         "_time=[now()..]"
     );
     assert_eq!(GetParameters::recovery(7, None).as_str(), "_sn=7..");
     assert_eq!(GetParameters::recovery(7, Some(9)).as_str(), "_sn=7..9");
-    for age in [-f64::from_bits(1), f64::MIN, f64::MAX] {
-        assert_eq!(
-            GetParameters::history(Some(usize::MAX), Some(age)).as_str(),
-            format!("_max={};_time=[now(-{age}s)..]", usize::MAX),
-            "the longest values are written whole"
-        );
-    }
+    assert_eq!(
+        GetParameters::history(Some(usize::MAX), Some(Duration::MAX)).as_str(),
+        format!(
+            "_max={};_time=[now(-{}.999999999s)..]",
+            usize::MAX,
+            u64::MAX
+        ),
+        "the longest values are written whole"
+    );
+    assert_eq!(
+        GetParameters::recovery(u32::MAX, Some(u32::MAX)).as_str(),
+        format!("_sn={}..{}", u32::MAX, u32::MAX)
+    );
 }
 
 /// A sample recovered from a reply is built from the reply's bytes as they

@@ -1117,7 +1117,7 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     let shared = shared_on(&script, &delivered);
 
     let before = allocations();
-    let parameters = super::GetParameters::history(Some(4), Some(1.5));
+    let parameters = super::GetParameters::history(Some(4), Some(Duration::from_millis(1_500)));
     let opts = super::get_options(&shared, &parameters);
     let parts = opts.query_parts();
     let lent = (
@@ -1139,7 +1139,13 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     );
     assert_eq!(
         opts.sent_parameters().as_deref(),
-        Some(crate::advanced_subscriber::plans::history_selector(Some(4), Some(1.5)).as_bytes()),
+        Some(
+            crate::advanced_subscriber::plans::history_selector(
+                Some(4),
+                Some(Duration::from_millis(1_500))
+            )
+            .as_bytes()
+        ),
     );
 }
 

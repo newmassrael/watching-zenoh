@@ -161,8 +161,9 @@ impl SampleView for RecoveredView<'_> {
 }
 
 /// Build the startup history GET selector from the `_max` cap (`sample_depth`)
-/// and the `_time` age bound (`max_age`). The `_time` form `[now(-{age}s)..]`
-/// is byte-identical to zenoh's `TimeRange<TimeExpr>` Display of
+/// and the `_time` age bound (`max_age`). The `_time` form `[now(-<age>s)..]`
+/// writes the age as a decimal number of seconds, which for every age of whole
+/// milliseconds is the text zenoh's `TimeRange<TimeExpr>` Display writes for
 /// `[Inclusive(Now{offset_secs:-age})..]` (zenoh-util time_range.rs:128-141/
 /// 327-339), so a wz cache and a zenoh cache both filter it exactly.
 ///
@@ -176,21 +177,77 @@ impl SampleView for RecoveredView<'_> {
 /// subscriber recovers nothing at all — measured as 5 refusals against 5 cached
 /// samples on a `z_advanced_pub` oracle.
 #[cfg(feature = "advanced-history")]
-pub fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String {
+pub fn history_selector(sample_depth: Option<usize>, max_age: Option<Duration>) -> String {
     let stated = GetParameters::history(sample_depth, max_age);
     let flag = core::str::from_utf8(wz_session_core::selector_params::anyke_suffix(
         stated.as_bytes(),
     ))
     .unwrap_or(wz_session_core::selector_params::ANYKE_PARAM);
-    format!("{}{flag}", stated.as_str())
+    let mut selector = String::from(stated.as_str());
+    selector.push_str(flag);
+    selector
 }
 
 /// The most bytes the parameters of a get take as [`GetParameters`] writes them: `_max=` and a
-/// `usize` (25), the separator, `_time=[now(-` (12), the longest text `f64`'s `Display` writes
-/// (a negative subnormal's, 327) and `s)..]` (5), which is more than a `_sn` range of two `u32`s
-/// takes. The flag is not among them: the get writes it after them.
+/// `usize`, the separator, and `_time=[now(-`, the seconds of a `Duration` with the nine digits
+/// of its fraction, and `s)..]`, which is more than a `_sn` range of two `u32`s takes. The flag
+/// is not among them: the get writes it after them.
 #[cfg(feature = "advanced-recovery")]
-const GET_PARAMETERS_BYTES: usize = 384;
+const GET_PARAMETERS_BYTES: usize = "_max=".len()
+    + U64_DIGITS
+    + 1
+    + "_time=[now(-".len()
+    + U64_DIGITS
+    + ".".len()
+    + 9
+    + "s)..]".len();
+
+/// The most digits a `u64` takes in decimal.
+#[cfg(feature = "advanced-recovery")]
+const U64_DIGITS: usize = 20;
+
+/// A number in decimal, as `{n}` prints it, written without `core::fmt`.
+#[cfg(feature = "advanced-recovery")]
+type Digits = wz_session_core::text_out::FixedText<U64_DIGITS>;
+
+/// `n` in decimal.
+#[cfg(feature = "advanced-recovery")]
+fn digits(n: u64) -> Digits {
+    use wz_session_core::text_out::TextOut as _;
+    let mut text = Digits::new();
+    text.push_u64(n);
+    text
+}
+
+/// `age` in seconds, `<secs>[.<fraction>]`, the fraction's trailing zeros left out and no
+/// fraction for a whole second. Written from the integers the `Duration` holds, so the text is
+/// the age exactly; for an age of whole milliseconds it is the text `f64`'s `Display` writes for
+/// that number of seconds.
+#[cfg(feature = "advanced-history")]
+fn seconds_text(age: Duration) -> wz_session_core::text_out::FixedText<{ U64_DIGITS + 10 }> {
+    use wz_session_core::text_out::TextOut as _;
+    let mut text = wz_session_core::text_out::FixedText::new();
+    text.push_u64(age.as_secs());
+    let mut fraction = age.subsec_nanos();
+    if fraction != 0 {
+        // A nonzero fraction ends in a nonzero digit after at most eight of these.
+        let mut places: usize = 9;
+        while fraction.is_multiple_of(10) {
+            fraction /= 10;
+            places = places.saturating_sub(1);
+        }
+        let written = digits(u64::from(fraction));
+        let shown = written.prefix();
+        text.push_str(".");
+        text.push_str(
+            "00000000"
+                .get(..places.saturating_sub(shown.len()))
+                .unwrap_or_default(),
+        );
+        text.push_str(shown);
+    }
+    text
+}
 
 /// The selector parameters of one get the subscriber asks, written where the caller keeps them
 /// and lent to the get for the call, so asking it takes no memory. The reply-keyexpr-any flag the
@@ -205,24 +262,23 @@ pub struct GetParameters {
 #[cfg(feature = "advanced-recovery")]
 impl GetParameters {
     /// The startup or a late publisher's history get: at most `sample_depth` samples of each
-    /// source, none older than `max_age` seconds.
+    /// source, none older than `max_age`.
     #[cfg(feature = "advanced-history")]
-    pub fn history(sample_depth: Option<usize>, max_age: Option<f64>) -> Self {
+    pub fn history(sample_depth: Option<usize>, max_age: Option<Duration>) -> Self {
         let mut parameters = Self::none();
         if let Some(max) = sample_depth {
-            parameters.push(format_args!("_max={max}"));
+            let max = digits(u64::try_from(max).unwrap_or(u64::MAX));
+            parameters.push(&["_max=", max.prefix()]);
         }
         if let Some(age) = max_age {
-            // R311y442 review (REVIEWER 1, finding 6) — upstream's `TimeExpr` Display
-            // special-cases a zero offset to `now()` rather than `now(-0s)`
-            // (zenoh-util/src/time_range.rs:333-339), and IEEE `-0.0 == 0.0` so a
-            // `max_age(0.0)` lands there. The two forms parse to the same instant, so
-            // this is byte-parity rather than a behaviour change — but the emitted
-            // selector is the thing a foreign peer logs and a future diff compares.
-            if age == 0.0 {
-                parameters.push(format_args!("_time=[now()..]"));
+            // Upstream's `TimeExpr` Display writes a zero offset as `now()`, not `now(-0s)`
+            // (zenoh-util/src/time_range.rs:333-339); both parse to the same instant, and the
+            // selector is what a foreign peer logs and a diff compares.
+            if age.is_zero() {
+                parameters.push(&["_time=[now()..]"]);
             } else {
-                parameters.push(format_args!("_time=[now(-{age}s)..]"));
+                let seconds = seconds_text(age);
+                parameters.push(&["_time=[now(-", seconds.prefix(), "s)..]"]);
             }
         }
         parameters
@@ -231,9 +287,13 @@ impl GetParameters {
     /// A recovery get: the sequence numbers from `from_sn`, up to `to_sn` when it is bounded.
     pub fn recovery(from_sn: u32, to_sn: Option<u32>) -> Self {
         let mut parameters = Self::none();
+        let from = digits(u64::from(from_sn));
         match to_sn {
-            Some(to) => parameters.push(format_args!("_sn={from_sn}..{to}")),
-            None => parameters.push(format_args!("_sn={from_sn}..")),
+            Some(to_sn) => {
+                let to = digits(u64::from(to_sn));
+                parameters.push(&["_sn=", from.prefix(), "..", to.prefix()]);
+            }
+            None => parameters.push(&["_sn=", from.prefix(), ".."]),
         }
         parameters
     }
@@ -255,34 +315,29 @@ impl GetParameters {
         }
     }
 
-    /// Write `part` after the separator when one precedes it. A part that does not fit is left
-    /// out whole, so what is written stays a list of whole parameters; the bound above leaves none
-    /// out.
-    fn push(&mut self, part: core::fmt::Arguments<'_>) {
-        use core::fmt::Write as _;
+    /// Write one parameter, the text of `pieces` in order, after the separator when one precedes
+    /// it. A parameter that does not fit is left out whole, so what is written stays a list of
+    /// whole parameters; the bound above leaves none out.
+    fn push(&mut self, pieces: &[&str]) {
         let start = self.len;
-        let written = if start == 0 {
-            self.write_fmt(part)
+        let mut separator_bytes = [0u8; 4];
+        let separator: &str = if start == 0 {
+            ""
         } else {
-            self.write_char(wz_session_core::selector_params::PARAM_LIST_SEPARATOR)
-                .and_then(|()| self.write_fmt(part))
+            wz_session_core::selector_params::PARAM_LIST_SEPARATOR.encode_utf8(&mut separator_bytes)
         };
-        if written.is_err() {
-            self.len = start;
+        let mut end = start;
+        for piece in core::iter::once(separator).chain(pieces.iter().copied()) {
+            let Some(room) = end
+                .checked_add(piece.len())
+                .and_then(|after| self.bytes.get_mut(end..after))
+            else {
+                return;
+            };
+            room.copy_from_slice(piece.as_bytes());
+            end = end.saturating_add(piece.len());
         }
-    }
-}
-
-#[cfg(feature = "advanced-recovery")]
-impl core::fmt::Write for GetParameters {
-    fn write_str(&mut self, text: &str) -> core::fmt::Result {
-        let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
-        self.bytes
-            .get_mut(self.len..end)
-            .ok_or(core::fmt::Error)?
-            .copy_from_slice(text.as_bytes());
         self.len = end;
-        Ok(())
     }
 }
 
