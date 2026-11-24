@@ -56,7 +56,7 @@
 #[cfg(test)]
 extern crate std;
 
-// The heap profile's links lend their owner a read of their stream (`stream::StreamReader`), and a
+// The heap profile's waits share a session's wake among its wakers (`net::PosixWaits::wake`), and a
 // group keeps what it receives (`multicast`).
 #[cfg(any(
     all(feature = "alloc", not(feature = "session-slot")),

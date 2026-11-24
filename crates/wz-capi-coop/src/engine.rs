@@ -804,8 +804,6 @@ pub(crate) struct Takes {
     /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
-    /// The reads whose wait was made in the read of the one link's buffer ([`IdleWait::Read`]).
-    pub(crate) owner_reads: core::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -814,7 +812,6 @@ impl Takes {
     fn wait(&self, wait: &IdleWait) {
         let counter = match wait {
             IdleWait::Input { .. } => &self.polls,
-            IdleWait::Read(..) => &self.owner_reads,
             IdleWait::None | IdleWait::Sleep(_) => return,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -2500,10 +2497,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(not(feature = "shared-key-ids"))]
         let _ = endpoint;
-        // One handle to the link, which its gates and a read's wait, lent its buffer, share: a
-        // stack whose pump is a shared handle already gives that one (`SessionLinks::share_pump`).
+        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
+        // already gives that one (`SessionLinks::share_pump`).
         let pump = L::share_pump(pump);
-        let ungated = pump.clone();
+        // What the session's read waits on for the link, read off it before its gates take it.
+        let (input, room) = (pump.input_wait(), pump.room_wait());
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
@@ -2584,7 +2582,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             },
             task,
             link,
-            ungated,
+            input,
+            room,
         ))
     }
 
@@ -3508,10 +3507,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         // What the read waits on is the driver's to make (`LinkSupervisor::idle_wait`): the input
         // of every link and port, and each group's after them, since a wait over several is made
-        // by the first and a link's names a group's socket to the platform beside its own. The one
-        // link waited on is read in place of the wait unless a sample lies in a datagram a link
-        // lent (`Round::lends_a_datagram`), which the lend would move, or the program moves
-        // the session's clock, whose word must end the wait and cannot end a read.
+        // by the first and a link's names a group's socket to the platform beside its own.
         let clock = &self.clock;
         #[cfg(test)]
         let clock_reads = &self.clock_reads;
@@ -3522,8 +3518,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 clock.now_us()
             })
         };
-        let (clock_moves, lane) = (&self.config.clock_moves, &self.lane);
-        let may_lend = || clock_moves.is_none() && !lane.lends_a_datagram();
         #[cfg(feature = "group")]
         let others = self.groups.iter().filter_map(GroupFace::input);
         #[cfg(not(feature = "group"))]
@@ -3538,8 +3532,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "time-base"))]
         let beside = None;
-        self.links
-            .idle_wait(most, &mut now_us, may_lend, others, beside)
+        self.links.idle_wait(most, &mut now_us, others, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to

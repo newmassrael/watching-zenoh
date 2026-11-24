@@ -48,12 +48,6 @@ use crate::link_cells::CellRc;
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use crate::session_drive::RxLease;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
@@ -314,24 +308,6 @@ where
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn room_wait(&self) -> Option<WaitOn> {
         either!(self, link => link.room_wait())
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        either!(self, link => link.lend_rx())
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn land_rx(&self, lease: RxLease) {
-        either!(self, link => link.land_rx(lease))
     }
 }
 
