@@ -494,7 +494,7 @@ mod tests {
             source_info: view.source_info().cloned(),
             timestamp: view
                 .timestamp_parts()
-                .map(|stamp| TimestampHint::new(stamp.time, &stamp.zid).unwrap()),
+                .map(|stamp| TimestampHint::new(stamp.time, stamp.zid).unwrap()),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
             #[cfg(feature = "pubsub-ts-stack")]

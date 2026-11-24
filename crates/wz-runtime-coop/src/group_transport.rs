@@ -25,6 +25,8 @@
 
 use core::net::{Ipv4Addr, SocketAddr};
 
+// A buffer a session lends exists only where the crate carries sessions.
+#[cfg(feature = "session-unicast")]
 use wz_session_core::byte_cells::ByteBuf;
 
 /// The interface a group is joined on and sent out of, in the form the group's family names one:
@@ -183,7 +185,8 @@ pub trait GroupTransport {
     /// datagram there, and its table has the buffer again once that ends. Asked after
     /// [`Self::close`], or as the transport is let go of without one; either way the transport
     /// receives nothing after it. `None`, the provided answer, from a transport whose buffer is its
-    /// own.
+    /// own. Present where the crate carries sessions (`session-unicast`), which lend buffers.
+    #[cfg(feature = "session-unicast")]
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         None
     }
@@ -258,6 +261,7 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
         (**self).lends_until_next_receive()
     }
 
+    #[cfg(feature = "session-unicast")]
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         (**self).give_back_rx()
     }
@@ -420,7 +424,11 @@ mod tests {
     /// a session holds it in, and gives the buffer back once. Turned red by a box that does not
     /// pass either answer on, which would leave the session copying or the buffer with the
     /// transport.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "alloc",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
     #[test]
     fn a_lent_buffer_is_told_and_given_back_through_the_box() {
         use wz_session_core::byte_cells::{ByteCells, ByteSource};
