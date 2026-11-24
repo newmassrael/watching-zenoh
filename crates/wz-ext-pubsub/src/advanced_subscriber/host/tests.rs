@@ -869,8 +869,12 @@ fn a_background_subscriber_retracts_nothing() {
     );
     {
         let subscriptions = script.subscriptions.lock().unwrap();
-        assert_eq!(subscriptions[0].2.mapping_id, 5, "named as the host said");
-        assert_eq!(subscriptions[0].2.suffix(), Some("/data"));
+        let (_, keyexpr, wire, _) = &subscriptions[0];
+        assert_eq!(
+            wire.names_in(keyexpr),
+            (5, Some("/data")),
+            "named as the host said"
+        );
     }
     script.events.lock().unwrap().clear();
     subscriber.background();
@@ -1374,8 +1378,9 @@ fn lodged_forms_and_kept_names_take_no_memory() {
     );
 }
 
-/// A form whose suffix lies in what it keeps hands the key made from it that suffix lent, not
-/// copied: making the key and copying it take no memory.
+/// A form whose suffix lies in what it keeps hands each key made from it that suffix lent, not
+/// copied: making one key and another of the same form, as each declaration on the form does, takes
+/// no memory.
 ///
 /// # Control
 ///
@@ -1390,16 +1395,16 @@ fn a_kept_suffix_is_lent_to_the_key_and_takes_no_memory() {
     // SAFETY: `rest` lies in the string `kept` counts, which nothing changes.
     let form = unsafe { EntityForm::aliased_in(9, rest, kept) };
     let wire = super::wire_of(&form);
-    let copy = wire.clone();
+    let copy = super::wire_of(&form);
     let during = allocations() - before;
 
-    assert_eq!(during, 0, "the key and its copy allocate nothing");
+    assert_eq!(during, 0, "two keys of one form allocate nothing");
     assert_eq!(
-        wire.suffix().map(str::as_ptr),
+        wire.names_in("demo/data/rest").1.map(str::as_ptr),
         Some(rest.as_ptr()),
         "lent, not copied"
     );
-    assert_eq!((copy.mapping_id, copy.suffix()), (9, Some("/rest")));
+    assert_eq!(copy.names_in("demo/data/rest"), (9, Some("/rest")));
 }
 
 /// A value lodged in a place its maker lends takes no memory, nor do its counts: the last count

@@ -143,13 +143,11 @@ impl GroupDeclarations {
     /// ([`Self::declares_keyexprs`]), and by the literal otherwise, as zenoh-pico names a key on
     /// a multicast transport at its default.
     pub fn key<'a>(self, keyexpr: &'a str, wire: &'a WireKey) -> GroupKey<'a> {
-        if self.declares_keyexprs() && wire.mapping_id != 0 {
-            GroupKey {
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix(),
+        match wire.names_in(keyexpr) {
+            (mapping_id, suffix) if self.declares_keyexprs() && mapping_id != 0 => {
+                GroupKey { mapping_id, suffix }
             }
-        } else {
-            GroupKey::literal(keyexpr)
+            _ => GroupKey::literal(keyexpr),
         }
     }
 

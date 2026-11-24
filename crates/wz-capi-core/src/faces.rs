@@ -892,18 +892,18 @@ impl QueryLeg<'_> {
         // A face's link names the key as its own key-wire form says.
         let linked = match self {
             QueryLeg::Face(session) => on_link(session, keyexpr, wire),
-            _ => std::borrow::Cow::Borrowed(wire),
+            _ => wz_capi_port::LinkKey::Lent(wire),
         };
-        let wire: &WireKey = &linked;
-        match self {
-            QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
-                wire.mapping_id,
-                wire.suffix(),
-                keyexpr,
-                opts.with_allowed_destination(self.locality()),
-                on_reply,
-                |_rid| {},
-            ),
+        match (self, linked.names_in(keyexpr)) {
+            (QueryLeg::Face(session), (mapping_id, suffix)) if mapping_id != 0 => session
+                .query_aliased(
+                    mapping_id,
+                    suffix,
+                    keyexpr,
+                    opts.with_allowed_destination(self.locality()),
+                    on_reply,
+                    |_rid| {},
+                ),
             _ => self.query(keyexpr, opts, on_reply),
         }
     }
@@ -1001,15 +1001,13 @@ fn declare_subscriber_on(
         ));
         callback(sample);
     };
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_subscriber(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_subscriber_aliased(wire.mapping_id, wire.suffix(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_subscriber_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1020,10 +1018,10 @@ fn on_link<'w>(
     session: &TokioSession,
     keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
+) -> wz_capi_port::LinkKey<'w> {
     match wz_capi_port::wire_on_link(session.actions().key_wire_on_link(keyexpr)) {
-        Some(linked) => std::borrow::Cow::Owned(linked),
-        None => std::borrow::Cow::Borrowed(wire),
+        Some(linked) => wz_capi_port::LinkKey::Made(linked),
+        None => wz_capi_port::LinkKey::Lent(wire),
     }
 }
 
@@ -1034,8 +1032,8 @@ fn on_link<'w>(
     _session: &TokioSession,
     _keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
-    std::borrow::Cow::Borrowed(wire)
+) -> wz_capi_port::LinkKey<'w> {
+    wz_capi_port::LinkKey::Lent(wire)
 }
 
 /// Declare a queryable on one face in `wire`'s form.
@@ -1046,15 +1044,13 @@ fn declare_queryable_on(
     options: QueryableOptions,
     callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
 ) -> Option<Queryable<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_queryable(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_queryable_aliased(wire.mapping_id, wire.suffix(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_queryable_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1065,13 +1061,11 @@ fn declare_token_on(
     wire: &WireKey,
     options: LivelinessOptions,
 ) -> Option<LivelinessToken<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session.declare_token(keyexpr.to_string(), options).ok()
-    } else {
-        session
-            .declare_token_aliased(wire.mapping_id, wire.suffix(), options)
-            .ok()
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session.declare_token(keyexpr.to_string(), options).ok(),
+        (mapping_id, suffix) => session
+            .declare_token_aliased(mapping_id, suffix, options)
+            .ok(),
     }
 }
 
@@ -1084,15 +1078,13 @@ fn declare_liveliness_subscriber_on(
     options: LivelinessSubscriberOptions,
     sink: impl for<'a> FnMut(LivelinessSample<'a>) + Send + 'static,
 ) -> Option<LivelinessSubscriber<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_liveliness_subscriber(keyexpr.to_string(), options, sink)
-            .ok()
-    } else {
-        session
-            .declare_liveliness_subscriber_aliased(wire.mapping_id, wire.suffix(), options, sink)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_liveliness_subscriber_aliased(mapping_id, suffix, options, sink)
+            .ok(),
     }
 }
 
@@ -2409,6 +2401,11 @@ pub struct SharedSession {
     /// What each connectivity listener whose history is being replayed was told of the faces
     /// ([`wz_capi_port::SessionEngine::told_ledger`]), on the heap, as the faces are read.
     pub(crate) told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
+    /// The queries a program keeps past their handlers on this node's faces
+    /// ([`wz_capi_port::QueryHolder::keep_query`]), each under the id its keep answers. The
+    /// faces' holders hold it weakly, so a keep the program never releases goes with the session.
+    #[cfg(feature = "queryable")]
+    pub(crate) kept_queries: Arc<wz_capi_port::HeldSlab<crate::engine_port::FaceKept>>,
     /// The periodic jobs a C ABI started on the session ([`wz_capi_port::Tickers::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
     /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
@@ -2933,6 +2930,8 @@ impl SharedSession {
             aggregation,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
+            #[cfg(feature = "queryable")]
+            kept_queries: Arc::new(wz_capi_port::HeldSlab::new()),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
             #[cfg(feature = "advanced")]
@@ -3252,6 +3251,13 @@ impl SharedSession {
             }
             self.local_wake.notified().await;
         }
+    }
+
+    /// Give back to the session what `wire` held of its declarations ([`WireKey::into_holds`]),
+    /// the key let go of: an entry taken out of the registry, or a key the session refused. With
+    /// no lock held, since the last hold of a declaration retracts it, which takes the lock.
+    fn give_back(&self, wire: WireKey) {
+        wire.let_go(self);
     }
 
     /// The registry lock, poison-tolerant. A C callback that panics is caught
@@ -4035,7 +4041,19 @@ impl SharedSession {
                 .collect();
             (entries, copies)
         };
-        drop(dropped);
+        // What each entry's key held goes back with the entry, outside the lock.
+        let ((subs, qbls, live_subs, matches), copies) = dropped;
+        for entry in subs {
+            self.give_back(entry.wire);
+        }
+        for entry in qbls {
+            self.give_back(entry.wire);
+        }
+        for entry in live_subs {
+            self.give_back(entry.wire);
+        }
+        drop(matches);
+        drop(copies);
     }
 
     /// One inbound iteration event for `id` — dispatched into that face's own
@@ -4652,7 +4670,8 @@ impl SharedSession {
         payload: wz_session_core::extshm::ShmSendHandle,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        if wire.is_literal() {
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        if mapping_id == 0 {
             self.fan_out_with(
                 opts,
                 PutKey::Literal(keyexpr),
@@ -4664,8 +4683,6 @@ impl SharedSession {
                 },
             )
         } else {
-            let mapping_id = wire.mapping_id;
-            let suffix = wire.suffix();
             self.fan_out_with(
                 opts,
                 PutKey::Declared {
@@ -4705,16 +4722,11 @@ impl SharedSession {
         if self.key_ids.names_keys_by_link() {
             return self.publish_by_link(keyexpr, wire, payload, opts);
         }
-        if wire.is_literal() {
-            self.publish_all(keyexpr, payload, opts)
-        } else {
-            self.publish_aliased_all_for(
-                Some(keyexpr),
-                wire.mapping_id,
-                wire.suffix(),
-                payload,
-                opts,
-            )
+        match wire.names_in(keyexpr) {
+            (0, _) => self.publish_all(keyexpr, payload, opts),
+            (mapping_id, suffix) => {
+                self.publish_aliased_all_for(Some(keyexpr), mapping_id, suffix, payload, opts)
+            }
         }
     }
 
@@ -4730,87 +4742,75 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        let key = if wire.is_literal() {
-            PutKey::Literal(keyexpr)
-        } else {
-            PutKey::Declared {
+        let key = match wire.names_in(keyexpr) {
+            (0, _) => PutKey::Literal(keyexpr),
+            (mapping_id, suffix) => PutKey::Declared {
                 literal: keyexpr,
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix(),
-            }
+                mapping_id,
+                suffix,
+            },
         };
         self.fan_out(
             opts,
             key,
             payload,
-            |session, leg| {
-                let wire = on_link(session, keyexpr, wire);
-                if wire.is_literal() {
-                    Leg::of_publish(session.publish(keyexpr, payload, leg))
-                } else {
-                    Leg::of_alias(session.publish_aliased_auto(
-                        wire.mapping_id,
-                        wire.suffix(),
-                        payload,
-                        leg,
-                    ))
+            |session, leg| match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                (0, _) => Leg::of_publish(session.publish(keyexpr, payload, leg)),
+                (mapping_id, suffix) => {
+                    Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
                 }
             },
             WireCalls {
-                probe: |session: &TokioSession, leg: PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
-                    } else {
-                        Leg::of_probe_alias(session.publish_aliased_auto_probe(
-                            wire.mapping_id,
-                            wire.suffix(),
-                            payload,
-                            leg,
-                        ))
-                    }
+                probe: |session: &TokioSession, leg: PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => Leg::of_probe(session.publish_probe(keyexpr, payload, leg)),
+                    (mapping_id, suffix) => Leg::of_probe_alias(
+                        session.publish_aliased_auto_probe(mapping_id, suffix, payload, leg),
+                    ),
                 },
-                reserve: |session: &TokioSession, leg: &PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
+                reserve: |session: &TokioSession, leg: &PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => {
                         Reserved::of_reserve(session.reserve_wire_chain(keyexpr, payload, leg))
-                    } else if session
-                        .actions()
-                        .resolve_outbound_mapping(wire.mapping_id)
-                        .is_none()
+                    }
+                    (mapping_id, _)
+                        if session
+                            .actions()
+                            .resolve_outbound_mapping(mapping_id)
+                            .is_none() =>
                     {
                         Reserved::Absent
-                    } else {
-                        Reserved::of_reserve(session.reserve_wire_chain_aliased(
-                            wire.mapping_id,
-                            wire.suffix(),
-                            payload,
-                            leg,
-                        ))
                     }
+                    (mapping_id, suffix) => Reserved::of_reserve(
+                        session.reserve_wire_chain_aliased(mapping_id, suffix, payload, leg),
+                    ),
                 },
                 reserved: |session: &TokioSession,
                            leg: PublishOptions,
                            reservation: WireReservation| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(
+                    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                        (0, _) => Leg::of_probe(
                             session
                                 .publish_reserved(keyexpr, payload, leg, reservation)
                                 .map(|()| WireProbe::Queued),
-                        )
-                    } else {
-                        Leg::of_probe_alias(
+                        ),
+                        (mapping_id, suffix) => Leg::of_probe_alias(
                             session
                                 .publish_aliased_auto_reserved(
-                                    wire.mapping_id,
-                                    wire.suffix(),
+                                    mapping_id,
+                                    suffix,
                                     payload,
                                     leg,
                                     reservation,
                                 )
                                 .map(|()| WireProbe::Queued),
-                        )
+                        ),
                     }
                 },
             },
@@ -5192,7 +5192,11 @@ impl SharedSession {
         links: LinkRestriction,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -5268,7 +5272,9 @@ impl SharedSession {
         // The per-face tokens go first, so their retractions reach the wire
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         // And the session's own liveliness subscribers, last: the token is gone from the wire
         // when they hear of it.
         if let Some((legs, keyexpr)) = told {
@@ -5328,7 +5334,11 @@ impl SharedSession {
         sink: LivelinessSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -6239,7 +6249,11 @@ impl SharedSession {
         sink: SubscriberSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
             zid_text(&self.zid),
@@ -7072,9 +7086,13 @@ impl SharedSession {
         drop(dropped_groups);
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
         drop(dropped_group_live);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         drop(dropped_live);
-        drop(dropped_live_entry);
+        if let Some(entry) = dropped_live_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
@@ -7229,7 +7247,11 @@ impl SharedSession {
         sink: QueryableSink,
     ) -> Option<QblId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
@@ -7317,7 +7339,9 @@ impl SharedSession {
         drop(dropped);
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
         drop(dropped_groups);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(
                 FilterPlane::Queryables {

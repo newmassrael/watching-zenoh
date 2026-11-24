@@ -5957,7 +5957,7 @@ kind = "choice"
 kconfig = "WZ_POLICY_HELD_PUBLISH_DROP"
 choices = ["held-faces", "every-face"]
 default = "held-faces"
-upstream = "Gives each transport a transmission queue of its own, so a droppable message that one transport's full queue drops is still queued on the session's other transports: `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a droppable message that finds it held is dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `Z_CONGESTION_CONTROL_BLOCK);`): `every-face`."
+upstream = "Gives each transport a transmission queue of its own, so a droppable message that one transport's full queue drops is still queued on the session's other transports: `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a droppable message that finds it held is dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-face`."
 scope = "session"
 binding = "open"
 mutability = "fixed"

@@ -208,6 +208,43 @@ pub trait Presence {
 
     /// The bytes of an arena [`Self::lent_from`] takes for `rows`. `None` past the address space.
     fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize>;
+
+    /// Whether the kind is kept.
+    const KEPT: bool;
+
+    /// A value of the kind as a variant of an enum holds it: `T` where the kind is kept, and
+    /// [`Unkept`] where it is not, a type of no value and no size, so the variant takes no room in
+    /// the enum and every arm that reads it is left out of the build.
+    type Record<T>;
+
+    /// `value` as a variant holds it, where the kind is kept; `None` where it is not.
+    fn record<T>(value: T) -> Option<Self::Record<T>>;
+
+    /// The value `record` holds.
+    fn read<T>(record: &Self::Record<T>) -> &T;
+
+    /// The value `record` holds, taken out of it.
+    fn take<T>(record: Self::Record<T>) -> T;
+}
+
+/// A value of a kind a build keeps none of ([`Presence::Record`]): none is ever made, and it
+/// takes no room.
+pub enum Unkept<T> {
+    /// Never made: its first field has no value.
+    #[doc(hidden)]
+    Never(
+        core::convert::Infallible,
+        core::marker::PhantomData<fn() -> T>,
+    ),
+}
+
+impl<T> Unkept<T> {
+    /// Anything at all, as a value that cannot be is read.
+    fn absurd<R>(&self) -> R {
+        match self {
+            Self::Never(never, _) => match *never {},
+        }
+    }
 }
 
 /// A table a session's arena lends at its open, `rows` rows of it ([`Presence::lent_from`]).
@@ -254,6 +291,22 @@ impl Presence for Present {
 
     fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize> {
         T::arena_bytes(rows)
+    }
+
+    const KEPT: bool = true;
+
+    type Record<T> = T;
+
+    fn record<T>(value: T) -> Option<T> {
+        Some(value)
+    }
+
+    fn read<T>(record: &T) -> &T {
+        record
+    }
+
+    fn take<T>(record: T) -> T {
+        record
     }
 }
 
@@ -305,6 +358,22 @@ impl Presence for Absent {
 
     fn arena_bytes<T: LentTable>(_rows: usize) -> Option<usize> {
         Some(0)
+    }
+
+    const KEPT: bool = false;
+
+    type Record<T> = Unkept<T>;
+
+    fn record<T>(_value: T) -> Option<Unkept<T>> {
+        None
+    }
+
+    fn read<T>(record: &Unkept<T>) -> &T {
+        record.absurd()
+    }
+
+    fn take<T>(record: Unkept<T>) -> T {
+        record.absurd()
     }
 }
 

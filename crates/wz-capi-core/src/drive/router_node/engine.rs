@@ -21,9 +21,10 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
-    MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
-    StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HeldSlab,
+    LivelinessSink, MatchId, MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal,
+    ReplyCallback, SessionEngine, StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId,
+    TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
@@ -34,7 +35,7 @@ use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
-use super::RouterState;
+use super::{RouterKept, RouterState};
 use crate::caller_span::CallerSpan;
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
@@ -114,6 +115,9 @@ pub(super) struct EngineState {
     /// What each connectivity listener whose history is being replayed was told of the node's
     /// faces ([`SessionEngine::told_ledger`]).
     told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
+    /// The queries the program keeps past the handlers of the node's queryables, each under the
+    /// id its keep answers ([`wz_capi_port::QueryHolder::keep_query`]).
+    kept: Arc<HeldSlab<RouterKept>>,
 }
 
 impl EngineState {
@@ -127,7 +131,14 @@ impl EngineState {
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
+            kept: Arc::new(HeldSlab::new()),
         }
+    }
+
+    /// The node's kept queries, as a holder of its queryables keeps them: weakly, the slab being
+    /// the node's.
+    pub(super) fn kept_queries(&self) -> std::sync::Weak<HeldSlab<RouterKept>> {
+        Arc::downgrade(&self.kept)
     }
 
     /// The next entity id, or `None` once every `u32` one has been handed out.
@@ -507,6 +518,26 @@ impl SessionEngine for RouterState {
         }
     }
 
+    // A reply holds the keep's value while it runs, so a release from another thread meanwhile
+    // sends the final once the reply has gone out. The forwarder's hold answers under the key it
+    // keeps itself, so the caller's is not read.
+    fn reply_held(
+        &self,
+        id: HeldQueryId,
+        _key: &str,
+        answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut),
+    ) {
+        if RouterState::is_closed(self) {
+            return;
+        }
+        if let Some(kept) = self.engine.kept.get(id) {
+            kept.held.reply(answer);
+        }
+    }
+
+    fn release_held(&self, id: HeldQueryId) {
+        self.engine.kept.release(id);
+    }
     fn declare_liveliness_token_on_wire(
         &self,
         keyexpr: &str,

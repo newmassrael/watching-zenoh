@@ -20,7 +20,7 @@
 
 use core::ptr::NonNull;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
+use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -124,6 +124,12 @@ pub(crate) struct LivelinessRow {
     latch: CallLatch,
 }
 
+impl super::RowHolds for LivelinessRow {
+    fn into_holds(self) -> WireHolds {
+        self.wire.into_holds()
+    }
+}
+
 impl LivelinessRow {
     /// A subscriber on `wire` as the ABI named its key, handing what it hears to `sink`.
     pub(crate) fn new(wire: WireKey, sink: LivelinessSink) -> Self {
@@ -160,12 +166,10 @@ impl LivelinessRow {
     ) -> bool {
         let id = u64::from(id);
         let wire = super::on_link(actions, keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_interest_liveliness_subscriber(id, history, 0, Some(keyexpr))
-        } else {
-            actions.send_interest_liveliness_subscriber(id, history, wire.mapping_id, wire.suffix())
-        }
-        .is_ok()
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        actions
+            .send_interest_liveliness_subscriber(id, history, mapping_id, suffix)
+            .is_ok()
     }
 }
 

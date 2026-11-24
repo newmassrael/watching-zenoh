@@ -214,6 +214,7 @@ impl RouterState {
         RouterQueryHolder {
             forwarder: Arc::downgrade(&self.forwarder),
             closed: self.stop.clone(),
+            kept: self.engine.kept_queries(),
         }
     }
 
@@ -395,11 +396,20 @@ impl RouterState {
     }
 }
 
-/// The queries of the queryables a router node hosts, kept through the node's forwarder.
+/// The queries of the queryables a router node hosts, kept through the node's forwarder. A query
+/// kept by its id is kept in the node's slab, held weakly: the slab is the node's engine's.
 #[derive(Clone)]
 pub struct RouterQueryHolder {
     forwarder: std::sync::Weak<RouterForwarder>,
     closed: Arc<AtomicBool>,
+    kept: std::sync::Weak<wz_capi_port::HeldSlab<RouterKept>>,
+}
+
+/// What a node keeps of a query a program keeps past its handler by id: the forwarder's hold of
+/// it, which answers on the query's own route and owes its final until dropped. The program's copy
+/// keeps the query's key and parameters itself.
+pub(crate) struct RouterKept {
+    held: wz_runtime_tokio::router_forward::HeldRouterQuery,
 }
 
 impl RouterQueryHolder {
@@ -427,6 +437,23 @@ impl wz_capi_port::QueryHolder for RouterQueryHolder {
         _view: &dyn wz_session_core::query_sink::QueryView,
     ) -> Box<dyn wz_capi_port::HeldQuery> {
         Box::new(self.hold_current())
+    }
+
+    fn keep_query(
+        &self,
+        view: &dyn wz_session_core::query_sink::QueryView,
+    ) -> Result<Option<wz_capi_port::HeldQueryId>, wz_capi_port::Refusal> {
+        if self.is_closed() {
+            return Err(wz_capi_port::Refusal::Closed);
+        }
+        let (Some(kept), Some(forwarder)) = (self.kept.upgrade(), self.forwarder.upgrade()) else {
+            return Err(wz_capi_port::Refusal::Closed);
+        };
+        // Only the query of the handler this thread is inside of can be kept.
+        let Some(held) = forwarder.hold_current_query() else {
+            return Ok(None);
+        };
+        kept.keep(view.rid(), RouterKept { held }).map(Some)
     }
 
     fn session_closed(&self) -> bool {

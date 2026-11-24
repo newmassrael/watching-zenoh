@@ -52,7 +52,9 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireKey};
+use wz_capi_port::{
+    HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey,
+};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -95,12 +97,22 @@ pub(crate) struct QueryableRow {
     /// made it on): a build without groups tells no one the key, and the declaration goes with
     /// the row, let go of with no lock of the session held.
     #[cfg(not(feature = "group"))]
-    _keeps: WireKey,
+    keeps: WireKey,
     /// The program's callback, called where the row lies through a shared borrow, with the holder
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
+}
+
+impl super::RowHolds for QueryableRow {
+    fn into_holds(self) -> WireHolds {
+        #[cfg(feature = "group")]
+        let wire = self.wire;
+        #[cfg(not(feature = "group"))]
+        let wire = self.keeps;
+        wire.into_holds()
+    }
 }
 
 impl QueryableRow {
@@ -118,7 +130,7 @@ impl QueryableRow {
             #[cfg(feature = "group")]
             wire,
             #[cfg(not(feature = "group"))]
-            _keeps: wire,
+            keeps: wire,
             sink,
             latch: CallLatch::new(),
         }
@@ -773,7 +785,7 @@ impl QueryPlane {
 
     /// What a query that reached the queryable `row` does: hold its
     /// Final and begin a call on the row, the query held in `round` where its parts lie
-    /// ([`Round::offer_query`](crate::round::Round::offer_query)); or, with no row left for its
+    /// ([`Round::offer_query`](crate::round::RoundOf::offer_query)); or, with no row left for its
     /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
     /// it is counted. Under the session's lock, from its dispatch.
     pub(super) fn arrive(
@@ -1230,7 +1242,7 @@ mod round_tests {
     //! A link's query held in the session's round of deliveries: handed to the queryable it reached
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
-    use crate::round::{AnswersQueries, Round};
+    use crate::round::{AnswersQueries, CoopCalls, Round};
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
     /// where they lie, the generation it came in under, and its encoding's packed id with where
@@ -1240,7 +1252,7 @@ mod round_tests {
     /// An engine stand-in that notes what it is asked to answer.
     struct Noting(Noted);
 
-    impl AnswersQueries for Noting {
+    impl AnswersQueries<CoopCalls> for Noting {
         fn answer_query(&self, _call: &QueryableCall, query: &dyn QueryView, generation: u64) {
             self.0.lock().unwrap().push((
                 query.keyexpr().to_owned(),

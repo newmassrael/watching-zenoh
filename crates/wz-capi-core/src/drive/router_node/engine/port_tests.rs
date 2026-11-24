@@ -889,6 +889,215 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     router.close();
 }
 
+/// One ask's legs: the Put replies they are handed, and how many of them have ended.
+#[derive(Default)]
+struct Legs {
+    replies: Mutex<Vec<Vec<u8>>>,
+    ended: AtomicUsize,
+}
+
+/// A leg's end, counted on its ask when the leg's callback is let go of.
+struct LegEnd(Arc<Legs>);
+
+impl Drop for LegEnd {
+    fn drop(&mut self) {
+        self.0.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Ask `key` once through `asker`'s port: how many legs were issued, and what they are handed.
+fn ask_counting_legs(asker: &Arc<dyn SessionEngine>, key: &str) -> (usize, Arc<Legs>) {
+    let legs = Arc::new(Legs::default());
+    let issued = asker
+        .get_on_wire(
+            key,
+            &WireKey::literal(),
+            &QueryOptions::default(),
+            None,
+            &mut || {
+                let end = LegEnd(Arc::clone(&legs));
+                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
+                    if reply.kind() == ReplyKind::Put {
+                        end.0.replies.lock().unwrap().push(reply.payload().to_vec());
+                    }
+                })
+            },
+        )
+        .expect("the engine asks queries");
+    (issued, legs)
+}
+
+/// Declare on `keeper` a queryable under `key` whose handler keeps each query and answers none,
+/// and ask it through `asker` until a query is kept. The kept query is answered through the
+/// keeper's port (`reply_held`): the reply arrives while the asker's leg stays open, the leg ends
+/// once the keep is released (`release_held`), `holds` (what the keeper keeps) is none after,
+/// and a keep released answers nothing more.
+fn a_kept_query_answers_and_ends_through_the_port(
+    keeper: &Arc<dyn SessionEngine>,
+    asker: &Arc<dyn SessionEngine>,
+    key: &str,
+    holds: impl Fn() -> usize,
+) {
+    let kept: Arc<Mutex<Vec<(String, HeldQueryId)>>> = Arc::default();
+    let into = Arc::clone(&kept);
+    let queryable = keeper
+        .declare_queryable_on_wire(
+            &format!("{key}/*"),
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            QueryableSink::shared(
+                move |query: &dyn QueryView, _out: &mut dyn ReplyOut, holder: &dyn QueryHolder| {
+                    let held = holder
+                        .keep_query(query)
+                        .expect("room to keep the query")
+                        .expect("the query this handler answers");
+                    into.lock()
+                        .unwrap()
+                        .push((query.keyexpr().to_owned(), held));
+                },
+            ),
+        )
+        .expect("a session has queryables");
+
+    // Each ask names a key of its own, so the keep of the last one is told from a keep of an
+    // earlier ask that arrived late.
+    let deadline = Instant::now() + WAIT;
+    let mut attempt = 0_u32;
+    let (asked, issued, legs, held) = loop {
+        attempt += 1;
+        let asked = format!("{key}/{attempt}");
+        let (issued, legs) = ask_counting_legs(asker, &asked);
+        let kept_of = || {
+            kept.lock()
+                .unwrap()
+                .iter()
+                .find(|(of, _)| *of == asked)
+                .map(|(_, held)| *held)
+        };
+        let waited = Instant::now() + Duration::from_millis(500);
+        while kept_of().is_none() && Instant::now() < waited {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(held) = kept_of() {
+            break (asked, issued, legs, held);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no query reached the keeping queryable"
+        );
+    };
+    assert!(holds() >= 1, "the keeper keeps the query");
+
+    keeper.reply_held(held, &asked, &mut |out| {
+        out.reply_keyed(&asked, b"kept")
+            .expect("a reply on the query's own key");
+    });
+    assert!(
+        eventually(|| !legs.replies.lock().unwrap().is_empty()),
+        "the reply made through the port did not arrive"
+    );
+    assert_eq!(legs.replies.lock().unwrap()[0], b"kept".to_vec());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        legs.ended.load(Ordering::SeqCst) < issued,
+        "a leg ended while its query was kept"
+    );
+
+    let all: Vec<HeldQueryId> = kept
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|(_, held)| held)
+        .collect();
+    for each in all {
+        keeper.release_held(each);
+    }
+    assert!(
+        eventually(|| legs.ended.load(Ordering::SeqCst) == issued),
+        "the leg did not end once its keep was released"
+    );
+    assert_eq!(holds(), 0, "a keep released is kept no more");
+
+    let mut answered = false;
+    keeper.reply_held(held, &asked, &mut |_out| answered = true);
+    assert!(!answered, "a keep released was answered");
+    keeper.undeclare_queryable(queryable);
+}
+
+/// A query a node's own queryable keeps past its handler is answered and ended through the node's
+/// port, the registry's client asking.
+#[test]
+fn a_query_the_node_keeps_is_answered_and_ended_through_its_port() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &router.as_engine(),
+        &peer.as_engine(),
+        "wz/port/kept/node",
+        || router.engine.kept.kept(),
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query a queryable of the registry keeps past its handler is answered on the face it came in
+/// on and ended through the registry's port, the node asking.
+#[cfg(feature = "queryable")]
+#[test]
+fn a_query_the_registry_keeps_is_answered_and_ended_through_its_port() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &peer.as_engine(),
+        &router.as_engine(),
+        "wz/port/kept/registry",
+        || peer.0.shared.kept_queries.kept(),
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query as a holder is handed one outside any handler.
+struct Unasked;
+
+impl QueryView for Unasked {
+    fn keyexpr(&self) -> &str {
+        "wz/port/kept/none"
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        None
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        None
+    }
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        1
+    }
+    fn qos(&self) -> wz_session_core::sample::QosLevel {
+        wz_session_core::sample::QosLevel::DEFAULT
+    }
+}
+
+/// A node's holder keeps nothing outside a handler of its queryables, and refuses a keep once the
+/// node is closed.
+#[test]
+fn a_nodes_holder_keeps_nothing_outside_a_handler_and_refuses_once_closed() {
+    let router = open_node();
+    let holder = router.node_query_holder();
+    assert_eq!(
+        holder.keep_query(&Unasked),
+        Ok(None),
+        "outside a handler there is no query to keep"
+    );
+    router.close();
+    assert_eq!(
+        holder.keep_query(&Unasked),
+        Err(Refusal::Closed),
+        "a closed node keeps nothing"
+    );
+    assert_eq!(router.engine.kept.kept(), 0);
+}
+
 /// The port's shared-memory publication, over links that negotiated shared memory.
 #[cfg(feature = "session-extshm")]
 mod shared_memory {
