@@ -698,25 +698,17 @@ pub(crate) struct TransportTables {
 }
 
 impl TransportRows {
-    /// The transport's tables, lent by `lend` in the order the plan laid them out.
+    /// The transport's tables, lent by `lend` in the order the plan laid them out: each made in
+    /// its field of the value handed back, whose fields are made in the order they are written.
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> TransportTables {
-        let links = self.links_from(lend);
-        let mut cells = [None, None, None, None];
-        for (bytes, lent) in self.cell_bytes.into_array().into_iter().zip(&mut cells) {
-            if bytes != 0 {
-                *lent = Some(lend.byte_cells(bytes, self.links));
-            }
-        }
-        // A chain's buffer is claimed when its first fragment arrives and given back when it
-        // ends; the session holds the table for its life.
-        let reassembly = lend.byte_cells(self.reassembly_bytes, self.reassembly_chains);
         let (dials, listens) = self.endpoint_rows;
-        let endpoints = EndpointTexts::over(lend.table(dials), lend.table(listens));
         TransportTables {
-            links,
-            cells: LinkCells::from_array(cells),
-            reassembly,
-            endpoints,
+            links: self.links_from(lend),
+            cells: self.cells_from(lend),
+            // A chain's buffer is claimed when its first fragment arrives and given back when it
+            // ends; the session holds the table for its life.
+            reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
+            endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
             #[cfg(any(feature = "listen", feature = "group"))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
@@ -725,6 +717,18 @@ impl TransportRows {
             #[cfg(feature = "listen")]
             port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
+    }
+
+    /// The cells of the links' drivers, their gates, their actions and their halves, lent by
+    /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
+    fn cells_from(&self, lend: &mut TableLender<'_>) -> LinkCells<Option<LentByteCells>> {
+        let mut cells = [None, None, None, None];
+        for (bytes, lent) in self.cell_bytes.into_array().into_iter().zip(&mut cells) {
+            if bytes != 0 {
+                *lent = Some(lend.byte_cells(bytes, self.links));
+            }
+        }
+        LinkCells::from_array(cells)
     }
 
     /// The tables of the links' buffers, lent by `lend`: the pool of receive buffers the links

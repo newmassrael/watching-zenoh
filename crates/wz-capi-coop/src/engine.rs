@@ -118,6 +118,7 @@ use wz_runtime_coop::transport::{
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
+#[cfg(any(test, feature = "advanced-cache"))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
@@ -628,11 +629,11 @@ struct LentApart {
 /// What the arena of a session lends it at its open ([`lend_session`]). The arena is the last
 /// field, so a value of this let go of whole lets every table lent from it go first.
 struct SessionLent {
-    link_tables: wz_runtime_coop::link_storage::LinkTables,
-    cells: LinkCells<Option<LentByteCells>>,
+    /// The transport's tables, held as they were lent: taken apart here, they would be moved
+    /// once into the open's frame and once more into this value.
+    transport: TransportTables,
     samples: Arc<Round>,
     router: SessionReassembly,
-    endpoints: EndpointTexts,
     keys: KeySpace,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -655,15 +656,9 @@ struct SessionLent {
     /// Whether the outbound slots the links share are fewer than the links.
     #[cfg(feature = "listen")]
     tx_pool_short: bool,
-    /// The places of the publishes the session keeps for its other faces, the engine's.
-    #[cfg(any(feature = "listen", feature = "group"))]
-    handed: HandedTable,
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
-    /// The rows the stack's udp ports keep their peers and their datagrams in, the stack's.
-    #[cfg(feature = "listen")]
-    port_rows: wz_runtime_coop::udp_link::PortRows,
     arena: SessionArena,
 }
 
@@ -735,18 +730,10 @@ fn lend_session(
     lay_out_open(&mut plan, cell_bytes, held)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
-    let TransportTables {
-        links: link_tables,
-        cells,
-        reassembly,
-        endpoints,
-        #[cfg(any(feature = "listen", feature = "group"))]
-        handed,
-        #[cfg(feature = "listen")]
-        port_rows,
-    } = plan.transport().lent_from(&mut lend);
-    // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
-    // moves the others out of one by one would need its own drop on each refusal below.
+    // Held whole to the end, as the value handed back holds it; the state's tables, which the
+    // open moves into what it makes one by one, are taken apart at once instead: a table held as
+    // a field of a set partly moved out would need its own drop on each refusal below.
+    let transport = plan.transport().lent_from(&mut lend);
     let StateTables {
         keys,
         #[cfg(feature = "query")]
@@ -777,7 +764,10 @@ fn lend_session(
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
-    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
+    let router = session_reassembly(
+        policy,
+        SessionChains::over(&transport.reassembly, LENT_CHAINS),
+    );
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
@@ -829,11 +819,9 @@ fn lend_session(
     )
     .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
-        link_tables,
-        cells,
+        transport,
         samples,
         router,
-        endpoints,
         keys,
         #[cfg(feature = "queryable")]
         plane,
@@ -849,12 +837,8 @@ fn lend_session(
         links: plan.links(),
         #[cfg(feature = "listen")]
         tx_pool_short: plan.tx_pool_short(),
-        #[cfg(any(feature = "listen", feature = "group"))]
-        handed,
         #[cfg(feature = "advanced-cache")]
         cache,
-        #[cfg(feature = "listen")]
-        port_rows,
         arena,
     })
 }
@@ -3823,13 +3807,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
-        write_endpoints(&mut EndpointWriter::over(&mut lent.endpoints))?;
+        write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints))?;
         let mut entropy = SessionEntropy::new(entropy);
-        let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
-        links.lend_buffers(lent.link_tables);
+        let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
+        links.lend_buffers(lent.transport.links);
         #[cfg(feature = "listen")]
-        links.lend_port_rows(lent.port_rows);
-        if let Some(driver_cells) = lent.cells.driver {
+        links.lend_port_rows(lent.transport.port_rows);
+        if let Some(driver_cells) = lent.transport.cells.driver {
             links.lend_cells(driver_cells);
         }
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
@@ -3877,7 +3861,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     config.max_faces.saturating_add(1),
                     wait_room,
                 ),
-                endpoints: lent.endpoints,
+                endpoints: lent.transport.endpoints,
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
                 #[cfg(feature = "listen")]
@@ -3889,9 +3873,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     lent.links,
                 )),
                 wire_zid: wire,
-                gate_cells: lent.cells.gate,
-                actions_cells: lent.cells.actions,
-                halves_cells: lent.cells.halves,
+                gate_cells: lent.transport.cells.gate,
+                actions_cells: lent.transport.cells.actions,
+                halves_cells: lent.transport.cells.halves,
                 #[cfg(feature = "shared-key-ids")]
                 key_forms,
                 router: lent.router,
@@ -3945,7 +3929,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let apart = LentApart {
             handle_place: lent.handle_place,
             #[cfg(any(feature = "listen", feature = "group"))]
-            handed: lent.handed,
+            handed: lent.transport.handed,
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
         };

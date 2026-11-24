@@ -6,6 +6,7 @@
 //! build's, dials nothing.
 
 use std::net::UdpSocket;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2468,4 +2469,80 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     plan.holding(&held)
         .expect("the build's limits lay the places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
+}
+
+/// The allocator, counting what it gives and what it is given back. Only
+/// `an_open_refused_after_its_lend_gives_its_arena_back_once` reserves from it.
+struct Recorded {
+    reserves: AtomicUsize,
+    reserved: AtomicUsize,
+    releases: AtomicUsize,
+    released: AtomicUsize,
+}
+
+impl ArenaMemory for Recorded {
+    fn reserve(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
+        let base = AllocatorMemory.reserve(layout)?;
+        self.reserves.fetch_add(1, Ordering::SeqCst);
+        self.reserved.fetch_add(layout.size(), Ordering::SeqCst);
+        Some(base)
+    }
+
+    unsafe fn release(&self, base: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        self.released.fetch_add(layout.size(), Ordering::SeqCst);
+        // SAFETY: the caller's contract: the allocator gave `base` for `layout`, given back once.
+        unsafe { AllocatorMemory.release(base, layout) }
+    }
+}
+
+static RECORDED: Recorded = Recorded {
+    reserves: AtomicUsize::new(0),
+    reserved: AtomicUsize::new(0),
+    releases: AtomicUsize::new(0),
+    released: AtomicUsize::new(0),
+};
+
+/// An open refused once its arena has lent every table (an endpoint's text longer than a row,
+/// which the source writes after the lend) lets go of what it was lent whole: its tables, then
+/// the arena, given back once and every byte of it. Turned red by a value of the lent tables that
+/// keeps the arena past a refusal, or gives it back twice.
+#[test]
+fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
+    use crate::arena::{HeldPlaces, OpenStorage};
+    use crate::{EndpointRefusal, Refusal};
+
+    let long = format!("tcp/127.0.0.1:{}", "7".repeat(caps::MAX_LOCATOR_LEN));
+    let refused = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || CoopConfig {
+            endpoints: vec![long.clone()],
+            ..client_config()
+        },
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        OpenStorage {
+            memory: &RECORDED,
+            held: HeldPlaces::NONE,
+        },
+    )
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::Unreachable(EndpointRefusal::new(
+            &long,
+            Refusal::TextTooLong
+        )))
+    );
+    assert_eq!(RECORDED.reserves.load(Ordering::SeqCst), 1, "one arena");
+    assert_eq!(
+        RECORDED.releases.load(Ordering::SeqCst),
+        1,
+        "given back once"
+    );
+    let reserved = RECORDED.reserved.load(Ordering::SeqCst);
+    assert!(reserved > 0, "the arena was reserved before the refusal");
+    assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
 }
