@@ -1009,6 +1009,10 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
 
 /// Put the payload `made` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null and the
 /// payload dropped, when there was no room for its bytes or the pool of payloads is full.
+///
+/// One body out of line: every door that hands a payload back stores it this way, and each copy
+/// inlined held its own placing of the payload and its own refusal.
+#[inline(never)]
 unsafe fn store_bytes(dst: *mut z_owned_bytes_t, made: Result<ByteBuf, NoRoom>) -> ZResult {
     match made.and_then(|buf| box_bytes(buf).ok_or(NoRoom)) {
         Ok(handle) => {
@@ -1114,7 +1118,9 @@ pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]
 }
 
 /// Put the string `made` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null, when
-/// there was no room for its bytes.
+/// there was no room for its bytes. Out of line for the reason `store_bytes` is: every door
+/// that hands a string back stores it this way.
+#[inline(never)]
 unsafe fn store_string(
     dst: *mut z_owned_string_t,
     made: Result<Box<StringState>, NoRoom>,

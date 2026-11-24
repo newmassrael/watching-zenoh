@@ -679,6 +679,9 @@ impl<T: core::fmt::Debug> core::fmt::Debug for Placed<T> {
 }
 
 impl<T> Drop for Placed<T> {
+    /// One body out of line for each kind of object: every door that lets go of a held encoding
+    /// drops one, and the release inlined at each held its own copy of giving the place back.
+    #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the object is live and let go once, here.
         unsafe { release(self.object.as_ptr()) }
