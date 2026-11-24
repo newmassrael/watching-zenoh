@@ -1382,10 +1382,16 @@ impl Iterator for HeldPlacesWalk {
 pub struct ArenaPlan {
     /// The rows laid out, in order, the first `len` of them: a row is written when it is laid
     /// out, and the rows past `len` are [`UNLAID_ROW`] in every plan, so two plans of the same rows
-    /// are equal.
+    /// are equal. Kept where a plan is read row by row, a build that lays its plans out at the
+    /// open and the tests: an open by a region reads `reserved` and the rows of each layer alone,
+    /// so a region carries no table of rows.
+    #[cfg(any(feature = "runtime-plan", test))]
     rows: [ArenaRow; ARENA_ROWS],
-    /// How many of `rows` were laid out.
+    /// How many rows were laid out.
     len: usize,
+    /// The bytes the rows laid out take together, each row's span added as it is laid out;
+    /// `None` past the address space.
+    reserved: Option<usize>,
     /// The first refusal met while the plan was laid out, kept as it came (the limit it names, or
     /// the address space), and the one its maker is told once the plan is settled
     /// ([`Self::settled`]): every row and every limit is put and read in one pass with no exit of
@@ -1405,8 +1411,10 @@ impl ArenaPlan {
     #[inline(never)]
     pub const fn vacant() -> Self {
         Self {
+            #[cfg(any(feature = "runtime-plan", test))]
             rows: [UNLAID_ROW; ARENA_ROWS],
             len: 0,
+            reserved: Some(0),
             refused: None,
             transport: TransportRows::NONE,
             session: SessionRows::NONE,
@@ -2013,12 +2021,19 @@ impl ArenaPlan {
             count,
             entry_bytes,
         };
+        if self.len >= ARENA_ROWS {
+            self.refuse(ArenaRefused::TooLarge);
+            return;
+        }
+        #[cfg(any(feature = "runtime-plan", test))]
         if let Some((_, [slot, ..])) = self.rows.split_at_mut_checked(self.len) {
             *slot = row;
-            self.len += 1;
-        } else {
-            self.refuse(ArenaRefused::TooLarge);
         }
+        self.len += 1;
+        self.reserved = match (self.reserved, row.span()) {
+            (Some(sum), Some(span)) => sum.checked_add(span),
+            _ => None,
+        };
     }
 
     /// Add the two rows of a table of `count` entries of `entry_bytes`, the parts `flags` and
@@ -2170,25 +2185,15 @@ impl ArenaPlan {
     }
 
     /// The rows, in the order the plan laid them out.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub fn rows(&self) -> impl Iterator<Item = &ArenaRow> + '_ {
         self.rows.iter().take(self.len)
     }
 
-    /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
+    /// The bytes the arena reserves: the sum of the rows' spans, added as each was laid out.
+    /// `None` past the address space.
     pub const fn reserved_bytes(&self) -> Option<usize> {
-        let mut sum = Some(0_usize);
-        let mut at = 0;
-        while at < self.len && sum.is_some() {
-            sum = match (sum, self.rows.split_at_checked(at)) {
-                (Some(sum), Some((_, [row, ..]))) => match row.span() {
-                    Some(span) => sum.checked_add(span),
-                    None => None,
-                },
-                _ => None,
-            };
-            at += 1;
-        }
-        sum
+        self.reserved
     }
 }
 
@@ -2745,6 +2750,7 @@ const fn keeps_handed(policy: &wz_session_core::policy::SessionPolicy) -> bool {
 }
 
 /// A row of a plan not laid out: what a plan holds past the rows it laid out.
+#[cfg(any(feature = "runtime-plan", test))]
 const UNLAID_ROW: ArenaRow = ArenaRow {
     name: ArenaPart::EndpointTexts,
     count: 0,
@@ -3042,6 +3048,40 @@ mod tests {
         plan.put(ArenaPart::KeyArena, 1, 8);
         assert_eq!(plan.rows().count(), ARENA_ROWS);
         assert_eq!(plan.settled(), Err(ArenaRefused::TooLarge));
+    }
+
+    /// The bytes a plan reserves, summed as each row is laid out, are the sum of the spans of the
+    /// rows it holds, a row it refused adding none, and none past the address space once a row's
+    /// span is. A region, which keeps no row, reserves by that sum alone. Turned red by a row whose
+    /// span is not added, or one added that the plan refused.
+    #[test]
+    fn the_bytes_a_plan_reserves_are_the_spans_of_the_rows_it_holds() {
+        let summed = |plan: &ArenaPlan| {
+            plan.rows()
+                .try_fold(0_usize, |sum, row| sum.checked_add(row.span()?))
+        };
+        let mut plan = empty_plan();
+        assert_eq!(plan.reserved_bytes(), Some(0));
+        plan.put(ArenaPart::EndpointTexts, 3, 8);
+        plan.put(ArenaPart::KeyArena, 1, 1);
+        assert_eq!(plan.reserved_bytes(), summed(&plan));
+        assert!(plan.reserved_bytes() > Some(24), "both rows are counted");
+        for _ in 2..ARENA_ROWS {
+            plan.put(ArenaPart::EndpointTexts, 1, 8);
+        }
+        let full = plan.reserved_bytes();
+        assert_eq!(full, summed(&plan));
+        plan.put(ArenaPart::KeyArena, 1, 4096);
+        assert_eq!(plan.reserved_bytes(), full, "a refused row adds nothing");
+        let mut past = empty_plan();
+        past.put(ArenaPart::KeyArena, 2, usize::MAX);
+        assert_eq!(past.reserved_bytes(), None);
+        past.put(ArenaPart::EndpointTexts, 1, 8);
+        assert_eq!(
+            past.reserved_bytes(),
+            None,
+            "past the address space stays past it"
+        );
     }
 
     /// The refusal a settled plan answers is the first one met, as it came: a limit over the
