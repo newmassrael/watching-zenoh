@@ -2003,8 +2003,21 @@ unsafe fn publisher_put_options<'o, 'a>(
 /// its options moved in, each sent from where it lies and let go when the put returns.
 #[derive(Default)]
 struct PutHeld {
-    attachment: Option<MovedBytes<'static>>,
-    encoding: Option<OwnedEncoding>,
+    attachment: core::mem::ManuallyDrop<Option<MovedBytes<'static>>>,
+    encoding: core::mem::ManuallyDrop<Option<OwnedEncoding>>,
+}
+
+impl Drop for PutHeld {
+    /// One body for every way out of both put doors: with the fields dropped by the compiler,
+    /// each return of each door held its own copy of both releases.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: each field is dropped here once, and nothing reads it after.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.attachment);
+            core::mem::ManuallyDrop::drop(&mut self.encoding);
+        }
+    }
 }
 
 /// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
@@ -2028,8 +2041,8 @@ impl PutCarried {
     /// Each field must be null or valid as the options struct it was read from requires.
     #[inline(never)]
     unsafe fn fold<'a>(self, opts: &mut PublishOptions<'a>, held: &'a mut PutHeld) -> bool {
-        held.attachment = read_moved_bytes(self.attachment);
-        held.encoding = crate::encoding::take_moved_encoding(self.encoding);
+        *held.attachment = read_moved_bytes(self.attachment);
+        *held.encoding = crate::encoding::take_moved_encoding(self.encoding);
         let held: &'a PutHeld = held;
         let attachment = held.attachment.as_deref().map(ByteBuf::as_slice);
         let encoding = held.encoding.as_ref().map(OwnedEncoding::view);
@@ -2460,6 +2473,61 @@ mod put_options_tests {
             assert_eq!(carried.attachment, Some(&b"publisher"[..]));
             assert!(carried.timestamp.is_none());
             assert!(attachment._this.handle.is_null(), "the attachment is spent");
+        }
+    }
+
+    /// What a put holds is let go when its hold is dropped, once, and not while the options that
+    /// borrow it are sent. Turned red by a drop of the hold that leaves the moved attachment held.
+    #[test]
+    fn a_puts_hold_lets_its_moved_attachment_go_when_it_is_dropped() {
+        use super::{put_options, PutCarried};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use core::ffi::c_void;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count(_data: *mut c_void, context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut bytes = *b"held";
+        let released = AtomicUsize::new(0);
+        let context = &released as *const AtomicUsize as *mut c_void;
+        // SAFETY: `bytes` and `released` outlive the payload made over them, and every pointer
+        // handed over is null or points at a live value of its type.
+        unsafe {
+            let mut owned = z_owned_bytes_t::null_value();
+            let made = crate::platform::z_bytes_from_buf(
+                &mut owned,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                Some(count),
+                context,
+            );
+            assert_eq!(made, crate::result::Z_OK);
+            let mut attachment = z_moved_bytes_t { _this: owned };
+            let mut held = PutHeld::default();
+            let mut opts = put_options();
+            let carried = PutCarried {
+                encoding: core::ptr::null_mut(),
+                timestamp: core::ptr::null_mut(),
+                attachment: &mut attachment,
+                source_info: core::ptr::null_mut(),
+            }
+            .fold(&mut opts, &mut held);
+            assert!(carried, "an attachment is carried");
+            assert_eq!(opts.attachment, Some(&b"held"[..]));
+            drop(opts);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                0,
+                "held while the put runs"
+            );
+            drop(held);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "let go once, with the hold"
+            );
         }
     }
 
