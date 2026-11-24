@@ -79,9 +79,9 @@ use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused,
-    SessionClosed, SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId,
-    SubscriberSink, WireHolds, WireKey,
+    KeyAnchor, KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
+    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
+    StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -1875,10 +1875,10 @@ fn sleep_ms(ms: u32) {
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
 /// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct SubscriberRow {
-    /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
-    /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
-    /// of the session held.
-    holds: WireHolds,
+    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
+    /// lock of the session held: the declarations the key and the retraction name are the tables'
+    /// row's to hold.
+    _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: SubscriberSink,
@@ -1888,30 +1888,14 @@ pub(crate) struct SubscriberRow {
     latch: CallLatch,
 }
 
-/// A row of the session's own declarations whose key holds the session's declarations: taken out
-/// of the tables, it is let go of with no lock of the session held, and what its key held comes
-/// back from it, to give back to the session (`CoopEngine::give_back`). The holds are bare ids
-/// of the session's count, which a dropped row would never give back, so every place a row leaves
-/// the tables goes through this.
-pub(crate) trait RowHolds {
-    /// Let go of the row, its callback with it: what its key held.
-    fn into_holds(self) -> WireHolds;
-}
-
-impl RowHolds for SubscriberRow {
-    fn into_holds(self) -> WireHolds {
-        self.holds
-    }
-}
-
 impl SubscriberRow {
-    /// A subscriber keeping `holds`, handing what it hears to `sink`, the timestamp shown when
+    /// A subscriber keeping `anchor`, handing what it hears to `sink`, the timestamp shown when
     /// `expose`.
     // Out of line: measured smaller apart from the declaration that builds the row.
     #[inline(never)]
-    pub(crate) fn new(holds: WireHolds, sink: SubscriberSink, expose: bool) -> Self {
+    pub(crate) fn new(anchor: KeyAnchor, sink: SubscriberSink, expose: bool) -> Self {
         Self {
-            holds,
+            _anchor: anchor,
             sink,
             expose,
             latch: CallLatch::new(),
@@ -5396,23 +5380,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Give back to the session what a key held of its declarations (`RowHolds`), with no lock
-    /// of the session held: a release may retract a declaration, which takes the lock.
-    // Out of line: every undeclaration, refused declaration and close gives holds back, and each
-    // would otherwise carry the releases and the drop of what the key kept.
-    #[inline(never)]
-    fn give_back(&self, holds: WireHolds) {
-        holds.release(self);
-    }
-
-    /// Let go of `wire`, a key no row came to hold, giving back what it held
-    /// ([`Self::give_back`]), with no lock of the session held.
-    // Out of line: each refusal of a declaration lets its key go, and one body serves them.
-    #[inline(never)]
-    fn let_go_of_key(&self, wire: WireKey) {
-        self.give_back(wire.into_holds());
-    }
-
     /// Let go of each row whose last call ended after it was undeclared, when a call said one may
     /// wait ([`Round::take_marked`]): a walk of each table whose calls the round ends takes them out
     /// one at a time under the session's lock (`SessionTables::release_drained_subscriber` and its
@@ -5445,10 +5412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Walk one table with `take`, which takes out the next row at or after its cursor whose last
     /// call ended: each row is taken under the session's lock, its drop counted as under way from
     /// there, and dropped after the lock.
-    fn let_go_of_drained<R: RowHolds>(
-        &self,
-        mut take: impl FnMut(&mut CoopTables, &mut usize) -> Option<R>,
-    ) {
+    fn let_go_of_drained<R>(&self, mut take: impl FnMut(&mut CoopTables, &mut usize) -> Option<R>) {
         let mut cursor = 0;
         loop {
             let taken = {
@@ -5459,7 +5423,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let Some((row, releasing)) = taken else {
                 break;
             };
-            self.give_back(row.into_holds());
+            drop(row);
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
         }
@@ -5541,7 +5505,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_release(handle),
                 None => {}
             }
@@ -5572,7 +5536,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_queryable_release(handle),
                 None => {}
             }
@@ -5590,7 +5554,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_liveliness_release(handle),
                 None => {}
             }
@@ -6506,7 +6470,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6517,21 +6481,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(
-            wire.mapping_id,
-            retraction.map_or(Retraction::ById, Retraction::Named),
-        );
-        // The tables' row holds the declaration the key is named by, so the key's own hold of it
-        // is given back once the row stands, and the entity holds it once; the row keeps what
-        // else the key held.
-        let mut holds = wire.into_holds();
-        let named = holds.take_named();
+        let form = core
+            .session
+            .key_form(
+                wire.mapping_id,
+                retraction.map_or(Retraction::ById, Retraction::Named),
+            )
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+        // The tables' row holds the declarations the key and the retraction name, once each, in
+        // the session's one count; the row keeps what else the key kept.
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(holds, sink, exposed_by(&core.policy));
+        let row = SubscriberRow::new(wire.into_anchor(), sink, exposed_by(&core.policy));
         let declared = tables_mut(&core.session.registry).declare_subscriber(
             keyexpr,
             allowed_origin,
@@ -6542,13 +6506,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared) => declared,
             Err(refused) => {
                 // The program's callback goes with the refusal, let go of with no lock held, and
-                // what the key held goes back.
+                // what the key kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -6580,9 +6541,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "local-subscriber")]
         self.read_matching(core);
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         #[cfg(feature = "local-subscriber")]
         self.deliver();
         Ok(id)
@@ -6623,13 +6581,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "liveliness")]
         if let Some(undeclared) = live {
             match undeclared {
-                (_, Some(row)) => self.give_back(row.into_holds()),
+                (_, Some(row)) => drop(row),
                 (handle, None) => self.wait_for_liveliness_release(handle),
             }
             return;
         }
-        // The row is taken out of the tables under the lock and let go of after it: its key may hold
-        // a declaration whose release reaches the session (`WireKey`). One a call of which runs is
+        // The row is taken out of the tables under the lock and let go of after it: what its key
+        // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
         let undeclared = self.live().and_then(|mut core| {
             let core = &mut core.0;
@@ -6646,7 +6604,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                         (
                             rank,
                             handle,
-                            row.key().prefix(),
+                            row.key().holds(),
                             // Read against the key, held past the row.
                             tables
                                 .retraction_of(row.key())
@@ -6655,12 +6613,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (rank, handle, prefix, retraction) = found?;
+            let (rank, handle, (prefix, named), retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's,
             // which comes before every subscriber.
             let place = core.place(DeclaredTable::Subscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
+            let named_place = core.prefix_retraction(named);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&core.session.registry).undeclare_subscriber(handle)?;
@@ -6671,6 +6630,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 SubscriberRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
+            core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);
@@ -6679,7 +6639,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which runs is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => self.give_back(row.into_holds()),
+            Some((_, Some(row))) => drop(row),
             Some((handle, None)) => self.wait_for_release(handle),
             None => {}
         }
@@ -7017,7 +6977,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: QueryableSink,
     ) -> Result<QblId, Declined> {
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7028,19 +6988,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(
-            wire.mapping_id,
-            retraction.map_or(Retraction::ById, Retraction::Named),
-        );
-        // The tables' row holds the declaration the key is named by, so the key's own hold of it
-        // is given back once the row stands, and the entity holds it once; the row keeps what
-        // else the key held.
-        let mut holds = wire.into_holds();
-        let named = holds.take_named();
-        let row = QueryableRow::new(holds, sink);
+        let form = core
+            .session
+            .key_form(
+                wire.mapping_id,
+                retraction.map_or(Retraction::ById, Retraction::Named),
+            )
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+        // The tables' row holds the declarations the key and the retraction name, once each, in
+        // the session's one count; the row keeps what else the key kept.
+        let row = QueryableRow::new(wire.into_anchor(), sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -7052,13 +7012,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared) => declared,
             Err(refused) => {
                 // The row goes with the refusal, let go of with no lock held, and what its key
-                // held goes back.
+                // kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -7092,9 +7049,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "local-queryable")]
         self.read_matching(core);
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         #[cfg(feature = "local-queryable")]
         self.deliver();
         Ok(id)
@@ -7487,8 +7441,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: QblId) {
-        // The row is taken out of the tables under the lock and let go of after it: its key may hold
-        // a declaration whose release reaches the session (`WireKey`). One a call of which is owed,
+        // The row is taken out of the tables under the lock and let go of after it: what its key
+        // kept may reach the session as it goes (`KeyAnchor`). One a call of which is owed,
         // a query queued for it or handed to its callback now, is let go of once that call ends
         // (`Self::wait_for_queryable_release`), and a query queued before is answered by nothing.
         let undeclared = self.live().and_then(|mut core| {
@@ -7506,7 +7460,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                         (
                             rank,
                             handle,
-                            row.key().prefix(),
+                            row.key().holds(),
                             // Read against the key, held past the row.
                             tables
                                 .retraction_of(row.key())
@@ -7515,12 +7469,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (rank, handle, prefix, retraction) = found?;
+            let (rank, handle, (prefix, named), retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the queryable's, ranked by the walk that found it, then the declaration's,
             // which comes before every queryable.
             let place = core.place(DeclaredTable::Queryables, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
+            let named_place = core.prefix_retraction(named);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&core.session.registry).undeclare_queryable(handle)?;
@@ -7531,6 +7486,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 QueryableRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
+            core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
             self.read_matching(core);
@@ -7539,7 +7495,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which is owed is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => self.give_back(row.into_holds()),
+            Some((_, Some(row))) => drop(row),
             Some((handle, None)) => self.wait_for_queryable_release(handle),
             None => {}
         }
@@ -7568,7 +7524,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             } else {
                 Retraction::ById
             };
-            let form = core.session.key_form(wire.mapping_id, named);
+            let form = core
+                .session
+                .key_form(wire.mapping_id, named)
+                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
             let declared = tables_mut(&core.session.registry).declare_token(keyexpr, form)?;
             core.announce(DeclaredRow::of(declared.handle));
             // A token takes no traffic of its own, so every group that is told tokens is told it.
@@ -7580,8 +7539,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared.id)
         });
         // The row holds the declaration its key is named by, so the key the ABI named it by is
-        // not kept: what it held goes back, declared or refused, with no lock held.
-        self.let_go_of_key(wire);
+        // not kept: what it kept goes, declared or refused, with no lock held.
+        drop(wire);
         declared
     }
 
@@ -7638,7 +7597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7646,33 +7605,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // next, which its Interest carries: a full table, a key the session cannot hold or no id
         // left refuses it before anything is asked, and the sink goes with the refusal. The row
         // holds the key expression declaration its Interest names the key by for as long as it
-        // stands, so the key's own hold of it is given back once the row stands.
+        // stands.
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(wire.mapping_id, Retraction::ById);
-        let mut holds = wire.into_holds();
-        let mut named = holds.take_named();
+        let form = core
+            .session
+            .key_form(wire.mapping_id, Retraction::ById)
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
         let declared = tables_mut(&core.session.registry).declare_liveliness_subscriber(
             keyexpr,
             history,
             form,
-            LivelinessRow::new(holds, sink),
+            LivelinessRow::new(wire.into_anchor(), sink),
         );
         let declared = match declared {
             Ok(declared) => declared,
             Err(refused) => {
                 // The program's callback goes with the refusal, let go of with no lock held, and
-                // what the key held goes back.
+                // what the key kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -7687,9 +7644,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
             drop(guard);
-            if let Some(named) = named.take() {
-                named.release(self);
-            }
             self.hand_history(declared.handle);
             guard = match self.live() {
                 Some(guard) => guard,
@@ -7719,9 +7673,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
         }
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         self.deliver();
         Ok(id)
     }

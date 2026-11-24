@@ -832,15 +832,15 @@ impl SharedSession {
     }
 
     /// [`Self::declared`] for a declaration on `wire`, which `made` is handed: a closed session,
-    /// which runs nothing, gives back what the key held of its declarations
-    /// ([`WireKey::into_holds`]); the registry gives it back when it refuses or lets the entry go.
+    /// which runs nothing, lets the key go; the registry holds the declarations it names for as
+    /// long as it records the entry.
     fn declared_on_wire<T>(
         &self,
         wire: WireKey,
         made: impl FnOnce(WireKey) -> Option<T>,
     ) -> Result<T, Refusal> {
         if self.is_closed() {
-            wire.let_go(self);
+            drop(wire);
             return Err(Refusal::Closed);
         }
         made(wire).ok_or(Refusal::NoEntityId)

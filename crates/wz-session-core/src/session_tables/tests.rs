@@ -459,6 +459,7 @@ fn an_entity_names_its_key_by_the_declaration_it_starts_with_and_holds_it() {
     let prefix = tables.declare_keyexpr("demo/").unwrap();
     let form = KeyForm {
         prefix: Some(prefix.handle),
+        own: None,
         retraction: Retraction::AsAnnounced,
     };
     let sub = tables
@@ -492,6 +493,7 @@ fn a_prefix_the_key_does_not_start_with_or_that_is_gone_is_not_used() {
     for prefix in [other.handle, gone.handle] {
         let form = KeyForm {
             prefix: Some(prefix),
+            own: None,
             retraction: Retraction::ById,
         };
         let token = tables.declare_token("demo/x", form).unwrap();
@@ -1312,6 +1314,7 @@ fn a_key_form_names_the_declaration_the_wire_names_while_it_stands() {
         tables.key_form(declared.id, Retraction::AsAnnounced),
         KeyForm {
             prefix: Some(declared.handle),
+            own: None,
             retraction: Retraction::AsAnnounced
         }
     );
@@ -1319,6 +1322,7 @@ fn a_key_form_names_the_declaration_the_wire_names_while_it_stands() {
         tables.key_form(0, Retraction::ById),
         KeyForm {
             prefix: None,
+            own: None,
             retraction: Retraction::ById
         },
         "a wire that names no declaration"
@@ -1328,6 +1332,7 @@ fn a_key_form_names_the_declaration_the_wire_names_while_it_stands() {
         tables.key_form(declared.id, Retraction::AsAnnounced),
         KeyForm {
             prefix: None,
+            own: None,
             retraction: Retraction::AsAnnounced
         },
         "a declaration that went is not named"
@@ -1350,6 +1355,7 @@ fn a_retraction_names_what_its_declaration_stated() {
     let key = "demo/x/**";
     let as_announced = KeyForm {
         prefix: Some(announced.handle),
+        own: None,
         retraction: Retraction::AsAnnounced,
     };
     let token = tables.declare_token(key, as_announced).unwrap();
@@ -1360,6 +1366,7 @@ fn a_retraction_names_what_its_declaration_stated() {
     );
     let named = KeyForm {
         prefix: Some(announced.handle),
+        own: None,
         retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
     };
     let sub = tables
@@ -1374,6 +1381,7 @@ fn a_retraction_names_what_its_declaration_stated() {
     assert_eq!(tables.wire_of(row).mapping, announced.id);
     let by_id = KeyForm {
         prefix: Some(announced.handle),
+        own: None,
         retraction: Retraction::ById,
     };
     let quiet = tables
@@ -1390,6 +1398,142 @@ fn a_retraction_names_what_its_declaration_stated() {
     );
 }
 
+/// An entity whose retraction names a declaration holds it as it holds the one its key is named
+/// by: the program's letting go of it leaves it declared, and the entity's going retracts it after
+/// the entity, by the id the retraction named.
+///
+/// # Control
+///
+/// Holding no declaration for a named retraction (`Declaring::declare` without `hold(named)`)
+/// reds the first `undeclare_keyexpr` (the program's release retracts it); releasing none in
+/// `undeclare_entity` reds `named`.
+#[test]
+fn a_named_retraction_holds_its_declaration_until_the_entity_goes() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/n").unwrap();
+    let key = "demo/n/**";
+    let form = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
+    };
+    let sub = tables
+        .declare_subscriber(key, Locality::Any, form, 1)
+        .unwrap();
+    assert_eq!(tables.keyexprs().get(own.handle).unwrap().holds(), 2);
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the subscriber still holds it"
+    );
+    let row = tables.subscribers().get(sub.handle).unwrap().key();
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((own.id, "/**"))
+    );
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert_eq!(undeclared.keyexpr, None, "its key was named whole");
+    assert_eq!(undeclared.named, Some(own.id));
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+}
+
+/// A declaration an entity's key is named by and its retraction names alike is held once, and
+/// retracted once with it.
+///
+/// # Control
+///
+/// Holding the named declaration even when it is the key's (`EntityKey::holds` without its
+/// filter) reds the count, and the entity's going then leaves it declared.
+#[test]
+fn one_declaration_named_twice_by_an_entity_is_held_once() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/t").unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(declared.id, "")),
+    };
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(tables.keyexprs().get(declared.handle).unwrap().holds(), 2);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    let undeclared = tables.undeclare_token(token.handle).unwrap();
+    assert_eq!(undeclared.keyexpr, Some(declared.id));
+    assert_eq!(undeclared.named, None);
+    assert_eq!(tables.keyexpr_by_id(declared.id), None);
+}
+
+/// A named retraction whose declaration no longer stands holds nothing and retracts the key
+/// whole; one whose declaration is retracted whatever held it does too.
+///
+/// # Control
+///
+/// Reading the stated id back unchecked (`retraction_of` returning the named key as stated)
+/// reds both literal assertions.
+#[test]
+fn a_named_retraction_without_its_declaration_names_the_key_whole() {
+    let mut tables = Tables::new();
+    let key = "demo/w/x";
+    let gone = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(77, "/x")),
+    };
+    let token = tables.declare_token(key, gone).unwrap();
+    let row = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(row.holds(), (None, None));
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((0, key))
+    );
+    let own = tables.declare_keyexpr("demo/w").unwrap();
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/x")),
+    };
+    let held = tables.declare_token(key, named).unwrap();
+    assert_eq!(tables.retract_keyexpr(own.handle), Some(own.id));
+    let row = tables.tokens().get(held.handle).unwrap().key();
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((0, key))
+    );
+    assert_eq!(tables.undeclare_token(held.handle).unwrap().named, None);
+}
+
+/// The declaration of an entity's own key the form states is held by its row whatever its
+/// retraction names, and goes with the entity after the program let it go: a subscriber announced
+/// on another key keeps its own declared key as zenoh-pico's subscription does.
+///
+/// # Control
+///
+/// Ignoring `KeyForm::own` in `Declaring::entity_key` reds the first `undeclare_keyexpr`.
+#[test]
+fn an_entity_holds_the_declaration_of_its_own_key_its_form_states() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/o").unwrap();
+    let form = KeyForm {
+        prefix: None,
+        own: Some(own.handle),
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/o/x", Locality::Any, form, 1)
+        .unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the subscriber holds it"
+    );
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert_eq!(undeclared.named, Some(own.id));
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+    assert_eq!(
+        KeyForm::default().owning(Some(own.handle)).own,
+        Some(own.handle)
+    );
+}
+
 #[test]
 fn a_retracted_declaration_goes_whatever_holds_it() {
     let mut tables = Tables::new();
@@ -1397,6 +1541,7 @@ fn a_retracted_declaration_goes_whatever_holds_it() {
     tables.declare_keyexpr("demo/").unwrap();
     let form = KeyForm {
         prefix: Some(declared.handle),
+        own: None,
         retraction: Retraction::ById,
     };
     let token = tables.declare_token("demo/x", form).unwrap();
@@ -1418,6 +1563,7 @@ fn a_key_is_named_as_the_session_sends_it_by_the_declaration_that_stands() {
     let id = MappedId::new(declared.id).unwrap();
     let form = KeyForm {
         prefix: Some(declared.handle),
+        own: None,
         retraction: Retraction::ById,
     };
     let token = tables.declare_token("demo/x", form).unwrap();
