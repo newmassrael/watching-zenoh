@@ -834,7 +834,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
-            for snapshot in connected(engine) {
+            for snapshot in connected(Arc::as_ref(engine)) {
                 delivery.call(z_loaned_transport_event_t {
                     kind: Z_SAMPLE_KIND_PUT,
                     transport: transport_of(&snapshot),
