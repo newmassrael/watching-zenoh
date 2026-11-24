@@ -1648,14 +1648,15 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 /// [`spawn_session`] over a reassembly Router its maker builds: a session whose fragment chains
 /// stage into buffers its session's arena lent.
 ///
-/// The task is a [`RouterSessionTask`] made in its cell, which builds the pump in its own memory
-/// when it first runs, and `make_router` writes the Router in the pump's field, so neither is
-/// moved through the stack of the call that opens the session; only the maker, which holds what
-/// the Router is made of, is. The pump is dropped with the task, whether the session ended or the
-/// task was dropped before. A task the runtime refuses (a table reserved too small for it, or
-/// full) is counted by the runtime and answered with why, the maker and what it was to be made of
-/// dropped unmade: an engine that reserved its tables at its open tells its program the session
-/// has no room, where a handle that reads as a shut runtime would say the session ended.
+/// The task is a [`RouterSessionTask`] whose cell is claimed first and whose parts are then
+/// written in it one by one, which builds the pump in its own memory when it first runs, and
+/// `make_router` writes the Router in the pump's field: neither the task, nor the pump, nor what
+/// they are made of is gathered into a value of this frame and moved into the cell. The pump is
+/// dropped with the task, whether the session ended or the task was dropped before. A task the
+/// runtime refuses (a table reserved too small for it, or full) is counted by the runtime and
+/// answered with why, the maker and what it was to be made of dropped unmade: an engine that
+/// reserved its tables at its open tells its program the session has no room, where a handle that
+/// reads as a shut runtime would say the session ended.
 /// Out of line: the task's future is built here, apart from the frame and body of the caller.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
@@ -1672,16 +1673,21 @@ where
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
 {
+    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F>>()?;
     let runtime = local.runtime().clone();
-    local.spawn_local_with(move || RouterSessionTask {
-        place: Becomes::new(PumpParts {
-            runtime,
-            fields,
-            make_router,
-        }),
-        on_event,
-        _pinned: core::marker::PhantomPinned,
-    })
+    let at = task.as_mut_ptr();
+    // SAFETY: the place is this claim's alone, long enough and aligned for the task. Every field of
+    // the task is written in it here, once, before the task starts: the parts whole, in the place
+    // marked as holding them, and the rest of the task beside them.
+    unsafe {
+        let parts = Becomes::hold_parts_at(core::ptr::addr_of_mut!((*at).place));
+        core::ptr::addr_of_mut!((*parts).runtime).write(runtime);
+        core::ptr::addr_of_mut!((*parts).fields).write(fields);
+        core::ptr::addr_of_mut!((*parts).make_router).write(make_router);
+        core::ptr::addr_of_mut!((*at).on_event).write(on_event);
+        core::ptr::addr_of_mut!((*at)._pinned).write(core::marker::PhantomPinned);
+        Ok(task.start_in())
+    }
 }
 
 /// The task a session runs as on the heap profile ([`spawn_session_with_router`]): a future of a
@@ -1804,12 +1810,29 @@ enum Stage {
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 impl<P, T> Becomes<P, T> {
     /// A place that holds `parts`.
+    #[cfg(test)]
     fn new(parts: P) -> Self {
         Self {
             place: MaybeUninit::new(Shared {
                 parts: ManuallyDrop::new(parts),
             }),
             stage: Stage::Parts,
+        }
+    }
+
+    /// The parts of the place at `at`, which is marked as holding them: where a task made in its
+    /// cell writes them, so they are not gathered into a value moved into the place.
+    ///
+    /// # Safety
+    /// `at` is valid for writes and aligned for the place, and a whole `P` is written at the
+    /// pointer answered before the place is read or dropped.
+    unsafe fn hold_parts_at(at: *mut Self) -> *mut P {
+        // SAFETY: the caller's contract. `MaybeUninit<Shared<P, T>>` lays out as the union, and
+        // the union's parts as a `P`, as `ManuallyDrop<P>` does.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).stage).write(Stage::Parts);
+            let shared = core::ptr::addr_of_mut!((*at).place).cast::<Shared<P, T>>();
+            core::ptr::addr_of_mut!((*shared).parts).cast::<P>()
         }
     }
 
@@ -2818,6 +2841,61 @@ mod wake_budget_tests {
         }
     }
 
+    /// A session refused a cell lets go of what it was handed, unmade: its maker is not run and
+    /// goes with the refusal, and so does the handle to its session the fields held. Turned red by
+    /// a spawn that writes the task's parts before it has a cell, or keeps them past a refusal.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_session_refused_a_cell_lets_go_of_what_it_was_handed() {
+        type Sink = fn(IterationEvent<'_, '_>);
+        let runtime = CoopRuntime::reserved(
+            Stopped,
+            crate::RuntimeRows {
+                tasks: 0,
+                task_bytes: 64,
+                timers: 0,
+            },
+        );
+        let local = CoopLocalSet::new(&runtime);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let made = Rc::new(core::cell::Cell::new(0u32));
+        let before = crate::link_cells::CellRc::handles(&actions);
+        let refused = spawn_session_with_router(
+            &local,
+            PumpFields {
+                link: Rc::new(Recording::default()),
+                actions: actions.clone(),
+                entropy,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
+            },
+            CountedRouter {
+                made: Rc::clone(&made),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
+            },
+            ignore as Sink,
+        );
+        assert!(refused.is_err(), "a table of no cells hosts no session");
+        assert_eq!(made.get(), 0, "the maker never ran");
+        assert_eq!(
+            Rc::strong_count(&made),
+            1,
+            "the maker went with the refusal"
+        );
+        assert_eq!(
+            crate::link_cells::CellRc::handles(&actions),
+            before,
+            "the fields, and the handle to the session they held, went with it"
+        );
+    }
+
     /// The engine's shape of a session: a runtime reserved when the session opens and sealed, the
     /// session's task on a local set, its pump holding a handle of the runtime. Letting go of every
     /// handle outside the table lets go of the runtime, and its clock with it: the table keeps no
@@ -2991,7 +3069,7 @@ mod wake_budget_tests {
 
 #[cfg(all(test, feature = "reassembly", not(feature = "session-slot")))]
 mod in_place_tests {
-    use super::Becomes;
+    use super::{Becomes, Stage};
     use alloc::boxed::Box;
     use core::cell::Cell;
 
@@ -3027,6 +3105,35 @@ mod in_place_tests {
         }
         assert_eq!(value_drops.get(), 1, "dropped once, with the place");
         assert_eq!(parts_drops.get(), 1);
+    }
+
+    /// Parts written in a place marked as holding them are handed to the maker as parts handed in
+    /// whole are, and the value built of them is dropped once, with the place. Turned red by a
+    /// place whose mark is left as it was, which builds nothing.
+    #[test]
+    fn parts_written_in_their_place_are_built_as_parts_handed_in_are() {
+        let (parts_drops, value_drops) = (Cell::new(0), Cell::new(0));
+        let mut place = core::mem::MaybeUninit::new(Becomes::<Counted<'_>, Counted<'_>> {
+            place: core::mem::MaybeUninit::uninit(),
+            stage: Stage::Empty,
+        });
+        // SAFETY: the place is this test's and aligned for its type, and the parts are written
+        // whole before it is read.
+        let becomes = unsafe {
+            Becomes::hold_parts_at(place.as_mut_ptr()).write(Counted(&parts_drops));
+            place.assume_init_mut()
+        };
+        let value = becomes
+            .build(|parts, slot| {
+                drop(parts);
+                Some(slot.write(Counted(&value_drops)))
+            })
+            .expect("built of the parts written in their place");
+        assert_eq!(value.0.get(), 0, "built and lent, not dropped");
+        assert_eq!(parts_drops.get(), 1, "the parts were handed to the maker");
+        // SAFETY: the place is whole, and dropped here once.
+        unsafe { place.assume_init_drop() };
+        assert_eq!((parts_drops.get(), value_drops.get()), (1, 1));
     }
 
     /// Parts never built into a value are dropped once, with the place.
