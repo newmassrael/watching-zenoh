@@ -248,6 +248,11 @@ pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 /// past it is refused, having installed nothing.
 pub const MAX_DECL_WATCHES: usize = generated::MAX_DECL_WATCHES;
 
+/// The events of what the peers declare and retract a session holds for its declaration watches
+/// until each watch is told, one row for each event however many watches it reaches. An event
+/// that finds every row taken is not held, and each watch it would reach is told how many it lost.
+pub const MAX_DECL_WATCH_EVENTS: usize = generated::MAX_DECL_WATCH_EVENTS;
+
 /// The transport events listeners a session holds at once. A listener past it is refused, having
 /// been told nothing.
 pub const MAX_TRANSPORT_EVENTS_LISTENERS: usize = generated::MAX_TRANSPORT_EVENTS_LISTENERS;
