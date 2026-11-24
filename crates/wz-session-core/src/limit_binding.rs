@@ -218,12 +218,23 @@ impl fmt::Display for LimitValue {
 }
 
 /// The type a limit's value is held in: a [`Quota`] for a bound, a `usize` for a parameter.
-pub trait LimitValueType: Copy + Eq + fmt::Debug + 'static {
+/// Sealed: an entry reads and writes the value as one `usize` word ([`LimitField`]), which only
+/// these two are.
+pub trait LimitValueType: sealed::OneWord + Copy + Eq + fmt::Debug + 'static {
     /// The kind of limit whose value this is.
     const KIND: LimitKind;
 
     /// The value as a statement names it.
     fn to_value(self) -> LimitValue;
+}
+
+mod sealed {
+    /// The types whose every value is one `usize` word, bit for bit.
+    pub trait OneWord {}
+
+    impl OneWord for super::Quota {}
+
+    impl OneWord for usize {}
 }
 
 impl LimitValueType for Quota {
@@ -727,8 +738,10 @@ impl<L: LimitSpec, const HELD: usize> Default for Limited<L, HELD> {
 /// # Safety
 ///
 /// `AT` is the offset in `S` (`core::mem::offset_of!`) of a field of type
-/// `Limited<Self, { Self::HELD }>`, and `Self::Value` is [`Quota`] or `usize`: the field keeps
-/// the value in one `usize` word there, or in no byte where the domain is one value.
+/// `Limited<Self, { Self::HELD }>`: the field keeps the value in one `usize` word there
+/// ([`LimitValueType`] is sealed to [`Quota`] and `usize`, and [`Limited`] is transparent), or in
+/// no byte where the domain is one value. The generated module pins each field's type beside its
+/// `AT`, so a field of another type does not compile.
 pub unsafe trait LimitField<S>: LimitSpec {
     /// The offset in `S` of the field that keeps the limit's value.
     const AT: usize;
@@ -783,10 +796,13 @@ impl<S> fmt::Debug for LimitEntry<S> {
 impl<S> LimitEntry<S> {
     /// The entry of the limit whose type is `L`.
     pub const fn of<L: LimitField<S>>() -> Self {
-        // A wrong offset is refused where the table is evaluated, before any read or write.
+        // A field that keeps a value is `Limited<L, 1>` (its type is pinned where `AT` is
+        // stated); a wrong layout or offset is refused where the table is evaluated.
         assert!(
             L::HELD == 0
-                || ((L::AT & (core::mem::align_of::<usize>() - 1)) == 0
+                || (core::mem::size_of::<Limited<L, 1>>() == core::mem::size_of::<usize>()
+                    && core::mem::align_of::<Limited<L, 1>>() == core::mem::align_of::<usize>()
+                    && (L::AT & (core::mem::align_of::<usize>() - 1)) == 0
                     && L::AT + core::mem::size_of::<usize>() <= core::mem::size_of::<S>()),
             "a limit's field is not one word inside its snapshot"
         );

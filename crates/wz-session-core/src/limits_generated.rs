@@ -3359,345 +3359,490 @@ impl Default for SessionLimits {
     }
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxKeyexprBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_keyexpr_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxKeyexprBytesHeld = |s| &s.max_keyexpr_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for KeyArenaBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, key_arena_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &KeyArenaBytesHeld = |s| &s.key_arena_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxSubscriptions {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_subscriptions);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxSubscriptionsHeld = |s| &s.max_subscriptions;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MatchMemoSlots {
     const AT: usize = core::mem::offset_of!(SessionLimits, match_memo_slots);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MatchMemoSlotsHeld = |s| &s.match_memo_slots;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneEvents {
     const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_events);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeliveryLaneEventsHeld = |s| &s.delivery_lane_events;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeliveryLaneBytesHeld = |s| &s.delivery_lane_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneCallbacks {
     const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_callbacks);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeliveryLaneCallbacksHeld = |s| &s.delivery_lane_callbacks;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxQueryables {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_queryables);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxQueryablesHeld = |s| &s.max_queryables;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPendingQueries {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_queries);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPendingQueriesHeld = |s| &s.max_pending_queries;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for LinkNotedRequests {
     const AT: usize = core::mem::offset_of!(SessionLimits, link_noted_requests);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &LinkNotedRequestsHeld = |s| &s.link_noted_requests;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxDeclObservers {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_observers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxDeclObserversHeld = |s| &s.max_decl_observers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxLivelinessSubscriptions {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_liveliness_subscriptions);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxLivelinessSubscriptionsHeld =
+    |s| &s.max_liveliness_subscriptions;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxLocalTokens {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_local_tokens);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxLocalTokensHeld = |s| &s.max_local_tokens;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPublishers {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_publishers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPublishersHeld = |s| &s.max_publishers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxQueriers {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_queriers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxQueriersHeld = |s| &s.max_queriers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxMatchingListeners {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_matching_listeners);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxMatchingListenersHeld = |s| &s.max_matching_listeners;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxDeclWatches {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_watches);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxDeclWatchesHeld = |s| &s.max_decl_watches;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxTransportEventsListeners {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_transport_events_listeners);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxTransportEventsListenersHeld =
+    |s| &s.max_transport_events_listeners;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxLinkEventsListeners {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_link_events_listeners);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxLinkEventsListenersHeld = |s| &s.max_link_events_listeners;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_declared_keyexprs);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxDeclaredKeyexprsHeld = |s| &s.max_declared_keyexprs;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_liveliness_gets);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPendingLivelinessGetsHeld = |s| &s.max_pending_liveliness_gets;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPendingDeclares {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_declares);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPendingDeclaresHeld = |s| &s.max_pending_declares;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxInboundSubInterests {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_inbound_sub_interests);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxInboundSubInterestsHeld = |s| &s.max_inbound_sub_interests;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPeerKeyexprAliases {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_peer_keyexpr_aliases);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPeerKeyexprAliasesHeld = |s| &s.max_peer_keyexpr_aliases;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxSharedKeyIds {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_shared_key_ids);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxSharedKeyIdsHeld = |s| &s.max_shared_key_ids;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxRemoteDecls {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_remote_decls);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxRemoteDeclsHeld = |s| &s.max_remote_decls;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPendingReplies {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_replies);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPendingRepliesHeld = |s| &s.max_pending_replies;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxPendingFinals {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_finals);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxPendingFinalsHeld = |s| &s.max_pending_finals;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_reply_payload_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxReplyPayloadBytesHeld = |s| &s.max_reply_payload_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxMulticastReplies {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_multicast_replies);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxMulticastRepliesHeld = |s| &s.max_multicast_replies;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_publishers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxAdvancedPublishersHeld = |s| &s.max_advanced_publishers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_subscribers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxAdvancedSubscribersHeld = |s| &s.max_advanced_subscribers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxFaces {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_faces);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxFacesHeld = |s| &s.max_faces;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for MaxAcceptPending {
     const AT: usize = core::mem::offset_of!(SessionLimits, max_accept_pending);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &MaxAcceptPendingHeld = |s| &s.max_accept_pending;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for RxPoolBuffers {
     const AT: usize = core::mem::offset_of!(SessionLimits, rx_pool_buffers);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &RxPoolBuffersHeld = |s| &s.rx_pool_buffers;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for TxPoolSlots {
     const AT: usize = core::mem::offset_of!(SessionLimits, tx_pool_slots);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &TxPoolSlotsHeld = |s| &s.tx_pool_slots;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
     const AT: usize = core::mem::offset_of!(SessionLimits, session_max_peer_keyexpr_aliases);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &SessionMaxPeerKeyexprAliasesHeld =
+    |s| &s.session_max_peer_keyexpr_aliases;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
     const AT: usize = core::mem::offset_of!(SessionLimits, session_max_remote_decls);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &SessionMaxRemoteDeclsHeld = |s| &s.session_max_remote_decls;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
     const AT: usize = core::mem::offset_of!(SessionLimits, session_max_inbound_sub_interests);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &SessionMaxInboundSubInterestsHeld =
+    |s| &s.session_max_inbound_sub_interests;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
     const AT: usize = core::mem::offset_of!(SessionLimits, querier_max_pending_queries);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &QuerierMaxPendingQueriesHeld = |s| &s.querier_max_pending_queries;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for TxNoProgressWindowUs {
     const AT: usize = core::mem::offset_of!(SessionLimits, tx_no_progress_window_us);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &TxNoProgressWindowUsHeld = |s| &s.tx_no_progress_window_us;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for TxExpiryCloseAfter {
     const AT: usize = core::mem::offset_of!(SessionLimits, tx_expiry_close_after);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &TxExpiryCloseAfterHeld = |s| &s.tx_expiry_close_after;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentBurst {
     const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_burst);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DatagramFragmentBurstHeld = |s| &s.datagram_fragment_burst;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentGapUs {
     const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_gap_us);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DatagramFragmentGapUsHeld = |s| &s.datagram_fragment_gap_us;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for QueryParametersMaxBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, query_parameters_max_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &QueryParametersMaxBytesHeld = |s| &s.query_parameters_max_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for QueryAttachmentMaxBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, query_attachment_max_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &QueryAttachmentMaxBytesHeld = |s| &s.query_attachment_max_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoTxQueueSize {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_tx_queue_size);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoTxQueueSizeHeld = |s| &s.pico_tx_queue_size;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for AppLinkQueueBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, app_link_queue_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &AppLinkQueueBytesHeld = |s| &s.app_link_queue_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for E2eSenderSlots {
     const AT: usize = core::mem::offset_of!(SessionLimits, e2e_sender_slots);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &E2eSenderSlotsHeld = |s| &s.e2e_sender_slots;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for ReplayDepthMax {
     const AT: usize = core::mem::offset_of!(SessionLimits, replay_depth_max);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &ReplayDepthMaxHeld = |s| &s.replay_depth_max;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for InstanceKeyFields {
     const AT: usize = core::mem::offset_of!(SessionLimits, instance_key_fields);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &InstanceKeyFieldsHeld = |s| &s.instance_key_fields;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for InstancesPerMessage {
     const AT: usize = core::mem::offset_of!(SessionLimits, instances_per_message);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &InstancesPerMessageHeld = |s| &s.instances_per_message;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncBurstMessages {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_burst_messages);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncBurstMessagesHeld =
+    |s| &s.declaration_sync_burst_messages;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncFinalTimeoutMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_final_timeout_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncFinalTimeoutMsHeld =
+    |s| &s.declaration_sync_final_timeout_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncIntervalMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_interval_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncIntervalMsHeld = |s| &s.declaration_sync_interval_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRxNoProgressMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_rx_no_progress_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncRxNoProgressMsHeld =
+    |s| &s.declaration_sync_rx_no_progress_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRetryIntervalMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_retry_interval_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncRetryIntervalMsHeld =
+    |s| &s.declaration_sync_retry_interval_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_tx_no_progress_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &DeclarationSyncTxNoProgressMsHeld =
+    |s| &s.declaration_sync_tx_no_progress_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for HandedLegBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, handed_leg_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &HandedLegBytesHeld = |s| &s.handed_leg_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for UdpPortSlots {
     const AT: usize = core::mem::offset_of!(SessionLimits, udp_port_slots);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &UdpPortSlotsHeld = |s| &s.udp_port_slots;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_unicast_batch_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoUnicastBatchBytesHeld = |s| &s.pico_unicast_batch_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoMulticastBatchBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_multicast_batch_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoMulticastBatchBytesHeld = |s| &s.pico_multicast_batch_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoLeaseMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_lease_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoLeaseMsHeld = |s| &s.pico_lease_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoSocketTimeoutMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_socket_timeout_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoSocketTimeoutMsHeld = |s| &s.pico_socket_timeout_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoConnectTimeoutMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_connect_timeout_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoConnectTimeoutMsHeld = |s| &s.pico_connect_timeout_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoFragMaxBytes {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_frag_max_bytes);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoFragMaxBytesHeld = |s| &s.pico_frag_max_bytes;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoAcceptTimeoutMs {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_accept_timeout_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&SessionLimits) -> &PicoAcceptTimeoutMsHeld = |s| &s.pico_accept_timeout_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
     const AT: usize = core::mem::offset_of!(SessionLimits, pico_keepalives_per_lease);
 }
+
+const _: fn(&SessionLimits) -> &PicoKeepalivesPerLeaseHeld = |s| &s.pico_keepalives_per_lease;
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
 pub const SESSION_LIMIT_COUNT: usize = 68;
@@ -4024,55 +4169,75 @@ impl Default for RuntimeLimits {
     }
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for MaxLocatorLen {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, max_locator_len);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &MaxLocatorLenHeld = |s| &s.max_locator_len;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for MaxStaticConnect {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, max_static_connect);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &MaxStaticConnectHeld = |s| &s.max_static_connect;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for SnapshotPeriodMs {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_period_ms);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &SnapshotPeriodMsHeld = |s| &s.snapshot_period_ms;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for SnapshotHistogramBuckets {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_histogram_buckets);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &SnapshotHistogramBucketsHeld = |s| &s.snapshot_histogram_buckets;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for SupervisionCheckpoints {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, supervision_checkpoints);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &SupervisionCheckpointsHeld = |s| &s.supervision_checkpoints;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for E2eSupervisedStreams {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, e2e_supervised_streams);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &E2eSupervisedStreamsHeld = |s| &s.e2e_supervised_streams;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for EventRingSlots {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, event_ring_slots);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &EventRingSlotsHeld = |s| &s.event_ring_slots;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for ClockSources {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_sources);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &ClockSourcesHeld = |s| &s.clock_sources;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for MessageCatalogEntries {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, message_catalog_entries);
 }
 
-// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+const _: fn(&RuntimeLimits) -> &MessageCatalogEntriesHeld = |s| &s.message_catalog_entries;
+
+// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
 unsafe impl LimitField<RuntimeLimits> for ClockMaxForwardStepMs {
     const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_max_forward_step_ms);
 }
+
+const _: fn(&RuntimeLimits) -> &ClockMaxForwardStepMsHeld = |s| &s.clock_max_forward_step_ms;
 
 /// How many limits [`RuntimeLimits`] holds: the length of [`RUNTIME_LIMITS`].
 pub const RUNTIME_LIMIT_COUNT: usize = 10;

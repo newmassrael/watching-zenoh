@@ -2886,10 +2886,16 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
     # the one body of `LimitEntry`, so the table links nothing per limit.
     for lim in lims:
         field, name = lim["id"].lower(), camel_limit(lim["id"])
-        out += ["", "// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.",
+        out += ["", "// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.",
                 f"unsafe impl LimitField<{snapshot}> for {name} {{"]
         out += rust_assoc_const("AT", "usize", f"core::mem::offset_of!({snapshot}, {field})")
-        out.append("}")
+        # The field's type is checked by the compiler, not by this rule: a field of any type but the
+        # limit's `Held` does not coerce, so `AT` can only name the word the entry reads.
+        pin = f"const _: fn(&{snapshot}) -> &{name}Held = |s| &s.{field};"
+        if len(pin) <= RUST_MAX_WIDTH:
+            out += ["}", "", pin]
+        else:
+            out += ["}", "", f"const _: fn(&{snapshot}) -> &{name}Held =", f"    |s| &s.{field};"]
     out += ["", f"/// How many limits [`{snapshot}`] holds: the length of [`{table}`].",
             f"pub const {count}: usize = {len(lims)};", "",
             f"/// Every limit of [`{snapshot}`] as a reader that names it by its id sees it, in the order of",
@@ -6478,6 +6484,10 @@ def cmd_selftest() -> int:
            and "unsafe impl LimitField<RuntimeLimits> for MaxA {\n"
            "    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_a);\n}\n" in rsnap
            and "fn select_in(" not in bsnap and "fn held_in(" not in bsnap)
+    expect("a limit's field is pinned to its Held type beside its offset, so the compiler checks it",
+           "    const AT: usize = core::mem::offset_of!(SessionLimits, max_a);\n}\n\n"
+           "const _: fn(&SessionLimits) -> &MaxAHeld = |s| &s.max_a;\n" in bsnap
+           and "const _: fn(&RuntimeLimits) -> &MaxAHeld = |s| &s.max_a;\n" in rsnap)
     csnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(
         SAMPLE.replace('on_heap = "advisory"', 'on_heap = "capacity"'))))
     expect("a bound the heap sizes too has its capacity in every build",
