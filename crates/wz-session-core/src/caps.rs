@@ -298,8 +298,9 @@ pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
 pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 
 /// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
-/// once: the payloads' area of the process's pools, blocks of power-of-two sizes each the smallest
-/// that holds its bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
+/// once, and the keys and parameters of the queries it keeps past their callbacks: the payloads'
+/// area of the process's pools, blocks of power-of-two sizes each the smallest that holds its
+/// bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
 pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
 
 /// The encodings a program holds through the C ABI at once: the slots of the process's pool of
@@ -481,13 +482,6 @@ pub const MAX_PENDING_REPLIES: usize = generated::MAX_PENDING_REPLIES;
 /// that cannot be terminated is not answered, because a reply with no `Final`
 /// after it leaves the peer's `get` open until its own timeout.
 pub const MAX_PENDING_FINALS: usize = generated::MAX_PENDING_FINALS;
-
-/// The bytes of the parameters of ONE query a program keeps past its queryable's
-/// callback (the deploy `HELD_QUERY_PARAMS_BYTES` limit): a cell of this many bytes
-/// for each of the session's [`MAX_PENDING_FINALS`] held queries, which the kept
-/// query's parameters are read from until the program lets it go. Keeping a query
-/// whose parameters are longer is refused; one without parameters takes no cell.
-pub const HELD_QUERY_PARAMS_BYTES: usize = generated::HELD_QUERY_PARAMS_BYTES;
 
 /// Maximum byte length of the payload of ONE staged reply, and the bytes of an
 /// attachment it carries beside it (the deploy `limits` key
