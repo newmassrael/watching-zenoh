@@ -197,7 +197,7 @@ fn loan(p: &Payload) -> *const wz_ext_loaned_message_payload_t {
 }
 
 fn key_is_the_catalogs(p: &Payload, catalog: *const wz_ext_loaned_message_catalog_t, index: usize) {
-    let mut entry: wz_ext_message_entry_t = unsafe { core::mem::zeroed() };
+    let mut entry = wz_ext_message_entry_t::default();
     // SAFETY: `catalog` is a live loaned catalog; `entry` is writable.
     assert_eq!(
         unsafe { wz_ext_message_catalog_entry(catalog, index, &mut entry) },

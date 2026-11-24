@@ -157,6 +157,7 @@ unsafe fn split_raw(
         transfer: 99,
         pieces: 99,
         sent: 99,
+        ..wz_ext_segment_result_t::default()
     };
     let mut refusal: z_owned_string_t = std::mem::zeroed();
     let rc = wz_ext_segment_sender_split(
@@ -214,7 +215,8 @@ fn a_split_hands_the_callback_each_piece_the_profile_describes() {
             wz_ext_segment_result_t {
                 transfer: 7,
                 pieces: 4,
-                sent: 4
+                sent: 4,
+                ..wz_ext_segment_result_t::default()
             }
         );
         assert_eq!(outcome.pieces.len(), 4);
@@ -290,6 +292,7 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
             transfer: 99,
             pieces: 99,
             sent: 99,
+            ..wz_ext_segment_result_t::default()
         };
         assert_eq!(
             wz_ext_segment_sender_split(
@@ -342,7 +345,8 @@ fn a_callback_that_stops_the_split_has_used_the_number() {
             wz_ext_segment_result_t {
                 transfer: 7,
                 pieces: 4,
-                sent: 1
+                sent: 1,
+                ..wz_ext_segment_result_t::default()
             }
         );
         assert!(
@@ -710,7 +714,8 @@ mod over_loopback {
                 wz_ext_segment_result_t {
                     transfer: 1,
                     pieces: 4,
-                    sent: 4
+                    sent: 4,
+                    ..wz_ext_segment_result_t::default()
                 }
             );
             let got = wait_for(&seen, 4);

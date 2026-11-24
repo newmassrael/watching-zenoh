@@ -11,6 +11,15 @@
  * it what is not portable. scripts/lib/drop_in_header_gate.py holds both halves.
  *
  * Include the drop-in header of the library first; the declarations here use its types.
+ *
+ * SIZED STRUCTS. Each struct a door writes into the program's memory, and the
+ * counts the object pool doors read from it, starts with size_t struct_size,
+ * which the program sets to the sizeof of the struct it was compiled with. A
+ * field is only ever added at the end of its struct. A door writes no byte
+ * past struct_size and sets struct_size to the bytes it wrote; it reads no
+ * count past struct_size, reading such a count as 0; and it refuses a
+ * struct_size short of the struct as it was when it took its size with
+ * Z_EINVAL, writing nothing.
  */
 
 #ifndef WZ_EXT_H
@@ -194,6 +203,7 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
 #define WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED 2  /* a key value is in no list */
 
 typedef struct wz_ext_event_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint8_t kind;      /* WZ_EXT_EVENT_RECORD, _EMPTY or _LOST */
   uint8_t level;     /* how serious, in the program's own scale */
   uint8_t arg_count; /* how many integers the event carries */
@@ -403,6 +413,7 @@ typedef struct wz_ext_moved_segment_sender_t {
 
 /* How far one put or split went. */
 typedef struct wz_ext_segment_result_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t transfer; /* the number the pieces carried; 0 when refused */
   size_t pieces;     /* how many pieces the message was cut into; 0 when
                         refused */
@@ -856,6 +867,7 @@ void wz_ext_e2e_receiver_options_default(wz_ext_e2e_receiver_options_t *this_);
 /* The verdict on one frame. The payload is frame + payload_offset, for
  * payload_len bytes, whatever the status. */
 typedef struct wz_ext_e2e_verdict_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint8_t status;    /* WZ_EXT_E2E_OK ... _UNSLOTTED */
   uint8_t failed;    /* WZ_EXT_E2E_FAILED_* bits */
   uint8_t has;       /* WZ_EXT_E2E_HAS_* bits */
@@ -993,6 +1005,7 @@ typedef struct wz_ext_instance_keyer_options_t {
 #define WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG 3   /* longer than an instance's room */
 
 typedef struct wz_ext_instance_key_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint8_t status;   /* WZ_EXT_INSTANCE_KEY_* */
   uint8_t reported; /* 1 when this drop carries the report of the drops since
                        the last one */
@@ -1284,6 +1297,7 @@ typedef struct wz_ext_replay_shape_t {
 } wz_ext_replay_shape_t;
 
 typedef struct wz_ext_replay_publisher_counts_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t recorded;
   uint64_t deferred_overwritten;
   uint64_t periodic_replaced;
@@ -1390,12 +1404,12 @@ typedef struct wz_ext_replay_publisher_slot_t {
  * returns 0, or returns anything else when it cannot say what time it is. */
 typedef int8_t wz_ext_replay_clock_fn(void *context, uint32_t *now_ms);
 
-/* One sample handed to the program: 120 bytes on a 64-bit target. It and the
+/* One sample handed to the program: 128 bytes on a 64-bit target. It and the
  * frame it points to are valid only for the call. */
 typedef struct wz_ext_replay_sample_t {
   const uint8_t *frame;
   size_t len;
-  wz_ext_e2e_verdict_t verdict; /* zero when judged is 0 */
+  wz_ext_e2e_verdict_t verdict; /* zero but its struct_size when judged is 0 */
   uint8_t from_replay;          /* 1 for a reply, 0 for a live sample */
   uint8_t judged;               /* 0 when stream is none the receiver has */
   uint8_t zid_len;              /* the replying publisher; 0 when live */
@@ -1426,6 +1440,7 @@ typedef struct wz_ext_replay_subscriber_options_t {
 } wz_ext_replay_subscriber_options_t;
 
 typedef struct wz_ext_replay_subscriber_counts_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t late_replies;
   uint64_t unknown_replies;
   uint64_t duplicates;
@@ -1965,18 +1980,27 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * largest block, or one no free block holds, is refused.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
- * The entity counts (publishers to liveliness_subscribers, queriers and
- * keyexprs) are per session and are multiplied by sessions; the rest are for
- * all sessions together. A session's subscribers, queryables, liveliness
- * tokens, liveliness subscribers, queriers and declared key expressions are
- * bounded by the limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES,
- * MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS,
- * MAX_DECLARED_KEYEXPRS): a count of
+ * The entity counts (publishers to liveliness_subscribers, queriers,
+ * keyexprs, gets, liveliness_gets and matching_listeners) are per session
+ * and are multiplied by sessions; the rest are for all sessions together. A
+ * session's subscribers, queryables, liveliness tokens, liveliness
+ * subscribers, queriers, declared key expressions, pending gets and liveliness
+ * gets and matching listeners are bounded by the limits it opens under
+ * (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
+ * MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS, MAX_DECLARED_KEYEXPRS,
+ * MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS, MAX_MATCHING_LISTENERS):
+ * a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
  * own pools states the configs it opens from and the bytes its payloads
  * carry. A count of an object the build has none of is not read.
+ *
+ * THE SIZE. The counts are a sized struct (SIZED STRUCTS, at the top): a
+ * program compiled before a count was added states it as 0, its limit's
+ * bound, and a struct_size short of the end of encodings, the counts every
+ * program states, is refused with Z_EINVAL by every door that reads counts,
+ * which then sizes and reserves nothing.
  *
  * RESERVING. With nothing reserved, the first object the program makes
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
@@ -2002,6 +2026,8 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
 #define WZ_EXT_OBJECT_POOL_CLASSES 11
 
 typedef struct wz_ext_object_pool_counts_t {
+  size_t struct_size; /* sizeof(wz_ext_object_pool_counts_t), set by the
+                       * program */
   size_t sessions;
   size_t publishers;
   size_t subscribers;
@@ -2018,9 +2044,14 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t queriers;
   size_t keyexprs;
   size_t encodings;
+  /* Read only when struct_size holds them, 0 otherwise (THE SIZE). */
+  size_t gets;
+  size_t liveliness_gets;
+  size_t matching_listeners;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   size_t slot_bytes;
   size_t slots;
   size_t in_use;
@@ -2033,22 +2064,24 @@ typedef struct wz_ext_object_pool_class_t {
  * memory wz_ext_object_pool_place needs. Z_OK; _Z_ERR_NULL for a NULL
  * argument; _Z_ERR_CONFIG_INVALID_VALUE for counts that make no pool (a
  * count left 0 whose limit holds no bound, or no slot at all);
- * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds. */
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds;
+ * Z_EINVAL for a struct_size short of the base (THE SIZE). */
 z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
                                     size_t *out_bytes);
 
 /* Reserve the pools of counts from the heap, in one allocation. Z_OK;
  * _Z_ERR_NULL for a NULL counts; _Z_ERR_CONFIG_INVALID_VALUE for counts that
  * make no pool; _Z_ERR_SYSTEM_OUT_OF_MEMORY when the heap has not the
- * memory; Z_EINVAL when pools are reserved already. A refusal leaves the heap
- * as it was. */
+ * memory; Z_EINVAL when pools are reserved already, or for a struct_size
+ * short of the base (THE SIZE). A refusal leaves the heap as it was. */
 z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts);
 
 /* Reserve the pools of counts over the len bytes at base, which the program
  * hands over until wz_ext_object_pool_release and must not touch meanwhile.
  * Z_OK; _Z_ERR_NULL for a NULL argument; _Z_ERR_CONFIG_INVALID_VALUE for
- * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes, or
- * when pools are reserved already; _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
+ * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes,
+ * when pools are reserved already, or for a struct_size short of the base
+ * (THE SIZE); _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
  * under what wz_ext_object_pool_bytes answers. A refused call writes nothing
  * at base. */
 z_result_t wz_ext_object_pool_place(void *base, size_t len,
@@ -2114,6 +2147,7 @@ typedef struct wz_ext_moved_message_catalog_t {
 
 /* One message's entry. A number whose has bit is clear is 0. */
 typedef struct wz_ext_message_entry_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   const char *key_expr;   /* the literal key it is put on, valid while the
                              catalog lives */
   uint32_t id;
@@ -2503,6 +2537,7 @@ bool wz_ext_internal_message_payload_check(
  * the objects behind the handles a program holds. */
 
 typedef struct wz_ext_session_memory_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   size_t total_bytes; /* the sum of the rows that are bounded */
   size_t rows;        /* rows wz_ext_session_memory_row reports */
   uint8_t bounded;    /* 1 when every row is: total_bytes is then the most */
@@ -2511,6 +2546,7 @@ typedef struct wz_ext_session_memory_t {
 } wz_ext_session_memory_t;
 
 typedef struct wz_ext_session_memory_row_t {
+  size_t struct_size; /* sizeof this struct, set by the program */
   const char *part;   /* what holds the bytes; static */
   const char *basis;  /* the limit or build value that sizes it; static */
   size_t count;       /* items; 0 when bounded is 0 */

@@ -2230,6 +2230,28 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     );
 }
 
+/// The ABI's places of matching listeners are as many as the rows of the engine's table of them,
+/// counted by `MAX_MATCHING_LISTENERS`, in every build. Turned red by places counted by another
+/// limit, or none laid out for the kind.
+#[test]
+fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::MatchingListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().matching_listeners;
+    assert!(rows > 0, "the build's limits admit matching listeners");
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "matching listener places")
+        .map(|row| (row.basis, row.count));
+    assert_eq!(laid, Some(("MAX_MATCHING_LISTENERS", rows)));
+    assert_eq!(plan.entities().of_kind(EntityKind::MatchingListener), rows);
+}
+
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
 /// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
 /// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does

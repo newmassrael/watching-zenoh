@@ -618,7 +618,7 @@ impl E2e {
             "a payload is protected"
         );
         self.now_ms += 1;
-        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        let mut verdict = wz_ext_e2e_verdict_t::default();
         assert_eq!(
             wz_ext_e2e_receiver_judge(
                 wz_ext_e2e_receiver_loan(&self.receiver),
@@ -800,7 +800,7 @@ impl Keyed {
         };
         let mut frame = [0u8; E2E_FRAME_ROOM];
         let mut written = 0usize;
-        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+        let mut key = wz_ext_instance_key_t::default();
         assert_eq!(
             wz_ext_instance_keyer_protect(
                 wz_ext_instance_keyer_loan(&self.sending),
@@ -819,7 +819,7 @@ impl Keyed {
         );
         assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
         self.now_ms += 1;
-        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        let mut verdict = wz_ext_e2e_verdict_t::default();
         assert_eq!(
             wz_ext_instance_keyer_judge(
                 wz_ext_instance_keyer_loan(&self.receiving),

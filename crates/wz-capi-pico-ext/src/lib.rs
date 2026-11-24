@@ -92,6 +92,14 @@ pub mod replay_publisher;
 #[cfg(feature = "replay-cache")]
 #[path = "../../wz-capi-pico/src/replay_subscriber.rs"]
 pub mod replay_subscriber;
+#[cfg(any(
+    feature = "e2e-receiver",
+    feature = "instance-key",
+    feature = "message-catalog",
+    feature = "replay-cache"
+))]
+#[path = "../../wz-capi-pico/src/sized.rs"]
+mod sized;
 #[cfg(feature = "e2e-supervision")]
 #[path = "../../wz-capi-pico/src/stream_supervision.rs"]
 pub mod stream_supervision;

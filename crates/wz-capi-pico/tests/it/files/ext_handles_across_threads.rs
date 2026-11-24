@@ -190,7 +190,7 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
                             counter, round as u64,
                             "stream {stream} keeps its own counter"
                         );
-                        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+                        let mut verdict = wz_ext_e2e_verdict_t::default();
                         let rc = wz_ext_e2e_receiver_judge(
                             rx,
                             stream,
@@ -269,7 +269,7 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
                     start.wait();
                     for round in 0..ROUNDS {
                         // An undecodable payload between each two, which every thread counts.
-                        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+                        let mut key = wz_ext_instance_key_t::default();
                         let garbage = [0xFFu8, 0xFF];
                         let rc = wz_ext_instance_keyer_index(
                             keyer,
@@ -390,7 +390,7 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                     let mine = wz_ext_message_payload_loan(&payload);
                     start.wait();
                     for round in 0..ROUNDS {
-                        let mut entry: wz_ext_message_entry_t = std::mem::zeroed();
+                        let mut entry = wz_ext_message_entry_t::default();
                         let index = round % 2;
                         let rc = wz_ext_message_catalog_entry(catalog, index, &mut entry);
                         assert_eq!(rc, Z_OK);

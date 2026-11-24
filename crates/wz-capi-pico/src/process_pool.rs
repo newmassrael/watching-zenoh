@@ -111,6 +111,8 @@ pub(crate) struct Counts {
     pub(crate) gets: usize,
     /// Liveliness gets each session holds pending.
     pub(crate) liveliness_gets: usize,
+    /// Matching listeners of each session, its publishers' and queriers' together.
+    pub(crate) matching_listeners: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -182,6 +184,7 @@ pub(crate) struct Bounds {
     keyexprs: Option<usize>,
     gets: Option<usize>,
     liveliness_gets: Option<usize>,
+    matching_listeners: Option<usize>,
 }
 
 impl Bounds {
@@ -197,6 +200,7 @@ impl Bounds {
             keyexprs: limits.max_declared_keyexprs().most(),
             gets: limits.max_pending_queries().most(),
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
+            matching_listeners: limits.max_matching_listeners().most(),
         }
     }
 }
@@ -309,12 +313,18 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.liveliness_gets,
             bounds.liveliness_gets,
         )),
+        matching_listeners: planned!(bounded(
+            true,
+            sessions,
+            stated.matching_listeners,
+            bounds.matching_listeners,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 17;
+const KINDS: usize = 18;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,6 +403,13 @@ impl Plan {
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         {
             plan = plan.with::<crate::get::GetPlace>(Kind::LivelinessGet, objects.liveliness_gets);
+        }
+        #[cfg(feature = "engine-tokio")]
+        {
+            plan = plan.with::<crate::matching::MatchingPlace>(
+                Kind::MatchingListener,
+                objects.matching_listeners,
+            );
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -910,6 +927,9 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_gets: each::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
             limits.max_pending_liveliness_gets(),
         ),
+        matching_listeners: each::<{ caps::MAX_MATCHING_LISTENERS }>(
+            limits.max_matching_listeners(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -935,6 +955,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         encodings: caps::HELD_ENCODINGS,
         gets: 0,
         liveliness_gets: 0,
+        matching_listeners: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1178,6 +1199,7 @@ mod tests {
         keyexprs: Some(7),
         gets: Some(8),
         liveliness_gets: Some(9),
+        matching_listeners: Some(10),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1189,6 +1211,7 @@ mod tests {
         liveliness_subscribers: None,
         gets: None,
         liveliness_gets: None,
+        matching_listeners: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1287,6 +1310,7 @@ mod tests {
             encodings: 12,
             gets: 1,
             liveliness_gets: 1,
+            matching_listeners: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1696,6 +1720,12 @@ mod tests {
             Kind::LivelinessGet,
             core::mem::size_of::<crate::get::GetPlace>(),
         );
+        #[cfg(feature = "engine-tokio")]
+        row(
+            "matching_listener",
+            Kind::MatchingListener,
+            core::mem::size_of::<crate::matching::MatchingPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1879,6 +1909,8 @@ mod tests {
         check(Kind::Get);
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         check(Kind::LivelinessGet);
+        #[cfg(feature = "engine-tokio")]
+        check(Kind::MatchingListener);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1900,6 +1932,10 @@ mod tests {
         assert_eq!(
             bounds.liveliness_gets,
             limits.max_pending_liveliness_gets().most()
+        );
+        assert_eq!(
+            bounds.matching_listeners,
+            limits.max_matching_listeners().most()
         );
     }
 
