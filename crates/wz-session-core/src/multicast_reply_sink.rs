@@ -52,6 +52,17 @@ pub trait MulticastReplyEnqueue {
     fn enqueue_reply(&self, reply: MulticastTxReply<'_>) {
         self.enqueue(reply.to_item());
     }
+
+    /// Enqueue one staged reply, described by the parts its stage lends. A backing that queues
+    /// owned items builds the owned record from them (the default), and skips a reply the wire
+    /// cannot carry; one that encodes its replies where they wait writes it with the stage's lent
+    /// writer ([`crate::lent_response::ResponseWriter`]), and builds no owned record of it.
+    #[cfg(feature = "codec-response")]
+    fn enqueue_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+            self.enqueue_reply(MulticastTxReply::Response(&response));
+        }
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -100,6 +111,12 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
     fn send_response(&self, response: crate::wire::ResponseOwned) {
         self.queue
             .enqueue_reply(MulticastTxReply::Response(&response));
+    }
+    // A staged reply goes to the backing as its parts, so that a backing that writes its replies
+    // where they wait builds no owned record of it.
+    #[cfg(feature = "codec-response")]
+    fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        self.queue.enqueue_reply_parts(parts);
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(
