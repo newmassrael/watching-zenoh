@@ -61,6 +61,7 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::serde_codec::z_deserialize;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::sink::SampleView;
+use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
@@ -958,9 +959,7 @@ fn issue_get<E: SessionEngine + ?Sized>(
         return;
     };
     let Some(slot) = shared.claim() else {
-        if !shared.is_closing() {
-            finish.run(&mut shared.lock());
-        }
+        end_unasked(shared, finish);
         return;
     };
     // SAFETY: the slot was taken just above, in `shared`'s table, and no leg of it is out.
@@ -984,19 +983,58 @@ fn issue_get<E: SessionEngine + ?Sized>(
     unsafe { slot.release() };
 }
 
+/// A get that is not asked is over at once: its end runs as a get's end does, unless the
+/// subscriber is closing.
+fn end_unasked<E: SessionEngine + ?Sized>(shared: &Shared<E>, finish: Finish) {
+    if !shared.is_closing() {
+        finish.run(&mut shared.lock());
+    }
+}
+
+/// The key of one get, written where its issuer keeps it: as long as the longest key a session
+/// stores, so a key past it is one no session would send.
+type GetKey = FixedText<{ caps::MAX_KEYEXPR_BYTES }>;
+
+/// The key of the startup get, `<base>/@adv/**`.
+fn history_key(base: &str) -> GetKey {
+    let mut key = GetKey::new();
+    crate::advanced_ke::write_history_get_ke(&mut key, base);
+    key
+}
+
+/// The key of a get of one source's cache, `<base>/@adv/*/<zid>/<eid>/**`.
+fn recovery_key(base: &str, zid: &[u8], eid: u32) -> GetKey {
+    let mut key = GetKey::new();
+    crate::advanced_ke::write_recovery_get_ke(&mut key, base, zid, eid);
+    key
+}
+
+/// Issue one get on the key written in `key`, as [`issue_get`] does; a key too long to write is
+/// a get no session sends, and it is over before it starts.
+fn issue_get_on<E: SessionEngine + ?Sized>(
+    shared: &Arc<Shared<E>>,
+    key: &GetKey,
+    opts: &QueryOptionsOf<'_>,
+    finish: Finish,
+) {
+    match key.finish() {
+        Ok(keyexpr) => issue_get(shared, keyexpr, opts, finish),
+        Err(_) => end_unasked(shared, finish),
+    }
+}
+
 /// Issue a `_sn` recovery get against the gapped source's `@adv` cache: the open range from the
 /// next sequence number, or the bounded one a heartbeat asks for.
 fn issue_recovery_query<E: SessionEngine + ?Sized>(
     shared: &Arc<Shared<E>>,
     request: RecoveryRequest,
 ) {
-    let zid_hex = zid_to_zenoh_hex(&request.zid);
-    let keyexpr = crate::advanced_ke::recovery_get_ke(&shared.base_keyexpr, &zid_hex, request.eid);
+    let key = recovery_key(&shared.base_keyexpr, &request.zid, request.eid);
     let parameters = GetParameters::recovery(request.from_sn, request.to_sn);
     let opts = get_options(shared, &parameters);
-    issue_get(
+    issue_get_on(
         shared,
-        &keyexpr,
+        &key,
         &opts,
         Finish::Recovery((request.zid, request.eid)),
     );
@@ -1008,11 +1046,11 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let keyexpr = crate::advanced_ke::history_get_ke(&shared.base_keyexpr);
+    let key = history_key(&shared.base_keyexpr);
     let parameters = GetParameters::history(depth, age);
-    issue_get(
+    issue_get_on(
         shared,
-        &keyexpr,
+        &key,
         &get_options(shared, &parameters),
         Finish::History,
     );
@@ -1026,11 +1064,10 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let zid_hex = zid_to_zenoh_hex(&zid);
-    let keyexpr = crate::advanced_ke::recovery_get_ke(&shared.base_keyexpr, &zid_hex, eid);
+    let key = recovery_key(&shared.base_keyexpr, &zid, eid);
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
-    issue_get(shared, &keyexpr, &opts, Finish::Recovery((zid, eid)));
+    issue_get_on(shared, &key, &opts, Finish::Recovery((zid, eid)));
 }
 
 /// The timestamped twin: the target is the token's own key expression, which is the one the

@@ -990,6 +990,15 @@ fn shared_on(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
 ) -> Arc<super::Shared<dyn SessionEngine>> {
+    shared_on_key(script, delivered, "demo/data")
+}
+
+/// [`shared_on`] subscribing to `base`.
+fn shared_on_key(
+    script: &Arc<Script>,
+    delivered: &Arc<Mutex<Vec<u8>>>,
+    base: &str,
+) -> Arc<super::Shared<dyn SessionEngine>> {
     let d = Arc::clone(delivered);
     let state = State::new(
         Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
@@ -1000,7 +1009,7 @@ fn shared_on(
     Arc::new(super::Shared::new(
         Arc::downgrade(&engine(script)),
         state,
-        "demo/data".into(),
+        base.into(),
         Locality::SessionLocal,
         1_000,
     ))
@@ -1149,5 +1158,54 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     assert_eq!(
         opts.sent_parameters().as_deref(),
         Some(crate::advanced_subscriber::plans::history_selector(Some(4), Some(1.5)).as_bytes()),
+    );
+}
+
+/// The keys of a history get and of a source's get are written where the issuer keeps them: no
+/// memory is taken, and each is the text the owned spelling builds.
+#[test]
+fn a_gets_key_is_written_in_place_and_takes_no_memory() {
+    let before = allocations();
+    let history = super::history_key("demo/data");
+    let recovery = super::recovery_key("demo/data", &[0x02], 7);
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "writing a get's key allocates nothing");
+    assert_eq!(
+        history.finish().ok(),
+        Some(crate::advanced_ke::history_get_ke("demo/data").as_str())
+    );
+    assert_eq!(
+        recovery.finish().ok(),
+        Some(crate::advanced_ke::recovery_get_ke("demo/data", &publisher_hex(), 7).as_str())
+    );
+}
+
+/// A subscription whose history key is longer than any key a session stores asks no get: the
+/// get is over before it starts, which hands on what the history held back.
+#[test]
+fn a_history_get_whose_key_does_not_fit_ends_at_once() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let base = "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES);
+    let shared = shared_on_key(&script, &delivered, &base);
+    let mut live = sample(0, 10);
+    live.keyexpr = base.clone();
+    assert!(
+        shared.lock().handle_live(&live, 1).is_none(),
+        "a live sample during the history asks nothing"
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "a live sample is held while the history is in flight"
+    );
+
+    super::issue_history_query(&shared, None, None);
+
+    assert_eq!(script.get_count(), 0, "no get is asked of the engine");
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [10],
+        "the history's end handed on what it held"
     );
 }

@@ -15,6 +15,9 @@
 //! (the publisher without the subscriber, say) links only the ones it calls, and the grammar
 //! stays one text for every host.
 
+use wz_session_core::text_out::TextOut;
+use wz_session_core::zid_hex::write_zenoh_hex;
+
 use crate::prelude::*;
 
 /// The `@adv` namespace prefix (zenoh `KE_ADV_PREFIX`, admin.rs:48).
@@ -109,10 +112,31 @@ pub fn recovery_get_ke(base: &str, zid_hex: &str, eid: u32) -> String {
     format!("{base}/{KE_ADV_PREFIX}/*/{zid_hex}/{eid}/**")
 }
 
+/// [`recovery_get_ke`] written into `out`, the source named by its zid's bytes, with no memory
+/// of its own: the key a host that asks its gets from fixed memory sends.
+pub fn write_recovery_get_ke(out: &mut dyn TextOut, base: &str, zid: &[u8], eid: u32) {
+    out.push_str(base);
+    out.push('/');
+    out.push_str(KE_ADV_PREFIX);
+    out.push_str("/*/");
+    write_zenoh_hex(zid, out);
+    out.push('/');
+    out.push_u64(u64::from(eid));
+    out.push_str("/**");
+}
+
 /// The startup history GET KE: `<base>/@adv/**` (every cached sample under the
 /// `@adv` namespace, across all publishers).
 pub fn history_get_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/**")
+}
+
+/// [`history_get_ke`] written into `out`, with no memory of its own.
+pub fn write_history_get_ke(out: &mut dyn TextOut, base: &str) {
+    out.push_str(base);
+    out.push('/');
+    out.push_str(KE_ADV_PREFIX);
+    out.push_str("/**");
 }
 
 /// The publisher-detection subscriber KE: `<base>/@adv/pub/**` (the `@adv/pub`
@@ -160,7 +184,35 @@ pub fn adv_ke_is_outbound_safe(ke: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{adv_ke_is_outbound_safe, history_get_ke, publisher_detection_ke, recovery_get_ke};
+    use wz_session_core::text_out::FixedText;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    use super::{
+        adv_ke_is_outbound_safe, history_get_ke, publisher_detection_ke, recovery_get_ke,
+        write_history_get_ke, write_recovery_get_ke,
+    };
+
+    /// The written keys are the owned spellings' texts, for a zid whose hex drops a leading zero
+    /// and for one that keeps every digit; a buffer too short for the key reports it and hands no
+    /// text cut short.
+    #[test]
+    fn the_written_get_keys_are_the_owned_ones() {
+        for zid in [&[0x02][..], &[0xAB, 0xCD, 0xEF, 0x01][..]] {
+            let mut written: FixedText<128> = FixedText::new();
+            write_recovery_get_ke(&mut written, "demo/data", zid, 7);
+            assert_eq!(
+                written.finish(),
+                Ok(recovery_get_ke("demo/data", &zid_to_zenoh_hex(zid), 7).as_str())
+            );
+        }
+        let mut written: FixedText<128> = FixedText::new();
+        write_history_get_ke(&mut written, "demo/**");
+        assert_eq!(written.finish(), Ok(history_get_ke("demo/**").as_str()));
+
+        let mut short: FixedText<12> = FixedText::new();
+        write_history_get_ke(&mut short, "demo/data");
+        assert!(short.finish().is_err(), "a key past the buffer is refused");
+    }
 
     /// R311y544 — this test used to assert the OPPOSITE, and pinned the
     /// premise of R311y543's degradation: that the derived heartbeat keyexpr
