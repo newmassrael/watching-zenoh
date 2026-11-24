@@ -57,6 +57,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt;
 
 use crate::json5::{number_as_u64, Json5Value};
@@ -220,25 +221,39 @@ pub(crate) fn dictionary_faults<'a>(
             report(Fault::NotAKeyExpr { at, key, refusal });
         }
     }
-    let mut ids: Vec<ExprId> = entries
-        .iter()
-        .map(|&(_, id, _)| id)
+    let id_at = |at: usize| entries.get(at).map(|&(_, id, _)| id);
+    let ids: Vec<ExprId> = sorted_places(entries.len(), &|a, b| id_at(a).cmp(&id_at(b)))
+        .into_iter()
+        .filter_map(id_at)
         .filter(|id| *id != 0)
         .collect();
-    ids.sort_unstable();
     // Each run of one value is reported once, at its first.
     for run in ids.chunk_by(|a, b| a == b) {
         if let [id, _, ..] = run {
             report(Fault::DuplicateId { id: *id });
         }
     }
-    let mut keys: Vec<&'a str> = entries.iter().map(|&(_, _, key)| key).collect();
-    keys.sort_unstable();
+    let key_at = |at: usize| entries.get(at).map(|&(_, _, key)| key);
+    let keys: Vec<&'a str> = sorted_places(entries.len(), &|a, b| key_at(a).cmp(&key_at(b)))
+        .into_iter()
+        .filter_map(key_at)
+        .collect();
     for run in keys.chunk_by(|a, b| a == b) {
         if let [key, _, ..] = run {
             report(Fault::DuplicateKey { key });
         }
     }
+}
+
+/// The places `0..len` in the order `order` puts them in: every ordering of a dictionary's
+/// entries, by id or by key, is this one sort. A sort is compiled once for each element type and
+/// comparator it is given; a comparator handed over as `dyn` is one type, so the sort is compiled
+/// once for all of them, where a closure comparing in place was a sort of its own each.
+#[inline(never)]
+fn sorted_places(len: usize, order: &dyn Fn(usize, usize) -> Ordering) -> Vec<usize> {
+    let mut places: Vec<usize> = (0..len).collect();
+    places.sort_unstable_by(|a, b| order(*a, *b));
+    places
 }
 
 /// One entry: an id and the key it names.
@@ -289,17 +304,18 @@ impl KeyIds {
         if let Some(fault) = first {
             return Err(fault.refused());
         }
-        let mut rows: Vec<Entry> = given
+        // The faults above refuse an id named twice, so the order by id is a total one.
+        let id_at = |at: usize| given.get(at).map(|&(_, id, _)| id);
+        let rows: Vec<Entry> = sorted_places(given.len(), &|a, b| id_at(a).cmp(&id_at(b)))
             .into_iter()
-            .map(|(_, id, key)| Entry {
+            .filter_map(|at| given.get(at))
+            .map(|&(_, id, key)| Entry {
                 id,
                 key: String::from(key),
             })
             .collect();
-        rows.sort_unstable_by_key(|entry| entry.id);
-        let mut by_key: Vec<usize> = (0..rows.len()).collect();
-        let key_at = |at: &usize| rows.get(*at).map(|row| row.key.as_bytes());
-        by_key.sort_unstable_by(|a, b| key_at(a).cmp(&key_at(b)));
+        let key_at = |at: usize| rows.get(at).map(|row| row.key.as_bytes());
+        let by_key = sorted_places(rows.len(), &|a, b| key_at(a).cmp(&key_at(b)));
         Ok(Self {
             entries: rows,
             by_key,
@@ -2505,6 +2521,42 @@ mod document_tests {
             "the document states id 0 in entry 0 of `wz/key-ids/dictionary`, and no key may \
              have it"
         );
+    }
+
+    /// The ids and keys named more than once are reported ascending, once each, whatever order
+    /// the entries come in, and a dictionary given out of order reads by id and by key. Turned
+    /// red by an ordering that compares other than the ids or the keys' bytes.
+    #[test]
+    fn repeats_are_reported_ascending_and_a_dictionary_reads_in_either_order() {
+        let entries = [
+            (0, 9, "lab/z"),
+            (1, 3, "lab/b"),
+            (2, 9, "lab/a"),
+            (3, 3, "lab/z"),
+            (4, 7, "lab/b"),
+        ];
+        let mut found = Vec::new();
+        dictionary_faults(&entries, |fault| found.push(fault));
+        assert_eq!(
+            found,
+            [
+                Fault::DuplicateId { id: 3 },
+                Fault::DuplicateId { id: 9 },
+                Fault::DuplicateKey { key: "lab/b" },
+                Fault::DuplicateKey { key: "lab/z" },
+            ]
+        );
+        let ids = KeyIds::new([(30, "lab/c"), (10, "lab/b/x"), (20, "lab/a"), (40, "lab/b")])
+            .expect("a dictionary");
+        assert_eq!(
+            ids.iter().collect::<Vec<_>>(),
+            [(10, "lab/b/x"), (20, "lab/a"), (30, "lab/c"), (40, "lab/b")]
+        );
+        for (id, key) in [(10, "lab/b/x"), (20, "lab/a"), (30, "lab/c"), (40, "lab/b")] {
+            assert_eq!(ids.id_of(key), Some(id), "{key}");
+            assert_eq!(ids.key_of(id), Some(key), "{id}");
+        }
+        assert_eq!(ids.id_of("lab/b/"), None);
     }
 
     #[test]
