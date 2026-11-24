@@ -51,9 +51,9 @@ impl RoundCall for Call {
 }
 
 impl SampleCall for Call {
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         self.log
-            .note(format!("{} sample {}", self.row, sample.keyexpr()));
+            .note(format!("{} sample {}", self.row, sample.keyexpr));
     }
 }
 
