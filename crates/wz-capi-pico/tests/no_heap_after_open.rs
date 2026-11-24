@@ -884,7 +884,16 @@ struct MessagePayload {
     sending: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
     receiving: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
     serial: u64,
+    /// The storage each payload keeps its values in, the program's: taken before the rounds and
+    /// let go after both payloads are dropped.
+    _storage: [Vec<u8>; 2],
 }
+
+/// The values and the bytes each payload of the `message-payload` family holds.
+#[cfg(feature = "message-payload")]
+const PAYLOAD_FIELDS: usize = 16;
+#[cfg(feature = "message-payload")]
+const PAYLOAD_BYTES: usize = 64;
 
 #[cfg(feature = "message-payload")]
 impl MessagePayload {
@@ -922,24 +931,40 @@ impl MessagePayload {
             Z_OK,
             "the synthetic schema reads"
         );
+        let size = wz_capi_pico::message_payload::wz_ext_message_payload_storage_size(
+            PAYLOAD_FIELDS,
+            PAYLOAD_BYTES,
+        );
+        let mut storage = [vec![0u8; size], vec![0u8; size]];
+        let [sending_at, receiving_at] = &mut storage;
         let payload = Self {
-            sending: Self::payload(&catalog, &schema),
-            receiving: Self::payload(&catalog, &schema),
+            sending: Self::payload(&catalog, &schema, sending_at),
+            receiving: Self::payload(&catalog, &schema, receiving_at),
             serial: 0,
+            _storage: storage,
         };
         wz_ext_payload_schema_drop(wz_ext_payload_schema_move(&mut schema));
         wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog));
         payload
     }
 
-    /// A payload of the catalog's first message, of type `syn.noheap.Pose`.
+    /// A payload of the catalog's first message, of type `syn.noheap.Pose`, keeping its values in
+    /// `storage`, which outlives it.
     unsafe fn payload(
         catalog: &wz_capi_pico::message_catalog::wz_ext_owned_message_catalog_t,
         schema: &wz_capi_pico::message_payload::wz_ext_owned_payload_schema_t,
+        storage: &mut [u8],
     ) -> wz_capi_pico::message_payload::wz_ext_owned_message_payload_t {
         use wz_capi_pico::message_catalog::wz_ext_message_catalog_loan;
         use wz_capi_pico::message_payload::{
-            wz_ext_message_payload_new, wz_ext_owned_message_payload_t, wz_ext_payload_schema_loan,
+            wz_ext_message_payload_new, wz_ext_message_payload_options_t,
+            wz_ext_owned_message_payload_t, wz_ext_payload_schema_loan,
+        };
+        let options = wz_ext_message_payload_options_t {
+            storage: storage.as_mut_ptr(),
+            storage_len: storage.len(),
+            fields: PAYLOAD_FIELDS,
+            bytes: PAYLOAD_BYTES,
         };
         let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
         assert_eq!(
@@ -949,6 +974,7 @@ impl MessagePayload {
                 0,
                 wz_ext_payload_schema_loan(schema),
                 c"syn.noheap.Pose".as_ptr(),
+                &options,
                 std::ptr::null_mut(),
             ),
             Z_OK,

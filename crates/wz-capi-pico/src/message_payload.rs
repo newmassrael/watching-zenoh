@@ -19,8 +19,17 @@
 //! # Refusals
 //!
 //! A call on a payload that is refused returns a named code (`WZ_EXT_ERR_PAYLOAD_PATH`, `_TYPE`,
-//! `_RANGE`, `_ABSENT`, `_WIRE`, or `Z_ERR_OVERFLOW` for a buffer too small) and changes nothing;
-//! `wz_ext_message_payload_refusal` gives the sentence of the last refused call on the payload.
+//! `_RANGE`, `_ABSENT`, `_WIRE`, or `Z_ERR_OVERFLOW` for a buffer too small or a storage with no
+//! room left) and changes nothing, except a decode whose values do not fit the storage, which
+//! leaves the payload empty; `wz_ext_message_payload_refusal` gives the sentence of the last
+//! refused call on the payload.
+//!
+//! # Storage
+//!
+//! A payload keeps its values in storage the program gives when it makes the payload
+//! (`wz_ext_message_payload_options_t`), as many values and bytes as the program states and
+//! `wz_ext_message_payload_storage_size` sizes, so setting, encoding, decoding and reading take
+//! nothing from the heap.
 //!
 //! # Ownership and threads
 //!
@@ -37,9 +46,12 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
+use core::mem::{align_of, size_of};
+use core::ptr::NonNull;
 
-use wz_app_frame::message_payload::{Given, Got, Payload, Refusal, Wanted};
+use wz_app_frame::message_payload::{Entry, Given, Got, Payload, Refusal, Storage, Wanted};
 use wz_app_frame::proto_decode::SchemaSet;
+use wz_app_frame::proto_write::Narrowing;
 
 use crate::abi::z_owned_string_t;
 use crate::e2e::{
@@ -94,10 +106,155 @@ pub struct wz_ext_moved_message_payload_t {
     pub(crate) _this: wz_ext_owned_message_payload_t,
 }
 
-/// What a payload handle holds: the payload over its schema, the key its catalog message is put
-/// on, and the sentence of the last refused call.
+/// How a payload is made: the storage it keeps its values in, the program's.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct wz_ext_message_payload_options_t {
+    /// `storage_len` bytes the payload keeps its values in, at least
+    /// `wz_ext_message_payload_storage_size(fields, bytes)`. The PROGRAM's, and it must stay valid
+    /// and untouched until the payload is dropped. May be null when that size is 0.
+    pub storage: *mut u8,
+    /// How many bytes `storage` has.
+    pub storage_len: usize,
+    /// How many values the payload holds at once: each value, each element of a repeated field,
+    /// each message field that holds others, and each field kept as the wire wrote it (one the
+    /// schema does not know, a map's entry) takes one.
+    pub fields: usize,
+    /// How many bytes of strings, bytes and kept fields the payload holds at once.
+    pub bytes: usize,
+}
+
+impl Default for wz_ext_message_payload_options_t {
+    fn default() -> Self {
+        Self {
+            storage: core::ptr::null_mut(),
+            storage_len: 0,
+            fields: 0,
+            bytes: 0,
+        }
+    }
+}
+
+/// The storage a payload of `fields` values and `bytes` bytes takes wherever the program's
+/// storage begins: its slots, with the room to align the first, then its bytes. `None` past the
+/// address space.
+fn storage_size(fields: usize, bytes: usize) -> Option<usize> {
+    if fields == 0 {
+        return Some(bytes);
+    }
+    fields
+        .checked_mul(size_of::<Entry>())?
+        .checked_add(align_of::<Entry>().saturating_sub(1))?
+        .checked_add(bytes)
+}
+
+/// The program's storage of a payload: its slots, then its bytes.
+struct ProgramStore {
+    entries: NonNull<Entry>,
+    fields: usize,
+    bytes: NonNull<u8>,
+    bytes_len: usize,
+}
+
+/// Why the program's storage makes no payload.
+enum StoreRefused {
+    /// Null storage for a store that takes some.
+    Null,
+    /// The text of a refusal of the shape or the storage.
+    Invalid(&'static str),
+}
+
+impl ProgramStore {
+    /// The store of `fields` slots and `bytes` bytes laid in the program's `storage`, every slot
+    /// free and every byte zero.
+    ///
+    /// # Safety
+    /// `storage` is null or writable for `storage_len` bytes, which nothing else touches while the
+    /// store lives.
+    unsafe fn lay(
+        storage: *mut u8,
+        storage_len: usize,
+        fields: usize,
+        bytes: usize,
+    ) -> Result<Self, StoreRefused> {
+        let need = storage_size(fields, bytes).ok_or(StoreRefused::Invalid(
+            "fields and bytes: their storage does not fit the address space",
+        ))?;
+        if need == 0 {
+            return Ok(Self {
+                entries: NonNull::dangling(),
+                fields: 0,
+                bytes: NonNull::dangling(),
+                bytes_len: 0,
+            });
+        }
+        if storage.is_null() {
+            return Err(StoreRefused::Null);
+        }
+        if storage_len < need {
+            return Err(StoreRefused::Invalid(
+                "storage: shorter than wz_ext_message_payload_storage_size gives",
+            ));
+        }
+        let mut rest = storage;
+        let mut entries = NonNull::dangling();
+        if fields != 0 {
+            let pad = storage.align_offset(align_of::<Entry>());
+            if pad >= align_of::<Entry>() {
+                return Err(StoreRefused::Invalid(
+                    "storage: no slot can be aligned in it",
+                ));
+            }
+            // The padding, the slots and the bytes lie within `need` bytes, which `storage_len`
+            // holds: the size counts the most padding an alignment takes.
+            let first = storage.add(pad).cast::<Entry>();
+            for at in 0..fields {
+                first.add(at).write(Entry::default());
+            }
+            entries = NonNull::new_unchecked(first);
+            rest = first.add(fields).cast::<u8>();
+        }
+        let mut at_bytes = NonNull::dangling();
+        if bytes != 0 {
+            rest.write_bytes(0, bytes);
+            at_bytes = NonNull::new_unchecked(rest);
+        }
+        Ok(Self {
+            entries,
+            fields,
+            bytes: at_bytes,
+            bytes_len: bytes,
+        })
+    }
+}
+
+impl Storage for ProgramStore {
+    fn entries(&self) -> &[Entry] {
+        // SAFETY: `lay` wrote `fields` slots there (or made none, over a dangling pointer), and the
+        // payload's contract keeps the program's storage to the payload while it lives.
+        unsafe { core::slice::from_raw_parts(self.entries.as_ptr(), self.fields) }
+    }
+
+    fn entries_mut(&mut self) -> &mut [Entry] {
+        // SAFETY: as for `entries`; the payload's lock gives one caller at a time.
+        unsafe { core::slice::from_raw_parts_mut(self.entries.as_ptr(), self.fields) }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `lay` zeroed `bytes_len` bytes there (or made none), the program's as above.
+        unsafe { core::slice::from_raw_parts(self.bytes.as_ptr(), self.bytes_len) }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as for `bytes`; the payload's lock gives one caller at a time.
+        unsafe { core::slice::from_raw_parts_mut(self.bytes.as_ptr(), self.bytes_len) }
+    }
+}
+
+/// What a payload handle holds: the payload over its schema in the program's storage, the key its
+/// catalog message is put on, and the sentence of the last refused call.
 struct Held {
-    payload: Payload<Arc<SchemaSet>>,
+    payload: Payload<Arc<SchemaSet>, ProgramStore>,
     key_expr: CString,
     refusal: Option<String>,
 }
@@ -332,21 +489,45 @@ pub unsafe extern "C" fn wz_ext_internal_payload_schema_check(
     guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
 }
 
+/// Fill in the default payload options: a storage of no value and no byte.
+///
+/// # Safety
+/// `this_` is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_message_payload_options_default(
+    this_: *mut wz_ext_message_payload_options_t,
+) {
+    if !this_.is_null() {
+        *this_ = wz_ext_message_payload_options_t::default();
+    }
+}
+
+/// How many bytes of storage a payload of `fields` values and `bytes` bytes takes, wherever the
+/// storage begins; 0 for one whose size overflows, and for a payload of no value and no byte.
+#[no_mangle]
+pub extern "C" fn wz_ext_message_payload_storage_size(fields: usize, bytes: usize) -> usize {
+    storage_size(fields, bytes).unwrap_or(0)
+}
+
 /// An empty payload of message `index` of `catalog`, of the message type `message` of `schema`
-/// (its full name, package included), written to `this_`. The payload keeps the message's key
-/// expression and holds the schema.
+/// (its full name, package included), keeping its values in the storage `options` gives, written
+/// to `this_`. The payload keeps the message's key expression and holds the schema.
 ///
 /// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
-/// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, why `message` names no message of
-/// the schema.
+/// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, why: `message` names no message of
+/// the schema, or the storage is shorter than its size.
 ///
 /// Returns `Z_OK`; `Z_ERR_INVALID` for a message the catalog does not have; `Z_EINVAL` for a name
-/// that is not UTF-8; `_Z_ERR_CONFIG_INVALID_VALUE` for a name the schema has no message of;
-/// `Z_ERR_NULL` for a null `this_`, `catalog`, `schema` or `message`, or a gravestone.
+/// that is not UTF-8; `_Z_ERR_CONFIG_INVALID_VALUE` for a name the schema has no message of, a
+/// storage shorter than `wz_ext_message_payload_storage_size` gives, or a size that overflows;
+/// `Z_ERR_NULL` for a null `this_`, `catalog`, `schema`, `message` or `options`, a null storage
+/// of a size, or a gravestone.
 ///
 /// # Safety
 /// `this_` is null or writable; `catalog` is null or a loaned catalog; `schema` is null or a loaned
-/// schema; `message` is null or a C string; `refusal` is null or writable.
+/// schema; `message` is null or a C string; `options` is null or readable, its `storage` null or
+/// writable for `storage_len` bytes until the payload is dropped and touched by nothing else
+/// meanwhile; `refusal` is null or writable.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_message_payload_new(
     this_: *mut wz_ext_owned_message_payload_t,
@@ -354,6 +535,7 @@ pub unsafe extern "C" fn wz_ext_message_payload_new(
     index: usize,
     schema: *const wz_ext_loaned_payload_schema_t,
     message: *const c_char,
+    options: *const wz_ext_message_payload_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -384,8 +566,25 @@ pub unsafe extern "C" fn wz_ext_message_payload_new(
                 return Z_ERR_CONFIG_INVALID_VALUE;
             }
         };
+        if options.is_null() {
+            return Z_ERR_NULL;
+        }
+        let options = *options;
+        let store = match ProgramStore::lay(
+            options.storage,
+            options.storage_len,
+            options.fields,
+            options.bytes,
+        ) {
+            Ok(store) => store,
+            Err(StoreRefused::Null) => return Z_ERR_NULL,
+            Err(StoreRefused::Invalid(why)) => {
+                write_refusal(refusal, why);
+                return Z_ERR_CONFIG_INVALID_VALUE;
+            }
+        };
         (*this_).handle = adopt(Held {
-            payload: Payload::new(Arc::clone(schema), message),
+            payload: Payload::over(Arc::clone(schema), message, Narrowing::Type, store),
             key_expr,
             refusal: None,
         });
@@ -415,8 +614,9 @@ pub unsafe extern "C" fn wz_ext_message_payload_key_expr(
 ///
 /// Returns `Z_OK`; `WZ_EXT_ERR_PAYLOAD_PATH` for a path that names no field; `_TYPE` for a field
 /// that holds no integer; `_RANGE` for a value the field cannot hold, a number a closed enum has
-/// not, or an index past the end of its list; `Z_EINVAL` for a path that is not UTF-8; `Z_ERR_NULL`
-/// for a null argument or the gravestone. A refused call changes nothing.
+/// not, or an index past the end of its list; `Z_ERR_OVERFLOW` when the payload's storage has no
+/// room for the value; `Z_EINVAL` for a path that is not UTF-8; `Z_ERR_NULL` for a null argument or
+/// the gravestone. A refused call changes nothing.
 ///
 /// # Safety
 /// `this_` is null or a loaned payload; `path` is null or a C string.
@@ -843,7 +1043,8 @@ pub unsafe extern "C" fn wz_ext_message_payload_encode(
 /// does not know and the entries of map fields are kept as written and encoded again.
 ///
 /// Returns `Z_OK`; `WZ_EXT_ERR_PAYLOAD_WIRE` for bytes that are not a message of the schema, the
-/// payload then as it was; `Z_ERR_NULL` for a null payload, a null `bytes` with a length, or the
+/// payload then as it was; `Z_ERR_OVERFLOW` for values the payload's storage has no room for, the
+/// payload then empty; `Z_ERR_NULL` for a null payload, a null `bytes` with a length, or the
 /// gravestone.
 ///
 /// # Safety
