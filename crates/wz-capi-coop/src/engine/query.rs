@@ -41,7 +41,7 @@ use alloc::sync::{Arc, Weak};
 use core::ptr::NonNull;
 #[cfg(feature = "local-queryable")]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 use portable_atomic::AtomicU64;
 
 #[allow(unused_imports)]
@@ -69,7 +69,6 @@ use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
-use wz_session_core::session_tables::QueryableHandle;
 use wz_session_mcu::dial::McuActions;
 
 use super::{key_on_link, lock, CoopEngine};
@@ -201,14 +200,13 @@ impl RowCallback for QueryableRow {
     }
 }
 
-/// A call of a queryable's callback the session began under its lock as a query arrived, and the
-/// handle its row is let go of by when it ends the last call of an undeclared queryable. Neither
+/// A call of a queryable's callback the session began under its lock as a query arrived: where its
+/// row lies, and nothing else, since the row whose last call it ends is found by its latch. Neither
 /// copied nor dropped unended: each is ended once ([`Self::end`]), or its row would keep its slot
 /// for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct QueryableCall {
     call: QueryableRowCall,
-    handle: QueryableHandle,
 }
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
@@ -242,24 +240,22 @@ impl QueryableCall {
         self.row().ask(query, responder, holder);
     }
 
-    /// End the call: the handle of its row when it was the last call of an undeclared queryable,
-    /// which the caller lets go of (`SessionTables::release_queryable`).
-    pub(crate) fn end(self) -> Option<QueryableHandle> {
+    /// End the call: `true` when it was the last call of an undeclared queryable, whose row the
+    /// session's walk of its tables then lets go of (`SessionTables::release_drained_queryable`).
+    pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
         // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
-        let last = unsafe { <QueryableRow as RowCallback>::end(self.call) };
-        last.then_some(self.handle)
+        unsafe { <QueryableRow as RowCallback>::end(self.call) }
     }
 }
 
 #[cfg(test)]
 impl QueryableCall {
-    /// A call begun on `row`, named `handle`: what a test hands the round as the dispatch would.
-    pub(crate) fn begun(row: &QueryableRow, handle: QueryableHandle) -> Self {
+    /// A call begun on `row`: what a test hands the round as the dispatch would.
+    pub(crate) fn begun(row: &QueryableRow) -> Self {
         Self {
             call: RowCallback::begin(row).expect("a live row begins a call"),
-            handle,
         }
     }
 }
@@ -613,9 +609,6 @@ pub(super) struct QueryPlane {
     /// nothing of the query is copied (`local-queryable`).
     #[cfg(feature = "local-queryable")]
     asked: Mutex<Asked>,
-    /// The rows of undeclared queryables taken out of the session's tables whose drop has not
-    /// ended ([`LettingGo`]): an undeclaration that waits for its row reads that none is under way.
-    letting_go: AtomicUsize,
 }
 
 /// The calls begun on the queryables of the session one of its own gets reached, as many as the
@@ -623,35 +616,22 @@ pub(super) struct QueryPlane {
 ///
 /// A fixed array the get takes out of the plane whole and holds in its own frame while it hands
 /// the calls out with no lock held ([`QueryPlane::take_asked`]), so it takes no heap after the
-/// open; its cost is stack. One is `MAX_QUERYABLES` calls of at most 16 bytes (a row's address and
-/// a 4-byte handle: 16 on a 64-bit target, 8 on a 32-bit one) and a length: at the build's default
-/// of 100 queryables, 1,608 bytes on a 64-bit target and 804 on a 32-bit one. A queryable's
+/// open; its cost is stack. One is `MAX_QUERYABLES` calls of a row's address each (8 bytes on a
+/// 64-bit target, 4 on a 32-bit one) and a length: at the build's default of 100 queryables, 808
+/// bytes on a 64-bit target and 404 on a 32-bit one. A queryable's
 /// callback that asks a get of its own session from inside the call holds a second one in a frame
 /// above the first, and so on: each get nested so holds a row of the plane's held Finals until
 /// its calls are handed ([`FinalHolds`]), so the nesting is at most the session's
-/// `MAX_PENDING_FINALS` deep (8 at the build's default, 12,864 bytes of these arrays on a 64-bit
+/// `MAX_PENDING_FINALS` deep (8 at the build's default, 6,464 bytes of these arrays on a 64-bit
 /// target), and the get past it is refused before it asks. Shared rows of the arena would hand a
 /// nested get's calls to the round when they overflow, which reorders the calls zenoh-pico makes
 /// inline, so the frame keeps its own.
 #[cfg(feature = "local-queryable")]
 pub(super) type Asked = BoundedVec<QueryableCall, { caps::MAX_QUERYABLES }, Static>;
 
-// A call is a row's address and a handle; the stack cost stated on `Asked` holds while it stays
-// so small.
+// A call is a row's address alone; the stack cost stated on `Asked` holds while it stays so.
 #[cfg(feature = "local-queryable")]
-const _: () = assert!(core::mem::size_of::<QueryableCall>() <= 16);
-
-/// A row of an undeclared queryable being let go of, counted from before it leaves its table,
-/// under the session's lock, until this is dropped, after the row was ([`QueryPlane::letting_go`]).
-#[cfg(feature = "local-queryable")]
-pub(super) struct LettingGo<'p>(&'p AtomicUsize);
-
-#[cfg(feature = "local-queryable")]
-impl Drop for LettingGo<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
+const _: () = assert!(core::mem::size_of::<QueryableCall>() <= core::mem::size_of::<usize>());
 
 impl QueryPlane {
     /// A plane that holds the Finals of its queries in `holds` ([`FinalHolds`]), rows the
@@ -666,7 +646,6 @@ impl QueryPlane {
             refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
-            letting_go: AtomicUsize::new(0),
         }
     }
 
@@ -679,7 +658,7 @@ impl QueryPlane {
         drop(lent);
     }
 
-    /// What a query that reached the queryable `row`, the row `handle` names, does: hold its
+    /// What a query that reached the queryable `row` does: hold its
     /// Final and begin a call on the row, the query held in `round` where its parts lie
     /// ([`Round::offer_query`](crate::round::Round::offer_query)); or, with no row left for its
     /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
@@ -687,7 +666,6 @@ impl QueryPlane {
     pub(super) fn arrive(
         &self,
         round: &crate::round::Round,
-        handle: QueryableHandle,
         row: &QueryableRow,
         view: &dyn QueryView,
     ) {
@@ -702,7 +680,7 @@ impl QueryPlane {
             lock(&self.holds).release(generation, view.rid());
             return;
         };
-        let call = QueryableCall { call, handle };
+        let call = QueryableCall { call };
         // The session's own get is handed to the queryables it matched by the get itself, from its
         // own view, so this notes only which; one past the list waits as a link's query does.
         #[cfg(feature = "local-queryable")]
@@ -721,20 +699,6 @@ impl QueryPlane {
         if !unsafe { round.offer_query(call, view, generation) } {
             lock(&self.holds).release(generation, view.rid());
         }
-    }
-
-    /// Count a row of an undeclared queryable as being let go of: taken before the row leaves its
-    /// table, under the session's lock, and dropped once the row was dropped, with no lock held.
-    #[cfg(feature = "local-queryable")]
-    pub(super) fn letting_go(&self) -> LettingGo<'_> {
-        self.letting_go.fetch_add(1, Ordering::AcqRel);
-        LettingGo(&self.letting_go)
-    }
-
-    /// Whether no row of an undeclared queryable is being let go of: what an undeclaration that
-    /// waits for its row reads once the row left its table.
-    pub(super) fn let_go_settled(&self) -> bool {
-        self.letting_go.load(Ordering::Acquire) == 0
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty.
@@ -1038,7 +1002,6 @@ mod round_tests {
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
     use crate::round::{AnswersQueries, Round};
-    use core::num::NonZeroU32;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
     /// where they lie, the generation it came in under, and its encoding's packed id with where
@@ -1100,17 +1063,14 @@ mod round_tests {
         }
     }
 
-    /// A queryable's row, boxed so it lies where it is while a call of it runs, and its handle.
-    fn row() -> (Box<QueryableRow>, QueryableHandle) {
-        let row = Box::new(QueryableRow::new(
+    /// A queryable's row, boxed so it lies where it is while a call of it runs.
+    fn row() -> Box<QueryableRow> {
+        Box::new(QueryableRow::new(
             1,
             None,
             WireKey::literal(),
             QueryableSink::shared(|_, _, _| {}),
-        ));
-        let handle =
-            QueryableHandle::from_bits(NonZeroU32::new(1).expect("not zero")).expect("an index");
-        (row, handle)
+        ))
     }
 
     /// The datagram a query of key `demo/q` and parameters `a=1` lies in.
@@ -1130,7 +1090,7 @@ mod round_tests {
         // Made of the stand-in's own type, then unsized where the round takes it.
         let answering: Weak<Noting> = Arc::downgrade(&noting);
         round.answer_queries_with(answering);
-        let (row, handle) = row();
+        let row = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
         unsafe { round.set_lending(Some(&datagram[..])) };
         // The schema is a range of the datagram as a frame's would be: here, its key's first part.
@@ -1139,7 +1099,7 @@ mod round_tests {
             parameters: &datagram[7..],
             encoding: Some((0x0B, Some(&datagram[..4]))),
         };
-        assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row), &asked, 7) });
         unsafe { round.set_lending(None) };
         unsafe { round.seal() };
         assert!(round.deliver());
@@ -1164,7 +1124,7 @@ mod round_tests {
         let datagram = DATAGRAM;
         let key = core::str::from_utf8(&datagram[..6]).expect("a key");
         let round = Round::leaked(4);
-        let (row, handle) = row();
+        let row = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
         unsafe { round.set_lending(Some(&datagram[..])) };
         let asked = Asked {
@@ -1172,7 +1132,7 @@ mod round_tests {
             parameters: &datagram[7..],
             encoding: None,
         };
-        assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row), &asked, 7) });
         unsafe { round.set_lending(None) };
         unsafe { round.seal() };
         assert!(round.deliver());
