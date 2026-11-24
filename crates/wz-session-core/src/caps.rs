@@ -592,6 +592,16 @@ pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 /// row.
 pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
 
+/// The members a session holds of each multicast group it joined: the rows a connectivity reader
+/// reads a member's transport from, with nothing allocated, and the group session's member table.
+/// A JOIN from one more is not admitted while every row is held.
+pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
+
+/// The transport or link events a connectivity listener declared with history holds while its
+/// history is replayed. Past them, the rest of the replay's window is told by comparing the
+/// transports that stand with those the listener was told.
+pub const MAX_CONNECTIVITY_REPLAY_EVENTS: usize = generated::MAX_CONNECTIVITY_REPLAY_EVENTS;
+
 /// Maximum number of static-scouting peer locators
 /// ([`crate::scout_static::synth_static_locators`] output capacity =
 /// `deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
