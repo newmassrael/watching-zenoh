@@ -32,7 +32,8 @@ use crate::policy_document::{Origin, Reason, Refusal};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expected {
     /// The member is taken: each limit named holds the value beside it, and every other limit
-    /// the build default.
+    /// the value the creator opens under, the build default unless the creator opens under
+    /// another ([`Self::check_session_over`]).
     Selected(Vec<(&'static str, LimitValue)>),
     /// The member is refused, for these reasons, in the order the resolution finds them.
     Refused(Vec<Reason<'static>>),
@@ -56,7 +57,19 @@ impl Expected {
     /// the build default for every other; otherwise the first limit that differs, as a sentence.
     /// A refused member makes no snapshot, so any snapshot is an `Err` here.
     pub fn check_session(&self, session: &SessionLimits) -> Result<(), String> {
-        self.check(&SESSION_LIMITS, &SessionLimits::defaults(), session)
+        self.check_session_over(&SessionLimits::defaults(), session)
+    }
+
+    /// [`Self::check_session`] for a creator that opens a session under `opening` rather than
+    /// the build defaults, as an ABI that opens under its upstream's limits does: each limit the
+    /// member does not select is to hold its value in `opening`. Which members are taken does
+    /// not move with it, since a member is judged by the build's domain alone.
+    pub fn check_session_over(
+        &self,
+        opening: &SessionLimits,
+        session: &SessionLimits,
+    ) -> Result<(), String> {
+        self.check(&SESSION_LIMITS, opening, session)
     }
 
     /// [`Self::check_session`] for the limits of a runtime.
@@ -436,6 +449,31 @@ mod tests {
               `NO_SUCH_LIMIT`"
             ]
         );
+    }
+
+    /// A check over the limits a creator opens under reads each limit the case leaves unselected
+    /// from them: the opening snapshot passes, and the build defaults are a difference wherever
+    /// the opening holds another value. Turned red by a check that reads the build defaults
+    /// whatever it is handed.
+    #[test]
+    fn a_check_over_an_opening_reads_the_unselected_limits_from_it() {
+        let nothing = Expected::Selected(Vec::new());
+        let opening = SessionLimits::PICO_PRESET;
+        let build = SessionLimits::defaults();
+        assert_eq!(nothing.check_session_over(&opening, &opening), Ok(()));
+        assert_eq!(
+            nothing.check_session_over(&build, &build),
+            nothing.check_session(&build)
+        );
+        // A build whose domains keep none of the preset's values opens under its own.
+        if opening != build {
+            assert!(nothing.check_session_over(&opening, &build).is_err());
+            assert!(nothing.check_session(&opening).is_err());
+        }
+        let unknown = refused(Reason::UnknownLimit {
+            limit: "NO_SUCH_LIMIT",
+        });
+        assert!(unknown.check_session_over(&opening, &opening).is_err());
     }
 
     /// Every case names the creator kinds apart only where a runtime's limit its machines read is
