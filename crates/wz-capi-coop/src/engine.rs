@@ -108,13 +108,12 @@ use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
-    router_session_task_bytes, OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig,
-    SessionLinks, SessionRole,
+    router_session_task_bytes, OpenedLink, SessionDatagramLink, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::transport::{
-    DialWalk, FaceStep, TransportFaces, TransportRefusal, TransportSession,
+    DialWalk, FaceStep, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
@@ -2543,6 +2542,121 @@ impl RuntimeTables {
     }
 }
 
+/// The session's part in the making of each of its links' sessions (`LinkCalls`): what its tables
+/// are told of a link, the gates it puts the link behind, and what the link's task hands its reads
+/// to.
+struct LinkMaking<'a> {
+    session: &'a SessionState,
+    /// The limits the session was opened with.
+    limits: &'a SessionLimits,
+}
+
+impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
+    type Gate = LinkGate<C>;
+    type Dispatch = FaceDispatch<C>;
+    type Session = LinkSession<C>;
+
+    fn link_made(&self, face: FaceId, actions: &SessionHandle<C>, key_form: Option<KeyWireForm>) {
+        // The session keeps its declarations in its one table set and names each key it sends
+        // itself, so the link keeps none and reads none; what the peer sends by the session's
+        // ids is read from the same tables, which the dispatch of every face reads.
+        actions.keep_no_keyexprs();
+        // The answer the face's session gives a query of its peer whose key it cannot resolve:
+        // the session's policy, stated for each link the face is opened over.
+        self.session
+            .registry
+            .borrow_mut()
+            .set_unanswerable_final(face, actions.params.policy.query_unanswerable_final());
+        // The key ids every node shares, on both sides of the link before it carries anything:
+        // the link's actions, with the key-wire form stated for the endpoint it was dialled to or
+        // taken on, so what is sent over it names its keys in that form, and the face's tables,
+        // so an id of the dictionary the peer sends is read.
+        #[cfg(feature = "shared-key-ids")]
+        if let Some(key_form) = key_form {
+            actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
+                self.session.key_ids.clone(),
+                key_form,
+                self.limits.link_noted_requests(),
+            ));
+            if let Some(ids) = &self.session.key_ids {
+                self.session
+                    .registry
+                    .borrow_mut()
+                    .install_shared_key_ids(face, ids.clone());
+            }
+        }
+        #[cfg(not(feature = "shared-key-ids"))]
+        let _ = key_form;
+    }
+
+    fn gate(
+        &self,
+        pump: CellRc<dyn SessionDatagramLink>,
+        actions: &SessionHandle<C>,
+    ) -> LinkGate<C> {
+        // The session is handed a record of a link only while its round of deliveries has the room
+        // one record can take (decision Q4), and with `listen` only once the engine admitted it:
+        // the link gives the session nothing between its handshake and the face table's decision
+        // (`admit`), so a link that is refused has put nothing in the tables.
+        let record_room = crate::round::read_room::<
+            { caps::MAX_SUBSCRIPTIONS },
+            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        >(self.limits);
+        #[cfg(feature = "listen")]
+        {
+            // SAFETY: a link is made under the session's lock, and its gate asked by the step
+            // alone.
+            unsafe {
+                RoundGate::new(
+                    AdmissionGate::new(pump, actions.clone()),
+                    self.session.lane.clone(),
+                    record_room,
+                )
+            }
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            let _ = actions;
+            // SAFETY: a link is made under the session's lock, and its gate asked by the step
+            // alone.
+            unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) }
+        }
+    }
+
+    fn wire_parts(
+        &self,
+        face: FaceId,
+        actions: SessionHandle<C>,
+        gate: &CellRc<LinkGate<C>>,
+    ) -> (FaceDispatch<C>, LinkSession<C>) {
+        #[cfg(feature = "queryable")]
+        let generation = self.session.plane.next_generation();
+        let dispatch = FaceDispatch {
+            registry: self.session.registry.clone(),
+            face,
+            actions: actions.clone(),
+            #[cfg(feature = "queryable")]
+            plane: self.session.plane.clone(),
+            #[cfg(feature = "queryable")]
+            generation,
+            lane: self.session.lane.clone(),
+        };
+        // The wire keeps a handle on the gates to admit the link through them.
+        #[cfg(not(feature = "listen"))]
+        let _ = gate;
+        (
+            dispatch,
+            LinkSession {
+                actions,
+                #[cfg(feature = "listen")]
+                gate: gate.clone(),
+                #[cfg(feature = "queryable")]
+                generation,
+            },
+        )
+    }
+}
+
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
@@ -2575,7 +2689,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<Wire<C>, OpenError> {
-        let OpenedLink { sink, pump } = opened;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
         let params = SessionInitParams {
@@ -2597,124 +2710,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        // The link's halves lie in its cell of the session's table, as its actions do: a link made
-        // after the open takes no memory of the heap for them.
-        let actions = McuActions::<C>::build_held(
-            sink,
-            params,
-            self.session_time.clone(),
-            |link, kernel| self.transport.place_halves(link, kernel, endpoint),
-        )?;
-        let actions = self.transport.place_actions(actions, role, endpoint)?;
-        // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
-        // session's source, and one whose source is dry refuses every handshake (fail closed): a
-        // source that is dry now is not a link to accept.
-        #[cfg(feature = "listen")]
-        if matches!(role, SessionRole::Acceptor) && self.entropy.try_next_u64().is_err() {
-            return Err(OpenError::EntropyUnavailable);
-        }
-        // The session keeps its declarations in its one table set and names each key it sends
-        // itself, so the link keeps none and reads none; what the peer sends by the session's
-        // ids is read from the same tables, which the dispatch of every face reads.
-        actions.keep_no_keyexprs();
-        // The answer the face's session gives a query of its peer whose key it cannot resolve:
-        // the session's policy, stated for each link the face is opened over.
-        self.session
-            .registry
-            .borrow_mut()
-            .set_unanswerable_final(face, actions.params.policy.query_unanswerable_final());
-        // The key ids every node shares, on both sides of the link before it carries anything:
-        // the link's actions, with the key-wire form stated for the endpoint it was dialled to or
-        // taken on, so what is sent over it names its keys in that form, and the face's tables,
-        // so an id of the dictionary the peer sends is read.
-        #[cfg(feature = "shared-key-ids")]
-        {
-            actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
-                self.session.key_ids.clone(),
-                self.transport.key_form_of(endpoint),
-                resolve_limits(&self.config).link_noted_requests(),
-            ));
-            if let Some(ids) = &self.session.key_ids {
-                self.session
-                    .registry
-                    .borrow_mut()
-                    .install_shared_key_ids(face, ids.clone());
-            }
-        }
-        #[cfg(not(feature = "shared-key-ids"))]
-        let _ = endpoint;
-        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
-        // already gives that one (`SessionLinks::share_pump`).
-        let pump = L::share_pump(pump);
-        // What the session's read waits on for the link's input and its room, read off it before
-        // its gates take it.
-        let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
-        // The session is handed a record of a link only while its round of deliveries has the room
-        // one record can take (decision Q4), and with `listen` only once the engine admitted it:
-        // the link gives the session nothing between its handshake and the face table's decision
-        // (`admit`), so a link that is refused has put nothing in the tables.
-        let record_room = crate::round::read_room::<
-            { caps::MAX_SUBSCRIPTIONS },
-            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-        >(&resolve_limits(&self.config));
-        #[cfg(feature = "listen")]
-        // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let gate: LinkGate<C> = unsafe {
-            RoundGate::new(
-                AdmissionGate::new(pump, actions.clone()),
-                self.session.lane.clone(),
-                record_room,
-            )
+        let limits = resolve_limits(&self.config);
+        // The link's session is the transport's to make; what the session's tables keep of the
+        // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).
+        let calls = LinkMaking {
+            session: &self.session,
+            limits: &limits,
         };
-        #[cfg(not(feature = "listen"))]
-        // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let gate: LinkGate<C> =
-            unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
-        let gate = self.transport.place_gate(gate, endpoint)?;
-        // The wire keeps a handle on the gates to admit the link through them.
-        #[cfg(feature = "listen")]
-        let admission = gate.clone();
-        let link = gate.into_link();
-        #[cfg(feature = "queryable")]
-        let generation = self.session.plane.next_generation();
-        let dispatch = FaceDispatch {
-            registry: self.session.registry.clone(),
-            face,
-            actions: actions.clone(),
-            #[cfg(feature = "queryable")]
-            plane: self.session.plane.clone(),
-            #[cfg(feature = "queryable")]
-            generation,
-            lane: self.session.lane.clone(),
-        };
-        let task = self.transport.spawn_link(
-            &self.local,
-            PumpFields {
-                link: link.clone(),
-                actions: actions.clone(),
-                entropy: self.entropy.clone(),
-                clock: self.session_time.clone(),
-                config: SessionDriveConfig {
+        self.transport
+            .make_wire(
+                &calls,
+                face,
+                opened,
+                role,
+                endpoint,
+                WireMaking {
+                    params,
+                    local: &self.local,
+                    entropy: &mut self.entropy,
+                    clock: &self.session_time,
                     timeouts: self.config.timeouts,
-                    role,
-                    max_iters: None,
                 },
-            },
-            dispatch,
-        )?;
-        Ok(wz_runtime_coop::faces::Wire::new(
-            LinkSession {
-                actions,
-                #[cfg(feature = "listen")]
-                gate: admission,
-                #[cfg(feature = "queryable")]
-                generation,
-            },
-            task,
-            link,
-            input_wait,
-            room_wait,
-        ))
+            )
+            .map_err(OpenError::from)
     }
 
     /// When a handshake begun now is given up, in microseconds on the session's clock.

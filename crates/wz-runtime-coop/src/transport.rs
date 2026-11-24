@@ -12,14 +12,17 @@ use alloc::vec::Vec;
 
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
+use wz_session_core::driver_loop::EventSink;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
 use wz_session_core::locator_directory::LocatorText;
+use wz_session_core::policy::KeyWireForm;
 use wz_session_core::response_sink::ResponseSink;
 
 use crate::executor::SpawnRefusal;
 use crate::faces::{FaceId, FaceSession, HandshakeEnd};
+use crate::link_cells::CellRc;
 use crate::locator_text::DialRefused;
-use crate::session_drive::{LinkOpenError, LinkWait};
+use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
 use crate::ClockSource;
 
@@ -28,7 +31,7 @@ use crate::ClockSource;
 #[cfg(feature = "reassembly")]
 mod state;
 #[cfg(feature = "reassembly")]
-pub use state::{DialRow, DialWalk, FaceStep, TransportFaces, TransportState};
+pub use state::{DialRow, DialWalk, FaceStep, TransportFaces, TransportState, WireMaking};
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
 /// given, and why.
@@ -168,6 +171,38 @@ pub trait TransportSession<C: ClockSource + 'static>: FaceSession {
         let _ = generation;
         false
     }
+}
+
+/// What the session does in the making of each of its links' sessions, in the engine's own types
+/// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
+/// the session tells its tables of the link, puts the link's pump behind its gates, and says what
+/// the link's task hands its reads to and what its face keeps of the link.
+pub trait LinkCalls<C: ClockSource + 'static> {
+    /// The gates the session puts a link's pump behind, placed in the link's cell of its table.
+    type Gate: SessionDatagramLink + 'static;
+    /// What a link's task hands what its session reads to.
+    type Dispatch: EventSink + 'static;
+    /// The session's half of a link, as its face keeps it.
+    type Session;
+
+    /// The link of face `face`, sending through `actions`, made: the session's tables are told of
+    /// it before it carries anything. `key_form` is the key-wire form stated for the endpoint the
+    /// link was dialled to or taken on, `None` in a build whose nodes share no key ids.
+    fn link_made(&self, face: FaceId, actions: &SessionHandle<C>, key_form: Option<KeyWireForm>);
+
+    /// The gates over `pump`, the link's one shared handle, whose session sends through
+    /// `actions`.
+    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, actions: &SessionHandle<C>)
+        -> Self::Gate;
+
+    /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
+    /// link: its actions and its gates, placed in their cell.
+    fn wire_parts(
+        &self,
+        face: FaceId,
+        actions: SessionHandle<C>,
+        gate: &CellRc<Self::Gate>,
+    ) -> (Self::Dispatch, Self::Session);
 }
 
 /// What the transport reads of a multicast group a session joined, each a face of its own: the

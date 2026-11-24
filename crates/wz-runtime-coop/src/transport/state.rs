@@ -29,6 +29,8 @@ use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::session_actions::SessionLinkActions;
+use wz_session_core::session_init_params::SessionInitParams;
+use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::session_zid::SessionZid;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::LinkKeyForms;
@@ -36,13 +38,13 @@ use wz_session_core::unicast_rx::RouterLend;
 
 #[cfg(feature = "group")]
 use super::GroupRecord;
-use super::{EndpointRefusal, Refusal, TransportRefusal, TransportSession};
+use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
 use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
     Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FaceRead, FaceRecord, IdleWait, Link,
-    LinkSupervisor,
+    LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -53,9 +55,9 @@ use crate::locator_text::parse_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
     spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PendingDial, PumpFields,
-    SessionDatagramLink, SessionLinks, SessionRole,
+    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-use crate::session_runtime::SessionHandle;
+use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
@@ -157,6 +159,22 @@ pub enum DialRow<D, P> {
     Pending(Dial<D>),
     /// Answered at once: the link it made, or why it was refused.
     Answered(Result<OpenedLink<P>, LinkOpenError>),
+}
+
+/// What the making of a link's session is handed beside the link ([`TransportState::make_wire`]):
+/// the parameters the session opens it with, and what it borrows of the session's driver (the set
+/// its task runs on, its source of entropy, its clock and the deadlines of its handshake).
+pub struct WireMaking<'a, C: ClockSource + 'static> {
+    /// The parameters the link's session is opened with.
+    pub params: SessionInitParams,
+    /// The set the link's task is spawned on.
+    pub local: &'a CoopLocalSet<C>,
+    /// The session's one source of entropy, which every link's handshake draws from.
+    pub entropy: &'a mut SessionEntropy,
+    /// The session's clock.
+    pub clock: &'a CoopTime<C>,
+    /// The deadlines of the link's handshake.
+    pub timeouts: SessionTimeouts,
 }
 
 /// The next step of the dial role's walk over the session's endpoints
@@ -645,6 +663,82 @@ impl<T: TransportFaces> TransportState<T> {
             )),
             _ => TransportRefusal::NoEndpoint,
         }
+    }
+
+    /// The session of the link `opened` as face `face`, in `role`, dialled to or taken on
+    /// `endpoint` and opened with `making`'s parameters: its actions and their halves placed in their cells, its
+    /// pump behind the gates the session puts it behind (`calls`), placed in theirs, and its task
+    /// spawned. What the session's tables keep of the link is the session's to do (`LinkCalls`).
+    /// [`TransportRefusal::EntropyUnavailable`] when an acceptor's source is dry, since its
+    /// binding would refuse every handshake.
+    // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
+    // which has returned before the link's task first runs.
+    #[inline(always)]
+    pub fn make_wire<K: LinkCalls<T::Clock>>(
+        &self,
+        calls: &K,
+        face: FaceId,
+        opened: OpenedLink<PumpOf<T>>,
+        role: SessionRole,
+        endpoint: Option<&DialEndpoint>,
+        making: WireMaking<'_, T::Clock>,
+    ) -> Result<Wire<K::Session>, TransportRefusal> {
+        let OpenedLink { sink, pump } = opened;
+        let WireMaking {
+            params,
+            local,
+            entropy,
+            clock,
+            timeouts,
+        } = making;
+        // The link's halves lie in its cell of the session's table, as its actions do: a link made
+        // after the open takes no memory of the heap for them.
+        let actions = SessionLinkActions::<CoopRuntime<T::Clock>, CoopTime<T::Clock>>::build_held(
+            sink,
+            params,
+            clock.clone(),
+            |link, kernel| self.place_halves(link, kernel, endpoint),
+        )?;
+        let actions = self.place_actions(actions, role, endpoint)?;
+        // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
+        // session's source, and one whose source is dry refuses every handshake (fail closed): a
+        // source that is dry now is not a link to accept.
+        #[cfg(feature = "listen")]
+        if matches!(role, SessionRole::Acceptor)
+            && wz_session_core::entropy::EntropySource::try_next_u64(&mut *entropy).is_err()
+        {
+            return Err(TransportRefusal::EntropyUnavailable);
+        }
+        #[cfg(feature = "shared-key-ids")]
+        let key_form = Some(self.key_form_of(endpoint));
+        #[cfg(not(feature = "shared-key-ids"))]
+        let key_form = None;
+        calls.link_made(face, &actions, key_form);
+        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
+        // already gives that one (`SessionLinks::share_pump`).
+        let pump = <T::Links as SessionLinks>::share_pump(pump);
+        // What the session's read waits on for the link's input and its room, read off it before
+        // its gates take it.
+        let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
+        let gate = self.place_gate(calls.gate(pump, &actions), endpoint)?;
+        let link = gate.clone().into_link();
+        let (dispatch, session) = calls.wire_parts(face, actions.clone(), &gate);
+        let task = self.spawn_link(
+            local,
+            PumpFields {
+                link: link.clone(),
+                actions,
+                entropy: entropy.clone(),
+                clock: clock.clone(),
+                config: SessionDriveConfig {
+                    timeouts,
+                    role,
+                    max_iters: None,
+                },
+            },
+            dispatch,
+        )?;
+        Ok(Wire::new(session, task, link, input_wait, room_wait))
     }
 
     /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
