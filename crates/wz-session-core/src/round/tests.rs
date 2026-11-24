@@ -171,6 +171,43 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
     Round::shared_over(RoundRows::lent(&mut arena, counts).expect("the arena has the rows"))
 }
 
+/// A round placed in its session's arena is built there whole, as a shared one is: nothing owed
+/// and no datagram lent, beside the rows it reads. Turned red by a placed round whose fields are
+/// not all written, or one placed past what the arena has.
+#[test]
+fn a_round_placed_in_an_arena_is_built_there_whole() {
+    let counts = RoundRowCounts {
+        records: caps::DELIVERY_LANE_EVENTS.min(4),
+        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
+        longest_key: caps::MAX_KEYEXPR_BYTES,
+    };
+    let bytes: usize = [
+        Arena::table_bytes::<Entry<Kept>>(counts.records),
+        Arena::table_bytes::<Owed<Kept>>(counts.callbacks),
+        Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<Round<Kept>>(1),
+    ]
+    .into_iter()
+    .map(|bytes| bytes.expect("in the address space"))
+    .sum();
+    let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+    let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+    let base = NonNull::from(region).cast::<u8>();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
+    // bytes, and is leaked, so nothing else uses it and it outlives the round and its rows.
+    let mut arena = unsafe { Arena::over(base, bytes) };
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    let round = Round::<Kept>::placed_over(&mut arena, rows).expect("the arena has the round");
+    assert!(!round.owes(), "nothing owed");
+    assert!(!round.lends_a_datagram(), "no datagram lent");
+    let start = base.as_ptr() as usize;
+    let at = core::ptr::from_ref::<Round<Kept>>(&round) as usize;
+    assert!(
+        (start..start + bytes).contains(&at),
+        "the round lies in the session's arena"
+    );
+}
+
 /// A sample on `key` with no payload.
 struct Sample(&'static str);
 

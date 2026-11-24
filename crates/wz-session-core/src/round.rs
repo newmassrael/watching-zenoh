@@ -57,6 +57,7 @@ use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use crate::key_arena::{KeyRef, KeySpace};
+use crate::placed::Placed;
 use crate::plane_lock::LockFamily;
 use crate::qos::CongestionControl;
 use crate::query_sink::QueryView;
@@ -1172,6 +1173,15 @@ impl<C: RoundCalls> Round<C> {
         // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
         // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
         unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
+    }
+
+    /// The session's round over `rows`, built where `arena` places it ([`Arena::place_with`]): in
+    /// the session's own memory, owned by one owner and reached by handles that count nothing.
+    /// Refused, taking nothing, past what the arena has left.
+    pub fn placed_over(arena: &mut Arena, rows: RoundRows<C>) -> Result<Placed<Self>, LendRefused> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which
+        // `place_with` gives aligned and valid for writes of one.
+        unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
     }
 
     /// An empty round written where `at` points, field by field.
