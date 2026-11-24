@@ -76,9 +76,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use wz_app_schema::json_doc::describe;
 use wz_session_core::json5::Json5Value;
 
-use crate::e2e_profile::{describe, optional, read_json, DocError, Pointer};
+use crate::e2e_profile::{optional, read_json, DocError, Pointer};
 use crate::e2e_receiver::{ReceiveError, Receiver, Status, Verdict};
 use crate::e2e_stream_sender::{Protected, SendError, StreamSender, Written};
 use crate::proto_decode::{AtPath, Item, SchemaMessage, SchemaSet, MAX_DECODE_DEPTH};

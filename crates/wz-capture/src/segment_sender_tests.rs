@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use crate::e2e_profile::DocError;
 use crate::segment_chain::{Carrier, KeyRef, SegmentLedger};
+use crate::segment_profile::recognise;
 use crate::segment_profile_tests::{demo_piece, demo_profile, DEMO};
 use crate::segment_sender::{Refusal, Rollover, SegmentSender, Split, SplitError};
 
@@ -75,7 +76,7 @@ fn the_reader_joins_what_the_sender_wrote() {
         let mut ledger = SegmentLedger::new();
         let mut joined = None;
         for (i, bytes) in got.iter().enumerate() {
-            let piece = profile.recognise(bytes).expect("a piece");
+            let piece = recognise(&profile, bytes).expect("a piece");
             assert!(piece.crc.is_some_and(|c| c.matches()), "chunk {chunk}");
             let v = ledger.receive(
                 &profile,

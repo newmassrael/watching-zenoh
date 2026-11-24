@@ -328,13 +328,15 @@ pub(crate) fn feed(profile: &Profile, digest: &mut Digest<'_>, item: Cover, fram
 /// The CRC of `frame` as the profile feeds it: the covered pieces, in the
 /// profile's order, each as it stands on the wire.
 pub(crate) fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
-    let mut digest = profile.crc().engine.start();
+    let mut digest = Digest::start(&profile.crc().engine);
     for &item in &profile.crc().cover {
         feed(profile, &mut digest, item, frame);
     }
     digest.finish()
 }
 
+/// Out of line: every refusal of a build reaches it.
+#[inline(never)]
 fn invalid(path: String, reason: String) -> BuildError {
     BuildError::Values(DocError::invalid(path, reason))
 }

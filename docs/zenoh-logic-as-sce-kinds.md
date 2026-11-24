@@ -349,7 +349,7 @@ the MCU rows of S5 and S9 are what the C build reaches first.
 The owner asked for the structure that is right in the long run with cost
 ignored, and left the choice to this track. U15's rows take a frame's layout as
 a profile on every call so that a deployment's constants never enter this public
-repository (`crates/wz-app-frame/src/e2e_profile.rs:18`); the decision keeps
+repository (`crates/wz-app-schema/src/e2e_profile.rs:18`); the decision keeps
 that, and moves the layout from a value the product interprets to a type the
 build compiles.
 

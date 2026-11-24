@@ -479,7 +479,7 @@ impl<'a> Declarations<'a> {
             }
         };
         let matched = map.segment_for(covering)?;
-        let piece = matched.profile.recognise(payload)?;
+        let piece = crate::segment_profile::recognise(matched.profile, payload)?;
         self.record_applied(matched.id);
         let list = self.list.get();
         let at = self.segment_row.get().map(|(produced, ordinal)| {
@@ -2732,7 +2732,7 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
         .map
         .segment_for(crate::payload::formats::SegmentKey::Resolved(&keyexpr))
     {
-        if matched.profile.recognise(bytes).is_some() {
+        if crate::segment_profile::recognise(matched.profile, bytes).is_some() {
             map.record_applied(matched.id);
             return PayloadDecoding::SegmentPiece {
                 keyexpr,
