@@ -1197,8 +1197,6 @@ pub mod tx_buf;
 /// itself (it is a pointer into memory the link owns) and is gated with
 /// `link`, the module that defines the link driver trait it borrows.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-065 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod tx_lease;
 
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
