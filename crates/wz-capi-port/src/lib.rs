@@ -692,8 +692,9 @@ enum Keeps {
     /// Nothing.
     #[default]
     Nothing,
-    /// An object of the ABI's that retracts the declaration when the last holder lets it go.
-    Anchor { _held: Arc<dyn Send + Sync> },
+    /// An object of the ABI's that retracts the declaration when the last holder lets it go, in a
+    /// box of its own or lodged in a place of the ABI's.
+    Anchor { _held: lodge::Kept },
     /// One hold on the declaration, counted by the engine itself.
     Hold { _held: KeyHold },
 }
@@ -778,7 +779,7 @@ impl WireKey {
     }
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+    pub fn keeping(mut self, anchor: lodge::Kept) -> Self {
         self.keeps = Keeps::Anchor { _held: anchor };
         self
     }
@@ -994,7 +995,8 @@ mod tests {
     #[test]
     fn a_kept_anchor_lives_as_long_as_the_key() {
         let anchor: Arc<dyn Send + Sync> = Arc::new(());
-        let key = WireKey::aliased(7, Some(String::from("rest"))).keeping(anchor.clone());
+        let key = WireKey::aliased(7, Some(String::from("rest")))
+            .keeping(crate::lodge::Kept::shared(anchor.clone()));
         assert_eq!(Arc::strong_count(&anchor), 2);
         let copy = key.clone();
         assert_eq!(Arc::strong_count(&anchor), 3);

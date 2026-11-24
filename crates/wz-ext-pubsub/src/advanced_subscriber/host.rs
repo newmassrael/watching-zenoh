@@ -66,7 +66,7 @@ use wz_session_core::sink::SampleView;
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
+use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle, Kept};
 use super::plans::{
     parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource, GetParameters,
     RecoveredView,
@@ -523,7 +523,7 @@ impl<E: SessionEngine + ?Sized> Drop for Token<E> {
 /// shows a peer.
 struct Held<T> {
     entity: T,
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Option<Kept>,
 }
 
 /// The teardown of the gets in flight. Armed until the subscriber goes to the background, which
@@ -610,7 +610,7 @@ fn wire_of(form: &EntityForm) -> WireKey {
         WireKey::aliased(form.mapping_id(), form.suffix().map(str::to_owned))
     };
     match form.kept() {
-        Some(anchor) => wire.keeping(Arc::clone(anchor)),
+        Some(anchor) => wire.keeping(anchor.clone()),
         None => wire,
     }
 }
@@ -919,7 +919,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             forms,
         } = self;
         cancel.armed = false;
-        let retain = |keeps: Option<Arc<dyn Send + Sync>>| {
+        let retain = |keeps: Option<Kept>| {
             if let (Some(forms), Some(keeps)) = (forms.as_ref(), keeps) {
                 forms.forms().retain(keeps);
             }

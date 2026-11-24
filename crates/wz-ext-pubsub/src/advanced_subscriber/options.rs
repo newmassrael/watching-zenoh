@@ -10,8 +10,13 @@
 //! the subscriber.
 
 use alloc::sync::Arc;
+use core::ptr::NonNull;
 #[cfg(feature = "advanced-recovery")]
 use core::time::Duration;
+
+/// What keeps an entity's name declared ([`EntityForm::keeping`]).
+pub use wz_capi_port::lodge::Kept;
+use wz_capi_port::lodge::Strong;
 
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::locality::Locality;
@@ -332,7 +337,7 @@ pub struct EntityForm {
     /// Whether a TOKEN's retraction names its key beside its id.
     names_key_on_retraction: bool,
     /// What keeps the declaration alive; let go of AFTER the entity is.
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Option<Kept>,
 }
 
 impl EntityForm {
@@ -363,7 +368,7 @@ impl EntityForm {
     }
 
     /// Hold `anchor` for as long as the entity declared in this form stands.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+    pub fn keeping(mut self, anchor: Kept) -> Self {
         self.keeps = Some(anchor);
         self
     }
@@ -394,7 +399,7 @@ impl EntityForm {
     }
 
     /// What keeps the declaration alive, to be let go of AFTER the entity.
-    pub fn kept(&self) -> Option<&Arc<dyn Send + Sync>> {
+    pub fn kept(&self) -> Option<&Kept> {
         self.keeps.as_ref()
     }
 }
@@ -453,23 +458,55 @@ pub trait DeclarationForms: Send + Sync {
     /// Take over an entity's declaration when the subscriber runs in the
     /// background: its handle is gone and nothing is left to let go of the
     /// declaration after the entity, so the host keeps it until its own end.
-    fn retain(&self, _anchor: Arc<dyn Send + Sync>) {}
+    fn retain(&self, _anchor: Kept) {}
 }
 
 /// A host's [`DeclarationForms`], shareable and printable, for
-/// [`AdvancedSubscriberOptions::forms`].
+/// [`AdvancedSubscriberOptions::forms`]: in a box of its own ([`Self::new`]) or lodged where the
+/// host put it ([`Self::lodged`]), so a host that keeps its forms in a place of its own takes no
+/// memory for them.
 #[derive(Clone)]
-pub struct FormsHandle(Arc<dyn DeclarationForms>);
+pub struct FormsHandle(FormsForm);
+
+#[derive(Clone)]
+enum FormsForm {
+    Shared(Arc<dyn DeclarationForms>),
+    /// The forms where they are lodged, and the count that holds them there.
+    Lodged {
+        forms: NonNull<dyn DeclarationForms>,
+        _count: Kept,
+    },
+}
+
+// SAFETY: the lodged forms are read only through a shared borrow, which `DeclarationForms`'s own
+// `Sync` admits from any thread, and their count is `Send + Sync`.
+unsafe impl Send for FormsForm {}
+// SAFETY: as `Send`.
+unsafe impl Sync for FormsForm {}
 
 impl FormsHandle {
     /// Wrap `forms`.
     pub fn new(forms: Arc<dyn DeclarationForms>) -> Self {
-        Self(forms)
+        Self(FormsForm::Shared(forms))
+    }
+
+    /// The forms `forms` counts, lodged where the host put them.
+    pub fn lodged<T: DeclarationForms + 'static>(forms: Strong<T>) -> Self {
+        let at: &dyn DeclarationForms = &*forms;
+        let at = NonNull::from(at);
+        Self(FormsForm::Lodged {
+            forms: at,
+            _count: Kept::lodged(forms),
+        })
     }
 
     /// The host's answers.
     pub fn forms(&self) -> &dyn DeclarationForms {
-        &*self.0
+        match &self.0 {
+            FormsForm::Shared(forms) => &**forms,
+            // SAFETY: the count kept beside the pointer holds the forms where they are lodged.
+            FormsForm::Lodged { forms, .. } => unsafe { forms.as_ref() },
+        }
     }
 }
 
@@ -514,8 +551,8 @@ impl AdvancedSubscriberOptions {
     }
 
     /// Name each entity the way `forms` says — see [`DeclarationForms`].
-    pub fn with_declaration_forms(mut self, forms: Arc<dyn DeclarationForms>) -> Self {
-        self.forms = Some(FormsHandle::new(forms));
+    pub fn with_declaration_forms(mut self, forms: FormsHandle) -> Self {
+        self.forms = Some(forms);
         self
     }
 

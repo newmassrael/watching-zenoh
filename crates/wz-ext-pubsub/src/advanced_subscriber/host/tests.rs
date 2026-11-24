@@ -32,8 +32,8 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::super::options::{
-    AdvancedSubscriberOptions, DeclarationForms, EntityForm, HistoryConfig, RecoveryConfig,
-    SubscriberDetection,
+    AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle, HistoryConfig, Kept,
+    RecoveryConfig, SubscriberDetection,
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
 use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
@@ -851,9 +851,9 @@ fn a_background_subscriber_retracts_nothing() {
             Some(77)
         }
         fn subscriber(&self, _keyexpr: &str) -> EntityForm {
-            EntityForm::aliased(5, Some("/data".into())).keeping(Arc::new(()))
+            EntityForm::aliased(5, Some("/data".into())).keeping(Kept::shared(Arc::new(())))
         }
-        fn retain(&self, _anchor: Arc<dyn Send + Sync>) {
+        fn retain(&self, _anchor: Kept) {
             *self.retained.lock().unwrap() += 1;
         }
     }
@@ -861,7 +861,7 @@ fn a_background_subscriber_retracts_nothing() {
     let script = Script::new(1);
     let options = AdvancedSubscriberOptions::new()
         .with_recovery(RecoveryConfig::new())
-        .with_declaration_forms(forms.clone());
+        .with_declaration_forms(FormsHandle::new(forms.clone()));
     let (subscriber, _delivered, _misses) = recording(&script, options);
     assert_eq!(
         subscriber.id().eid(),
@@ -1364,6 +1364,56 @@ fn given_back_into(given: &AtomicU64) -> *mut core::ffi::c_void {
     core::ptr::from_ref(given)
         .cast_mut()
         .cast::<core::ffi::c_void>()
+}
+
+/// Forms lodged where their host put them, and the names an entity's form keeps through a lodged
+/// count, are handed around, read and let go of with no memory taken, and the forms' place goes
+/// back once, after the last copy of the handle and the last name.
+///
+/// # Control
+///
+/// A handle that boxes the forms (`FormsHandle::new(Arc::new(..))`) counts an allocation; a name
+/// whose copy takes no count gives the place back early, which reds the second assertion.
+#[test]
+fn lodged_forms_and_kept_names_take_no_memory() {
+    struct Lodged;
+    impl DeclarationForms for Lodged {}
+    let given = AtomicU64::new(0);
+    let mut place = Lodging::<Lodged>::vacant();
+
+    let before = allocations();
+    // SAFETY: `place` is free and outlives every count; `given` outlives the give-back.
+    let forms = unsafe {
+        Strong::lodge(
+            core::ptr::NonNull::from(&mut place),
+            Lodged,
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let name = Kept::lodged(forms.clone());
+    let handle = FormsHandle::lodged(forms);
+    let copy = handle.clone();
+    let form = copy.forms().subscriber("demo/data").keeping(name.clone());
+    let wire = super::wire_of(&form);
+    drop((handle, copy, name, form));
+    let during = allocations() - before;
+    let given_while_named = given.load(Ordering::SeqCst);
+    drop(wire);
+
+    assert_eq!(
+        during, 0,
+        "the handle, its copies and the kept names allocate nothing"
+    );
+    assert_eq!(
+        given_while_named, 0,
+        "the key's kept name still holds the forms"
+    );
+    assert_eq!(
+        given.load(Ordering::SeqCst),
+        1,
+        "the last name gave the place back, once"
+    );
 }
 
 /// A value lodged in a place its maker lends takes no memory, nor do its counts: the last count

@@ -2332,8 +2332,10 @@ pub unsafe extern "C" fn z_link_events_listener_drop(
 /// The hub's own behaviour, over the tokio engine's registry as the engine a listener is declared
 /// on: the hub reads the faces through the port, and a registry with no face is an engine with
 /// none to replay.
+/// Also the counting allocator of the library's test binary, which other modules' tests read
+/// through `allocations`.
 #[cfg(all(test, feature = "engine-tokio"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2446,7 +2448,7 @@ mod tests {
     }
 
     /// Every allocation of the test's own thread while `run` runs, counted.
-    fn allocations(run: impl FnOnce()) -> usize {
+    pub(crate) fn allocations(run: impl FnOnce()) -> usize {
         COUNTING.with(|count| count.set(Some(0)));
         run();
         COUNTING.with(|count| count.take()).unwrap_or(0)
