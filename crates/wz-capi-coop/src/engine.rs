@@ -2392,7 +2392,7 @@ fn kinds(kind: InterestKind) -> InterestKinds {
 
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
 /// a message no link could have carried.
-fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
+fn leg_outcome(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     match result.map_err(PublishError::from) {
         Ok(()) => Ok(0),
         Err(PublishError::TransportUnavailable | PublishError::RequiresUnicast) => Ok(0),
@@ -5121,7 +5121,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Some(Ok(Probed::NoRoom)) => ProbeAnswer::NoRoom,
                     Some(Ok(Probed::Sent)) => ProbeAnswer::Sent,
                     Some(Err(error)) => {
-                        let sent = leg(Err(error));
+                        let sent = leg_outcome(Err(error));
                         if sent.is_err() {
                             outcome = sent;
                         }
@@ -5160,7 +5160,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 )
             };
             let sent = if let Some(lent) = lent {
-                leg(lent)
+                leg_outcome(lent)
             } else if !lent_push::LENT_PUBLICATION_MAY_DECLINE {
                 // No send of this build declines one, so the owned builders are not linked.
                 Err(FanoutError::ExceedsCapacity)
@@ -5181,7 +5181,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     }
                 };
                 match push {
-                    Ok(push) => leg(actions.send_network_message_qos(
+                    Ok(push) => leg_outcome(actions.send_network_message_qos(
                         NetworkMessage::Push(Box::new(push)),
                         reliable,
                         express,
