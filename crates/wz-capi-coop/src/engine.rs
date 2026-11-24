@@ -5726,7 +5726,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
     fn hold_leg(
         &self,
-        core: &Core<L, C>,
+        core: &mut Core<L, C>,
         ask: &mut LegAsk<'_, '_>,
         face: FaceId,
         leg_id: u64,

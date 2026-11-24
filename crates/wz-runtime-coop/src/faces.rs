@@ -738,6 +738,8 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     /// another thread then makes no buffer of its own after the open.
     waits: Option<Vec<LinkWait>>,
     next_face: FaceId,
+    /// The record each face is kept as: the table `P` holds it, the supervisor names it.
+    records: core::marker::PhantomData<fn() -> F>,
 }
 
 impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlaces<F>>
@@ -754,6 +756,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             listeners: Vec::new(),
             waits: Some(Vec::with_capacity(waits)),
             next_face: 1,
+            records: core::marker::PhantomData,
         }
     }
 

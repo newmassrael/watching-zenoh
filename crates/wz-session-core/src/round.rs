@@ -840,7 +840,7 @@ impl<C: RoundCalls> Table<C> {
     /// The sample a record of `head` and `rest` holds, read where its parts lie: what each of its
     /// subscribers' callbacks is handed. It answers no hint: nothing is built on the heap for a
     /// record of the round.
-    fn sample(&self, head: &Head, rest: Option<&Rest>) -> SampleRef<'_> {
+    fn sample<'a>(&'a self, head: &Head, rest: Option<&'a Rest>) -> SampleRef<'a> {
         let mut sample = SampleRef::new(
             self.text(head.key),
             self.bytes(head.payload),

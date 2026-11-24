@@ -1715,7 +1715,7 @@ fn pico_preset_limits() -> SessionLimits {
 
 /// What the pico interface opens for a session that listens on nothing: the dial role's face and
 /// no other, as zenoh-pico's client holds its one transport.
-fn preset_client() -> CoopConfig {
+fn one_face_client() -> CoopConfig {
     CoopConfig {
         max_faces: 0,
         ..client_config()
@@ -1777,7 +1777,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         );
     }
     let limits = pico_preset_limits();
-    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
+    let plan = ArenaPlan::of(&one_face_client(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let preset = pico_value;
@@ -2006,7 +2006,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     let client = ArenaPlan::of(
         &CoopConfig {
             accept_pending: handshakes,
-            ..preset_client()
+            ..one_face_client()
         },
         &limits,
     )
@@ -2190,7 +2190,7 @@ fn the_arena_of_a_session_by_row_measured() {
         let client = ArenaPlan::of(
             &CoopConfig {
                 accept_pending: handshakes,
-                ..preset_client()
+                ..one_face_client()
             },
             &limits,
         )
