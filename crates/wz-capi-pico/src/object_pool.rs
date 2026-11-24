@@ -218,26 +218,28 @@ fn refused_code(refused: Refused) -> ZResult {
 /// `struct_size` under [`COUNTS_BASE_BYTES`].
 ///
 /// # Safety
-/// `counts` is null or points at a `usize`-aligned struct of at least `struct_size` readable
-/// bytes, `struct_size` its first field.
+/// `counts` is null or points at a struct of at least `struct_size` readable bytes, `struct_size`
+/// its first field.
 unsafe fn stated(
     counts: *const wz_ext_object_pool_counts_t,
 ) -> Result<wz_ext_object_pool_counts_t, ZResult> {
     if counts.is_null() {
         return Err(Z_ERR_NULL);
     }
-    // `struct_size` is the first word: read alone, as the struct may be shorter than this build's.
-    let declared = counts.cast::<usize>().read();
+    // `struct_size` is the first word: read alone, as the struct may be shorter than this build's,
+    // and unaligned, so the read holds whatever address the program hands.
+    let declared = counts.cast::<usize>().read_unaligned();
     if declared < COUNTS_BASE_BYTES {
         return Err(Z_EINVAL);
     }
     // A count the struct holds only in part is not read: the words, not the bytes, that fit.
     let words = declared.min(size_of::<wz_ext_object_pool_counts_t>()) / size_of::<usize>();
     let mut read = wz_ext_object_pool_counts_t::default();
+    // Copied as bytes, which need no alignment of the program's struct.
     ptr::copy_nonoverlapping(
-        counts.cast::<usize>(),
-        ptr::addr_of_mut!(read).cast::<usize>(),
-        words,
+        counts.cast::<u8>(),
+        ptr::addr_of_mut!(read).cast::<u8>(),
+        words * size_of::<usize>(),
     );
     Ok(read)
 }
