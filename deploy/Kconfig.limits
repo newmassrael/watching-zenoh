@@ -120,8 +120,8 @@ config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
 	default 100
 	help
-	  The queryables a session holds at once. Declaring one more is refused
-	  while the table is full.
+	  The queryables a session holds at once, a background one included until
+	  the session closes. Declaring one more is refused while the table is full.
 
 config WZ_LIMIT_MAX_PENDING_QUERIES
 	int "MAX_PENDING_QUERIES"
