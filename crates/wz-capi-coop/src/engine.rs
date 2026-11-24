@@ -1915,7 +1915,7 @@ impl SubscriberRow {
             hidden = sample.without_timestamp();
             &hidden
         };
-        self.sink.call(sample);
+        self.sink.call_ref(sample);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:

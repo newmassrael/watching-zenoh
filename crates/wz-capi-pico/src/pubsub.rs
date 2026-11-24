@@ -35,7 +35,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
-use wz_session_core::sink::{encoding_carried, timestamp_carried, SampleView};
+use wz_session_core::sink::SampleRef;
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -256,8 +256,8 @@ impl SampleMarshal {
         Self::keyed(KeyText::lent(keyexpr), payload, kind)
     }
 
-    /// The marshal a subscriber's callback is handed for `view`: its key, its payload and its
-    /// attachment read where the view holds them, with nothing copied or allocated for them, as
+    /// The marshal a subscriber's callback is handed for `sample`: its key, its payload and its
+    /// attachment read where the sample holds them, with nothing copied or allocated for them, as
     /// zenoh-pico hands its callback the sample its receive decoded, without copying it
     /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_sample_steal_data(&sample`). What
     /// is kept past the call is copied when it is kept: a clone of the payload ([`ByteBuf`]) and
@@ -266,18 +266,30 @@ impl SampleMarshal {
     /// Nothing it holds is its own, so it is handed back not to be dropped: a delivery lets it go
     /// without running the drop of a key, a payload, an attachment and an encoding that own none.
     ///
+    /// Every part is read as the session's sample holds it ([`SampleRef`]), its timestamp and
+    /// encoding as the parts it read once off the message, with no call through a view.
+    ///
     /// # Safety
-    /// The marshal is let go before the borrow of `view` ends.
-    pub(crate) unsafe fn lent(view: &dyn SampleView) -> core::mem::ManuallyDrop<Self> {
+    /// The marshal is let go before the borrows `sample` holds end.
+    pub(crate) unsafe fn lent(sample: &SampleRef<'_>) -> core::mem::ManuallyDrop<Self> {
         let mut marshal = Self::keyed(
-            KeyText::lent(view.keyexpr()),
-            ByteBuf::lent(view.payload()),
-            sample_kind_of(view.kind()),
+            KeyText::lent(sample.keyexpr),
+            ByteBuf::lent(sample.payload),
+            sample_kind_of(sample.kind),
         );
-        if let Some(attachment) = view.attachment() {
-            marshal.attachment = Some(ByteBuf::lent(attachment));
-        }
-        core::mem::ManuallyDrop::new(marshal.with_metadata(view))
+        marshal.attachment = sample
+            .attachment
+            .map(|attachment| ByteBuf::lent(attachment));
+        marshal.timestamp = sample
+            .timestamp
+            .map(|(time, zid)| timestamp_from(time, zid));
+        marshal.encoding = sample
+            .encoding
+            .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema));
+        marshal.qos = sample.qos;
+        marshal.reliability = sample.reliability;
+        marshal.source_info = sample.source_info.map(source_info_of);
+        core::mem::ManuallyDrop::new(marshal)
     }
 
     /// [`Self::new`] for a key held as `keyexpr`.
@@ -301,26 +313,6 @@ impl SampleMarshal {
             },
             loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
         }
-    }
-
-    /// Attach the metadata a [`SampleView`] carried besides its attachment, which
-    /// [`Self::lent`] reads where it lies. The encoding's schema is read where the view holds it
-    /// too.
-    ///
-    /// # Safety
-    /// As [`Self::lent`]: the marshal is dropped before the borrow of `view` ends.
-    unsafe fn with_metadata(mut self, view: &dyn SampleView) -> Self {
-        // Read where the view holds them, or off its hints for a view that holds them only so: one
-        // reading of each, the session's own.
-        self.timestamp = timestamp_carried(view).map(|(time, zid)| timestamp_from(time, zid));
-        self.encoding = encoding_carried(view)
-            .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema));
-        // R311y559 — the three fields the census found unreachable from C. All
-        // three were already on the seam; nothing decoded them into the ABI.
-        self.qos = view.qos();
-        self.reliability = view.reliability();
-        self.source_info = view.source_info().map(source_info_of);
-        self
     }
 
     /// Attach metadata read off a REPLY rather than a sample.
@@ -697,19 +689,19 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
 #[cfg(test)]
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
-) -> impl FnMut(&dyn SampleView) + Send + 'static {
-    move |view: &dyn SampleView| hand_sample(&closure, view)
+) -> impl FnMut(&dyn wz_session_core::sink::SampleView) + Send + 'static {
+    move |view: &dyn wz_session_core::sink::SampleView| hand_sample(&closure, &SampleRef::of(view))
 }
 
-/// Hand `view` to the C callback of `closure`, marshalled into the borrowed `z_loaned_sample_t`
+/// Hand `sample` to the C callback of `closure`, marshalled into the borrowed `z_loaned_sample_t`
 /// it reads for the length of the call.
-pub(crate) fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
+pub(crate) fn hand_sample(closure: &CClosure, sample: &SampleRef<'_>) {
     let call = match closure.call {
         Some(f) => f,
         None => return,
     };
-    // SAFETY: the marshal is let go at the end of this call, inside the borrow of `view`.
-    let mut marshal = unsafe { SampleMarshal::lent(view) };
+    // SAFETY: the marshal is let go at the end of this call, inside the borrows `sample` holds.
+    let mut marshal = unsafe { SampleMarshal::lent(sample) };
     // Bind AFTER the move out of `lent` — the marshal is at its final
     // address only here. See `SampleMarshal::bind`.
     marshal.bind();
@@ -742,12 +734,12 @@ pub(crate) fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
 unsafe fn subscriber_sink_at<T>(object: *mut T) -> SubscriberSink {
     /// # Safety
     /// `context` is the object of a place whose kept closure the sink's release has not taken out.
-    unsafe fn call<T>(context: *mut c_void, view: &dyn SampleView) {
+    unsafe fn call<T>(context: *mut c_void, sample: &SampleRef<'_>) {
         // SAFETY: the caller's contract: the closure stands in the place, read through a shared
         // borrow.
         let kept =
             unsafe { &*crate::object_slot::kept_at::<T, SubscriberKept>(context.cast::<T>()) };
-        hand_sample(&kept.closure, view);
+        hand_sample(&kept.closure, sample);
     }
     /// # Safety
     /// As `call`'s, and nothing calls either again.
@@ -3967,6 +3959,7 @@ pub unsafe extern "C" fn z_closure_sample_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::sink::SampleView;
 
     /// pico's `_z_declared_keyexpr_t` field for field, as its header declares it: the
     /// declaration's rc (`_z_keyexpr_wire_declaration_rc_t`, a value pointer and a count
@@ -4175,7 +4168,7 @@ mod tests {
             attachment: b"attachment",
         };
         // SAFETY: the marshal is dropped before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         let kept = marshal.deep_copy().expect("room for the copy");
         let clone = marshal.payload.try_clone().expect("room for the copy");
@@ -4204,7 +4197,7 @@ mod tests {
             attachment: b"attachment",
         };
         // SAFETY: the marshal is dropped before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         let kept = marshal.deep_copy().expect("room for the copy");
         drop(core::mem::ManuallyDrop::into_inner(marshal));
@@ -4248,6 +4241,39 @@ mod tests {
         );
     }
 
+    /// A subscriber's marshal reads the session's sample by its fields: a sample of parts, with no
+    /// view behind it and no hint built, hands the callback its key and attachment where they lie,
+    /// its encoding and its timestamp.
+    #[test]
+    fn a_marshal_reads_the_sessions_sample_by_its_fields() {
+        let zid = [0x11u8; 16];
+        let mut sample =
+            SampleRef::new("demo/fields", b"p", SampleKind::Put, Reliability::Reliable);
+        sample.attachment = Some(&b"att"[..]);
+        sample.encoding = Some((7, Some(&b"utf8"[..])));
+        sample.timestamp = Some((5, &zid[..]));
+        // SAFETY: the marshal is dropped before `sample` and what it borrows.
+        let mut marshal = unsafe { SampleMarshal::lent(&sample) };
+        marshal.bind();
+        assert_eq!(marshal.keyexpr.as_str().as_ptr(), sample.keyexpr.as_ptr());
+        let attachment = marshal.attachment.as_ref().expect("the sample carried one");
+        assert_eq!(
+            Some(attachment.as_slice().as_ptr()),
+            sample.attachment.map(<[u8]>::as_ptr),
+            "read where the sample holds it"
+        );
+        assert!(
+            marshal.timestamp.is_some(),
+            "the timestamp's parts are read"
+        );
+        // SAFETY: a sample this crate marshalled and bound.
+        let loaned = unsafe { z_sample_encoding(marshal.as_loaned()) };
+        // SAFETY: the loaned encoding of the live marshal.
+        let hint = unsafe { crate::encoding::encoding_view(loaned) }.expect("bound");
+        assert_eq!((hint.packed_id, hint.schema), (7, Some(&b"utf8"[..])));
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
+    }
+
     /// A sample's payload view is its pico-layout payload field, as zenoh-pico's `z_sample_payload`
     /// is `&sample->payload`: it reads the sample's payload, and a copy of it is a borrow, which
     /// the drop of an owned bytes made of it does not let go. Turned red by an accessor that hands
@@ -4260,7 +4286,7 @@ mod tests {
             attachment: b"",
         };
         // SAFETY: the marshal is dropped before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         let sample = marshal.as_loaned();
         // SAFETY: a sample this crate marshalled and bound.
@@ -4289,7 +4315,7 @@ mod tests {
     fn a_clone_of_a_kept_sample_is_its_own_and_reads_the_same() {
         let view = EncodedView { schema: b"utf8" };
         // SAFETY: the marshal is let go before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         // SAFETY: a marshal this crate made and bound.
         let first = unsafe { clone_sample_marshal(marshal.as_loaned()) }.expect("a first copy");
@@ -4338,7 +4364,7 @@ mod tests {
             attachment: b"attachment",
         };
         // SAFETY: the marshal is let go before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.payload = ByteBuf::copy_of(b"payload").expect("room");
         marshal.attachment = Some(ByteBuf::copy_of(b"attachment").expect("room"));
         marshal.bind();
@@ -4369,7 +4395,7 @@ mod tests {
             attachment: b"attachment",
         };
         // SAFETY: the marshal is let go before `view`.
-        let marshal = unsafe { SampleMarshal::lent(&view) };
+        let marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         assert_eq!(marshal.keyexpr.as_str().as_ptr(), view.key.as_ptr());
         assert_eq!(marshal.payload.as_slice().as_ptr(), view.payload.as_ptr());
         let attachment = marshal.attachment.as_ref().expect("the view carried one");
@@ -4377,7 +4403,7 @@ mod tests {
 
         let encoded = EncodedView { schema: b"utf8" };
         // SAFETY: the marshal is let go before `encoded`.
-        let marshal = unsafe { SampleMarshal::lent(&encoded) };
+        let marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&encoded)) };
         let schema = marshal
             .encoding
             .as_ref()
@@ -4397,7 +4423,7 @@ mod tests {
             attachment: b"attachment",
         };
         // SAFETY: the marshal is dropped before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         // SAFETY: a marshal this crate made and bound.
         let owned = unsafe { clone_sample_marshal(marshal.as_loaned()) }
@@ -4461,7 +4487,7 @@ mod tests {
     fn a_samples_encoding_is_held_in_its_marshal() {
         let view = EncodedView { schema: b"utf8" };
         // SAFETY: the marshal is dropped before `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        let mut marshal = unsafe { SampleMarshal::lent(&SampleRef::of(&view)) };
         marshal.bind();
         // SAFETY: a sample this crate marshalled and bound.
         let loaned = unsafe { z_sample_encoding(marshal.as_loaned()) };
@@ -4504,7 +4530,7 @@ mod tests {
             attachment: b"",
         };
         // SAFETY: the marshal is dropped before `plain`.
-        let mut none = unsafe { SampleMarshal::lent(&plain) };
+        let mut none = unsafe { SampleMarshal::lent(&SampleRef::of(&plain)) };
         none.bind();
         // SAFETY: a sample this crate marshalled and bound.
         let carried = unsafe { z_sample_encoding(none.as_loaned()) };

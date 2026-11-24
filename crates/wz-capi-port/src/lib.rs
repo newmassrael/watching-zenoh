@@ -75,7 +75,7 @@ use alloc::sync::Arc;
 
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::{SampleRef, SampleView};
 
 pub mod cancellation;
 pub mod decl_watch;
@@ -167,9 +167,11 @@ pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
 
 /// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
 /// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
+/// It is handed the session's own sample ([`SampleRef`]), whose parts it reads as fields: one
+/// indirect call per delivery, and none through a view.
 #[derive(Clone, Copy)]
 pub struct RawSampleCallback {
-    call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
     context: *mut core::ffi::c_void,
     drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
 }
@@ -190,7 +192,7 @@ impl SubscriberSink {
     /// itself, until `drop` is called; `drop`, when given, may be called with `context` once, on
     /// any thread, after the last call has returned.
     pub unsafe fn raw(
-        call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
         context: *mut core::ffi::c_void,
         drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
     ) -> Self {
@@ -206,8 +208,19 @@ impl SubscriberSink {
         Self::Shared(Arc::new(call))
     }
 
-    /// Hand `sample` to the callback.
+    /// Hand `sample` to the callback: a C program's is handed the session's sample read once off
+    /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view.
     pub fn call(&self, sample: &dyn SampleView) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, &SampleRef::of(sample)) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+
+    /// Hand the session's own `sample` to the callback as it lies, for an engine that holds its
+    /// sample so: a C program's reads its parts with no call through a view.
+    pub fn call_ref(&self, sample: &SampleRef<'_>) {
         match self {
             // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
             Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
@@ -1115,6 +1128,49 @@ mod link_form_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A C program's callback is handed the session's own sample as it lies when the engine holds
+    /// one ([`SubscriberSink::call_ref`]), and one read once off a view otherwise
+    /// ([`SubscriberSink::call`]), with the parts the view handed. Turned red by a raw call that
+    /// rebuilds a sample the engine already holds.
+    #[test]
+    fn a_raw_sink_is_handed_the_sessions_sample_as_it_lies() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static HANDED: AtomicUsize = AtomicUsize::new(0);
+        static READ: AtomicUsize = AtomicUsize::new(0);
+        unsafe fn note(_context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+            HANDED.store(core::ptr::from_ref(sample) as usize, Ordering::SeqCst);
+            let attachment = sample.attachment.map_or(0, <[u8]>::len);
+            READ.store(
+                sample.keyexpr.len() + sample.payload.len() + attachment,
+                Ordering::SeqCst,
+            );
+        }
+        // SAFETY: `note` reads only the sample it is handed, from any thread; nothing is dropped.
+        let sink = unsafe { SubscriberSink::raw(note, core::ptr::null_mut(), None) };
+        let mut sample = SampleRef::new("demo/ref", b"pay", SampleKind::Put, Reliability::Reliable);
+        sample.attachment = Some(&b"att"[..]);
+        let at = core::ptr::from_ref(&sample) as usize;
+
+        sink.call_ref(&sample);
+        assert_eq!(HANDED.load(Ordering::SeqCst), at, "the engine's own sample");
+        assert_eq!(READ.load(Ordering::SeqCst), 14);
+
+        READ.store(0, Ordering::SeqCst);
+        sink.call(&sample);
+        assert_ne!(
+            HANDED.load(Ordering::SeqCst),
+            at,
+            "a view is read into a sample of its own"
+        );
+        assert_eq!(
+            READ.load(Ordering::SeqCst),
+            14,
+            "with every part the view handed"
+        );
+    }
 
     #[test]
     fn an_engine_that_limits_nothing_refuses_a_set_and_passes_none() {
