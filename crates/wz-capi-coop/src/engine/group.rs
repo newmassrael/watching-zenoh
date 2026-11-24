@@ -61,6 +61,7 @@ use wz_session_core::qos::Priority;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::sample::SampleKind;
+use wz_session_core::session_tables::WireForm;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
@@ -1492,6 +1493,14 @@ where
         }
         dispatch(event, &replies);
     }
+}
+
+/// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
+/// entity it names: the declaration's id and the rest of the key by its length, read against the
+/// key handed beside it ([`WireKey::names_in`]), so the tables stay the one place the form lies
+/// and nothing of the key is copied.
+pub(super) fn wire_key_of(form: WireForm<'_>) -> WireKey {
+    WireKey::aliased_tail(form.mapping, form.suffix.len())
 }
 
 /// One entity the session declared, as a group is told of it: its kind, its entity id, the key
