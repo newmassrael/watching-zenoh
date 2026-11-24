@@ -564,7 +564,7 @@ mod tests {
     }
 
     /// ARCHITECTURE section 9.1 on the MCU profile, the two ends joined: the real
-    /// session encodes a push straight into the pbuf the real lwIP driver lends,
+    /// session encodes a push straight into the slot the real lwIP driver lends,
     /// and the datagram that comes out is the one the same session makes through a
     /// driver that lends nothing. Each end is pinned alone (the session against a
     /// fake lender, the driver against hand-made frames); this is the join, where
@@ -572,7 +572,7 @@ mod tests {
     /// after.
     #[cfg(feature = "codec-push")]
     #[test]
-    fn a_push_encoded_into_the_lent_pbuf_is_the_datagram_a_copying_driver_sends() {
+    fn a_push_encoded_into_the_lent_slot_is_the_datagram_a_copying_driver_sends() {
         /// The same driver with the lend taken away: every default method.
         struct NoLend(Rc<LwipUdpDriver>);
         impl BoxedLinkDriver for NoLend {
@@ -667,7 +667,7 @@ mod tests {
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
             (1, 0),
-            "the push went through the lent pbuf and not the copying send"
+            "the push went through the lent slot and not the copying send"
         );
         let lent = delivered(&lending);
 
@@ -695,19 +695,19 @@ mod tests {
     }
 
     /// ARCHITECTURE section 9.1 on the MCU profile, the batching window: the
-    /// window's frame is opened in ONE slot of the transmit pool, lent through
-    /// the real lwIP driver, every message of the window is encoded into it, and
-    /// the flush sends that slot. Nothing crosses the copying send (which, with a
-    /// pool installed, would copy the flushed batch into a second slot), and the
-    /// datagram is the one the heap stage makes through a driver that lends
-    /// nothing. The pool's own lifecycle balances at the end.
+    /// window's frame is opened in the slot the real lwIP driver reserves for its
+    /// link, every message of the window is encoded into it, and the flush hands
+    /// that slot to the driver, which copies the datagram into ONE slot of the
+    /// transmit pool. Nothing crosses the session's copying send, and the datagram
+    /// is the one the heap stage makes through a driver that lends nothing. The
+    /// pool's own lifecycle balances at the end.
     ///
     /// Not in the slim profile: its socket carries 256 bytes, short of this
     /// session's 1024-byte batch, so the window is staged on the heap there by
     /// rule (a slot short of the budget is refused).
     #[cfg(all(feature = "codec-push", not(feature = "buffer-pool-session-rx-slim")))]
     #[test]
-    fn a_batch_window_leaves_from_one_pool_slot_with_nothing_copied_at_flush() {
+    fn a_batch_window_leaves_as_its_lent_slot_through_one_pool_slot() {
         use wz_link_lwip::tx_pool::{self, TxPoolStorage};
 
         /// The same driver with the lend taken away: every default method.
