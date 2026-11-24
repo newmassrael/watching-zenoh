@@ -1713,7 +1713,12 @@ impl<P: Storage> PeerTokens<P> {
             let Some((id, row)) = subs.row_of(interest_id) else {
                 break;
             };
-            L::Sink::tell(
+            // The token's row keeps its key, which a context that keeps the sample may hold.
+            let held = self
+                .table
+                .find(token_id)
+                .and_then(crate::bounded::KeyBacking::held);
+            L::Sink::tell_held(
                 cx,
                 id,
                 row,
@@ -1722,6 +1727,7 @@ impl<P: Storage> PeerTokens<P> {
                     keyexpr,
                     token_id,
                 },
+                held,
             );
             replayed += 1;
             after = Some(token_id);
