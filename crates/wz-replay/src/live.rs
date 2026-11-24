@@ -268,7 +268,8 @@ fn session_init_params(
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::from_entropy(
             &mut wz::runtime_tokio::session_glue::OsEntropy,
-        )?,
+        )?
+        .into(),
         region: None,
     })
 }

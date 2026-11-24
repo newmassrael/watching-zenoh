@@ -427,6 +427,93 @@ fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
     }
 }
 
+/// The endpoint a [`LateDialStack`] answers late; any other unicast endpoint it refuses.
+const LATE: &str = "tcp/192.0.2.50:7447";
+
+/// A member's stack that also dials: it joins [`GROUP`] as [`MemberStack`] does, answers a dial
+/// of [`LATE`] up only once the session has asked it and gone on, and refuses any other; each
+/// unicast endpoint it is asked to open is recorded.
+struct LateDialStack {
+    member: MemberStack,
+    dialled: Arc<Mutex<Vec<String>>>,
+}
+
+impl AppPort for LateDialStack {
+    fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+        if kind == AppLinkKind::Group {
+            return self.member.open(link, kind, locator);
+        }
+        self.dialled.lock().unwrap().push(locator.to_owned());
+        if !locator.starts_with(LATE) {
+            return ProgramOpen::Refused;
+        }
+        let transport = self.member.transport.lock().unwrap().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(transport) = transport.upgrade() {
+                let _ = transport.event(link, ProgramEvent::Connected);
+            }
+        });
+        ProgramOpen::Pending
+    }
+
+    fn send(&self, link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+        self.member.send(link, bytes)
+    }
+
+    fn close(&self, link: LinkHandle) {
+        self.member.close(link);
+    }
+}
+
+/// A session whose groups hold every task cell dials [`LATE`], which answers after the dial was
+/// begun, and then a second endpoint. The late link's session finds no task cell: a cell is not
+/// the endpoint's, so the second endpoint would be refused the same, and the dial role dials it
+/// not; the open, which redials none, ends for want of a task. Turned red by a walk that goes on
+/// to the next endpoint after a late answer whose task was refused, which dials the second
+/// endpoint and ends with that endpoint's refusal.
+#[test]
+fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
+    use wz_runtime_coop::executor::SpawnRefusal;
+    use wz_session_core::caps::MAX_TASKS;
+
+    const REFUSED: &str = "tcp/192.0.2.51:7447";
+    let network = Arc::new(Network::default());
+    let mut config = member_config(1, GROUP);
+    let join = config.groups[0].clone();
+    config.groups = vec![join; MAX_TASKS];
+    config.endpoints = vec![LATE.to_owned(), REFUSED.to_owned()];
+    config.redial_ms = None;
+    let dialled = Arc::new(Mutex::new(Vec::new()));
+    let own = Arc::new(Mutex::new(Weak::new()));
+    let transport = Arc::new(AppTransport::new(
+        Box::new(Table(Mutex::new(AppLinkTable::new()))),
+        Box::new(LateDialStack {
+            member: MemberStack {
+                network: Arc::clone(&network),
+                member: 1,
+                transport: Arc::clone(&own),
+            },
+            dialled: Arc::clone(&dialled),
+        }),
+    ));
+    *own.lock().unwrap() = Arc::downgrade(&transport);
+    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let opened = Engine::open(links, PosixClock, PosixEntropy, config);
+    assert_eq!(
+        opened.err(),
+        Some(OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+        "the open ends for want of a task"
+    );
+    let dialled = dialled.lock().unwrap();
+    assert_eq!(
+        dialled.len(),
+        1,
+        "only the late endpoint is dialled: {dialled:?}"
+    );
+    assert!(dialled[0].starts_with(LATE), "{dialled:?}");
+}
+
 /// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
 fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));

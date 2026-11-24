@@ -102,7 +102,11 @@ it behaves as pico behaves in both of pico's threading arms.
   application declared, which every face is dispatched against. The engine does not keep one
   observer for each peer and replay the application's registrations onto each, as the tokio
   engine's registry does, because the fixed-memory profile already separates the two kinds of
-  table and the separation is what the engine needs.
+  table and the separation is what the engine needs. D9 holds for a build that takes faces
+  beside its dial role's, one with `listen` or `group`. A build of neither holds its dial
+  role's face alone: one face in its transport's table (`OneFace`), one set of face tables
+  and no index of which face holds which (`OneHolder`), every face read in the dial role, and
+  a config that states a face beside it refused by `max_faces`.
 - **D6. The compile profile is orthogonal.** A `panic = "abort"` profile for the
   C ABI (`capi-small`) composes with either engine and is measured on its own.
 - **Superseded in part (owner, 2026-11-21).** `docs/c-abi-engine-and-memory.md` makes the

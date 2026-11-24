@@ -118,7 +118,7 @@ pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
 /// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
 /// pico's `BATCH_UNICAST_SIZE` as the open's snapshot `limits` holds it
 /// (`PICO_UNICAST_BATCH_BYTES`).
-fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
+const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
     pico_batch(limits.pico_unicast_batch_bytes())
 }
 
@@ -132,8 +132,12 @@ fn pico_multicast_batch(limits: &SessionLimits) -> u16 {
 /// A batch size of this ABI as the wire carries it, in two bytes. The domain of both batch limits
 /// is `1..=65535`, so a snapshot holds no size the field cannot carry: a batch of 0 would size a
 /// session that sends nothing, and one past `u16::MAX` does not fit the field.
-fn pico_batch(bytes: usize) -> u16 {
-    u16::try_from(bytes).unwrap_or(u16::MAX)
+const fn pico_batch(bytes: usize) -> u16 {
+    if bytes > u16::MAX as usize {
+        u16::MAX
+    } else {
+        bytes as u16
+    }
 }
 
 /// What a session of this ABI rejoins from fragments, unicast and in a group, on either engine:
@@ -1869,6 +1873,30 @@ fn write_unicast_endpoints(
     Ok(())
 }
 
+/// The rows of the tables of every session a build that states no policy, listens on nothing and
+/// joins no group opens, laid out when it is compiled: such a build opens each session under the
+/// pico preset (`opening_limits`) as a client that dials at most the endpoints the build admits
+/// (`MAX_STATIC_CONNECT`), advertising the preset's batch and admitting no face besides its dial,
+/// so its open walks no plan of its own.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+static PRESET_REGION: wz_capi_coop::arena::ArenaRegion = match wz_capi_coop::arena::ArenaRegion::of(
+    wz_capi_coop::arena::PlanShape::dial_only(
+        wz_session_core::caps::MAX_STATIC_CONNECT,
+        pico_unicast_batch(&opening_limits()),
+    ),
+    opening_limits(),
+) {
+    Ok(region) => region,
+    Err(_) => panic!("the pico preset lays out no arena under this build's limits"),
+};
+
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     // What the config names, read where it lies; the texts themselves are written into the
@@ -2075,6 +2103,20 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     #[cfg(not(feature = "app-transport"))]
     let links = links.waited_by_owner();
+    // A build that may state a policy, listen or join a group lays out each session's rows from
+    // its config at the open.
+    #[cfg(not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    )))]
+    let plan = wz_capi_coop::arena::PlanFrom::Region(&PRESET_REGION);
+    #[cfg(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
+    let plan = wz_capi_coop::arena::PlanFrom::Config;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
         clock,
@@ -2085,6 +2127,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         wz_capi_coop::arena::OpenStorage {
             memory: &wz_capi_coop::arena::AllocatorMemory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
+            plan,
         },
     )
     .map(wz_capi_coop::CoopEngine::into_drive);
@@ -3705,6 +3748,15 @@ mod read_task_start_codes {
 /// node. Its owner lets go of it with `z_session_drop`.
 #[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
 pub(crate) fn listening_on_loopback() -> z_owned_session_t {
+    listening_on_loopback_with(|_| {})
+}
+
+/// [`listening_on_loopback`] from a config `amend` wrote to before the open, as a program states
+/// what its session opens under, its limits among them.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+pub(crate) fn listening_on_loopback_with(
+    amend: impl FnOnce(*mut crate::abi::z_loaned_config_t),
+) -> z_owned_session_t {
     use crate::config::{z_config_default, z_config_loan_mut, z_config_move, zp_config_insert};
     // SAFETY: every pointer is to a live owned value of this frame, and the open consumes the
     // config.
@@ -3719,6 +3771,7 @@ pub(crate) fn listening_on_loopback() -> z_owned_session_t {
             ),
             Z_OK
         );
+        amend(z_config_loan_mut(&mut config));
         let mut session = z_owned_session_t::null_value();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut config), core::ptr::null()),

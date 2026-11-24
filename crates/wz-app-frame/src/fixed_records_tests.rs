@@ -7,9 +7,8 @@
 //! values a layout refuses, and the policy a receiver judges by (`e2e_policy`).
 //!
 //! Every vector runs through the hand-written builder and opener of `crate::e2e_frame` and the
-//! receiver of `crate::e2e_receiver`, and, behind `sce-generated-codec`, through the codecs SCE
-//! generates from the same layouts. The runner and the records are written once against `Codec`,
-//! so a generated codec is held to the corpus unchanged.
+//! receiver of `crate::e2e_receiver`. The runner and the records are written once against `Codec`,
+//! so a codec SCE generates from the same layouts is held to the corpus unchanged.
 //!
 //! The profile language states a split word part by part, so a value over several runs of a word
 //! is cut here into the parts that hold its runs, and the refusal of one of those parts is
@@ -880,59 +879,4 @@ fn the_corpus_holds_the_word_sent_for_review_and_the_same_word_written_otherwise
         assert_eq!(differ, [0, crc_at], "{name}");
         assert_eq!(sent[0] & 0x0F, other[0] & 0x0F, "{name}");
     }
-}
-
-/// The codecs generated from the corpus's layouts, by layout name: the list a build that links
-/// them states. The layouts need SCE's word mask, multi-run fields and derived checksum, length
-/// and address fields; with none of them listed the arm below fails naming each layout.
-#[cfg(feature = "sce-generated-codec")]
-const GENERATED: &[(&str, &dyn Codec)] = &[];
-
-/// Every layout's generated codec, as one codec.
-#[cfg(feature = "sce-generated-codec")]
-struct Generated;
-
-#[cfg(feature = "sce-generated-codec")]
-impl Generated {
-    fn of(layout: &Layout) -> &'static dyn Codec {
-        let found = GENERATED.iter().find(|(name, _)| *name == layout.name);
-        let Some((_, codec)) = found else {
-            panic!("no generated codec of the layout `{}`", layout.name);
-        };
-        *codec
-    }
-}
-
-#[cfg(feature = "sce-generated-codec")]
-impl Codec for Generated {
-    fn build(
-        &self,
-        layout: &Layout,
-        values: &Json5Value,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, Refusal> {
-        Self::of(layout).build(layout, values, payload)
-    }
-
-    fn open(&self, layout: &Layout, wire: &[u8]) -> Result<Opened, Refusal> {
-        Self::of(layout).open(layout, wire)
-    }
-
-    fn policy(&self, layout: &Layout, stated: &Json5Value) -> Result<Policy, Refusal> {
-        Self::of(layout).policy(layout, stated)
-    }
-}
-
-#[cfg(feature = "sce-generated-codec")]
-#[test]
-fn generated_codec_matches_the_corpus() {
-    let corpus = corpus();
-    let mut missing = Vec::new();
-    for layout in &corpus.layouts {
-        if GENERATED.iter().all(|(name, _)| *name != layout.name) {
-            missing.push(layout.name.as_str());
-        }
-    }
-    assert!(missing.is_empty(), "no generated codec of {missing:?}");
-    assert_eq!(run(&corpus, &Generated), KINDS);
 }

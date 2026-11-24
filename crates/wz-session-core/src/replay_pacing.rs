@@ -23,7 +23,8 @@ use crate::limits::{
     DeclarationSyncRetryIntervalMs, DeclarationSyncRetryIntervalMsHeld,
     DeclarationSyncTxNoProgressMs, DeclarationSyncTxNoProgressMsHeld, SessionLimits,
 };
-use crate::policy::SessionPolicy;
+use crate::policy::{DeclarationSyncPacing, SessionPolicy};
+use crate::policy_binding::PolicyValue;
 
 /// A pace of `burst` declarations a turn and `interval_ms` between turns, and the answer to a turn
 /// the link refused. A host holds it as an `Option`, so a test, or a caller that wants pacing on
@@ -53,6 +54,15 @@ pub enum RefusalStep {
 }
 
 impl ReplayPacing {
+    /// Whether a session of this build can be paced: whether the build's domain of
+    /// `declaration-sync-pacing` holds `on`. A build whose domain is `off` alone (a target with
+    /// no operating system, or a build in which nothing selects a policy after it, unless the
+    /// build states the allowance) reaches no pace through its snapshots, so a host that tells a
+    /// peer its declarations in turns reads this to leave the code of the turns out of that
+    /// build and tell them in one lap, as upstream does.
+    pub const REACHABLE: bool =
+        DeclarationSyncPacing::DOMAIN.contains_index(DeclarationSyncPacing::On as usize);
+
     /// A pace of `burst` declarations a turn and `interval_ms` between turns. Both must be at least
     /// 1: a turn that sends nothing would never finish, and no wait would run the turns together.
     /// A refused turn is answered as the build's two limits state
@@ -214,6 +224,18 @@ impl Default for ProgressStamp {
 mod tests {
     use super::*;
 
+    /// A pace is reachable exactly when a snapshot of the build can select the policy `on`: the
+    /// constant a host leaves its paced turns out by agrees with the policy's own domain, in a
+    /// build of either domain.
+    #[test]
+    fn a_pace_is_reachable_exactly_when_a_snapshot_can_select_pacing_on() {
+        let mut policy = SessionPolicy::defaults();
+        let selectable = policy
+            .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+            .is_ok();
+        assert_eq!(ReplayPacing::REACHABLE, selectable);
+    }
+
     /// A pace of nothing is refused: a turn that sends nothing never finishes, and no wait would
     /// run the turns together.
     #[test]
@@ -267,8 +289,6 @@ mod tests {
     /// off is upstream's one call.
     #[test]
     fn a_session_is_paced_by_the_snapshot_it_holds() {
-        use crate::policy::{DeclarationSyncPacing, SessionPolicy};
-        use crate::policy_binding::PolicyValue;
         if DeclarationSyncPacing::DOMAIN.is_singleton() {
             return;
         }

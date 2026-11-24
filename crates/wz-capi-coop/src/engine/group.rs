@@ -24,7 +24,6 @@
 //! leaves.
 
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
@@ -57,6 +56,7 @@ use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
+use wz_session_core::placed::PlacedRef;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
 #[cfg(feature = "queryable")]
@@ -86,7 +86,7 @@ use {
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use super::registry::{FaceId, HeldFace, Registry};
+use super::registry::{FaceId, HeldFace};
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -384,7 +384,7 @@ struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
-    lane: Arc<Round>,
+    lane: PlacedRef<Round>,
 }
 
 impl Drop for Watched {
@@ -508,7 +508,7 @@ pub(super) struct GroupJoining {
     pub(super) input_gate: GroupInputGate,
     /// The session's round of deliveries, which reads what the group's transport lends where it
     /// lies and keeps the buffer it gives back while a record still reads it.
-    pub(super) lane: Arc<Round>,
+    pub(super) lane: PlacedRef<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
@@ -1190,10 +1190,13 @@ impl<W: LinkWaits> GroupFace<W> {
     /// keyexprs (`GroupDeclarations::declares_keyexprs`), as the tokio engine's group is told it,
     /// and hold it for the members that ask for it.
     pub(super) fn announce_keyexpr(&self, id: ExprId, keyexpr: &str) {
-        if id == 0 || self.has_ended() || !self.join.declarations.declares_keyexprs() {
+        let Some(declared) = core::num::NonZero::new(id) else {
+            return;
+        };
+        if self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        if let Ok(declaration) = kexpr_declaration(id, keyexpr) {
+        if let Ok(declaration) = kexpr_declaration(declared, keyexpr) {
             self.keyexprs.borrow_mut().declared(id, keyexpr);
             multicast_tx_declaration(&declaration, |message| self.push_lent(message));
         }
@@ -1523,22 +1526,24 @@ pub(super) struct GroupPut<'a> {
 /// `generation`, so the answer it is owed is the group's and no link's.
 #[cfg(feature = "queryable")]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;
     move |event, replies| {
-        let mut registry = registry.borrow_mut();
-        plane.set_arriving(generation);
-        registry.dispatch_event(face, event);
-        registry.flush_pending_replies(face, replies);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
-            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                replies.send_response_final(rid, qos);
+        let dispatched = registry.with(|registry| {
+            plane.set_arriving(generation);
+            registry.dispatch_event(face, event);
+            registry.flush_pending_replies(face, replies);
+            for (rid, qos) in registry.take_pending_final_rids(face) {
+                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
+                    replies.send_response_final(rid, qos);
+                }
             }
-        }
+        });
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
     }
 }
 
@@ -1546,10 +1551,13 @@ pub(super) fn dispatch(
 /// staged queued on the group at once.
 #[cfg(not(feature = "queryable"))]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
-    move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
+    move |event, replies| {
+        let dispatched = registry.with(|registry| registry.dispatch(face, event, replies));
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
+    }
 }
 
 #[cfg(all(test, feature = "connectivity"))]

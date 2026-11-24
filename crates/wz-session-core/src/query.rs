@@ -3996,38 +3996,33 @@ where
             let carries_stack = ts_stack.is_some();
             #[cfg(not(feature = "pubsub-ts-stack"))]
             let carries_stack = false;
-            if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
-                let shared = crate::query_sink::SharedQuery {
-                    base: query_view,
-                    value: lent_value,
-                    attachment: attachment_shared.as_ref(),
-                    #[cfg(feature = "pubsub-ts-stack")]
-                    ts_stack,
+            // One view or the other, and one call of the sink for both: each call is the sink's
+            // whole delivery inlined.
+            let shared;
+            let inner: &dyn crate::query_sink::QueryView =
+                if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
+                    shared = crate::query_sink::SharedQuery {
+                        base: query_view,
+                        value: lent_value,
+                        attachment: attachment_shared.as_ref(),
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        ts_stack,
+                    };
+                    &shared
+                } else {
+                    &query_view
                 };
-                L::Sink::ask(
-                    cx,
-                    id,
-                    row,
-                    &crate::query_sink::ProvenQuery {
-                        inner: &shared,
-                        peer: requester,
-                        encoding: lent_encoding,
-                    },
-                    &mut responder,
-                )
-            } else {
-                L::Sink::ask(
-                    cx,
-                    id,
-                    row,
-                    &crate::query_sink::ProvenQuery {
-                        inner: &query_view,
-                        peer: requester,
-                        encoding: lent_encoding,
-                    },
-                    &mut responder,
-                )
-            }
+            L::Sink::ask(
+                cx,
+                id,
+                row,
+                &crate::query_sink::ProvenQuery {
+                    inner,
+                    peer: requester,
+                    encoding: lent_encoding,
+                },
+                &mut responder,
+            )
         }
         // The view and the responder are handed over as their own types: a sink of one
         // closed type is called without a vtable (`ResponderSink`).

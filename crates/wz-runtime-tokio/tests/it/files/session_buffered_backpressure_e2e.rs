@@ -32,7 +32,6 @@
 use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
-use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, SubscribeOptions, TokioSession};
@@ -78,9 +77,7 @@ fn burst_of_frames() -> Vec<Vec<u8>> {
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into();
     let actions = new_session_actions(outbound, params, TokioTime::new());
-    actions
-        .link
-        .fact_established_at(|slot| *slot = Some(actions.clock.now_monotonic_ms()));
+    actions.enter_established();
     let session = TokioSession::new(
         actions,
         Arc::new(wz_runtime_tokio::sync::PlainMutex::new(

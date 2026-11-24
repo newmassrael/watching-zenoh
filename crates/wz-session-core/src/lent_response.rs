@@ -108,6 +108,10 @@ impl Window<'_> {
     /// `value` as the codec runtime writes a VLE: seven bits at a time with the continuation
     /// flag, and the ninth byte, when there is one, carrying its last eight bits whole. The loop
     /// runs to the length the value has, so it is not unrolled to the widest one at each call.
+    ///
+    /// Out of line: a reply writes up to nine VLEs, and each inlined copy of the loop cost more
+    /// than the call.
+    #[inline(never)]
     fn vle(&mut self, value: u64) {
         let mut rest = value;
         for _ in 1..vle_len(value) {
@@ -606,7 +610,8 @@ impl<'a> ResponseWriter<'a> {
             out.vle(identity.len() as u64);
             out.bytes(identity);
         }
-        match body {
+        // A Put and an Err end alike, in their encoding and their payload: written once for both.
+        let carried = match body {
             BodyView::Put { payload, encoding } => {
                 out.byte(REPLY_HEADER);
                 let mut header = PUT_HEADER;
@@ -614,13 +619,12 @@ impl<'a> ResponseWriter<'a> {
                     header |= wire_const::FLAG_Z_PUT_E;
                 }
                 out.byte(header);
-                write_encoding(&mut out, encoding);
-                out.vle(payload.len() as u64);
-                out.bytes(payload);
+                Some((payload, encoding))
             }
             BodyView::Del => {
                 out.byte(REPLY_HEADER);
                 out.byte(DEL_HEADER);
+                None
             }
             #[cfg(feature = "query-reply-err")]
             BodyView::Err { payload, encoding } => {
@@ -629,10 +633,13 @@ impl<'a> ResponseWriter<'a> {
                     header |= wire_const::FLAG_Z_ERR_E;
                 }
                 out.byte(header);
-                write_encoding(&mut out, encoding);
-                out.vle(payload.len() as u64);
-                out.bytes(payload);
+                Some((payload, encoding))
             }
+        };
+        if let Some((payload, encoding)) = carried {
+            write_encoding(&mut out, encoding);
+            out.vle(payload.len() as u64);
+            out.bytes(payload);
         }
         if out.filled() {
             Ok(())

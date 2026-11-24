@@ -122,10 +122,10 @@ impl ReplyView for LentReply<'_, '_> {
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
         // The codec holds the id within the sixteen bytes a zenoh id has, so every byte is kept.
-        Some(self.timestamp_hint.get_or_init(|| TimestampHint {
+        crate::once_built::get_or_build(&self.timestamp_hint, || TimestampHint {
             time: ts.time,
             zid: crate::sample::TimestampZid::new(ts.zid.into_inner()).unwrap_or_default(),
-        }))
+        })
     }
     fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
         self.timestamp.map(|ts| crate::reply_stage::TimestampParts {

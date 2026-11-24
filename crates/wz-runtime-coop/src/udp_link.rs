@@ -802,9 +802,11 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     // The datagram is lent out of the link's own receive buffer, which the
     // stack has just written: no heap copy of it. The buffer stays borrowed
     // while `f` runs; the session's sends go through the socket, not through
-    // it, and a receive from inside `f` would be refused by the `RefCell`.
+    // it, and a receive from inside `f` finds it lent and reads nothing.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        let mut buf = self.rx_buf.borrow_mut();
+        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
+            return false;
+        };
         // A link of a pool that holds no buffer and finds none free reads nothing: its datagrams
         // wait in the stack (`SessionDatagramLink::waits_for_buffer`).
         let Some(bytes) = buf.bytes() else {
@@ -2200,6 +2202,21 @@ mod tests {
         assert_eq!(&next.bytes[..], b"second");
         assert!(link.try_recv().is_none(), "nothing is left to read");
         assert!(!link.holds_input(), "nothing is kept after the copy");
+    }
+
+    /// A receive asked from inside the lend finds the buffer lent and reads nothing, and the next
+    /// datagram waits for the next receive. Turned red by a receive that borrows its buffer with
+    /// `borrow_mut`, which panics there.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_receive_from_inside_the_lend_reads_nothing() {
+        let link = driver(Loop::default());
+        queued(&link.socket, b"first");
+        queued(&link.socket, b"second");
+        let mut inner = None;
+        assert!(link.recv_with(&mut |_| inner = Some(received(&link))));
+        assert_eq!(inner, Some(None), "the inner receive reads nothing");
+        assert_eq!(received(&link).as_deref(), Some(&b"second"[..]));
     }
 
     /// The defect this rule exists for: one datagram from another address used to point the

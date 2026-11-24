@@ -3946,6 +3946,7 @@ dependencies = [
  "rustls",
  "sce-forge-runtime",
  "wz-capi-port",
+ "wz-codecs",
  "wz-ext-pubsub",
  "wz-runtime-coop",
  "wz-runtime-posix",

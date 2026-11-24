@@ -102,7 +102,7 @@ fn unicast_params(
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
         limits: *limits,
-        cookie_signing_key,
+        cookie_signing_key: cookie_signing_key.into(),
     })
 }
 

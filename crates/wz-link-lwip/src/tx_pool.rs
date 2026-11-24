@@ -1,38 +1,32 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ARCHITECTURE section 9.1 on the MCU profile -- the TRANSMIT POOL: the slots a
-//! session encodes its outbound frames into, which an Ethernet MAC's DMA then
+//! ARCHITECTURE section 9.1 on the MCU profile -- the TRANSMIT POOL: the slots
+//! the datagrams a socket sends are copied into, which an Ethernet MAC's DMA then
 //! reads where they lie.
 //!
-//! ## What this adds to the lend that came before it
+//! ## What goes through it
 //!
-//! The lwIP driver already lends the session the memory of the pbuf a datagram is
-//! sent in ([`LwipUdpSocket::alloc_tx_payload`](crate::LwipUdpSocket::alloc_tx_payload)),
-//! and a MAC that gathers in place reads that pbuf without a copy. What governed
-//! that buffer was lwIP's heap and the pbuf's reference count; the generated
-//! pool's transmit lifecycle (`sources/network/session_tx_pool_mcu.scxml`) had no
-//! caller. This module is its caller: with a pool installed, the lend is a slot of
-//! the pool, and every step of the frame's life is an edge of that lifecycle.
+//! Every datagram reaches the socket as bytes
+//! ([`LwipUdpSocket::send_to`](crate::LwipUdpSocket::send_to)): a session encodes
+//! its frames into the outbound slot its link driver reserves with the link, and
+//! hands the bytes it wrote to the send, which copies them once into the buffer
+//! lwIP sends from. With a pool installed that buffer is a slot of the pool, so a
+//! MAC that gathers in place reads the frame there and copies nothing into its
+//! ring, and every step of the frame's life is an edge of the generated pool's
+//! transmit lifecycle (`sources/network/session_tx_pool_mcu.scxml`):
 //!
 //! | what happens to the frame | edge of the generated pool |
 //! |---|---|
-//! | the session is lent a slot | `pool_acquire_for_encode` (free to cpu-mut) |
+//! | the send is lent a slot and copies into it | `pool_acquire_for_encode` (free to cpu-mut) |
 //! | the frame is sent | `link_arm_tx` (cpu-mut to dma-armed-tx) |
 //! | a MAC queues it to be read in place | `dma_start_tx` (to dma-busy-tx) |
 //! | the MAC reports it done and lwIP lets go | `tx_complete` (dma-busy-tx to free) |
 //! | it left by a copy, or reached no MAC | `un_arm_tx` then `pool_return` |
-//! | it was lent and never sent | `pool_return` (cpu-mut to free) |
+//! | it was lent and given back unsent | `pool_return` (cpu-mut to free) |
 //!
-//! A datagram a sender hands over as bytes
-//! ([`LwipUdpSocket::send_to`](crate::LwipUdpSocket::send_to)) is lent a slot
-//! the same way and copied into it: a session encodes only its data frames into
-//! a lent slot, and its keep-alives, closes, handshake frames, flushed batches
-//! and fragments arrive as bytes. Before that send drew on the pool, each of
-//! them left from a pbuf of lwIP's heap and the MAC copied it into its ring, so
-//! the steady traffic of an idle session never touched the pool. What still
-//! leaves from lwIP's heap is what lwIP sends itself (ARP, ICMP), a datagram past
-//! a slot, and anything sent while the pool is dry.
+//! What leaves from lwIP's heap instead is what lwIP sends itself (ARP, ICMP), a
+//! datagram past a slot, and anything sent while the pool is dry.
 //!
 //! The address a MAC is handed is checked against the pool's own answer
 //! (`dma_armed_tx_ptr`), so a slot is started only when a piece of the frame the
@@ -57,14 +51,16 @@
 //! `NOLOAD`), so `install` writes the whole pool itself before using it; a pool
 //! of zeroes is a pool of free slots, which a test below pins.
 //!
-//! Without an installed pool nothing here runs and the lend is lwIP's heap pbuf,
-//! as before. A dry pool is not an error either: the lend falls back the same way.
+//! Without an installed pool nothing here runs and a send copies into a pbuf of
+//! lwIP's heap. A dry pool is not an error either: the send falls back the same
+//! way.
 //!
 //! ## Threading
 //!
 //! lwIP runs `NO_SYS`, on one thread, and so does everything here: the pool is
-//! reached from the lend, the send, the MAC's gather callback and lwIP's free
-//! callback, all on that thread and none of them inside another.
+//! reached from the send (which lends the slot and arms it), the MAC's gather
+//! callback and lwIP's free callback, all on that thread and none of them inside
+//! another.
 //!
 //! [`TxPoolStorage`]: crate::tx_pool::TxPoolStorage
 //! [`install`]: crate::tx_pool::install
@@ -99,7 +95,7 @@ pub struct TxPoolSpan {
 /// when it is over.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxPoolStats {
-    /// Slots lent to a sender.
+    /// Slots lent to a send.
     pub lent: u32,
     /// Slots lent and given back unsent.
     pub abandoned: u32,
@@ -239,7 +235,9 @@ pub fn slot_of(ptr: *const u8) -> Option<(usize, SlotState)> {
 }
 
 /// How many payload bytes a lent slot can carry, or 0 when no pool is installed
-/// (or the port cannot wrap a slot in a pbuf).
+/// (or the port cannot wrap a slot in a pbuf). The lend reads the same number
+/// itself ([`lend`]); this is the tests' view of it.
+#[cfg(test)]
 pub(crate) fn capacity() -> usize {
     with(|installed, _| usize::from(installed.capacity)).unwrap_or(0)
 }
