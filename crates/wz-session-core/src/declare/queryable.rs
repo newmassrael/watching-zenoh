@@ -26,8 +26,6 @@ use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap};
-#[cfg(feature = "alloc")]
-use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::transport_profile::owned::DeclareOwnedVariant;
@@ -111,9 +109,8 @@ use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 #[cfg(feature = "storage-profile")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerierCriterion {
-    /// The querier's keyexpr (a pattern; both sides may be wildcards). Read it
-    /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
-    /// with no allocator (`crate::declare::CriterionKey`).
+    /// The querier's keyexpr (a pattern; both sides may be wildcards), held in the
+    /// criterion (`crate::declare::CriterionKey`). Read it through `as_str`.
     pub keyexpr: super::CriterionKey,
     /// The querier's `allowed_destination`: which halves of the verdict
     /// it admits at all. pico's `ctx->allow_local` / `ctx->allow_remote`
@@ -136,16 +133,26 @@ pub struct QuerierCriterion {
     pub remote_includes: bool,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 impl QuerierCriterion {
     /// Build from the querier's own three knobs.
-    pub fn new(keyexpr: &str, locality: Locality, complete_required: bool) -> Self {
-        Self {
-            keyexpr: String::from(keyexpr),
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`] for a keyexpr longer than
+    /// [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES), which the criterion holds in
+    /// place.
+    pub fn new(
+        keyexpr: &str,
+        locality: Locality,
+        complete_required: bool,
+    ) -> Result<Self, RegisterError> {
+        Ok(Self {
+            keyexpr: super::criterion_key(keyexpr)?,
             locality,
             complete_required,
             remote_includes: false,
-        }
+        })
     }
 
     /// This criterion with the rule of [`Self::remote_includes`] set as `includes` says.
@@ -158,7 +165,11 @@ impl QuerierCriterion {
     /// intersecting queryable answers. The shape
     /// [`RemoteQueryableRegistry::has_matching`] keeps for its existing
     /// callers.
-    pub fn intersecting(keyexpr: &str) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn intersecting(keyexpr: &str) -> Result<Self, RegisterError> {
         Self::new(keyexpr, Locality::Any, false)
     }
 }
@@ -656,6 +667,25 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         declared_answers(&self.declared, criterion)
     }
 
+    /// [`Self::has_matching_for`] over the querier's own knobs, the keyexpr borrowed: a poll
+    /// asks it with no criterion made, so no keyexpr is copied and none is refused.
+    #[cfg(feature = "storage-profile")]
+    pub fn has_matching_at(
+        &self,
+        keyexpr: &str,
+        locality: Locality,
+        complete_required: bool,
+        remote_includes: bool,
+    ) -> bool {
+        declared_answers_for(
+            &self.declared,
+            keyexpr,
+            locality,
+            complete_required,
+            remote_includes,
+        )
+    }
+
     /// Drop everything the peer declared, in place; the refusal count is kept.
     /// Returns how many declarations were dropped.
     #[cfg(feature = "storage-profile")]
@@ -809,8 +839,17 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
 
     /// R311kh — register a matching-listener watch over `keyexpr`; see
     /// [`RemoteQueryableTable::declare_matching_listener`].
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`], with no watch registered, as
+    /// [`QuerierCriterion::new`] refuses `keyexpr`.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+    pub fn declare_matching_listener(
+        &mut self,
+        keyexpr: &str,
+        sink: BoxedMatchingSink,
+    ) -> Result<u64, RegisterError> {
         self.table
             .declare_matching_listener(&self.peer, keyexpr, sink)
     }
@@ -1022,19 +1061,24 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
     /// [`RemoteQueryablePeer::has_matching`]`(keyexpr)` caused by an inbound
     /// `DeclQueryable` / `UndeclQueryable`, seeded with the current
     /// verdict (registration fires only when already matching).
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`], with no watch registered, as
+    /// [`QuerierCriterion::new`] refuses `keyexpr`.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener<Q: Storage>(
         &mut self,
         peer: &RemoteQueryablePeer<Q>,
         keyexpr: &str,
         sink: M,
-    ) -> u64 {
-        self.declare_matching_listener_seeded(
+    ) -> Result<u64, RegisterError> {
+        Ok(self.declare_matching_listener_seeded(
             peer,
-            QuerierCriterion::intersecting(keyexpr),
+            QuerierCriterion::intersecting(keyexpr)?,
             false,
             sink,
-        )
+        ))
     }
 
     /// R311y797 — [`Self::declare_matching_listener`] carrying the
@@ -2053,17 +2097,84 @@ mod tests {
             for complete_required in [false, true] {
                 assert_eq!(
                     reg.peer.answers_query(key, complete_required),
-                    reg.has_matching_for(&QuerierCriterion::new(
-                        key,
-                        Locality::Remote,
-                        complete_required
-                    )),
+                    reg.has_matching_for(
+                        &QuerierCriterion::new(key, Locality::Remote, complete_required)
+                            .expect("a short key")
+                    ),
                     "{key} complete {complete_required}",
                 );
             }
         }
         assert!(reg.peer.answers_query("home/door", false));
         assert!(!reg.peer.answers_query("home/other", false));
+    }
+
+    /// A querier's criterion holds its keyexpr in place: a key of the bound is held, one byte more
+    /// is refused, and the poll asked over a borrowed key answers as the criterion of the same
+    /// knobs, for every locality, target and inclusion rule.
+    #[test]
+    fn a_querier_criterion_holds_its_key_to_the_bound_and_a_poll_needs_none() {
+        let fits = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES);
+        let past = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
+        let held = QuerierCriterion::new(&fits, Locality::Any, false).expect("a key of the bound");
+        assert_eq!(held.keyexpr.as_str(), fits.as_str());
+        assert_eq!(
+            QuerierCriterion::new(&past, Locality::Any, false),
+            Err(RegisterError::KeyexprTooLong)
+        );
+
+        let mut reg = RemoteQueryableRegistry::new();
+        reg.dispatch_declare(
+            &decl_queryable_complete(1, "home/temp", true),
+            &HashMap::new(),
+        );
+        reg.dispatch_declare(
+            &decl_queryable_complete(2, "home/door", false),
+            &HashMap::new(),
+        );
+        for key in ["home/temp", "home/door", "home/other"] {
+            for locality in [Locality::Any, Locality::Remote, Locality::SessionLocal] {
+                for complete_required in [false, true] {
+                    for includes in [false, true] {
+                        assert_eq!(
+                            reg.peer
+                                .has_matching_at(key, locality, complete_required, includes),
+                            reg.has_matching_for(
+                                &QuerierCriterion::new(key, locality, complete_required)
+                                    .expect("a short key")
+                                    .with_remote_inclusion(includes)
+                            ),
+                            "{key} {locality:?} complete {complete_required} includes {includes}",
+                        );
+                    }
+                }
+            }
+        }
+        assert!(reg
+            .peer
+            .has_matching_at("home/door", Locality::Remote, false, false));
+        assert!(!reg
+            .peer
+            .has_matching_at("home/door", Locality::SessionLocal, false, false));
+    }
+
+    /// A matching listener on a key longer than a criterion holds is refused, and no watch is
+    /// left registered. CONTROL: the same listener on a short key registers.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_querier_matching_listener_past_the_key_bound_is_refused_with_no_watch() {
+        use crate::declare::matching::BoxedMatchingSink;
+
+        let mut reg = RemoteQueryableRegistry::new();
+        let past = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
+        assert_eq!(
+            reg.declare_matching_listener(&past, BoxedMatchingSink::new(|_| {})),
+            Err(RegisterError::KeyexprTooLong)
+        );
+        assert_eq!(reg.matching_listener_len(), 0, "no watch is left");
+        reg.declare_matching_listener("home/temp", BoxedMatchingSink::new(|_| {}))
+            .expect("CONTROL: a short key registers");
+        assert_eq!(reg.matching_listener_len(), 1);
     }
 
     #[test]
@@ -2078,11 +2189,14 @@ mod tests {
             "the ordinary criterion matches — the keyexprs are identical",
         );
         assert!(
-            !reg.has_matching_for(&QuerierCriterion::new(
-                "home/temp",
-                Locality::Any,
-                /*complete_required=*/ true,
-            )),
+            !reg.has_matching_for(
+                &QuerierCriterion::new(
+                    "home/temp",
+                    Locality::Any,
+                    /*complete_required=*/ true,
+                )
+                .expect("a short key")
+            ),
             "an AllComplete querier needs a COMPLETE responder",
         );
     }
@@ -2115,7 +2229,9 @@ mod tests {
             "`home/*/temp` and `home/**` intersect at `home/a/temp`",
         );
         assert!(
-            !reg.has_matching_for(&QuerierCriterion::new("home/**", Locality::Any, true)),
+            !reg.has_matching_for(
+                &QuerierCriterion::new("home/**", Locality::Any, true).expect("a short key")
+            ),
             "`home/*/temp` does NOT include `home/**` — a querier asking \
              for the whole subtree cannot be served alone by a responder \
              holding one depth of it",
@@ -2127,11 +2243,10 @@ mod tests {
             &HashMap::new(),
         );
         assert!(
-            wide.has_matching_for(&QuerierCriterion::new(
-                "home/kitchen/temp",
-                Locality::Any,
-                true,
-            )),
+            wide.has_matching_for(
+                &QuerierCriterion::new("home/kitchen/temp", Locality::Any, true)
+                    .expect("a short key")
+            ),
             "`home/**` includes `home/kitchen/temp`, so it answers alone",
         );
     }
@@ -2153,15 +2268,16 @@ mod tests {
             &HashMap::new(),
         );
         assert!(
-            reg.has_matching_for(&QuerierCriterion::new("home/temp", Locality::Any, false)),
+            reg.has_matching_for(
+                &QuerierCriterion::new("home/temp", Locality::Any, false).expect("a short key")
+            ),
             "a locality-Any querier is answered by the peer",
         );
         assert!(
-            !reg.has_matching_for(&QuerierCriterion::new(
-                "home/temp",
-                Locality::SessionLocal,
-                false,
-            )),
+            !reg.has_matching_for(
+                &QuerierCriterion::new("home/temp", Locality::SessionLocal, false)
+                    .expect("a short key")
+            ),
             "a SessionLocal querier never reaches a peer, so no peer \
              declaration can make it match",
         );
@@ -2187,7 +2303,8 @@ mod tests {
         let log_for_sink = log.clone();
         let mut reg = RemoteQueryableRegistry::new();
         let id = reg.declare_matching_listener_seeded(
-            QuerierCriterion::new("home/temp", Locality::Any, /*complete_required=*/ true),
+            QuerierCriterion::new("home/temp", Locality::Any, /*complete_required=*/ true)
+                .expect("a short key"),
             /*local_matching=*/ false,
             crate::declare::matching::BoxedMatchingSink::new(move |m| {
                 log_for_sink.lock().unwrap().push(m)
@@ -2234,7 +2351,7 @@ mod tests {
         let log_for_sink = log.clone();
         let mut reg = RemoteQueryableRegistry::new();
         reg.declare_matching_listener_seeded(
-            QuerierCriterion::intersecting("home/temp"),
+            QuerierCriterion::intersecting("home/temp").expect("a short key"),
             /*local_matching=*/ false,
             crate::declare::matching::BoxedMatchingSink::new(move |m| {
                 log_for_sink.lock().unwrap().push(m)
@@ -2272,7 +2389,7 @@ mod tests {
         let log_for_sink = log.clone();
         let mut reg = RemoteQueryableRegistry::new();
         reg.declare_matching_listener_seeded(
-            QuerierCriterion::intersecting("home/temp"),
+            QuerierCriterion::intersecting("home/temp").expect("a short key"),
             /*local_matching=*/ true,
             crate::declare::matching::BoxedMatchingSink::new(move |m| {
                 log_for_sink.lock().unwrap().push(m)
@@ -2306,7 +2423,7 @@ mod tests {
         let log_for_sink = log.clone();
         let mut reg = RemoteQueryableRegistry::new();
         reg.declare_matching_listener_seeded(
-            QuerierCriterion::new("home/temp", Locality::Any, false),
+            QuerierCriterion::new("home/temp", Locality::Any, false).expect("a short key"),
             /*local_matching=*/ true,
             crate::declare::matching::BoxedMatchingSink::new(move |m| {
                 log_for_sink.lock().unwrap().push(m)

@@ -4411,12 +4411,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             obs.face_ref()
                 .remote_subscribers
                 .initial_declarations_final()
-                && !obs.face_ref().remote_subscribers.has_matching_for(
-                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        keyexpr,
-                        Locality::Remote,
-                    ),
-                )
+                && !obs
+                    .face_ref()
+                    .remote_subscribers
+                    .has_matching_at(keyexpr, Locality::Remote)
         })
     }
 
@@ -6492,11 +6490,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-subscriber")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.face_ref().remote_subscribers.has_matching_for(
-                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        keyexpr, locality,
-                    ),
-                )
+                obs.face_ref()
+                    .remote_subscribers
+                    .has_matching_at(keyexpr, locality)
             })
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -6531,13 +6527,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-queryable")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.face_ref().remote_queryables.has_matching_for(
-                    &wz_session_core::declare::queryable::QuerierCriterion::new(
-                        keyexpr,
-                        locality,
-                        complete_required,
-                    )
-                    .with_remote_inclusion(by_inclusion),
+                obs.face_ref().remote_queryables.has_matching_at(
+                    keyexpr,
+                    locality,
+                    complete_required,
+                    by_inclusion,
                 )
             })
         }
