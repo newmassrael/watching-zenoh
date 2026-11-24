@@ -126,7 +126,10 @@ impl Told {
     /// The key of a declaration; empty for the others.
     fn key(&self) -> &str {
         // The bytes are a whole `str`'s, copied by `Self::of`.
-        core::str::from_utf8(&self.key[..self.key_len]).unwrap_or_default()
+        self.key
+            .get(..self.key_len)
+            .and_then(|key| core::str::from_utf8(key).ok())
+            .unwrap_or_default()
     }
 
     /// The event in the port's words, borrowed for the sink's call.
@@ -183,15 +186,28 @@ struct Observers {
     undeclared: u64,
 }
 
-/// The kinds of entity a watch may be of, each with one pair of observers ([`plane_row`]).
-const PLANES: usize = 3;
+/// The observers installed for each kind of entity a watch may be of, one pair a kind.
+#[derive(Default)]
+struct PlaneObservers {
+    subscribers: Option<Observers>,
+    queryables: Option<Observers>,
+    tokens: Option<Observers>,
+}
 
-/// The row of `plane`'s observers.
-const fn plane_row(plane: DeclPlane) -> usize {
-    match plane {
-        DeclPlane::Subscribers => 0,
-        DeclPlane::Queryables => 1,
-        DeclPlane::Tokens => 2,
+impl PlaneObservers {
+    /// The pair of `plane`, when installed.
+    fn of(&mut self, plane: DeclPlane) -> &mut Option<Observers> {
+        match plane {
+            DeclPlane::Subscribers => &mut self.subscribers,
+            DeclPlane::Queryables => &mut self.queryables,
+            DeclPlane::Tokens => &mut self.tokens,
+        }
+    }
+
+    /// Whether no kind has its pair installed.
+    #[cfg(all(test, not(any(feature = "query", feature = "queryable"))))]
+    fn is_empty(&self) -> bool {
+        self.subscribers.is_none() && self.queryables.is_none() && self.tokens.is_none()
     }
 }
 
@@ -201,7 +217,7 @@ struct Table {
     /// first `most`.
     watches: [Option<Watch>; caps::MAX_DECL_WATCHES],
     most: usize,
-    observers: [Option<Observers>; PLANES],
+    observers: PlaneObservers,
     next_id: DeclWatchId,
 }
 
@@ -211,7 +227,7 @@ impl Table {
         Self {
             watches: [const { None }; caps::MAX_DECL_WATCHES],
             most: most.min(caps::MAX_DECL_WATCHES),
-            observers: [const { None }; PLANES],
+            observers: PlaneObservers::default(),
             next_id: 0,
         }
     }
@@ -231,17 +247,12 @@ impl Table {
 
     /// The rows of the watches `what` of `plane` reaches, and whether there is one.
     fn reached(&self, what: What, plane: DeclPlane) -> ([bool; caps::MAX_DECL_WATCHES], bool) {
-        let mut owed = [false; caps::MAX_DECL_WATCHES];
-        let mut any = false;
-        for (row, watch) in self.watches.iter().enumerate() {
-            if let Some(watch) = watch {
-                if what.reaches(plane, watch.plane) {
-                    owed[row] = true;
-                    any = true;
-                }
-            }
-        }
-        (owed, any)
+        let owed = self.watches.each_ref().map(|watch| {
+            watch
+                .as_ref()
+                .is_some_and(|watch| what.reaches(plane, watch.plane))
+        });
+        (owed, owed.contains(&true))
     }
 }
 
@@ -286,61 +297,96 @@ impl Ring {
 
     /// The rows no event holds.
     fn free(&self) -> usize {
-        self.most - self.len
+        // `len` never passes `most`: `push` holds it there.
+        self.most.saturating_sub(self.len)
     }
 
-    /// The row of the `nth` event, oldest first; `nth` below `len`, so `most` is not zero.
-    fn row(&self, nth: usize) -> usize {
-        (self.head + nth) % self.most
+    /// The row of the `nth` event, oldest first; `None` in a ring of no row.
+    fn row(&self, nth: usize) -> Option<usize> {
+        self.head.checked_add(nth)?.checked_rem(self.most)
     }
 
     /// Hold `held` after every event; `false` when the ring is full.
     fn push(&mut self, held: Held) -> bool {
-        if self.free() == 0 {
+        let Some(len) = self.len.checked_add(1).filter(|len| *len <= self.most) else {
             return false;
-        }
-        let row = self.row(self.len);
-        self.rows[row] = held;
-        self.len += 1;
+        };
+        let Some(slot) = self.row(self.len).and_then(|row| self.rows.get_mut(row)) else {
+            return false;
+        };
+        *slot = held;
+        self.len = len;
         true
     }
 
+    /// Hold `held` after every event as the running dispatch's, which settles it; `false` when
+    /// the ring is full.
+    fn stage(&mut self, held: Held) -> bool {
+        let kept = self.push(held);
+        if kept {
+            // The unsettled are some of the events held, so never more than `most`.
+            self.unsettled = self.unsettled.saturating_add(1);
+        }
+        kept
+    }
+
     /// The oldest event, when the ring holds one.
+    fn front(&self) -> Option<&Held> {
+        if self.len == 0 {
+            return None;
+        }
+        self.rows.get(self.head)
+    }
+
+    /// [`Self::front`], to write.
     fn front_mut(&mut self) -> Option<&mut Held> {
         if self.len == 0 {
             return None;
         }
-        let row = self.head;
-        Some(&mut self.rows[row])
+        self.rows.get_mut(self.head)
+    }
+
+    /// The events held, oldest first, to write: the rows from the head to the last in use, then
+    /// those before the head, `len` of them in all.
+    fn held_mut(&mut self) -> impl Iterator<Item = &mut Held> {
+        let len = self.len;
+        let rows = self.rows.get_mut(..self.most).unwrap_or_default();
+        let (before, from) = rows.split_at_mut_checked(self.head).unwrap_or_default();
+        from.iter_mut().chain(before).take(len)
     }
 
     /// Let the oldest event go.
     fn pop_front(&mut self) {
-        if self.len != 0 {
-            self.head = (self.head + 1) % self.most;
-            self.len -= 1;
+        if let Some(len) = self.len.checked_sub(1) {
+            // A ring that held an event has a row, so the head has one after it.
+            self.head = self.row(1).unwrap_or(0);
+            self.len = len;
         }
     }
 
     /// Let the events of a dispatch no one settled go: a group's.
     fn drop_unsettled(&mut self) {
-        self.len -= self.unsettled;
+        // The unsettled are the last of the events held, never more than `len`.
+        self.len = self.len.saturating_sub(self.unsettled);
         self.unsettled = 0;
     }
 
     /// The settled events no watch is owed any more, oldest first, let go of, so an undeclared
     /// watch leaves no row taken in front of those still owed.
     fn let_go_of_the_told(&mut self) {
-        while self.len > self.unsettled && !self.rows[self.head].owed.contains(&true) {
+        while self.len > self.unsettled
+            && self.front().is_some_and(|held| !held.owed.contains(&true))
+        {
             self.pop_front();
         }
     }
 
     /// Every watch's row `row` is owed nothing more.
     fn forget_row(&mut self, row: usize) {
-        for nth in 0..self.len {
-            let at = self.row(nth);
-            self.rows[at].owed[row] = false;
+        for held in self.held_mut() {
+            if let Some(owed) = held.owed.get_mut(row) {
+                *owed = false;
+            }
         }
     }
 }
@@ -404,8 +450,8 @@ fn held_of(plane: DeclPlane, tables: &FaceTables, mut each: impl FnMut(u64, &str
 /// How many declarations of `plane` the peer of `tables` holds now: the rows a watch of
 /// `plane` declared now takes of the ring for that peer ([`DeclWatches::tell_held`]).
 pub(super) fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
-    let mut count = 0;
-    held_of(plane, tables, |_, _| count += 1);
+    let mut count: usize = 0;
+    held_of(plane, tables, |_, _| count = count.saturating_add(1));
     count
 }
 
@@ -419,16 +465,12 @@ fn stage(shared: &Shared, what: What, plane: DeclPlane, id: u64, keyexpr: &str) 
         return;
     }
     let mut ring = lock(&shared.ring);
-    let kept = Told::of(what, id, keyexpr).is_some_and(|told| ring.push(Held { told, owed }));
-    if kept {
-        ring.unsettled += 1;
+    if Told::of(what, id, keyexpr).is_some_and(|told| ring.stage(Held { told, owed })) {
         return;
     }
-    for (row, watch) in table.watches.iter_mut().enumerate() {
-        if let Some(watch) = watch {
-            if owed[row] {
-                watch.staged_lost += 1;
-            }
+    for (watch, owed) in table.watches.iter_mut().zip(owed) {
+        if let Some(watch) = watch.as_mut().filter(|_| owed) {
+            watch.staged_lost = watch.staged_lost.saturating_add(1);
         }
     }
 }
@@ -457,8 +499,9 @@ impl DeclWatches {
     /// `app` with the first watch of that kind. Refused, with `sink` handed back for the caller to
     /// let go of with no lock held, by [`Declined::TableFull`] when the session holds as many
     /// watches as its limit admits, the ring has fewer than `held` rows free, or the application
-    /// layer's list of observers is at its bound, and by [`Declined::NotBuilt`] for a kind the
-    /// build does not hear; nothing is installed then.
+    /// layer's list of observers is at its bound, by [`Declined::NotBuilt`] for a kind the build
+    /// does not hear, and by [`Declined::NoEntityId`] once every id was handed out; nothing is
+    /// installed then.
     ///
     /// Called under the session's lock, as every stage is, so the rows found free stay free for
     /// the catch-up that follows; a delivery meanwhile only frees more.
@@ -479,8 +522,13 @@ impl DeclWatches {
         held: usize,
     ) -> Result<DeclWatchId, (Declined, DeclWatchSink)> {
         let mut table = lock(&self.shared.table);
-        let most = table.most;
-        let Some(free) = table.watches[..most].iter().position(Option::is_none) else {
+        let Table {
+            watches,
+            most,
+            observers,
+            next_id,
+        } = &mut *table;
+        let Some(free) = watches.iter_mut().take(*most).find(|watch| watch.is_none()) else {
             return Err((Declined::TableFull, sink));
         };
         {
@@ -491,16 +539,18 @@ impl DeclWatches {
                 return Err((Declined::TableFull, sink));
             }
         }
-        let observers = &mut table.observers[plane_row(plane)];
+        let Some(id) = next_id.checked_add(1) else {
+            return Err((Declined::NoEntityId, sink));
+        };
+        let observers = observers.of(plane);
         if observers.is_none() {
             match install(app, plane, &self.shared) {
                 Ok(installed) => *observers = Some(installed),
                 Err(refused) => return Err((refused, sink)),
             }
         }
-        table.next_id += 1;
-        let id = table.next_id;
-        table.watches[free] = Some(Watch {
+        *next_id = id;
+        *free = Some(Watch {
             id,
             plane,
             sink: Some(sink),
@@ -521,17 +571,17 @@ impl DeclWatches {
         peer: impl FnOnce() -> Option<SessionZid>,
     ) {
         let mut table = lock(&self.shared.table);
-        let Some(row) = table
+        let Some((row, watch)) = table
             .watches
-            .iter()
-            .position(|watch| matches!(watch, Some(watch) if watch.id == id))
+            .iter_mut()
+            .enumerate()
+            .find_map(|(row, watch)| Some((row, watch.as_mut().filter(|watch| watch.id == id)?)))
         else {
             return;
         };
-        let mut owed = [false; caps::MAX_DECL_WATCHES];
-        owed[row] = true;
+        let owed: [bool; caps::MAX_DECL_WATCHES] = core::array::from_fn(|at| at == row);
         let mut ring = lock(&self.shared.ring);
-        let mut lost = 0;
+        let mut lost: u64 = 0;
         let mut peer = Some(peer);
         let mut named_peer = None;
         held_of(plane, tables, |declared, keyexpr| {
@@ -543,12 +593,10 @@ impl DeclWatches {
                 ..told
             });
             if !told.is_some_and(|told| ring.push(Held { told, owed })) {
-                lost += 1;
+                lost = lost.saturating_add(1);
             }
         });
-        if let Some(watch) = table.watches[row].as_mut() {
-            watch.lost += lost;
-        }
+        watch.lost = watch.lost.saturating_add(lost);
     }
 
     /// Stop watch `id`: nothing more is owed to it, and the observers of its kind leave `app`
@@ -565,13 +613,13 @@ impl DeclWatches {
         id: DeclWatchId,
     ) -> Option<Option<DeclWatchSink>> {
         let mut table = lock(&self.shared.table);
-        let row = table
+        let (row, watch) = table
             .watches
-            .iter()
-            .position(|watch| matches!(watch, Some(watch) if watch.id == id))?;
-        let watch = table.watches[row].take()?;
+            .iter_mut()
+            .enumerate()
+            .find_map(|(row, watch)| Some((row, watch.take_if(|watch| watch.id == id)?)))?;
         if !table.watches().any(|held| held.plane == watch.plane) {
-            if let Some(observers) = table.observers[plane_row(watch.plane)].take() {
+            if let Some(observers) = table.observers.of(watch.plane).take() {
                 uninstall(app, observers);
             }
         }
@@ -627,13 +675,16 @@ impl DeclWatches {
             return;
         }
         let peer = named(peer);
-        for nth in ring.len - ring.unsettled..ring.len {
-            let at = ring.row(nth);
-            ring.rows[at].told.peer = peer;
+        // The unsettled are the last of the events held.
+        let settled = ring.len.saturating_sub(ring.unsettled);
+        for held in ring.held_mut().skip(settled) {
+            held.told.peer = peer;
         }
         ring.unsettled = 0;
         for watch in table.watches.iter_mut().flatten() {
-            watch.lost += core::mem::take(&mut watch.staged_lost);
+            watch.lost = watch
+                .lost
+                .saturating_add(core::mem::take(&mut watch.staged_lost));
         }
     }
 
@@ -703,13 +754,14 @@ impl HandingTurn<'_> {
             let Some(front) = ring.front_mut() else {
                 break;
             };
-            let Some(row) = front.owed.iter().position(|owed| *owed) else {
+            let Some((row, owed)) = front.owed.iter_mut().enumerate().find(|(_, owed)| **owed)
+            else {
                 ring.pop_front();
                 continue;
             };
-            front.owed[row] = false;
+            *owed = false;
             let told = front.told;
-            if let Some(watch) = table.watches[row].as_mut() {
+            if let Some(watch) = table.watches.get_mut(row).and_then(Option::as_mut) {
                 if let Some(sink) = watch.sink.take() {
                     return Some((watch.id, sink, told));
                 }
@@ -1291,7 +1343,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&log), 1, "the refused sink is let go of");
         {
             let table = lock(&watches.shared.table);
-            assert!(table.observers.iter().all(Option::is_none));
+            assert!(table.observers.is_empty());
             assert_eq!(table.watches().count(), 0, "no row is taken");
         }
         let (sink, _log) = recording();
@@ -1328,6 +1380,104 @@ mod tests {
         let (third, _third_log) = recording();
         added(&watches, &mut app, DeclPlane::Subscribers, third);
         assert_eq!(lock(&watches.shared.table).watches().count(), 1);
+    }
+
+    /// A held event owed to the watch of the first row, `id` its id.
+    fn owed_to_first(id: u64) -> Held {
+        Held {
+            told: Told::lost(id),
+            owed: core::array::from_fn(|row| row == 0),
+        }
+    }
+
+    /// The ids of the events a ring holds, oldest first.
+    fn ids(ring: &mut Ring) -> Vec<u64> {
+        ring.held_mut().map(|held| held.told.id).collect()
+    }
+
+    /// A ring of no row holds nothing: a push is refused, there is no front, and a pop changes
+    /// nothing.
+    ///
+    /// # Control
+    ///
+    /// A `push` that skips the `most` bound reds the first assertion.
+    #[test]
+    fn a_ring_of_no_row_holds_nothing() {
+        let mut ring = Ring::holding(0);
+        assert!(!ring.push(owed_to_first(1)), "no row to hold it");
+        assert!(!ring.stage(owed_to_first(2)), "nor to stage it");
+        assert_eq!(ring.unsettled, 0, "a refused stage owes nothing");
+        assert!(ring.front().is_none());
+        ring.pop_front();
+        assert_eq!((ring.len, ring.head), (0, 0));
+        assert!(ids(&mut ring).is_empty());
+        assert_eq!(ring.free(), 0);
+    }
+
+    /// The events a ring holds are read oldest first across its last row, a full ring refuses the
+    /// next, and what a dispatch staged is let go of from the newest end.
+    ///
+    /// # Control
+    ///
+    /// Reading the rows before the head first (`before` ahead of `from` in `held_mut`) reds the
+    /// order after the wrap.
+    #[test]
+    fn a_ring_reads_oldest_first_across_its_last_row() {
+        let mut ring = Ring::holding(3);
+        assert!(ring.push(owed_to_first(1)));
+        assert!(ring.push(owed_to_first(2)));
+        assert!(ring.push(owed_to_first(3)));
+        assert!(!ring.push(owed_to_first(4)), "three rows, three events");
+        ring.pop_front();
+        ring.pop_front();
+        assert_eq!(ring.head, 2);
+        assert!(ring.stage(owed_to_first(5)), "the first row is free again");
+        assert!(ring.stage(owed_to_first(6)));
+        assert_eq!(ids(&mut ring), [3, 5, 6]);
+        assert_eq!(ring.front().map(|held| held.told.id), Some(3));
+        ring.drop_unsettled();
+        assert_eq!(ids(&mut ring), [3], "the two staged went");
+        assert_eq!(ring.free(), 2);
+        ring.forget_row(0);
+        ring.let_go_of_the_told();
+        assert!(ids(&mut ring).is_empty(), "an event owed to no one goes");
+        assert_eq!(ring.head, 0, "the head moved past the last row");
+    }
+
+    /// A watch past the last id the session can hand out is refused by name, its sink handed
+    /// back and nothing installed for it.
+    ///
+    /// # Control
+    ///
+    /// An `add` that wraps `next_id` to zero, or installs the observers before it reads the id,
+    /// reds the assertions.
+    #[test]
+    fn a_watch_past_the_last_id_is_refused_and_installs_nothing() {
+        let watches = DeclWatches::default();
+        let mut app = SlotObserver::new();
+        lock(&watches.shared.table).next_id = DeclWatchId::MAX;
+        let (sink, log) = recording();
+        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, sink, 0)
+        else {
+            panic!("every id was handed out");
+        };
+        assert_eq!(refused, Declined::NoEntityId);
+        drop(handed_back);
+        assert_eq!(
+            Arc::strong_count(&log),
+            1,
+            "the refused sink is the caller's"
+        );
+        assert_eq!(
+            app.remote_subscribers.on_decl_len(),
+            0,
+            "no observer installed"
+        );
+        assert_eq!(
+            lock(&watches.shared.table).watches().count(),
+            0,
+            "no row taken"
+        );
     }
 
     /// The session's limits set the rows a table and its ring admit, under the build's.
