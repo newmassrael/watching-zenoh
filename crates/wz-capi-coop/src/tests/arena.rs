@@ -197,6 +197,7 @@ fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
         OpenStorage {
             memory: &AllocatorMemory,
             held,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2583,6 +2584,7 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
         OpenStorage {
             memory: &RECORDED,
             held: HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .err();
@@ -2602,4 +2604,211 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);
     assert!(reserved > 0, "the arena was reserved before the refusal");
     assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
+}
+
+/// A plan laid out when the build is compiled is the plan an open lays out at run time, row by
+/// row: for a client of the build's limits, and for a client of the pico preset that dials as many
+/// endpoints as the build admits, the shape a build of fixed limits lays its arena out by. Turned
+/// red by a row the walk lays out at one time and not the other, or by a number of the config the
+/// shape reads apart from the one the open reads.
+#[test]
+fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
+    use crate::arena::PlanShape;
+    const CLIENT: PlanShape = PlanShape {
+        max_faces: caps::MAX_FACES,
+        accept_pending: caps::MAX_ACCEPT_PENDING,
+        ..PlanShape::dial_only(0, 1024)
+    };
+    const CLIENT_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(CLIENT, &SessionLimits::BUILD);
+    assert_eq!(PlanShape::of(&client_config()), CLIENT);
+    let at_open = ArenaPlan::of(&client_config(), &SessionLimits::defaults());
+    assert!(
+        at_open.is_ok(),
+        "CONTROL: the build lays its own client out"
+    );
+    assert_eq!(CLIENT_PLAN, at_open);
+
+    const PRESET: PlanShape = PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024);
+    const PRESET_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(PRESET, &SessionLimits::PICO_PRESET);
+    let preset = CoopConfig {
+        endpoints: vec![String::from("udp/127.0.0.1:7447"); caps::MAX_STATIC_CONNECT],
+        max_faces: 0,
+        accept_pending: 0,
+        limits: SessionLimits::PICO_PRESET,
+        ..client_config()
+    };
+    assert_eq!(PlanShape::of(&preset), PRESET);
+    let at_open = ArenaPlan::of(&preset, &SessionLimits::PICO_PRESET);
+    assert!(at_open.is_ok(), "CONTROL: the preset lays a client out");
+    let (Ok(at_build), Ok(at_open)) = (&PRESET_PLAN, &at_open) else {
+        unreachable!("both laid out");
+    };
+    assert!(
+        at_build.rows().eq(at_open.rows()),
+        "row by row: {at_build:?} against {at_open:?}"
+    );
+    assert_eq!(at_build.reserved_bytes(), at_open.reserved_bytes());
+    assert_eq!(PRESET_PLAN.as_ref(), Ok(at_open));
+}
+
+/// The region of a client of the pico preset that dials as many endpoints as the build admits and
+/// advertises a batch of 1024 bytes, as a build of fixed limits lays it out when it is compiled.
+static PRESET_REGION: crate::arena::ArenaRegion = match crate::arena::ArenaRegion::of(
+    crate::arena::PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024),
+    SessionLimits::PICO_PRESET,
+) {
+    Ok(region) => region,
+    Err(_) => panic!("the preset lays a client out"),
+};
+
+/// A client of [`PRESET_REGION`]'s shape and limits that dials `dials` endpoints.
+fn preset_client(dials: usize) -> CoopConfig {
+    CoopConfig {
+        endpoints: vec![String::from("udp/127.0.0.1:7447"); dials],
+        max_faces: 0,
+        limits: SessionLimits::PICO_PRESET,
+        ..client_config()
+    }
+}
+
+/// The pico preset with one limit lowered: limits a region of the preset was not laid out for.
+fn other_than_preset() -> SessionLimits {
+    let preset = SessionLimits::PICO_PRESET;
+    let fewer = if preset.max_subscriptions() == Quota::at_most(2) {
+        1
+    } else {
+        2
+    };
+    let mut other = preset;
+    other
+        .select_max_subscriptions(Quota::at_most(fewer))
+        .expect("the build admits a few subscribers");
+    assert_ne!(other, preset, "CONTROL: the limits differ from the preset");
+    other
+}
+
+/// A region lays out, for an open of a config of its shape and limits, the rows an open of its own
+/// shape lays out from the config, whether the config dials as many endpoints as the region holds
+/// rows for or fewer, and admits handshakes it never takes, listening on nothing. A config that
+/// dials more, listens, advertises another batch, admits another face or holds other limits is
+/// refused under what differs, and is laid out no row. Turned red by a region that lays its rows
+/// out for a config it was not laid out for, or refuses one it was.
+#[test]
+fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
+    let lay_out = |config: &CoopConfig| {
+        let mut plan = ArenaPlan::vacant();
+        PRESET_REGION.lay_out_on(&mut plan, config).map(|()| plan)
+    };
+    let most = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    );
+    assert!(most.is_ok(), "CONTROL: the preset lays a client out");
+    assert_ne!(
+        preset_client(1).accept_pending,
+        0,
+        "CONTROL: the client admits handshakes it never takes"
+    );
+    assert_eq!(lay_out(&preset_client(caps::MAX_STATIC_CONNECT)), most);
+    assert_eq!(lay_out(&preset_client(1)), most);
+    assert_eq!(
+        lay_out(&preset_client(caps::MAX_STATIC_CONNECT + 1)),
+        Err(ArenaRefused::Limit {
+            limit: ArenaLimit::MaxStaticConnect,
+            why: UnlentRows::OverCeiling {
+                value: caps::MAX_STATIC_CONNECT + 1,
+                ceiling: caps::MAX_STATIC_CONNECT,
+            },
+        })
+    );
+    let other_shape = Err(ArenaRefused::Limit {
+        limit: ArenaLimit::ShapeDiffersFromBuild,
+        why: UnlentRows::NoCeiling,
+    });
+    assert_eq!(
+        lay_out(&CoopConfig {
+            batch_size: 512,
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            max_faces: 1,
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            listen: vec![String::from("tcp/127.0.0.1:7447")],
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            limits: other_than_preset(),
+            ..preset_client(1)
+        }),
+        Err(ArenaRefused::Limit {
+            limit: ArenaLimit::LimitsDifferFromBuild,
+            why: UnlentRows::NoCeiling,
+        })
+    );
+}
+
+/// An open whose rows come from a region reserves the arena an open of the same config lays out
+/// from the config, and an open of limits the region was not laid out for is refused before
+/// anything is dialled. Turned red by an open that reads the region apart from the config, or
+/// lends from a region it should refuse.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
+    use crate::arena::{ArenaRegion, HeldPlaces, OpenStorage, PlanFrom, PlanShape};
+
+    let open_by = |config: CoopConfig, region: &'static ArenaRegion| {
+        Engine::open_made_in(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            || config,
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            OpenStorage {
+                memory: &AllocatorMemory,
+                held: HeldPlaces::NONE,
+                plan: PlanFrom::Region(region),
+            },
+        )
+    };
+    let router = Router::start(CatchAll::None);
+    let own: &'static ArenaRegion = Box::leak(Box::new(
+        ArenaRegion::of(PlanShape::of(&config(&router)), config(&router).limits)
+            .expect("the build's limits lay an arena out"),
+    ));
+    let engine = open_by(config(&router), own).expect("the session opens");
+    let plan = host_plan(&config(&router)).expect("the build's limits lay an arena out");
+    assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
+    let probe = Probe::bind();
+    let refused = open_by(
+        CoopConfig {
+            endpoints: vec![probe.endpoint()],
+            open_timeout_ms: 300,
+            limits: other_than_preset(),
+            ..preset_client(0)
+        },
+        &PRESET_REGION,
+    )
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::Arena(ArenaRefused::Limit {
+            limit: ArenaLimit::LimitsDifferFromBuild,
+            why: UnlentRows::NoCeiling,
+        }))
+    );
+    assert!(!probe.reached(), "a refused open dials nothing");
 }

@@ -2807,3 +2807,37 @@ fn a_planes_write_filters_are_held_to_its_own_bound() {
         "CONTROL: tables given no bound hold a plane to the table's alone"
     );
 }
+
+/// The bytes the tables take are what a build whose limits are fixed lays out when it compiles:
+/// the same evaluated in a const as at run time, less where a kind is left out, and none past the
+/// address space. Turned red by `arena_bytes` no longer a const fn, by a kind left out still
+/// counted, or by a table past the address space answered as a size.
+#[test]
+fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
+    const ROWS: TableRows = TableRows {
+        keyexprs: 2,
+        subscribers: 3,
+        queryables: 1,
+        tokens: 1,
+        liveliness_subscribers: 1,
+        publishers: 2,
+        queriers: 1,
+        matching_listeners: 1,
+        pending_gets: 2,
+        held_replies: 2,
+    };
+    const AT_BUILD: Option<usize> = SessionTables::<Calls, Lent>::arena_bytes(&ROWS);
+    const NONE_KEPT: Option<usize> = SessionTables::<NoneKept, Lent>::arena_bytes(&ROWS);
+    let rows = ROWS;
+    assert_eq!(
+        AT_BUILD,
+        SessionTables::<Calls, Lent>::arena_bytes(core::hint::black_box(&rows))
+    );
+    assert!(AT_BUILD.is_some_and(|bytes| bytes > 0));
+    assert!(NONE_KEPT.is_some() && NONE_KEPT < AT_BUILD);
+    let past = TableRows {
+        subscribers: usize::MAX,
+        ..ROWS
+    };
+    assert_eq!(SessionTables::<Calls, Lent>::arena_bytes(&past), None);
+}
