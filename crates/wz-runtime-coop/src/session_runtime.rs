@@ -122,7 +122,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     // The shareable pointer is a cell handle, counted as an `Rc` is and not atomically: the
     // single-task drive loop shares the kernel and the link only within its own task, and
     // ARMv6-M has no atomic pointer. A cell handle, so an engine that reserved a table of cells
-    // places a link's halves in one of them (`CellRc::halves`), and the same type names halves
+    // writes a link's halves in one of them (`CellRc::halves_in`), and the same type names halves
     // on the heap (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
     type Shared<U> = crate::link_cells::CellRc<U>;
