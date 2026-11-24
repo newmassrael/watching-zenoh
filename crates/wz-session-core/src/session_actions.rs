@@ -1154,25 +1154,9 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
     /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
     /// every priority collapses onto the single conduit.
-    // Its readers are the batching paths and the lend-only frame open (`open_frame_lent`).
-    #[cfg(any(
-        feature = "transport-batching",
-        all(
-            feature = "tx-lend-only",
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            )
-        )
-    ))]
+    // Its readers are the batching paths (the lend-only frame open reads it inside its batching
+    // window), and `flush_conduit` is one under the feature alone.
+    #[cfg(feature = "transport-batching")]
     const fn conduit_index(priority: Priority) -> usize {
         #[cfg(feature = "transport-qos")]
         {

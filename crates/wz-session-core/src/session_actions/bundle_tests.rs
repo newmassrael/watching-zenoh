@@ -217,7 +217,7 @@ mod action_trace {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
-    use super::{bundle, PlainRuntime, StillClock};
+    use super::{bundle, NoEntropy, PlainRuntime, StillClock};
     use crate::close_reason::CloseReason;
     use crate::session_actions::SessionActionsBinding;
     use crate::session_fsm_unicast::SessionFsmUnicastActions;
