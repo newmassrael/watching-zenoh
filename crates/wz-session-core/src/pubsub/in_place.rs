@@ -104,18 +104,12 @@ impl SampleView for LentSample<'_, '_> {
     #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
-        Some(
-            self.timestamp_hint
-                .get_or_init(|| TimestampHint::from_view(ts)),
-        )
+        crate::once_built::get_or_build(&self.timestamp_hint, || TimestampHint::from_view(ts))
     }
     #[cfg(feature = "alloc")]
     fn encoding(&self) -> Option<&EncodingHint> {
         let encoding = self.encoding?;
-        Some(
-            self.encoding_hint
-                .get_or_init(|| EncodingHint::from_view(encoding)),
-        )
+        crate::once_built::get_or_build(&self.encoding_hint, || EncodingHint::from_view(encoding))
     }
     // The parts are the wire's own fields, read where they lie: nothing is built to
     // answer, so this is the accessor a build with no allocator has.

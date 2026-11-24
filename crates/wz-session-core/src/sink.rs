@@ -506,9 +506,8 @@ impl SampleView for PlainSample<'_> {
         self.qos
     }
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
-        self.shared
-            .get_or_init(|| self.frame.subslice(self.payload_range()))
-            .as_ref()
+        crate::once_built::get_or_build(&self.shared, || self.frame.subslice(self.payload_range()))
+            .and_then(Option::as_ref)
     }
     fn payload_shared_owned(&self) -> Option<crate::link::RxBytes> {
         // Read through the borrowed answer when it was already built; otherwise built here,

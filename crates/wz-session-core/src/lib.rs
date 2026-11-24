@@ -381,6 +381,9 @@ pub mod registry_error;
 // R311gh).
 pub mod sink;
 
+#[cfg(feature = "alloc")]
+mod once_built;
+
 // R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
 // adapter (`EventInjector` DIP port over the SCE engine's
 // `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
