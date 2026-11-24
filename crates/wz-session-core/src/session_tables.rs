@@ -2065,6 +2065,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// Whether the session's own entities of `plane` that hear what the session itself sends
     /// reach `key`.
+    // Out of line: a write filter's answer and the matching listeners' walk both read it, and each
+    // would carry a copy of the walks over the subscribers and the queryables.
+    #[inline(never)]
     pub fn local_declares(&self, plane: Plane, key: &str) -> bool {
         match plane {
             Plane::Subscribers => self.subscribers.iter().any(|(_, row)| {
