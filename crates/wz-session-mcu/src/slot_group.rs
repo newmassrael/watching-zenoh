@@ -47,18 +47,18 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastParams};
+use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_tx_offer_put_literal, MulticastTxOffer};
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::WhatAmI;
 
 use crate::app_layer::NoReplies;
 use crate::group_drive::{multicast_pump_task, MulticastRef, MulticastSession, MulticastSlots};
 use crate::slot_client::DocumentSinks;
-use crate::slot_node::ZID_MAX;
 use crate::slot_plane::{Plane, PlaneContext, PlaneRunning};
 use crate::slot_publisher::{Body, Publication, PublishCounts, Publishing};
 use crate::slot_schedule::Outcome;
@@ -174,13 +174,13 @@ impl GroupTiming {
 /// The parameters a node of zenoh id `zid` advertises on the group, with `timing`, under
 /// `policy`, the node's snapshot: the parameters carry it to the group's drive loop, and the
 /// queue its session is made with is made from it.
-fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
+fn group_params(zid: SessionZid, timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
     // The node's image resolves no limits snapshot of its own: the build's limits are the ones
     // its group runs with, named here, and its queue and machines read them from the parameters.
     let limits = wz_session_core::limits::SessionLimits::BUILD;
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: zid_vec(zid),
+        zid,
         lease_ms: timing.lease_ms,
         join_interval_ms: timing.join_interval_ms,
         seq_num_res: GROUP_SN_RESOLUTION,
@@ -369,8 +369,7 @@ where
     plane: SlotGroup<C, T, B, MEMBERS, P>,
     runtime: CoopRuntime<C>,
     observer: &'static ObserverCell<DocumentSinks>,
-    zid: [u8; ZID_MAX],
-    zid_len: usize,
+    zid: SessionZid,
     /// The node's snapshot, which each session the group joins with is made from.
     policy: SessionPolicy,
     /// The node's limits, which the group's peer tables are held to at each join.
@@ -388,15 +387,11 @@ where
     type Running = SlotGroupRunning<C, T, B, MEMBERS, P>;
 
     fn start(self, context: PlaneContext<'_, C>) -> Self::Running {
-        let mut zid = [0u8; ZID_MAX];
-        let zid_len = context.zid.len().min(zid.len());
-        zid[..zid_len].copy_from_slice(&context.zid[..zid_len]);
         SlotGroupRunning {
             plane: self,
             runtime: context.runtime,
             observer: context.observer,
-            zid,
-            zid_len,
+            zid: context.zid,
             policy: *context.policy,
             limits: context.limits,
             task: None,
@@ -432,7 +427,7 @@ where
         let session = MulticastSession {
             dispatcher: MulticastDispatcher::new(MulticastConfig::new(self.plane.timing.lease_ms)),
             transport,
-            params: group_params(&self.zid[..self.zid_len], &self.plane.timing, &self.policy),
+            params: group_params(self.zid, &self.plane.timing, &self.policy),
             policy: self.policy,
             tick_ms: self.plane.timing.tick_ms,
             max_iters: None,
@@ -535,7 +530,11 @@ mod tests {
                 // The build's domain leaves this value out: no creator can hand it.
                 continue;
             }
-            let params = group_params(&[0x01, 0x02], &GroupTiming::ZENOH, &policy);
+            let params = group_params(
+                SessionZid::from_array([0x01, 0x02]),
+                &GroupTiming::ZENOH,
+                &policy,
+            );
             assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
             assert_eq!(
                 params.tx_queue,
@@ -690,7 +689,7 @@ mod tests {
         let mut running = plane.start(PlaneContext {
             runtime,
             observer,
-            zid: &[0x01, 0x02],
+            zid: SessionZid::from_array([0x01, 0x02]),
             policy: &SessionPolicy::defaults(),
             limits,
         });

@@ -58,15 +58,6 @@ pub fn unpack_res_cbyte(cbyte: u8) -> (u8, u8) {
     (cbyte & 0x03, (cbyte >> 2) & 0x03)
 }
 
-/// A zid in the form [`MulticastParams::zid`] holds it, from bytes the caller
-/// wrote itself: [`zid_bytes`](crate::session_init_params::zid_bytes), which the
-/// unicast parameters use, so the two are one rule. Panics when `src` is not one
-/// to sixteen bytes or is all zero; a zid from configuration or from the wire is
-/// made with [`SessionZid::new`], whose refusal the caller reports.
-pub fn zid_vec(src: &[u8]) -> SessionZid {
-    crate::session_init_params::zid_bytes(src)
-}
-
 /// Inputs for each outbound multicast JOIN frame plus the periodic-emit
 /// cadence.
 ///

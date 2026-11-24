@@ -365,7 +365,10 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
         what: 0x03,
-        zid: Some(wz_session_core::session_init_params::zid_bytes(OUR_ZID)),
+        zid: Some(
+            wz_session_core::session_zid::SessionZid::new(OUR_ZID)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        ),
         timeout_ms: 1500,
         // The survey arm: the window is closed by its deadline, so every
         // datagram below is observed by ONE window.

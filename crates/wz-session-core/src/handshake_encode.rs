@@ -948,7 +948,7 @@ mod tests {
         use alloc::vec;
         crate::session_init_params::SessionInitParams {
             whatami: WhatAmI::Peer,
-            zid: crate::session_init_params::zid_bytes(&[0x01; 4]),
+            zid: crate::session_zid::SessionZid::from_array([0x01; 4]),
             seq_num_res: 0,
             req_id_res: 0,
             batch_size: 0,

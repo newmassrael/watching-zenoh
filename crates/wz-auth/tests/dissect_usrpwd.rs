@@ -18,7 +18,7 @@ use wz_session_core::auth_dispatch::AuthDispatch;
 use wz_session_core::dissect::{dissect_transport_message, Field, FieldValue};
 use wz_session_core::handshake_encode::encode_open;
 use wz_session_core::session_init_params::{
-    cookie_bytes, zid_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::transport_profile::ExtEntryOwned;
@@ -26,7 +26,7 @@ use wz_session_core::transport_profile::ExtEntryOwned;
 fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[0x11; 16]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([0x11; 16]),
         seq_num_res: 2,
         req_id_res: 1,
         batch_size: 1472,

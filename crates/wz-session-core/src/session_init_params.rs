@@ -82,21 +82,6 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
-/// A zid for [`SessionInitParams::zid`] from bytes the caller wrote itself.
-/// Panics when `src` is not one to [`ZID_MAX`] bytes or is all zero: a zid the
-/// wire cannot carry is a construction mistake there, not a runtime condition. A
-/// zid that arrives from configuration or from the wire is made with
-/// [`SessionZid::new`], whose refusal the caller reports.
-pub fn zid_bytes(src: &[u8]) -> SessionZid {
-    // The refusal is not formatted: it is a construction mistake whose rule the message states,
-    // and formatting it would link `ZidError`'s `Debug` and the formatter's struct writer into
-    // every MCU image that names its zid (about 490 bytes of text on thumbv7m).
-    match SessionZid::new(src) {
-        Ok(zid) => zid,
-        Err(_) => panic!("a zid is 1 to 16 bytes, not all zero"),
-    }
-}
-
 /// A cookie for [`SessionInitParams::cookie`], written the same way on every
 /// profile. Panics when `src` is longer than [`COOKIE_MAX`].
 pub fn cookie_bytes(src: &[u8]) -> SessionBytes<COOKIE_MAX> {

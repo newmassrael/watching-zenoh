@@ -1633,7 +1633,8 @@ mod batch_walk_tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(zid),
+            zid: crate::session_zid::SessionZid::new(zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

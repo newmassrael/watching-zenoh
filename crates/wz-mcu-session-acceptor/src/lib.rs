@@ -89,7 +89,7 @@ use wz_session_core::limits::SessionLimits;
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams, SessionZid};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -784,10 +784,10 @@ pub(crate) fn acceptor_params(
 ) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        // `zid_bytes` / `cookie_bytes` are the profile's own spelling of these two
-        // (a `Vec` on the growable backing, a fixed buffer under `bounded-heapless`),
-        // so the same fixture serves both profiles.
-        zid: zid_bytes(&[0x0A, 0x0B, 0x0C, 0x0D]),
+        // A constant zid, checked when the build is made. `cookie_bytes` is the profile's own
+        // spelling of the cookie (a `Vec` on the growable backing, a fixed buffer under
+        // `bounded-heapless`), so the same fixture serves both profiles.
+        zid: const { SessionZid::from_array([0x0A, 0x0B, 0x0C, 0x0D]) },
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,

@@ -58,7 +58,6 @@ use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDri
 use wz_session_core::credential_identity::zid_from_spki_der;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::reconnect::SwappableLink;
-use wz_session_core::session_init_params::zid_bytes;
 use wz_session_core::wire::{PushOwned, WireStorage};
 
 use wz_session_core::drive::{
@@ -240,7 +239,10 @@ fn established_session() -> (
     };
     let (actions, engine) = established_session_over(Arc::new(driver));
     <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
-        *slot = Some(zid_bytes(&zid));
+        *slot = Some(
+            wz_session_core::session_zid::SessionZid::new(&zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        );
     });
     assert!(
         actions.peer_identity_verified(),
@@ -258,7 +260,10 @@ fn established_unverified_session() -> (
     let (actions, engine) = established_session_over(Arc::new(NoopOutboundDriver::default()));
     let zid = zid_from_spki_der(COMMANDER_SPKI);
     <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
-        *slot = Some(zid_bytes(&zid));
+        *slot = Some(
+            wz_session_core::session_zid::SessionZid::new(&zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        );
     });
     assert!(!actions.peer_identity_verified());
     (actions, engine)
@@ -977,7 +982,10 @@ fn a_session_behind_the_reconnect_seam_is_verified_by_its_live_links_key() {
     let seam = Arc::new(SwappableLink::<TokioRuntime>::new(certified));
     let (actions, _engine) = established_session_over(seam.clone());
     <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
-        *slot = Some(zid_bytes(&zid));
+        *slot = Some(
+            wz_session_core::session_zid::SessionZid::new(&zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        );
     });
     assert!(
         actions.peer_identity_verified(),

@@ -46,7 +46,7 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -161,7 +161,7 @@ impl<const S: usize> Statics<S> {
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[zid; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,

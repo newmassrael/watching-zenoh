@@ -45,7 +45,7 @@ use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::session_drive::{LinkOpenError, PumpSlots, SessionDriveConfig, SessionRole};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::datagram_peer::is_init_syn;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -100,7 +100,7 @@ type Opened = OpenedSession<Frozen, LwipUdpDriver>;
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[zid; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,

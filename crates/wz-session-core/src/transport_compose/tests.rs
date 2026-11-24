@@ -11,7 +11,7 @@ use wz_codecs::whatami::WhatAmI;
 fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: crate::session_init_params::zid_bytes(zid),
+        zid: crate::session_zid::SessionZid::new(zid).expect("a 1 to 16 byte zid, not all zero"),
         seq_num_res: 2,
         req_id_res: 1,
         batch_size,

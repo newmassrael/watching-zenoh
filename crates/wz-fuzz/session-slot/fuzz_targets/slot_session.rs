@@ -46,7 +46,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_init_params::{
-    cookie_bytes, zid_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -240,7 +240,7 @@ impl SessionDatagramLink for Feed {
 fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[0xb0; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([0xb0; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: BATCH,

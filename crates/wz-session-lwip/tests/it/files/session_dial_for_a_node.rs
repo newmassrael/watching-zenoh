@@ -34,7 +34,7 @@ use wz_runtime_coop::session_drive::{PumpSlots, SessionDriveConfig, SessionRole}
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopTime, RuntimeCell};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::datagram_peer::is_init_syn;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -87,7 +87,7 @@ const BATCH: u16 = 1024;
 fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[0xb0; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([0xb0; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: BATCH,

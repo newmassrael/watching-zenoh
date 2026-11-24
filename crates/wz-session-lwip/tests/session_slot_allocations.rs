@@ -92,7 +92,7 @@ use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::BoxedSink;
@@ -313,7 +313,7 @@ type Handle = SessionHandle<Frozen, Driver>;
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[zid; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
