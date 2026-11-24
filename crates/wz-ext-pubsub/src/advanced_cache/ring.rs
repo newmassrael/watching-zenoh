@@ -16,6 +16,8 @@
 //! field is read and written as bytes, so nothing here reads past the span whatever it holds.
 
 use wz_session_core::sample::{EncodingRef, SampleKind, SourceInfo, TimestampHint};
+#[cfg(feature = "advanced-recovery")]
+use wz_session_core::{reliability::Reliability, sample::QosLevel, sink::SampleView};
 
 use super::{Held, SampleBody};
 
@@ -61,6 +63,8 @@ const R_EID: usize = 72;
 const R_SN: usize = 76;
 const R_TS_ZID_LEN: usize = 80;
 const R_SI_ZID_LEN: usize = 81;
+#[cfg(feature = "advanced-recovery")]
+const R_QOS: usize = 82;
 
 // What a record's flags say it holds.
 const F_DEL: u32 = 1;
@@ -70,6 +74,11 @@ const F_SCHEMA: u32 = 1 << 3;
 const F_ATTACHMENT: u32 = 1 << 4;
 #[cfg(feature = "transport-shm")]
 const F_SHARED: u32 = 1 << 5;
+const F_STAMPED: u32 = 1 << 6;
+#[cfg(feature = "advanced-recovery")]
+const F_QOS: u32 = 1 << 7;
+#[cfg(feature = "advanced-recovery")]
+const F_BEST_EFFORT: u32 = 1 << 8;
 
 /// The owner a dead record carries: no cache's.
 const DEAD: u32 = 0;
@@ -160,8 +169,19 @@ fn word(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// What a record keeps of its sample beside the body: the stamps a cache answers with, and what
+/// a subscriber hands on with a sample it held.
+struct Stamps<'a> {
+    source_info: Option<SourceInfo>,
+    timestamp: Option<&'a TimestampHint>,
+    #[cfg(feature = "advanced-recovery")]
+    qos: Option<QosLevel>,
+    #[cfg(feature = "advanced-recovery")]
+    reliability: Reliability,
+}
+
 /// A session's ring, read and written over the bytes of its span.
-pub(super) struct RecordRing<'a> {
+pub(crate) struct RecordRing<'a> {
     /// The ring's state.
     head: &'a mut [u8],
     /// The records.
@@ -171,7 +191,7 @@ pub(super) struct RecordRing<'a> {
 impl<'a> RecordRing<'a> {
     /// The ring `span` holds, or `None` for a span too short for one record of no sample, or not
     /// laid on the records' alignment.
-    pub(super) fn over(span: &'a mut [u8]) -> Option<Self> {
+    pub(crate) fn over(span: &'a mut [u8]) -> Option<Self> {
         if span.as_ptr() as usize % ALIGN != 0 || capacity(span.len()) < RECORD_HEAD_BYTES {
             return None;
         }
@@ -225,7 +245,7 @@ impl<'a> RecordRing<'a> {
     }
 
     /// How many records of `owner` the ring holds.
-    pub(super) fn live(&self, owner: u32) -> usize {
+    pub(crate) fn live(&self, owner: u32) -> usize {
         let mut live = 0usize;
         self.each_record(&mut |at| {
             if read_u32(self.data, at.saturating_add(R_OWNER)) == owner {
@@ -376,7 +396,15 @@ impl<'a> RecordRing<'a> {
             }
             self.pop_tail();
         };
-        self.write(at, need, owner, body, source_info, timestamp);
+        let stamps = Stamps {
+            source_info,
+            timestamp: Some(timestamp),
+            #[cfg(feature = "advanced-recovery")]
+            qos: None,
+            #[cfg(feature = "advanced-recovery")]
+            reliability: Reliability::default(),
+        };
+        self.write(at, need, owner, body, &stamps);
     }
 
     /// Write the record at `at`, of `total` bytes.
@@ -386,9 +414,9 @@ impl<'a> RecordRing<'a> {
         total: usize,
         owner: u32,
         body: SampleBody<'_>,
-        source_info: Option<SourceInfo>,
-        timestamp: &TimestampHint,
+        stamps: &Stamps<'_>,
     ) {
+        let source_info = stamps.source_info.as_ref();
         let schema = body.encoding.and_then(|encoding| encoding.schema);
         let mut flags = 0;
         if matches!(body.kind, SampleKind::Del) {
@@ -396,6 +424,17 @@ impl<'a> RecordRing<'a> {
         }
         if source_info.is_some() {
             flags |= F_SOURCE;
+        }
+        if stamps.timestamp.is_some() {
+            flags |= F_STAMPED;
+        }
+        #[cfg(feature = "advanced-recovery")]
+        if stamps.qos.is_some() {
+            flags |= F_QOS;
+        }
+        #[cfg(feature = "advanced-recovery")]
+        if matches!(stamps.reliability, Reliability::BestEffort) {
+            flags |= F_BEST_EFFORT;
         }
         if body.encoding.is_some() {
             flags |= F_ENCODING;
@@ -427,22 +466,20 @@ impl<'a> RecordRing<'a> {
             body.encoding.map_or(0, |encoding| encoding.packed_id),
         );
         write_u32(data, at + R_SCHEMA, word(schema.map_or(0, <[u8]>::len)));
-        write_u64(data, at + R_TIME, timestamp.time);
-        let ts_zid = timestamp.zid_prefix();
+        write_u64(data, at + R_TIME, stamps.timestamp.map_or(0, |ts| ts.time));
+        let ts_zid = stamps.timestamp.map_or(&[][..], TimestampHint::zid_prefix);
         put_bytes(data, at + R_TS_ZID, ts_zid);
-        let si_zid = source_info.as_ref().map_or(&[][..], SourceInfo::zid_prefix);
+        let si_zid = source_info.map_or(&[][..], SourceInfo::zid_prefix);
         put_bytes(data, at + R_SI_ZID, si_zid);
-        write_u32(
-            data,
-            at + R_EID,
-            source_info.as_ref().map_or(0, |si| si.eid),
-        );
-        write_u32(data, at + R_SN, source_info.as_ref().map_or(0, |si| si.sn));
+        write_u32(data, at + R_EID, source_info.map_or(0, |si| si.eid));
+        write_u32(data, at + R_SN, source_info.map_or(0, |si| si.sn));
         put_bytes(
             data,
             at + R_TS_ZID_LEN,
             &[ts_zid.len() as u8, si_zid.len() as u8],
         );
+        #[cfg(feature = "advanced-recovery")]
+        put_bytes(data, at + R_QOS, &[stamps.qos.map_or(0, |qos| qos.raw)]);
         let mut off = at + RECORD_HEAD_BYTES;
         #[cfg(feature = "transport-shm")]
         if let Some(shared) = body.shared {
@@ -472,6 +509,135 @@ impl<'a> RecordRing<'a> {
             .cast()
     }
 
+    /// The owner of the record at `at`.
+    #[cfg(feature = "advanced-recovery")]
+    fn owner_at(&self, at: usize) -> u32 {
+        read_u32(self.data, at.saturating_add(R_OWNER))
+    }
+
+    /// The number `order` reads off the record at `at`.
+    #[cfg(feature = "advanced-recovery")]
+    fn key_at(&self, at: usize, order: Order) -> u64 {
+        match order {
+            Order::Sn => u64::from(read_u32(self.data, at.saturating_add(R_SN))),
+            #[cfg(feature = "advanced-history")]
+            Order::Time => read_u64(self.data, at.saturating_add(R_TIME)),
+        }
+    }
+
+    /// The record of `owner` held under `key`, read in `order`.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn find(&self, owner: u32, order: Order, key: u64) -> Option<usize> {
+        let mut found = None;
+        self.each_record(&mut |at| {
+            if found.is_none() && self.owner_at(at) == owner && self.key_at(at, order) == key {
+                found = Some(at);
+            }
+        });
+        found
+    }
+
+    /// The record of `owner` held under the least key read in `order`, with its key.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn first(&self, owner: u32, order: Order) -> Option<(u64, usize)> {
+        let mut first: Option<(u64, usize)> = None;
+        self.each_record(&mut |at| {
+            if self.owner_at(at) == owner {
+                let key = self.key_at(at, order);
+                if first.is_none_or(|(least, _)| key < least) {
+                    first = Some((key, at));
+                }
+            }
+        });
+        first
+    }
+
+    /// Keep the sample `view` reads as a record of `owner`, with every stamp a subscriber hands
+    /// on with it. Unlike [`Self::keep`], no live record is let go for room: the dead ones at the
+    /// ring's tail are taken back, and a sample that finds no room after them is not kept, which
+    /// the answer says.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn place(&mut self, owner: u32, view: &dyn SampleView) -> bool {
+        let body = SampleBody {
+            keyexpr: view.keyexpr(),
+            payload: view.payload(),
+            kind: view.kind(),
+            encoding: view.encoding().map(EncodingRef::of).or_else(|| {
+                view.encoding_parts()
+                    .map(|(packed_id, schema)| EncodingRef { packed_id, schema })
+            }),
+            attachment: view
+                .attachment()
+                .or_else(|| view.attachment_shared().map(|bytes| &**bytes)),
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        };
+        let timestamp = view.timestamp().cloned().or_else(|| {
+            view.timestamp_parts()
+                .and_then(|(time, zid)| TimestampHint::new(time, zid))
+        });
+        let stamps = Stamps {
+            source_info: view.source_info().cloned(),
+            timestamp: timestamp.as_ref(),
+            qos: view.qos(),
+            reliability: view.reliability(),
+        };
+        let Some(need) = record_bytes(&body).filter(|need| *need <= self.capacity()) else {
+            return false;
+        };
+        loop {
+            if let Some(at) = self.take_room(need) {
+                self.write(at, need, owner, body, &stamps);
+                return true;
+            }
+            if self.state(COUNT) == 0 || self.owner_at(self.state(TAIL)) != DEAD {
+                return false;
+            }
+            self.pop_tail();
+        }
+    }
+
+    /// The sample of the record at `at`, read where it lies, as a subscriber hands it on.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn view_at(&self, at: usize) -> Option<RecordView<'_>> {
+        let flags = read_u32(self.data, at.saturating_add(R_FLAGS));
+        let qos = (flags & F_QOS != 0)
+            .then(|| self.data.get(at.saturating_add(R_QOS)).copied())
+            .flatten()
+            .map(QosLevel::from_raw);
+        Some(RecordView {
+            held: self.held(at)?,
+            qos,
+            reliability: if flags & F_BEST_EFFORT != 0 {
+                Reliability::BestEffort
+            } else {
+                Reliability::Reliable
+            },
+        })
+    }
+
+    /// Let the record at `at` go, and take back the bytes of the dead records at the ring's tail.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn let_go(&mut self, at: usize) {
+        self.kill(at);
+        self.take_back();
+    }
+
+    /// Let every record of `owner` go, and take back what the ring's tail then holds dead.
+    #[cfg(feature = "advanced-recovery")]
+    pub(crate) fn let_go_all(&mut self, owner: u32) {
+        self.forget(owner);
+        self.take_back();
+    }
+
+    /// Take back the bytes of the dead records at the ring's tail.
+    #[cfg(feature = "advanced-recovery")]
+    fn take_back(&mut self) {
+        while self.state(COUNT) != 0 && self.owner_at(self.state(TAIL)) == DEAD {
+            self.pop_tail();
+        }
+    }
+
     /// Call `each` with every live sample of `owner`, oldest first.
     pub(super) fn each_of(&self, owner: u32, each: &mut dyn FnMut(Held<'_>)) {
         self.each_record(&mut |at| {
@@ -493,10 +659,14 @@ impl<'a> RecordRing<'a> {
         let schema_len = read_u32(data, at + R_SCHEMA) as usize;
         let ts_zid_len = usize::from(*data.get(at + R_TS_ZID_LEN)?);
         let si_zid_len = usize::from(*data.get(at + R_SI_ZID_LEN)?);
-        let timestamp = TimestampHint::new(
-            read_u64(data, at + R_TIME),
-            span_of(data, at + R_TS_ZID, ts_zid_len)?,
-        )?;
+        let timestamp = if flags & F_STAMPED != 0 {
+            Some(TimestampHint::new(
+                read_u64(data, at + R_TIME),
+                span_of(data, at + R_TS_ZID, ts_zid_len)?,
+            )?)
+        } else {
+            None
+        };
         let source_info = if flags & F_SOURCE != 0 {
             Some(SourceInfo::new(
                 span_of(data, at + R_SI_ZID, si_zid_len)?,
@@ -559,5 +729,57 @@ impl<'a> RecordRing<'a> {
             #[cfg(feature = "transport-shm")]
             shared,
         })
+    }
+}
+
+/// Which number of its records orders what one owner holds: a sample's sequence number, or its
+/// timestamp's time.
+#[cfg(feature = "advanced-recovery")]
+#[derive(Clone, Copy)]
+pub(crate) enum Order {
+    Sn,
+    #[cfg(feature = "advanced-history")]
+    Time,
+}
+
+/// A held sample as a subscriber hands it on, read where its record lies.
+#[cfg(feature = "advanced-recovery")]
+pub(crate) struct RecordView<'a> {
+    held: Held<'a>,
+    qos: Option<QosLevel>,
+    reliability: Reliability,
+}
+
+#[cfg(feature = "advanced-recovery")]
+impl SampleView for RecordView<'_> {
+    fn keyexpr(&self) -> &str {
+        self.held.keyexpr
+    }
+    fn payload(&self) -> &[u8] {
+        self.held.bytes
+    }
+    fn kind(&self) -> SampleKind {
+        self.held.kind
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+    fn qos(&self) -> Option<QosLevel> {
+        self.qos
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.held.attachment
+    }
+    fn timestamp(&self) -> Option<&TimestampHint> {
+        self.held.timestamp.as_ref()
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.held.source_info.as_ref()
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.held
+            .encoding
+            .as_ref()
+            .map(|encoding| (encoding.packed_id, encoding.schema))
     }
 }

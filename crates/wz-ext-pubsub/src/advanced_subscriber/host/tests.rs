@@ -7,8 +7,6 @@
 //! host does with it: the entities and the order they are declared and retracted in, the get each
 //! trigger issues, what ends a get, and what a teardown stops.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -37,6 +35,7 @@ use super::super::options::{
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
 use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
+use crate::test_alloc::allocations;
 use wz_capi_port::lodge::{Lodging, Strong};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
@@ -954,49 +953,8 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
 // What asking a get and subscribing take of the heap. The crate's other lib tests run beside these
 // on libtest's other threads and allocate as they please; the count is of the thread a test runs
 // on (a thread-local cell the allocator bumps), and a window opens and closes on that thread with
-// nothing handed to another in between, so what the others allocate never reaches it.
-
-/// Counts the allocations made BY THE CURRENT THREAD.
-struct CountingAllocator;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-// SAFETY: every call forwards to `System` unchanged; the only addition is a bump of a thread-local
-// cell without a destructor, which neither allocates nor unwinds.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        // SAFETY: the caller's contract, forwarded.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        // SAFETY: the caller's contract, forwarded.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        // SAFETY: the caller's contract, forwarded.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller's contract, forwarded.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static COUNTING: CountingAllocator = CountingAllocator;
-
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
-}
-
+// nothing handed to another in between, so what the others allocate never reaches it
+// (`crate::test_alloc`).
 /// A subscriber's shared part on the scripted engine with its startup get counted in flight,
 /// recording what it delivers into `delivered`.
 fn shared_on(
