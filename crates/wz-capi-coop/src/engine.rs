@@ -2655,15 +2655,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             })
     }
 
-    /// The faces whose links are up, which is what a get is asked of.
+    /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:
+    /// how a get walks the faces it asks one at a time, taking the session's lock for each and
+    /// keeping no list of them. A face that comes up during the walk with a greater id is asked
+    /// too, and one that goes is not.
     #[cfg(feature = "query")]
-    fn up_faces(&self) -> Vec<FaceId> {
+    fn next_up_face(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
         self.links
             .faces()
             .iter()
             .filter(|face| matches!(face.link, Link::Up(_)))
             .map(|face| face.id)
-            .collect()
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
     }
 
     /// The actions of face `id` while its link is up.
@@ -5840,7 +5850,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return;
         };
         let core = &guard.0;
-        for face in core.up_faces() {
+        let mut asked = None;
+        while let Some(face) = core.next_up_face(true, asked) {
+            asked = Some(face);
             if let Some(actions) = core.up_actions(face) {
                 actions
                     .next_outbound_interest_id
@@ -7017,29 +7029,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         } else {
             None
         };
-        let (faces, expose) = {
+        let expose = {
             let guard = self.live().ok_or(Declined::Closed)?;
             // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
             // states none, applied to every leg's callback, after its replies are consolidated.
-            let expose = opts.expose_timestamp_by(&guard.0.policy);
-            let faces = if opts.allowed_destination.allows_remote() {
-                guard.0.up_faces()
-            } else {
-                Vec::new()
-            };
-            (faces, expose)
+            opts.expose_timestamp_by(&guard.0.policy)
         };
+        let remote = opts.allowed_destination.allows_remote();
         let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
-        for face in faces {
-            let leg_id = self.next_local_id();
+        // The faces whose links are up, each asked once in the order of their ids: the walk keeps
+        // the last face it asked and takes the session's lock for each, holding no list of them.
+        let mut asked = None;
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_up_face(remote, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(actions) = core.up_actions(face).cloned() else {
                 continue;
             };
@@ -7287,7 +7301,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<usize, Declined> {
         // One leg for each face whose link is up; a session with no link up reaches nobody, and
         // the snapshot is over at once. A closed session asks nothing.
-        let faces = self.live().ok_or(Declined::Closed)?.0.up_faces();
+        if self.live().is_none() {
+            return Err(Declined::Closed);
+        }
         // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
         // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
         // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
@@ -7296,12 +7312,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             set => set,
         };
         let mut issued = 0;
-        for face in faces {
-            let leg_id = self.next_local_id();
+        // The faces whose links are up, each asked once, as a query's are.
+        let mut asked = None;
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_up_face(true, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(actions) = core.up_actions(face).cloned() else {
                 continue;
             };
