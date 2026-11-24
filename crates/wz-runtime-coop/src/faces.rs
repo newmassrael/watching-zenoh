@@ -651,6 +651,69 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     }
 }
 
+/// The face of a session that only dials: its dial role's face, always held and never taken
+/// out. No face is put beside it, so there is no place to walk, none free and none to look up:
+/// every walk over the faces is one face, and the first place is the only one.
+pub struct OneFace<F> {
+    face: F,
+}
+
+impl<F> FacePlaces<F> for OneFace<F> {
+    fn with_dial(dial: F, _places: usize) -> Self {
+        Self { face: dial }
+    }
+
+    fn places(&self) -> usize {
+        1
+    }
+
+    fn get(&self, at: usize) -> Option<&F> {
+        (at == 0).then_some(&self.face)
+    }
+
+    fn get_mut(&mut self, at: usize) -> Option<&mut F> {
+        (at == 0).then_some(&mut self.face)
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a F>
+    where
+        F: 'a,
+    {
+        core::iter::once(&self.face)
+    }
+
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
+    where
+        F: 'a,
+    {
+        core::iter::once(&mut self.face)
+    }
+
+    fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
+    where
+        F: 'a,
+    {
+        core::iter::once((0, &self.face))
+    }
+
+    fn placed_mut<'a>(&'a mut self) -> impl Iterator<Item = (usize, &'a mut F)>
+    where
+        F: 'a,
+    {
+        core::iter::once((0, &mut self.face))
+    }
+
+    fn put(&mut self, _at: usize, face: F) -> Result<(), F> {
+        Err(face)
+    }
+
+    fn take(&mut self, _at: usize) -> Option<F> {
+        None
+    }
+
+    fn keep_dial_only(&mut self) {}
+}
+
 /// A session's faces, dials and ports over the network `L`, each face kept as the session's
 /// record `F` at a place of its own in the table `P`. The first place is the dial role's face's,
 /// which is never taken out.
@@ -1967,5 +2030,62 @@ mod tests {
             dial(&faces).link,
             Link::Waiting { at_us: u64::MAX }
         ));
+    }
+
+    /// A table of many faces keeps the dial role's at the first place for good, puts a face at a
+    /// free place only, and walks the held places alone, each with its place.
+    ///
+    /// # Control
+    ///
+    /// A `put` that took the dial role's place, or a `take` that gave it up, reds the first
+    /// assertions; a walk that read the free places reds the `placed` list.
+    #[test]
+    fn a_table_of_many_faces_keeps_each_face_at_its_place() {
+        let mut table = ManyFaces::with_dial(10_u32, 3);
+        assert_eq!(table.places(), 3);
+        assert_eq!(
+            table.put(0, 11),
+            Err(11),
+            "the dial role's place is never put"
+        );
+        assert_eq!(table.take(0), None, "the dial role's face is never taken");
+        assert_eq!(table.put(2, 12), Ok(()));
+        assert_eq!(table.put(2, 13), Err(13), "a held place is not put again");
+        assert_eq!(table.put(3, 14), Err(14), "past the table");
+        assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &10), (2, &12)]);
+        assert_eq!(table.get(1), None, "a free place holds no face");
+        assert_eq!(table.take(2), Some(12));
+        assert_eq!(table.put(1, 15), Ok(()));
+        table.keep_dial_only();
+        assert_eq!(table.iter().collect::<Vec<_>>(), [&10]);
+        assert_eq!(table.places(), 3, "the places stay, free");
+    }
+
+    /// The face of a session that only dials is its dial role's alone, at the one place, whatever
+    /// count of places the open names: nothing is put beside it, it is never taken, and every walk
+    /// reads it once.
+    ///
+    /// # Control
+    ///
+    /// A `get` that answered past the first place, or a `put` that kept its face, reds the
+    /// assertions on place 1.
+    #[test]
+    fn a_table_of_one_face_holds_its_dial_role_alone() {
+        let mut table = OneFace::with_dial(10_u32, 4);
+        assert_eq!(table.places(), 1, "one place, whatever the open counts");
+        assert_eq!(table.get(0), Some(&10));
+        assert_eq!(table.get(1), None, "no place past the first");
+        assert_eq!(table.put(1, 11), Err(11), "no face is put beside it");
+        assert_eq!(table.take(0), None, "the dial role's face is never taken");
+        if let Some(face) = table.get_mut(0) {
+            *face = 12;
+        }
+        table.keep_dial_only();
+        assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &12)]);
+        assert_eq!(table.iter_mut().count(), 1);
+        assert_eq!(
+            table.placed_mut().map(|(at, _)| at).collect::<Vec<_>>(),
+            [0]
+        );
     }
 }
