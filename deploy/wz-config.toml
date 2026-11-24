@@ -2167,7 +2167,7 @@ kconfig = "WZ_LIMIT_KEY_ARENA_BYTES"
 kind = "parameter"
 range = [1, 4294967291]
 on_heap = "quota"
-default = 97152
+default = 95040
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2187,11 +2187,11 @@ be at least 1.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds, with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, every row of the engine's record at the build's defaults (224), of the application's tables (48), of one face's pending gets (16) and of what one face's peer declares and asks (80: its aliases, its subscribers, queryables and tokens, its interests), 368 rows and 97,152 bytes, so a build that states nothing refuses no key it took before."
+reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds, with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, every row of the engine's record at the build's defaults (224), of the application's tables (40), of one face's pending gets (16) and of what one face's peer declares and asks (80: its aliases, its subscribers, queryables and tokens, its interests), 360 rows and 95,040 bytes, so a build that states nothing refuses no key it took before. The session's own tokens are rows of the engine's record alone: the cooperative engine answers a peer's liveliness Interest from them and keeps no second table of them with keys of its own (crates/wz-capi-coop/src/engine.rs, lend_session)."
 
 [limit.pico_preset]
-value = 4096
-reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds, with a key of up to 52 bytes, about twice that, in a block of 60, the 34 rows of the engine's record, the 10 of the application's tables and the 2 of one face's pending gets at the preset's other values, 2,760 bytes, and 22 keys of what the peers declare in the rest."
+value = 3960
+reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds, with a key of up to 52 bytes, about twice that, in a block of 60, the 34 rows of the engine's record, the 8 of the application's tables and the 2 of one face's pending gets at the preset's other values, 2,640 bytes, and 22 keys of what the peers declare in the rest, 1,320 bytes."
 
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"
