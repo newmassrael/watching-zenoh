@@ -1352,8 +1352,6 @@ pub mod wireexpr_build;
 /// not exist. Widening costs nothing: the items are `pub`, so no configuration
 /// gains a dead-code finding.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-117 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod ext_nodeid;
 
 /// A list a message holds, kept within its bound as a type: how this crate reads, makes and edits
