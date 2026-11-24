@@ -2662,7 +2662,10 @@ impl RuntimeTables {
     /// cells and holds a bare cell for each group, given the bytes the group's task needs when the
     /// open spawns it, and sealed once the open is over (`open_links`). A build that joins none
     /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
-    /// that names a group is refused by name there, so the groups' cells are none.
+    /// that names a group is refused by name there, so the groups' cells are none. A build that
+    /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
+    /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
+    /// walk of a table of many cells.
     pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
         #[cfg(feature = "group")]
         {
@@ -2670,13 +2673,18 @@ impl RuntimeTables {
         }
         #[cfg(not(feature = "group"))]
         {
-            CoopRuntime::reserved(
-                clock,
-                RuntimeRows {
-                    tasks: self.rows.tasks.saturating_add(self.groups),
-                    ..self.rows
-                },
-            )
+            let rows = RuntimeRows {
+                tasks: self.rows.tasks.saturating_add(self.groups),
+                ..self.rows
+            };
+            #[cfg(feature = "listen")]
+            {
+                CoopRuntime::reserved(clock, rows)
+            }
+            #[cfg(not(feature = "listen"))]
+            {
+                CoopRuntime::reserved_for_one(clock, rows)
+            }
         }
     }
 }

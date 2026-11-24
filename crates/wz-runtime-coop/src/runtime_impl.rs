@@ -226,6 +226,22 @@ impl<C: ClockSource> CoopRuntime<C> {
         )
     }
 
+    /// [`Self::reserved`] for a runtime that hosts one task at a time: an engine whose session holds
+    /// one link, its dial role's, and runs no task beside that link's. It holds one cell of
+    /// `rows.task_bytes` (none for `rows.tasks` of 0, and one for a count past it), and its
+    /// passes, spawns and sweeps look at that cell alone: a spawn while the cell is taken is
+    /// refused, counted, as one past a reserved table's rows is. As only this names the walks of
+    /// one cell and only the other makings name the walks of many, a build whose runtimes are all
+    /// made here links no walk of many cells.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn reserved_for_one(clock: C, rows: RuntimeRows) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::reserved_one(rows.tasks, rows.task_bytes),
+            TimerQueue::reserved(rows.timers),
+        )
+    }
+
     /// [`Self::reserved`] for an engine whose open spawns tasks it cannot size before it opens (a
     /// group's session): beside the `rows.tasks` cells it holds `added` cells with no bytes yet,
     /// and until [`Self::seal`] a task that no free cell fits takes one of those and bytes of its

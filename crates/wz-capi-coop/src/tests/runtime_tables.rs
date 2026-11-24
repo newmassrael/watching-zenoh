@@ -77,7 +77,8 @@ fn a_listener_reserves_a_cell_for_each_face_it_admits() {
 /// A session that listens with the peers zenoh-pico takes (its ten, `Z_LISTEN_MAX_CONNECTION_NB`)
 /// runs a task for each: ten cells, and the eighth to the tenth session are spawned as the first
 /// is; one that also dials has a cell for its dial beside them. Only a link past the faces it
-/// admits finds no cell.
+/// admits finds no cell. A build that takes faces, whose runtime is one of many cells.
+#[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
     let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
@@ -115,6 +116,43 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         "a link past the faces finds no cell"
     );
     drop(sessions);
+}
+
+/// A build that takes no face beside its dial role's runs that one link's task in the one cell of
+/// its runtime, whatever count of faces the config states: a second task is refused for want of a
+/// cell, counted, and the cell takes the next task once the first is over and read.
+///
+/// # Control
+///
+/// A runtime made of the tables' rows as a table of many reds the refusal of the second task.
+#[cfg(not(any(feature = "listen", feature = "group")))]
+#[test]
+fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        max_faces: 3,
+        ..client_config()
+    });
+    let runtime = tables.runtime(PosixClock);
+    let local = CoopLocalSet::new(&runtime);
+    let first = local
+        .try_spawn_local(async { 1u8 })
+        .unwrap_or_else(|_| panic!("the dial role's link has the cell"));
+    assert!(
+        matches!(
+            local
+                .try_spawn_local(async { 2u8 })
+                .map(|_| ())
+                .map_err(|refused| refused.why),
+            Err(SpawnRefusal::NoTaskCell)
+        ),
+        "no second cell"
+    );
+    assert_eq!(runtime.task_refusals().no_task_cell, 1);
+    assert_eq!(local.block_on_local(first).expect("ran"), 1);
+    let next = local
+        .try_spawn_local(async { 3u8 })
+        .unwrap_or_else(|_| panic!("the cell is free once its task is read"));
+    assert_eq!(local.block_on_local(next).expect("ran"), 3);
 }
 
 /// The cells are held to the build's `MAX_TASKS` whatever the config admits, a count past the
