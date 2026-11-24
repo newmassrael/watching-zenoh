@@ -613,7 +613,7 @@ impl OpenKeyIds {
     }
 }
 
-/// What a session's open decided before its state is built ([`CoopEngine::core_of`]): its
+/// What a session's open decided before its state is built ([`CoopEngine::engine_over`]): its
 /// policies, the zid it announces and, with `shared-key-ids`, the key ids it holds and the
 /// key-wire form of each link. Small values, apart from the config and the stack's values the
 /// stage is handed as they are.
@@ -626,7 +626,7 @@ struct OpenDecided {
     key_forms: LinkKeyForms,
 }
 
-/// What the open lent the engine apart from the session's state ([`CoopEngine::core_of`]): the
+/// What the open lent the engine apart from the session's state ([`CoopEngine::engine_over`]): the
 /// place of the ABI's handle, the places of the publishes kept for the session's other faces,
 /// which a publish reaches with the session held by another, and the ring of the advanced
 /// publishers' caches, which the engine locks apart from the state.
@@ -3811,16 +3811,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "shared-key-ids")]
             key_forms,
         };
-        let (core, apart) = Self::core_of(links, clock, entropy, config, decided, &plan, lent);
-        Ok(Self::engine_of(core, apart))
+        Ok(Self::engine_over(
+            links, clock, entropy, config, decided, &plan, lent,
+        ))
     }
 
-    /// The session's state over `links`, on `clock` and `entropy`, out of `config`, what its open
-    /// decided (`decided`) and lent (`lent`, as `plan` laid it out): the links lent their buffers
-    /// and cells, the task and timer tables reserved, the dial role's face and every table in
-    /// place. Out of line, so the open's measure shows it apart.
+    /// The engine over the session's state on `links`, `clock` and `entropy`, out of `config`,
+    /// what its open decided (`decided`) and lent (`lent`, as `plan` laid it out): the links lent
+    /// their buffers and cells, the task and timer tables reserved, the dial role's face and every
+    /// table in place. The state is made in this frame and moved once, into the engine's
+    /// allocation ([`Self::engine_of`]): handed back with what was lent apart, it would be moved
+    /// again in the open's frame to be parted from it. Out of line, so the open's measure shows it
+    /// apart.
     #[inline(never)]
-    fn core_of(
+    fn engine_over(
         mut links: L,
         clock: C,
         entropy: SessionEntropy,
@@ -3828,7 +3832,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         decided: OpenDecided,
         plan: &ArenaPlan,
         lent: SessionLent,
-    ) -> (Core<L, C>, LentApart) {
+    ) -> Arc<Self> {
         let OpenDecided {
             policy,
             zid: wire,
@@ -3961,7 +3965,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
         };
-        (core, apart)
+        Self::engine_of(core, apart)
     }
 
     /// The engine over `core`, held where its own handle (`this`) reaches it, with what the open
