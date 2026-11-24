@@ -1382,6 +1382,68 @@ impl fmt::Display for LendRefused {
 
 impl core::error::Error for LendRefused {}
 
+/// Lends the tables of a set from an [`Arena`] in the order they are asked, keeping the first
+/// refusal: every table asked after it is lent no rows, as a table made without an arena is, and
+/// [`Self::finish`] hands the refusal back. The set is built whole either way and given up whole,
+/// once, so its maker has no path of its own for each table that gives up the ones before it.
+pub struct TableLender<'a> {
+    arena: &'a mut Arena,
+    refused: Option<LendRefused>,
+}
+
+impl<'a> TableLender<'a> {
+    /// A lender of the tables of one set from `arena`.
+    pub fn new(arena: &'a mut Arena) -> Self {
+        Self {
+            arena,
+            refused: None,
+        }
+    }
+
+    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// (`Arena::lend_rows`). Once a table is refused, this one among them, a span of no rows
+    /// where the arena has got to, which takes nothing and starts on [`ARENA_ALIGN`] as every span
+    /// does: the table made over it holds no value, as a full one, so its maker needs no path of
+    /// its own for a refusal.
+    pub(crate) fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> (NonNull<u8>, u32) {
+        if self.refused.is_none() {
+            match self.arena.lend_rows(rows, ceiling, bytes) {
+                Ok(span) => return span,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        (self.arena.next_span(), 0)
+    }
+
+    /// The table `lend` lends from the arena; the table of no rows when it is refused or a table
+    /// before it was.
+    pub fn lend_with<T: Default>(
+        &mut self,
+        lend: impl FnOnce(&mut Arena) -> Result<T, LendRefused>,
+    ) -> T {
+        if self.refused.is_none() {
+            match lend(&mut *self.arena) {
+                Ok(table) => return table,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        T::default()
+    }
+
+    /// The first refusal, if a table was refused.
+    pub fn finish(self) -> Result<(), LendRefused> {
+        match self.refused {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Arena {
     /// An arena of the `bytes` bytes at `base`, none of them lent.
     ///
@@ -1455,6 +1517,14 @@ impl Arena {
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
         Ok(unsafe { BoundedVec::lent_over(at.cast::<T>(), room) })
+    }
+
+    /// Where the next span starts: a span of no bytes, aligned to [`ARENA_ALIGN`] as every span
+    /// is, which no row lies in.
+    fn next_span(&self) -> NonNull<u8> {
+        // SAFETY: `lent` never passes `bytes`, so the address is inside the arena or one past its
+        // end, a multiple of `ARENA_ALIGN` from a base aligned to it.
+        unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) }
     }
 
     /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
