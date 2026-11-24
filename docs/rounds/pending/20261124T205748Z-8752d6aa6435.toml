@@ -1,0 +1,28 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport", "watching-zenoh/local-ci-gates"]
+decision = '''
+An eleventh integration of the pico C ABI release toward docs/c-abi-architecture.md, with two hosted reds paid and the Windows release DLL's ceiling filled.
+
+Windows release DLL: with the reference built on the VS 2026 runner, the package ceiling step read the release DLL (host-peer-ext, every extension door) at 4.797 times zenoh-pico on x64 and 5.6461 on x86. Its two rows are filled from that hosted reading as ratchets under debt-pico-host-size-ceiling. A read of the hosted PDB by feature found the bulk in the doors wz adds beyond pico: the run-time .proto toolchain and the message catalog (about 312 KB), e2e, advanced and the replay cache. The shipped nostd package is now uploaded with its PDB before its size readings, so the shipped DLL itself can be read the same way. A key-id dictionary is sorted in one body rather than one per caller's iterator, and an e2e or segment field is written with one copy rather than a vectorised shift loop.
+
+Windows C ABI: the 4 MB chain test put its message with the default DROP congestion control, which drops a whole chain once its fragments have waited past the drop deadline, as upstream's pipeline does (`io/zenoh-transport/src/common/pipeline.rs` @ `fragment.ext_drop = Some(fragment::ext::Drop::new());`). On the Windows loopback that raced the writer. The test puts it with BLOCK, as its contract is the receiver's reassembly. On pc3-win the test failed 2 of 10 runs before and passed 10 of 10 after.
+
+wz-node-time: a clock is built for no id longer than a timestamp can carry (sixteen bytes, as upstream's uhlc ID), so a node with such an id no longer claims to stamp while every stamp came back empty. Its tests with every feature did not compile on main before the last round; they pass now.
+
+Size: the build's process pools are laid where the lock holds them rather than built on the stack and copied.
+
+The size ledger reads 1.5581 times zenoh-pico in total (from 1.5600): sessions 2.8788, doors 2.0919, transport 2.7702, driver 1.4630.
+'''
+changes = '''
+deploy/pico_host_ceiling.json: pico-release-windows-x64 and -x86 rows filled from the hosted reading.
+.github/actions/pico-windows-package/action.yml and .github/workflows/platform.yml (the nostd package uploaded before its size readings); docs/release-proof-pico-windows.md.
+crates/wz-capi-c/tests/it/files/fragmentation_roundtrip.rs (the 4 MB chain put with BLOCK).
+crates/wz-node-time: node_clock.rs and its tests (no clock for an id past sixteen bytes).
+crates/wz-session-core: shared_key_ids.rs (from_given); crates/wz-app-frame: e2e_frame.rs and segment_profile.rs (field writes); crates/wz-capi-pico: process_pool.rs (Reserved::built, Pools::lay).
+deploy/size_ledger.json rows tightened.
+'''
+verification = '''
+Run through bx from the integration worktree on a1a97d29f: the integration verify sweep passed every lane (22: clippy of each changed crate with -D warnings, the changed crates' tests, the coop, pico and lwIP feature combinations, Layer C1nh); beside it clippy --all-targets -D warnings of wz-capi-pico with engine-tokio,peer,query,queryable, engine-coop,peer,advanced and engine-coop,peer,object-pool, process_pool tests, wz-node-time tests and clippy with every feature, the C1ah node_clock tests and the shared_key_ids tests passed. On dd22b8309: wz-app-frame tests and clippy, wz-capture segment tests, wz-capi-c tests built and its clippy, Layer 0 and release_proof_ledger_gate.py --check passed. On pc3-win the fragmentation test failed 2 of 10 runs on e21c983ce and passed 10 of 10 with the BLOCK put. The size ledger --measure on a1a97d29f: sessions 91,252 / doors 43,958 / transport 40,839 / driver 27,451 / keyexpr 11,892 / codec 32,823 / language 17,446 bytes against zenoh-pico, total 1.5581. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate, upstream_citation_anchor_gate, prose_named_identifier_gate, logic_census_coverage_gate, totality_debt_gate, wz_config.py --check.
+'''
+carry = '''
+Open: the Windows release DLL at 4.797 (x64) and 5.6461 (x86) times zenoh-pico, its bulk in the extension doors; lanes are folding their per-caller copies and moving the open-time schema readers to a crate of their own. Whether a .proto may be compiled to a descriptor at build time, rather than read at run time as the door's contract says, is the owner's to decide. The pico release case reads sessions 2.88, transport 2.77, doors 2.09, driver 1.46. The ABI performance matrix is being run again after the keep-alive repair. The SCE items wait behind the runtime size branch.
+'''
