@@ -3810,16 +3810,16 @@ mod group_declarations_written_from_parts {
 
     /// Every kind this build has a declaration plane of.
     fn kinds() -> Vec<GroupDeclaration> {
-        let mut kinds = Vec::new();
-        #[cfg(feature = "declare-subscriber")]
-        kinds.push(GroupDeclaration::Subscriber);
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: true });
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: false });
-        #[cfg(feature = "liveliness-token")]
-        kinds.push(GroupDeclaration::Token);
-        kinds
+        Vec::from([
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber,
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: true },
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: false },
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token,
+        ])
     }
 
     /// The keys a group names: a literal, an alias with a suffix, an alias alone, and a multi-byte
