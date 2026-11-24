@@ -62,9 +62,9 @@ use crate::matching::{
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
-use crate::write_filter::{PicoSession, WriteFilter};
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+use crate::session::{session_handle, z_loaned_session_t, Engine};
+use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 
 // --- options ---------------------------------------------------------------
 
@@ -393,7 +393,7 @@ pub unsafe extern "C" fn z_declare_querier(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        let engine = engine_of(handle);
+        let session = PicoSession::of(handle);
         // Read where the caller's key lies: the declaration below keeps its own.
         let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
             Ok(k) => k,
@@ -403,53 +403,39 @@ pub unsafe extern "C" fn z_declare_querier(
         // defaults, so a null `options` is a valid default querier — which is
         // exactly what `z_get_lat.c` passes.
         let shape = GetShape::of_querier(options);
-        // R2959 — pico declares the querier's whole key
-        // (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
-        // and its gets are issued on that declaration.
         // The querier's place is taken from its session before anything is declared, so a
         // session with no place left refuses the querier and nothing is declared.
-        let Some(slot) =
-            crate::object_slot::Slot::take_entity(&engine, crate::object_slot::Kind::Querier)
-        else {
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &session.engine,
+            crate::object_slot::Kind::Querier,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let key = match DeclaredKeyexpr::declare(&engine, ke, declared_of(keyexpr)) {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        // Its entity id, taken before the filter's Interest takes the next, as pico's
-        // `_z_declare_querier` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made. A
-        // session that has handed out every id refuses the querier with the code a refused
-        // declaration gets here.
-        let Some(eid) = engine.next_entity_id() else {
-            return Z_ERR_GENERIC;
-        };
-        #[cfg(not(feature = "unstable-api"))]
-        let _ = eid;
-        // R2962 — and its write filter, counting QUERYABLES; a target of
-        // `ALL_COMPLETE` counts only the ones declared complete
-        // (`vendor/zenoh-pico/src/api/api.c` @
+        // pico declares the querier's whole key
+        // (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
+        // and its gets are issued on that declaration, then takes its id and makes its write
+        // filter, counting QUERYABLES; a target of `ALL_COMPLETE` counts only the ones declared
+        // complete (`vendor/zenoh-pico/src/api/api.c` @
         // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
-        let filter = match WriteFilter::declare(
-            &PicoSession::of(handle),
+        let filtered = match FilteredKey::declare(
+            &session,
             FilterPlane::Queryables {
                 complete_required: shape.target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
-            &key,
-            &key.wire(Arc::as_ref(&engine)),
+            ke,
+            declared_of(keyexpr),
             shape.qos.destination.allows_local(),
         ) {
-            Ok(filter) => filter,
+            Ok(filtered) => filtered,
             Err(rc) => return rc,
         };
         let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
             #[cfg(feature = "unstable-api")]
-            eid,
-            shared: engine,
-            filter,
-            key,
+            eid: filtered.eid,
+            shared: session.engine,
+            filter: filtered.filter,
+            key: filtered.key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             shape,
             encoding,

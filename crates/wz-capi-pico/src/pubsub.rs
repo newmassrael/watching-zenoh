@@ -54,7 +54,7 @@ use crate::result::{
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
-use crate::write_filter::{PicoSession, WriteFilter};
+use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
@@ -1442,44 +1442,29 @@ impl PlainPublisher {
         existing: Option<&DeclaredKeyexpr>,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
-        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
-        // The publisher's entity id comes off the session's one counter before its filter's
-        // Interest takes the next, whether or not this build reports the id: pico's
-        // `_z_declare_publisher` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before `z_declare_publisher`
-        // creates the filter, and a group the Interest goes to reads the id. A session that
-        // has handed out every id refuses the publisher with the code a refused declaration
-        // gets here.
-        let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
-        #[cfg(not(feature = "unstable-api"))]
-        let _ = eid;
-        // R2962 — the filter is created AFTER the key, because its Interest names
-        // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
-        // `_z_write_filter_create`, in `z_declare_publisher`).
-        // The publisher keeps its key, which holds the declaration: its wire form holds nothing.
-        let wire = key.wire(Arc::as_ref(&session.engine));
-        let filter = WriteFilter::declare(
+        let filtered = FilteredKey::declare(
             session,
             FilterPlane::Subscribers,
-            &key,
-            &wire,
+            keyexpr,
+            existing,
             declared.counts_local(),
         )?;
         // How a put that brings nothing of its own is sent plain, worked out once from the QoS it
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
-        filter.keep_plain(
-            matches!(wire.names_in(key.literal()), (id, None) if id != 0)
+        let wire = &filtered.wire;
+        filtered.filter.keep_plain(
+            matches!(wire.names_in(filtered.key.literal()), (id, None) if id != 0)
                 .then(|| declared.apply(put_options()).plain_put_params())
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
         );
         Ok(Self {
             #[cfg(feature = "unstable-api")]
-            eid,
+            eid: filtered.eid,
             shared: session.engine.clone(),
-            filter,
-            key,
-            wire,
+            filter: filtered.filter,
+            key: filtered.key,
+            wire: filtered.wire,
             declared,
         })
     }
@@ -3069,20 +3054,16 @@ pub unsafe extern "C" fn z_declare_publisher(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
+        let session = PicoSession::of(state);
         // The publisher's place is taken from its session before it is declared, so a session
         // with no place left refuses the declaration and nothing is declared.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &engine_of(state),
+            &session.engine,
             crate::object_slot::Kind::Publisher,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let core = match PlainPublisher::declare(
-            &PicoSession::of(state),
-            ke,
-            declared_of(keyexpr),
-            declared,
-        ) {
+        let core = match PlainPublisher::declare(&session, ke, declared_of(keyexpr), declared) {
             Ok(core) => core,
             Err(rc) => return rc,
         };
