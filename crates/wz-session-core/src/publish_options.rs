@@ -179,6 +179,44 @@ impl<'a> PublishOptions<'a> {
     /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
     /// encoding they were lent is copied into what is kept.
     pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
+        let (mut kept, encoding, attachment) = self.apart();
+        kept.encoding = encoding.map(PublishEncoding::into_owned);
+        (kept, attachment)
+    }
+
+    /// These options without the parts they borrowed, and those parts: the encoding they were lent
+    /// and the attachment. What a holder keeps that keeps the options past the call and holds the
+    /// lent parts where they lie for as long (a C ABI's encoding object and the caller's bytes,
+    /// copied into storage of its own): nothing is copied here. An encoding the options own stays
+    /// in what is kept, since it is theirs and no holder's.
+    pub fn into_kept_parts(
+        self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<EncodingRef<'a>>,
+        Option<&'a [u8]>,
+    ) {
+        let (mut kept, encoding, attachment) = self.apart();
+        let lent = match encoding {
+            Some(PublishEncoding::Lent(lent)) => Some(lent),
+            Some(PublishEncoding::Owned(owned)) => {
+                kept.encoding = Some(PublishEncoding::Owned(owned));
+                None
+            }
+            None => None,
+        };
+        (kept, lent, attachment)
+    }
+
+    /// These options with neither an encoding nor an attachment, and the two apart: the one split
+    /// both ways of keeping options past their call make.
+    fn apart(
+        self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<PublishEncoding<'a>>,
+        Option<&'a [u8]>,
+    ) {
         let Self {
             allowed_destination,
             links,
@@ -206,7 +244,7 @@ impl<'a> PublishOptions<'a> {
                 reliability,
                 kind,
                 timestamp,
-                encoding: encoding.map(PublishEncoding::into_owned),
+                encoding: None,
                 source_info,
                 attachment: None,
                 qos,
@@ -216,6 +254,7 @@ impl<'a> PublishOptions<'a> {
                 wire_ts_stack,
                 stamp_timestamp,
             },
+            encoding,
             attachment,
         )
     }
@@ -900,6 +939,52 @@ mod plain_put_tests {
         );
         let (kept, _) = opts.into_owned_parts();
         assert_eq!(kept.encoding, Some(PublishEncoding::Owned(held.to_hint())));
+    }
+
+    /// Options kept past their call by a holder that keeps what they borrowed where it lies hand
+    /// the lent encoding and the attachment back as they were lent, the holder's own bytes, and
+    /// keep an encoding of their own. The CONTROL is the copy `into_owned_parts` makes of the same
+    /// lent encoding.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn options_kept_with_their_lent_parts_copy_nothing_and_keep_their_own_encoding() {
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let attached = *b"attached";
+        let lent = PublishOptions::put()
+            .with_encoding_ref(held)
+            .with_attachment(&attached);
+        let (kept, encoding, attachment) = lent.clone().into_kept_parts();
+        assert_eq!(
+            kept.encoding, None,
+            "the lent encoding is not in what is kept"
+        );
+        assert_eq!(kept.attachment, None);
+        assert_eq!(encoding, Some(held));
+        assert_eq!(
+            encoding.and_then(|e| e.schema).map(<[u8]>::as_ptr),
+            Some(schema.as_ptr()),
+            "the holder's own bytes, not a copy"
+        );
+        assert_eq!(attachment.map(<[u8]>::as_ptr), Some(attached.as_ptr()));
+        let (copied, _) = lent.into_owned_parts();
+        assert_eq!(
+            copied.encoding,
+            Some(PublishEncoding::Owned(held.to_hint())),
+            "CONTROL: the owned split copies the lent encoding in"
+        );
+        let own = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's']),
+        };
+        let (kept, encoding, _) = PublishOptions::put()
+            .with_encoding(own.clone())
+            .into_kept_parts();
+        assert_eq!(encoding, None, "an encoding the options own is no holder's");
+        assert_eq!(kept.encoding, Some(PublishEncoding::Owned(own)));
     }
 
     /// The constant the engine's tests read the build from is the answer of the function it
