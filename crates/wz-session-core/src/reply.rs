@@ -4389,6 +4389,115 @@ mod tests {
         );
     }
 
+    /// What a requester of this session keeps of `reply`, handed through the registry as an
+    /// engine hands a reply of the session's own queryable (`deliver_local_reply`): the retained
+    /// form a requester makes of the view it is handed.
+    #[cfg(feature = "query-queryable")]
+    fn kept_through_the_registry(reply: &InboundReply) -> InboundReply {
+        let mut reg = ReplyRegistry::new();
+        let kept: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let keep = kept.clone();
+        reg.register(
+            reply.rid,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |view| keep.lock().unwrap().push(InboundReply::from_view(view)),
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        reg.deliver_local_reply(reply);
+        let mut kept = kept.lock().unwrap();
+        assert_eq!(kept.len(), 1, "the reply reaches its get once");
+        kept.remove(0)
+    }
+
+    /// What a requester of this session keeps of the reply `parts` describes, in the form an
+    /// engine hands a reply of the session's own queryable to the registry.
+    #[cfg(feature = "query-queryable")]
+    fn kept_local(parts: &crate::reply_stage::ReplyParts<'_>) -> InboundReply {
+        kept_through_the_registry(&InboundReply::from(crate::query::QueryReply::from_parts(
+            parts,
+        )))
+    }
+
+    /// A Put reply of this session's own queryable, described by its parts.
+    #[cfg(feature = "query-queryable")]
+    fn local_put(body: crate::reply_stage::PartsBody<'_>) -> crate::reply_stage::ReplyParts<'_> {
+        crate::reply_stage::ReplyParts {
+            rid: 11,
+            keyexpr: "sensors/a",
+            responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: crate::reply_stage::PartsKind::Reply {
+                body,
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// The address of a kept Put reply's payload.
+    #[cfg(feature = "query-queryable")]
+    fn kept_payload_address(kept: &InboundReply) -> usize {
+        match &kept.body {
+            InboundReplyBody::Put { payload, .. } => payload.as_slice().as_ptr() as usize,
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// A requester of this session keeps a plain payload of its own queryable's reply as bytes of
+    /// its own: what it keeps outlives the responder's buffer. Turned red by a delivery that hands
+    /// the requester the responder's bytes to keep as they lie.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn a_local_reply_is_kept_as_a_copy_of_a_plain_payload() {
+        let responders = b"value".to_vec();
+        let kept = kept_local(&local_put(crate::reply_stage::PartsBody::Put(&responders)));
+        assert_ne!(kept_payload_address(&kept), responders.as_ptr() as usize);
+        drop(responders);
+        assert_eq!(kept.rid, 11);
+        assert_eq!(kept.keyexpr_literal, "sensors/a");
+        match kept.body {
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"value"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// A requester of this session keeps a buffer of shared memory its own queryable answered with
+    /// as the page the buffer lends a receiver, a second reference and not a copy, and no reference
+    /// is taken for a remote receiver. The plain reply beside it is the control that the address
+    /// comparison can fail. Turned red by a delivery that copies the buffer's bytes for the
+    /// requester to keep.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "transport-shm",
+        feature = "rx-shared-bytes"
+    ))]
+    #[test]
+    fn a_local_reply_is_kept_sharing_its_buffer_of_shared_memory() {
+        use crate::extshm::send_test_support::FakeSendBuffer;
+        use crate::extshm::ShmSendHandle;
+        let (buffer, reservations) = FakeSendBuffer::new(b"hello shm!!");
+        let storage_address = buffer.storage.as_ptr() as usize;
+        let handle = ShmSendHandle::new(buffer);
+        let kept = kept_local(&local_put(crate::reply_stage::PartsBody::Shared(&handle)));
+        assert_eq!(kept_payload_address(&kept), storage_address);
+        let plain = kept_local(&local_put(crate::reply_stage::PartsBody::Put(
+            b"hello shm!!",
+        )));
+        assert_ne!(
+            kept_payload_address(&plain),
+            storage_address,
+            "control: a plain reply is its own bytes"
+        );
+        assert_eq!(reservations.counts(), (0, 0, 0));
+    }
+
     /// A8b — the loopback receive twin: a `QueryReply` staged with an
     /// attachment + encoding (the A8a emit) projects through
     /// `From<QueryReply>` so a SessionLocal reply surfaces the same metadata
