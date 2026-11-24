@@ -224,6 +224,7 @@ const HEADROOM: usize = 4;
 fn heap_frame(payload: &[u8]) -> Vec<u8> {
     let link = LendingLink::new(false, 0, 0, 0);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", payload, true)
         .expect("push");
@@ -245,6 +246,7 @@ fn params_with_sn_7(batch: Option<u16>) -> wz_session_core::session_init_params:
 fn a_push_over_a_lending_link_is_written_into_its_slot_and_not_copied() {
     let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
         .expect("push");
@@ -262,6 +264,7 @@ fn the_lent_frame_is_byte_for_byte_the_frame_the_heap_path_writes() {
     for payload in [&b"x"[..], &b"payload"[..], &[0xA5u8; 100][..]] {
         let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
         let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+        actions.enter_established();
         actions
             .send_push_literal("home/lent", payload, true)
             .expect("push");
@@ -278,6 +281,7 @@ fn the_lent_frame_is_byte_for_byte_the_frame_the_heap_path_writes() {
 fn a_link_that_lends_nothing_is_handed_the_same_frame_on_the_heap() {
     let link = LendingLink::new(false, 1, SLOT_LEN, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
         .expect("push");
@@ -290,6 +294,7 @@ fn a_link_that_lends_nothing_is_handed_the_same_frame_on_the_heap() {
 fn a_link_with_no_free_slot_gets_the_frame_on_the_heap_and_loses_nothing() {
     let link = LendingLink::new(true, 0, SLOT_LEN, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
         .expect("a dry pool is a fallback, not an error");
@@ -303,6 +308,7 @@ fn a_frame_that_overflows_its_slot_goes_on_the_heap_and_the_slot_comes_back() {
     // not fit what is left after the headroom, and the encode finds that out.
     let link = LendingLink::new(true, 1, 24, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     let payload = [0x3Cu8; 80];
     actions
         .send_push_literal("home/lent", &payload, true)
@@ -321,6 +327,7 @@ fn a_frame_that_overflows_its_slot_goes_on_the_heap_and_the_slot_comes_back() {
 fn the_fallback_keeps_the_sequence_numbers_gapless() {
     let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"one", true)
         .expect("first");
@@ -350,6 +357,7 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
 fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
     let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     let long_key = "k".repeat(usize::from(u16::MAX) + 1);
     let refused = actions.send_plain_put_qos(
         wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
@@ -396,6 +404,7 @@ fn lowlatency_session(
     >,
 > {
     let actions = new_session_actions(link, params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     assert!(
         actions.set_lowlatency_offer(true),
         "lowlatency offer applies"
@@ -483,6 +492,7 @@ fn a_lender_behind_the_swap_seam_still_lends() {
     let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let seam: Sink = Arc::new(SwappableLink::<TokioRuntime>::new(link.clone()));
     let actions = new_session_actions(seam, params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
         .expect("push");
@@ -576,6 +586,7 @@ fn a_swap_to_a_link_that_lends_nothing_takes_the_heap_afterwards() {
     let plain = LendingLink::new(false, 0, 0, 0);
     let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
     let actions = new_session_actions(seam.clone(), params_with_sn_7(None), TokioTime::new());
+    actions.enter_established();
     actions
         .send_push_literal("home/lent", b"one", true)
         .expect("first");

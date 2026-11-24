@@ -1055,10 +1055,10 @@ mod facts_lock {
     }
 
     /// Every fact the closed transport's handshake took is cleared in the reopen's one hold,
-    /// the peer's capabilities with the kept send limits they were computed into.
+    /// and the reopened link takes no data send until it is established again.
     #[cfg(feature = "session-reconnect")]
     #[test]
-    fn a_reopen_clears_every_handshake_fact_and_moves_the_kept_limits_tag() {
+    fn a_reopen_clears_every_handshake_fact_and_closes_the_data_send_gate() {
         let (actions, _link) = bundle();
         actions.fact_awaiting_open_ack(|slot| *slot = true);
         actions.fact_remote_peer_zid(|slot| *slot = Some([0x0B; 4].into()));
@@ -1068,7 +1068,8 @@ mod facts_lock {
             req_id_res: 2,
             batch_size: 1024,
         }));
-        let tag = actions.tx_limits_cache.current_tag();
+        actions.enter_established();
+        assert!(actions.link.transport_available.is_open(), "established");
         actions.reset_for_reopen();
         let (awaiting, zid, whatami, caps) = actions.with_facts(|facts| {
             (
@@ -1082,11 +1083,69 @@ mod facts_lock {
         assert_eq!(zid, None, "the routing zid is the closed transport's");
         assert_eq!(whatami, None, "the role is the closed transport's");
         assert_eq!(caps, None, "the capabilities are the closed transport's");
-        assert_ne!(
-            actions.tx_limits_cache.current_tag(),
-            tag,
-            "limits kept from the cleared capabilities are no longer served"
+        assert!(
+            !actions.link.transport_available.is_open(),
+            "the reopened link waits for its establishment"
         );
+    }
+
+    /// A data send is refused until the link is established; once it is, the send leaves with
+    /// the limits settled from the capabilities the handshake wrote, which a write after
+    /// establishment does not move until the link is established again. Turned red by a gate
+    /// open at construction, or by limits read from the capabilities at each send.
+    #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+    #[test]
+    fn data_leaves_only_an_established_link_with_the_limits_it_was_established_with() {
+        use crate::peer_init_caps::PeerInitCaps;
+        use crate::send_wire_error::SendWireError;
+        let caps = |batch_size| PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size,
+        };
+        let (actions, link) = bundle();
+        assert_eq!(
+            actions.send_push_literal("a/b", b"x", true),
+            Err(SendWireError::TransportUnavailable),
+            "a send before establishment is refused"
+        );
+        assert_eq!(
+            link.written.load(core::sync::atomic::Ordering::SeqCst),
+            0,
+            "and reaches no link"
+        );
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            (0, 0),
+            "no limits are settled yet"
+        );
+
+        actions.set_peer_init_caps(Some(caps(512)));
+        actions.enter_established();
+        let settled = actions.negotiated_tx_limits();
+        assert_eq!(
+            settled,
+            (
+                actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+                actions.negotiated_sn_mask()
+            ),
+            "settled from the capabilities the handshake wrote"
+        );
+        assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
+
+        actions.set_peer_init_caps(Some(caps(256)));
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            settled,
+            "a write after establishment waits for the next establishment"
+        );
+        actions.enter_established();
+        assert_eq!(
+            actions.negotiated_tx_limits().0,
+            actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+            "established again, the limits are the new capabilities'"
+        );
+        assert_ne!(actions.negotiated_tx_limits(), settled);
     }
 
     /// An awaited OpenAck is admitted, ends the wait and takes the peer's lease and bound in one

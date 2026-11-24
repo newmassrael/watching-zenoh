@@ -1681,134 +1681,72 @@ impl FrameTxConduits {
     }
 }
 
-/// What every send reads before it takes its conduit's lock, kept where it can be read
-/// without a lock: the negotiated frame budget and SN ring (`SessionLinkActions::negotiated_tx_limits`).
-/// They change when a handshake sets the peer's capabilities and when a reconnect clears
-/// them, and at no other time, so a send that paid a mutex pair to read them paid it for a
-/// value that was the same as the send before it.
+/// The frame budget and SN ring this link's sends are held to, one word for each reliability
+/// class, settled when the link is established ([`SessionLinkActions::enter_established`]) and
+/// read by every send without a lock. Nothing reads them before: the data-send gate opens after
+/// they are settled. What they are computed from does not move while the link is established
+/// (the peer's capabilities and the lowlatency and compression outcomes are the handshake's),
+/// and a reconnect establishes the link again, which settles them again.
 ///
-/// The value is kept with a TAG: the number of times the peer's capabilities have been
-/// written, plus one, taken in the same hold of the capabilities' mutex as the value was
-/// computed from. A reader trusts the kept value only when its tag is the current number, so
-/// a value that a writer has since replaced is never used, whatever order the two interleave
-/// in: the worst a race costs is one more trip through the mutex. Writers move the number
-/// while they hold the mutex (`peer_caps_changed`).
-///
-/// Packed in one word, bits 0-7 the negotiated sequence-number resolution, 8-23 the batch
-/// budget (at most 65535: both advertisements are `u16`), 24-55 the tag; zero is empty.
-pub struct TxLimitsCache {
-    writes: AtomicU32,
-    // Read and written by the sends alone, as `current_tag` says.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    packed: AtomicU64,
+/// A word holds the ring resolution in bits 0-7 and the budget in bits 8-23 (at most 65535: the
+/// batch advertisements are `u16`).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Debug)]
+pub struct TxLimits {
+    reliable: AtomicU32,
+    best_effort: AtomicU32,
 }
 
-impl TxLimitsCache {
-    pub(crate) fn new() -> Self {
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl TxLimits {
+    const fn new() -> Self {
         Self {
-            writes: AtomicU32::new(0),
-            #[cfg(any(
-                test,
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            ))]
-            packed: AtomicU64::new(0),
+            reliable: AtomicU32::new(0),
+            best_effort: AtomicU32::new(0),
         }
     }
 
-    /// The peer's capabilities were just written (or cleared). Called under their mutex.
-    pub(crate) fn peer_caps_changed(&self) {
-        self.writes.fetch_add(1, Ordering::Release);
+    fn word(&self, class: Reliability) -> &AtomicU32 {
+        match class {
+            Reliability::Reliable => &self.reliable,
+            Reliability::BestEffort => &self.best_effort,
+        }
     }
 
-    /// The number a value computed NOW would be tagged with. Read under the capabilities'
-    /// mutex, together with the capabilities.
-    // Read by `negotiated_tx_limits`, which exists in a build with a sending codec only.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    pub(crate) fn current_tag(&self) -> u32 {
-        self.writes.load(Ordering::Acquire).wrapping_add(1)
+    /// Settle the limits of `class`.
+    fn settle(&self, class: Reliability, budget: usize, ring: u8) {
+        let budget = u32::from(u16::try_from(budget).unwrap_or(u16::MAX));
+        self.word(class)
+            .store((budget << 8) | u32::from(ring), Ordering::Release);
     }
 
-    /// The kept `(batch budget, ring resolution)`, when it is for the current capabilities.
-    // See `current_tag`.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
+    /// The settled `(budget, ring resolution)` of `class`.
     #[inline]
-    pub(crate) fn get(&self) -> Option<(usize, u8)> {
-        let packed = self.packed.load(Ordering::Acquire);
-        if packed == 0 {
-            return None;
-        }
-        let tag = ((packed >> 24) & 0xFFFF_FFFF) as u32;
-        if tag != self.current_tag() {
-            return None;
-        }
-        Some((((packed >> 8) & 0xFFFF) as usize, (packed & 0xFF) as u8))
-    }
-
-    /// Keep `(mtu, ring)` as computed from the capabilities the tag was read with. `mtu` over
-    /// what 16 bits hold is not kept: the reader then asks the mutex every time, as it did.
-    // See `current_tag`.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    pub(crate) fn keep(&self, tag: u32, mtu: usize, ring: u8) {
-        let Ok(mtu) = u16::try_from(mtu) else { return };
-        let packed = (u64::from(tag) << 24) | (u64::from(mtu) << 8) | u64::from(ring);
-        self.packed.store(packed, Ordering::Release);
+    fn get(&self, class: Reliability) -> (usize, u8) {
+        let word = self.word(class).load(Ordering::Acquire);
+        (((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8)
     }
 }
 
@@ -1962,14 +1900,6 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
     #[cfg(feature = "session-extshm")]
     pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
-    /// What the slot above makes of the negotiated send limits, kept so a send reads them
-    /// without its mutex ([`TxLimitsCache`]). Every write of the slot moves it. The limits of
-    /// the reliable frames; the best-effort ones are kept beside them.
-    pub tx_limits_cache: TxLimitsCache,
-    /// [`Self::tx_limits_cache`] for the best-effort frames, whose budget is their own on a
-    /// link that carries them apart ([`BoxedLinkDriver::link_mtu_for`]). Every write of the
-    /// slot moves it too.
-    pub best_effort_tx_limits_cache: TxLimitsCache,
     /// R121e — outbound Frame sequence-number generator. The
     /// session-FSM Established-side path emits one `Frame`
     /// transport-message per outbound application-layer batch
@@ -2890,13 +2820,16 @@ pub struct LinkState<R: SessionRuntime> {
     /// read two of them at once, and a transport replaced for a re-dial clears all three. Reached
     /// through [`Self::stamps()`], [`Self::with_stamps`] and the `fact_*` doors.
     stamps: R::Mutex<LinkStamps>,
-    /// F2 — is the transport currently accepting data sends? `true` at
-    /// construction (the bundle is built over a live link sink; the
-    /// pre-handshake window keeps today's emit semantics), `false` when
+    /// F2 — is the transport currently accepting data sends? `false` at
+    /// construction: data leaves only over an established link, as upstream's
+    /// transport exists only once the Open exchange is over
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `let oack_out = step!(fsm.recv_open_ack((&mut link_unicast, &mut state)).await);`
+    /// precedes `.init_transport_unicast(`), `false` again when
     /// the FSM releases the link (`release_link`, Closing/Closed entry)
     /// or the reconnect supervisor tears the transport down for re-dial
     /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
-    /// (re-)enters (`record_established_at`). The
+    /// (re-)enters ([`SessionLinkActions::enter_established`]). The
     /// `SessionLinkActions::dispatch_network_message_at` chokepoint gates on it
     /// so a data send inside the RECONNECTING window rejects typed
     /// ([`SendWireError::TransportUnavailable`]) instead of silently
@@ -2908,6 +2841,20 @@ pub struct LinkState<R: SessionRuntime> {
     /// A [`crate::send_gate::SendGate`] and not a lock: every data send reads it, and nothing
     /// reads and writes it in one step.
     pub transport_available: crate::send_gate::SendGate,
+    /// The send limits this link was established with.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    tx_limits: TxLimits,
     /// Whether this link's keepalive worker runs: set by the FSM's
     /// `start_keepalive_worker` on `Established` entry and cleared by
     /// `stop_keepalive_worker` on its exit (and by
@@ -4991,7 +4938,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 datagram_resume: R::new_mutex(None::<DatagramResume>),
                 stamps: R::new_mutex(LinkStamps::default()),
-                transport_available: crate::send_gate::SendGate::new(true),
+                transport_available: crate::send_gate::SendGate::new(false),
+                #[cfg(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                ))]
+                tx_limits: TxLimits::new(),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
                 lease_armed: core::sync::atomic::AtomicBool::new(false),
@@ -5158,8 +5118,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // session-extshm — no authenticator until the AP installs one.
                 #[cfg(feature = "session-extshm")]
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
-                tx_limits_cache: TxLimitsCache::new(),
-                best_effort_tx_limits_cache: TxLimitsCache::new(),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "alloc")]
@@ -7561,11 +7519,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// envelope the link and the compression wrap put around the frame, and a frame that
     /// filled the whole batch would reach the peer as a batch past what it negotiated.
     ///
-    /// Answered from the kept value when its inputs have not changed since it was computed, so
-    /// a send pays no mutex for it. A value is kept only once the session is established: the
-    /// envelope depends on the lowlatency and compression outcomes, which the Init exchange
-    /// settles AFTER it writes the peer's capabilities, and are final only then. A reconnect
-    /// clears the capabilities, which moves the tag and drops the kept value.
+    /// Settled when this link was established ([`TxLimits`]): before that no data send is let
+    /// through, and the answer is `(0, 0)`.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -7600,31 +7555,80 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
     ))]
     pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, u64) {
-        let cache = match class {
-            Reliability::Reliable => &self.tx_limits_cache,
-            Reliability::BestEffort => &self.best_effort_tx_limits_cache,
-        };
-        // The common case, a session whose handshake is long done: the kept answer, read
-        // without the capabilities' mutex ([`TxLimitsCache`]).
-        if let Some((mtu, ring)) = cache.get() {
-            return (mtu, crate::sn::mask_from_res(ring));
-        }
-        // The capabilities and the tag they are the capabilities OF, read in one hold: a
-        // writer moves the tag in the hold that writes them.
-        let (peer, tag) = self.fact_inbound_peer_init_caps(|slot| (*slot, cache.current_tag()));
-        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
-        // Read BEFORE the envelope: a session seen established had settled the outcomes the
-        // envelope reads before it became established, so they are final here.
-        let established = self.is_established();
-        let budget = self
-            .batch_mtu_for(peer, class)
-            .saturating_sub(self.batch_envelope_bytes_for(class));
-        // Before the peer's capabilities arrive the own advertisement applies, and before
-        // establishment the envelope can still change: neither answer is kept.
-        if peer.is_some() && established {
-            cache.keep(tag, budget, ring);
-        }
+        let (budget, ring) = self.link.tx_limits.get(class);
         (budget, crate::sn::mask_from_res(ring))
+    }
+
+    /// Settle this link's send limits ([`TxLimits`]) from what the handshake negotiated, once
+    /// the link is established: the envelope reads the lowlatency outcome of an established
+    /// link, and the compression outcome, both final by then.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn settle_tx_limits(&self) {
+        let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
+        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
+        for class in [Reliability::Reliable, Reliability::BestEffort] {
+            let budget = self
+                .batch_mtu_for(peer, class)
+                .saturating_sub(self.batch_envelope_bytes_for(class));
+            self.link.tx_limits.settle(class, budget, ring);
+        }
+    }
+
+    /// Enter the established state on this bundle's link: what the session machine's
+    /// `Established` entry does to the bundle, and the one door a test takes to stand a bundle
+    /// where a session that completed its handshake stands. Stamps the establishment, settles
+    /// the link's send limits ([`TxLimits`]) from what the handshake negotiated, lets go of
+    /// the held handshake answer, opens the data-send gate and shapes the link's outbound
+    /// queue. Entered again, after a reconnect, it does all of it again.
+    pub fn enter_established(&self) {
+        // The shared monotonic clock, the scale the lease comparator reads its stamps on.
+        let now = self.clock.now_monotonic_ms();
+        self.link.fact_established_at(|slot| *slot = Some(now));
+        // After the stamp: the envelope of an established lowlatency link is its own.
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))]
+        self.settle_tx_limits();
+        #[cfg(all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        self.release_handshake_answer();
+        // Data sends are let through only now, with the limits above in place: upstream's
+        // transport exists only once the Open exchange is over.
+        self.link.transport_available.open();
+        // R2924 — the link's outbound queue takes the established session's shape: its
+        // configured sizes, one queue per priority if it negotiated QoS and one queue
+        // otherwise, as zenoh builds a link's pipeline when the link joins an established
+        // transport. R2925 — its batches are the link's negotiated batch MTU; what a lane is
+        // bounded by is counted in the session's CONFIGURED batch size
+        // (`TxQueueShape::queue_unit_bytes` says why).
+        self.link_driver()
+            .shape_tx_queue(self.params.tx_queue.shape(
+                self.negotiated_qos(),
+                self.negotiated_batch_mtu(),
+                self.params.effective_batch_size() as usize,
+            ));
     }
 
     /// The bytes of a batch that are not its frame: the length a streamed link writes in
@@ -7671,21 +7675,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         length.saturating_add(header)
     }
 
-    /// Write the peer's capabilities ([`HandshakeFacts::inbound_peer_init_caps`]), and tell the
-    /// kept send limits ([`TxLimitsCache`]) that what they were computed from is gone. THE way
-    /// to write the slot: a write that bypassed it would leave a send using limits the slot no
-    /// longer says.
+    /// Write the peer's capabilities ([`HandshakeFacts::inbound_peer_init_caps`]). The send
+    /// limits are settled from them when the link is established ([`TxLimits`]), so a write
+    /// after establishment reaches the sends at the next establishment.
     pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
-        self.fact_inbound_peer_init_caps(|slot| self.write_peer_init_caps(slot, caps));
+        self.fact_inbound_peer_init_caps(|slot| Self::write_peer_init_caps(slot, caps));
     }
 
     /// [`Self::set_peer_init_caps`] for a step that holds the facts' lock already, writing
-    /// the capabilities beside other facts of the same handshake message: the kept limits
-    /// are told in the same hold, as the setter tells them.
-    fn write_peer_init_caps(&self, slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
+    /// the capabilities beside other facts of the same handshake message.
+    fn write_peer_init_caps(slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
         *slot = caps;
-        self.tx_limits_cache.peer_caps_changed();
-        self.best_effort_tx_limits_cache.peer_caps_changed();
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -8574,7 +8574,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             f.handshake.inbound_peer_zid = zid;
             f.handshake.remote_peer_zid = zid;
             f.handshake.peer_whatami = whatami;
-            self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
+            Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
         });
     }
 
@@ -11116,7 +11116,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             cookie,
                         );
                     }
-                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             // A peer's InitSyn and OpenSyn are recorded only by a build with the accepting
@@ -11153,7 +11153,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // alongside its zid; see the InitAck arm above for why both
                     // directions capture it (the gossip-policy "F1" prerequisite).
                     f.handshake.peer_whatami = Some(init.whatami);
-                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
@@ -11989,10 +11989,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-qos"))]
         let ext_qos: Option<Priority> = None;
         // F2 — transport-availability gate (pico
-        // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): inside the
-        // RECONNECTING window (link released / reset for re-dial, not yet
-        // re-Established) a data send must reject typed rather than
-        // vanish into a dead writer channel. Single gate — every
+        // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): before the link is first
+        // established, and inside the RECONNECTING window (link released / reset
+        // for re-dial, not yet re-Established), a data send must reject typed
+        // rather than vanish into a dead writer channel. Single gate — every
         // network-message send routes through this chokepoint.
         // R311y205 (transport-multilink) — for an AGGREGATING session the gate is
         // the OR over the link set's `transport_available`: the session accepts
@@ -12047,9 +12047,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // path wraps). This precedes the MTU / SN / batch-lock machinery below,
         // which lowlatency deletes by design (zenoh's lowlatency transport tracks
         // no SN and never fragments — defrag and the half-window gate do not
-        // exist on this path). Data sends only fire post-Established, by when the
-        // capability is finalized (negotiated at the Init exchange), so reading
-        // `is_lowlatency()` here needs no establishment guard.
+        // exist on this path). The gate above lets a data send through only once the
+        // link is established, by when the capability is final (negotiated at the
+        // Init exchange), so reading `is_lowlatency()` here needs no guard of its own.
         #[cfg(feature = "transport-lowlatency")]
         if self.is_lowlatency() {
             // ARCHITECTURE section 9.1 — the bare message straight into a slot the
@@ -18546,7 +18546,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // that clear is `return_to_offer` below: the region joined the
                 // cookie's group, whose one writer puts back the offer, and the offer
                 // holds no peer's region. A second write here would be a second writer.
-                self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
+                Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
                 // R2566 — the authenticated principal is HANDSHAKE-scoped and must
                 // not survive into the re-dial window. The `auth` dispatch itself
                 // persists here (its methods keep their configured credentials), so
@@ -19857,38 +19857,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn record_established_at(&mut self) {
         let a = &self.inner;
         a.note_action(|t| t.record_established_at = t.record_established_at.saturating_add(1));
-        // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
-        // clock (same epoch as last_inbound_at +
-        // drive_session_until_terminal) so the lease comparator's u64
-        // subtract stays on one scale. Read outside the slot closure.
-        let now = a.clock.now_monotonic_ms();
-        // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
-        self.link().fact_established_at(|slot| *slot = Some(now));
-        // The establishment is over, so no step of it is answered again.
-        #[cfg(all(
-            any(feature = "codec-init-body", feature = "codec-open-body"),
-            any(feature = "session-unicast-open", feature = "session-unicast-accept")
-        ))]
-        a.release_handshake_answer();
-        // F2 — Established (re-)entry re-opens the data-send gate (the
-        // supervisor replays cached declarations right after this fires).
-        self.link().transport_available.open();
-        // R2924 — the link's outbound queue takes the established session's
-        // shape: its configured sizes, one queue per priority if it negotiated
-        // QoS and one queue otherwise, as zenoh builds a link's pipeline when
-        // the link joins an established transport.
-        //
-        // R2925 — its batches are the link's negotiated batch MTU, as
-        // upstream's pipeline batches are the link's `batch.mtu`. What a lane
-        // is bounded by is counted in the session's CONFIGURED batch size, not
-        // in that MTU (`TxQueueShape::queue_unit_bytes` says why).
-        self.link()
-            .link_driver()
-            .shape_tx_queue(a.params.tx_queue.shape(
-                a.negotiated_qos(),
-                a.negotiated_batch_mtu(),
-                a.params.effective_batch_size() as usize,
-            ));
+        // The supervisor replays cached declarations right after this fires, through the gate
+        // it opens.
+        a.enter_established();
     }
 
     #[inline(never)]
@@ -20118,133 +20089,6 @@ mod held_answer_tests {
         assert_eq!(holds_answer(ExtChainRole::OpenSyn), replays);
         assert!(!holds_answer(ExtChainRole::InitSyn));
         assert!(!holds_answer(ExtChainRole::OpenAck));
-    }
-}
-
-#[cfg(test)]
-mod tx_limits_cache_tests {
-    use super::TxLimitsCache;
-
-    /// The protocol, one step at a time: empty until something is kept, kept only for the tag
-    /// it was computed under, gone the moment the capabilities are written, and never revived
-    /// by a value computed before that write.
-    #[test]
-    fn a_kept_value_serves_only_the_capabilities_it_was_computed_from() {
-        let cache = TxLimitsCache::new();
-        assert_eq!(cache.get(), None, "nothing is kept at the start");
-
-        let first = cache.current_tag();
-        cache.keep(first, 2048, 2);
-        assert_eq!(
-            cache.get(),
-            Some((2048, 2)),
-            "kept for the current capabilities"
-        );
-        assert_eq!(cache.get(), Some((2048, 2)), "and served again");
-
-        // A writer replaces the capabilities.
-        cache.peer_caps_changed();
-        assert_eq!(cache.get(), None, "a write ends what was kept");
-
-        // A reader that computed under the OLD tag and stores after the write: harmless.
-        cache.keep(first, 2048, 2);
-        assert_eq!(
-            cache.get(),
-            None,
-            "a value computed before a write is never served after it"
-        );
-
-        // A value computed under the new tag is served.
-        let second = cache.current_tag();
-        assert_ne!(first, second);
-        cache.keep(second, 65_535, 3);
-        assert_eq!(cache.get(), Some((65_535, 3)));
-
-        // Every write ends the value, however many.
-        for _ in 0..5 {
-            cache.peer_caps_changed();
-            assert_eq!(cache.get(), None);
-            cache.keep(cache.current_tag(), 512, 1);
-            assert_eq!(cache.get(), Some((512, 1)));
-        }
-    }
-
-    /// The edges of the packing: a budget over what 16 bits hold is not kept, the largest one
-    /// and a ring resolution of every value survive the round trip.
-    #[test]
-    fn the_packing_round_trips_and_refuses_what_does_not_fit() {
-        let cache = TxLimitsCache::new();
-        for ring in [0u8, 1, 2, 3, 255] {
-            for mtu in [0usize, 1, 2048, 65_535] {
-                cache.keep(cache.current_tag(), mtu, ring);
-                assert_eq!(cache.get(), Some((mtu, ring)), "mtu {mtu}, ring {ring}");
-                cache.peer_caps_changed();
-            }
-        }
-        cache.keep(cache.current_tag(), 65_536, 1);
-        assert_eq!(cache.get(), None, "a budget that does not fit is not kept");
-        cache.keep(cache.current_tag(), usize::MAX, 1);
-        assert_eq!(cache.get(), None, "nor the largest");
-    }
-
-    /// The writer and many readers at once: whatever a reader is handed is a value some
-    /// writer wrote under the tag it was written with, never a mix of two.
-    #[test]
-    fn concurrent_readers_never_see_a_mixed_value() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        let cache = Arc::new(TxLimitsCache::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        // The writer alternates two capabilities, each kept under its own tag; the pair
-        // (mtu, ring) is always one of (1000, 1) or (2000, 2).
-        let writer = {
-            let (cache, stop) = (cache.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let mut flip = false;
-                while !stop.load(Ordering::Relaxed) {
-                    cache.peer_caps_changed();
-                    let (mtu, ring) = if flip { (2000, 2) } else { (1000, 1) };
-                    cache.keep(cache.current_tag(), mtu, ring);
-                    flip = !flip;
-                }
-            })
-        };
-        let readers: std::vec::Vec<_> = (0..4)
-            .map(|_| {
-                let cache = cache.clone();
-                std::thread::spawn(move || {
-                    // A fixed number of reads can all finish before the writer is first
-                    // scheduled, or all land in its invalidated window, and then nothing
-                    // was compared. So the reader goes on past the fixed count until it
-                    // has been handed a value, and a deadline turns a writer that never
-                    // keeps one into a failure instead of a hang.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                    let mut seen = 0u32;
-                    let mut reads = 0u64;
-                    while reads < 200_000 || seen == 0 {
-                        reads += 1;
-                        if reads >= 200_000 {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "no value was handed to this reader in 60 s"
-                            );
-                        }
-                        if let Some(pair) = cache.get() {
-                            assert!(
-                                pair == (1000, 1) || pair == (2000, 2),
-                                "a mixed value: {pair:?}"
-                            );
-                            seen += 1;
-                        }
-                    }
-                    seen
-                })
-            })
-            .collect();
-        let seen: u32 = readers.into_iter().map(|r| r.join().unwrap()).sum();
-        stop.store(true, Ordering::Relaxed);
-        writer.join().unwrap();
-        assert!(seen > 0, "the readers saw the value at least once");
     }
 }
 
