@@ -643,11 +643,17 @@ fn kept_name(key: &str, name: InterestName<'_>) -> Option<KeptName> {
     let Some(rest) = name.suffix else {
         return Some(kept(name.mapping_id, None));
     };
+    // Searched as bytes: a text search brings the pattern searcher and the panic formatting of a
+    // text slice into every image that holds an Interest. A rest is whole UTF-8, so the place it
+    // starts at is a character boundary of `key`.
+    let (bytes, wanted) = (key.as_bytes(), rest.as_bytes());
     let tail = key
         .len()
         .checked_sub(rest.len())
-        .filter(|&at| key.get(at..) == Some(rest));
-    match tail.or_else(|| key.find(rest)) {
+        .filter(|_| bytes.ends_with(wanted));
+    let inside =
+        || (0..key.len()).find(|&at| bytes.get(at..).is_some_and(|from| from.starts_with(wanted)));
+    match tail.or_else(inside) {
         Some(at) => Some(kept(name.mapping_id, Some(range(at, rest.len())?))),
         None => Some(kept(0, Some(range(0, key.len())?))),
     }

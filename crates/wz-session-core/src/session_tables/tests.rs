@@ -2283,6 +2283,16 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
         (0, rest("s/t"), true),
         "nowhere in the key: the key whole"
     );
+    assert_eq!(
+        named(&mut Tables::new(), "ä/ö/ü", "ö"),
+        (5, rest("ö"), true),
+        "inside the key, after characters of two bytes"
+    );
+    assert_eq!(
+        named(&mut Tables::new(), "s", "s/t"),
+        (0, rest("s"), true),
+        "a rest longer than the key: the key whole"
+    );
     let plain = tables
         .declare_write_filter_as(
             Plane::Subscribers,
