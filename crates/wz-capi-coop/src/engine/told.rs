@@ -274,7 +274,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let Some(apart) = face.told.went(row) else {
             return;
         };
-        let Some(place) = self.session.registry.borrow_mut().keep_place() else {
+        let Some(place) = self.session.registry.keep_place() else {
             return;
         };
         let id = self.transport.links.next_face_id();
@@ -287,7 +287,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.transport.links.place_face(place, departed).is_ok() {
             self.transport.links.advance_face_id();
         } else {
-            self.session.registry.borrow_mut().free_kept(place);
+            self.session.registry.free_kept(place);
         }
     }
 
@@ -306,10 +306,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A wait that is never due: the face is not dialled, and its value stays as it is.
         face.link = Link::Waiting { at_us: u64::MAX };
         let id = face.id;
-        self.session
-            .registry
-            .borrow_mut()
-            .depart(HeldFace::new(at, id));
+        self.session.registry.depart(HeldFace::new(at, id));
         true
     }
 
@@ -328,7 +325,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Free the place at `at` a departed face kept, in the face table and the registry alike.
     fn let_go_departed(&mut self, at: usize) {
         self.transport.links.take_face(at);
-        self.session.registry.borrow_mut().free_kept(at);
+        self.session.registry.free_kept(at);
     }
 
     /// Give up the first departed place, whose listeners are then not told its row left: what a

@@ -14,7 +14,7 @@
 //! What every engine keeps alike (the key arena, the count of the session's own requests, where the
 //! matching listeners were last read) is this crate's.
 
-use core::cell::{Cell, Ref, RefMut};
+use core::cell::Cell;
 
 use crate::bounded::Storage;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -63,29 +63,29 @@ pub trait SessionParts {
     type LocalRequests;
 
     /// The session's tables, where `registry` keeps them, to read.
-    fn tables(registry: &Self::Registry) -> Ref<'_, SessionTables<Self::Callbacks, Self::Storage>>;
+    fn tables(registry: &Self::Registry) -> &SessionTables<Self::Callbacks, Self::Storage>;
 
     /// [`Self::tables`], to write.
     fn tables_mut(
-        registry: &Self::Registry,
-    ) -> RefMut<'_, SessionTables<Self::Callbacks, Self::Storage>>;
+        registry: &mut Self::Registry,
+    ) -> &mut SessionTables<Self::Callbacks, Self::Storage>;
 
     /// The faces, where `registry` keeps them, to read.
-    fn faces(registry: &Self::Registry) -> Ref<'_, Self::Faces>;
+    fn faces(registry: &Self::Registry) -> &Self::Faces;
 
     /// [`Self::faces`], to write.
-    fn faces_mut(registry: &Self::Registry) -> RefMut<'_, Self::Faces>;
+    fn faces_mut(registry: &mut Self::Registry) -> &mut Self::Faces;
 }
 
 impl<P: SessionParts> SessionState<P> {
     /// The session's tables, to read.
-    pub fn tables(&self) -> Ref<'_, SessionTables<P::Callbacks, P::Storage>> {
+    pub fn tables(&self) -> &SessionTables<P::Callbacks, P::Storage> {
         P::tables(&self.registry)
     }
 
     /// The session's tables, to write.
-    pub fn tables_mut(&self) -> RefMut<'_, SessionTables<P::Callbacks, P::Storage>> {
-        P::tables_mut(&self.registry)
+    pub fn tables_mut(&mut self) -> &mut SessionTables<P::Callbacks, P::Storage> {
+        P::tables_mut(&mut self.registry)
     }
 
     /// The session's next entity id, taken: what a declaration and an Interest of the session are
@@ -93,7 +93,7 @@ impl<P: SessionParts> SessionState<P> {
     /// declaration rather than wrap onto a live id.
     // Out of line: every declaration that numbers an entity of its own takes the id through it.
     #[inline(never)]
-    pub fn take_entity_id(&self) -> Option<EntityId> {
+    pub fn take_entity_id(&mut self) -> Option<EntityId> {
         self.tables_mut().take_entity_id()
     }
 
@@ -171,7 +171,7 @@ where
         match self.pending_gets.note(leg) {
             Ok(()) => true,
             Err(leg) => {
-                leg.unregister(&mut *P::faces_mut(&self.registry));
+                leg.unregister(P::faces_mut(&mut self.registry));
                 false
             }
         }
@@ -182,7 +182,7 @@ where
     /// as it now is, and every get asked of it, whose Final its peer can no longer send: each
     /// pending leg's entry is dropped, which ends the leg.
     pub fn lose_face(&mut self, face: u64) {
-        let mut faces = P::faces_mut(&self.registry);
+        let faces = P::faces_mut(&mut self.registry);
         faces.lose_face(face);
         self.pending_gets
             .drop_face(face, |leg| leg.unregister(&mut *faces));
@@ -207,11 +207,11 @@ where
     ///
     /// # Safety
     /// The caller holds the session's lock, as the round's writer does ([`Round::has_room`]).
-    pub unsafe fn retract_owed(&self, room: ReadRoom) {
+    pub unsafe fn retract_owed(&mut self, room: ReadRoom) {
         let round = &self.lane;
         // SAFETY: the caller's contract.
         let mut has_room = || unsafe { round.has_room(room) };
-        let done = P::faces_mut(&self.registry).retract_owed(&mut has_room);
+        let done = P::faces_mut(&mut self.registry).retract_owed(&mut has_room);
         round.owe(!done);
     }
 }
@@ -259,6 +259,7 @@ mod tests {
     use crate::limits::SessionLimits;
     use crate::pending_get::GetKind;
     use crate::session_tables::Absent;
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     use core::cell::RefCell;
     use core::ptr::NonNull;
 
@@ -343,7 +344,7 @@ mod tests {
             enum $name {}
 
             impl SessionParts for $name {
-                type Registry = RefCell<Registry>;
+                type Registry = Registry;
                 type Faces = Registry;
                 type Callbacks = NoCallbacks;
                 type Storage = Profile;
@@ -356,20 +357,20 @@ mod tests {
                 type KeyIds = ();
                 type LocalRequests = LocalRequests;
 
-                fn tables(registry: &Self::Registry) -> Ref<'_, Tables> {
-                    Ref::map(registry.borrow(), |registry| &registry.tables)
+                fn tables(registry: &Self::Registry) -> &Tables {
+                    &registry.tables
                 }
 
-                fn tables_mut(registry: &Self::Registry) -> RefMut<'_, Tables> {
-                    RefMut::map(registry.borrow_mut(), |registry| &mut registry.tables)
+                fn tables_mut(registry: &mut Self::Registry) -> &mut Tables {
+                    &mut registry.tables
                 }
 
-                fn faces(registry: &Self::Registry) -> Ref<'_, Registry> {
-                    registry.borrow()
+                fn faces(registry: &Self::Registry) -> &Registry {
+                    registry
                 }
 
-                fn faces_mut(registry: &Self::Registry) -> RefMut<'_, Registry> {
-                    registry.borrow_mut()
+                fn faces_mut(registry: &mut Self::Registry) -> &mut Registry {
+                    registry
                 }
             }
         };
@@ -410,7 +411,7 @@ mod tests {
     fn new_state<P>() -> SessionState<P>
     where
         P: SessionParts<
-            Registry = RefCell<Registry>,
+            Registry = Registry,
             Entities = (),
             Queryables = (),
             Gets = (),
@@ -428,7 +429,7 @@ mod tests {
     fn new_state_with<P>(lane: P::Lane) -> SessionState<P>
     where
         P: SessionParts<
-            Registry = RefCell<Registry>,
+            Registry = Registry,
             Entities = (),
             Queryables = (),
             Gets = (),
@@ -439,7 +440,7 @@ mod tests {
         P::PendingGets: Default,
     {
         SessionState {
-            registry: RefCell::new(Registry::default()),
+            registry: Registry::default(),
             watchers: Default::default(),
             entities: (),
             keys: keys(64),
@@ -499,10 +500,8 @@ mod tests {
     }
 
     /// What the faces of `state` were told, read back.
-    fn faces_told<P: SessionParts<Registry = RefCell<Registry>>>(
-        state: &SessionState<P>,
-    ) -> Ref<'_, Registry> {
-        state.registry.borrow()
+    fn faces_told<P: SessionParts<Registry = Registry>>(state: &SessionState<P>) -> &Registry {
+        &state.registry
     }
 
     /// The state retracts the owed tokens the round of deliveries has room for, each a record of
@@ -514,12 +513,9 @@ mod tests {
         const OWED: usize = 64;
         let lane: TestLane = crate::round::tests::round();
         let log = alloc::sync::Arc::new(crate::round::tests::Log::default());
-        let state = new_state_with::<Rounds>(lane.clone());
-        {
-            let mut registry = state.registry.borrow_mut();
-            registry.owed_tokens = OWED;
-            registry.retracts_into = Some((lane, log.clone()));
-        }
+        let mut state = new_state_with::<Rounds>(lane.clone());
+        state.registry.owed_tokens = OWED;
+        state.registry.retracts_into = Some((lane, log.clone()));
         let one = ReadRoom { callbacks: 1 };
         // SAFETY: the test's thread is the round's one writer, as the session's lock holder is.
         unsafe { state.retract_owed(one) };
@@ -542,7 +538,7 @@ mod tests {
             OWED - left,
             "each token retracted is a record handed out"
         );
-        state.registry.borrow_mut().owed_tokens = 1;
+        state.registry.owed_tokens = 1;
         // SAFETY: as above.
         unsafe { state.retract_owed(one) };
         assert_eq!(faces_told(&state).owed_tokens, 0);
@@ -552,7 +548,7 @@ mod tests {
     /// The state numbers the session's entities by the ids its tables hand out, each once.
     #[test]
     fn the_state_takes_each_entity_id_from_its_tables_once() {
-        let state = new_state::<Unwatched>();
+        let mut state = new_state::<Unwatched>();
         assert_eq!(state.take_entity_id(), Some(1));
         assert_eq!(state.take_entity_id(), Some(2));
         assert_eq!(
@@ -566,7 +562,7 @@ mod tests {
     /// none for a wire that names none.
     #[test]
     fn the_state_names_a_key_by_the_declaration_its_tables_hold() {
-        let state = new_state::<Unwatched>();
+        let mut state = new_state::<Unwatched>();
         let declared = state.tables_mut().declare_keyexpr("demo/").unwrap();
         assert_eq!(
             state.key_form(declared.id, Retraction::AsAnnounced),

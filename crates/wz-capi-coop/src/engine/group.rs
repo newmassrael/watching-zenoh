@@ -86,7 +86,7 @@ use {
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use super::registry::{FaceId, HeldFace, Registry};
+use super::registry::{FaceId, HeldFace};
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -1523,22 +1523,24 @@ pub(super) struct GroupPut<'a> {
 /// `generation`, so the answer it is owed is the group's and no link's.
 #[cfg(feature = "queryable")]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;
     move |event, replies| {
-        let mut registry = registry.borrow_mut();
-        plane.set_arriving(generation);
-        registry.dispatch_event(face, event);
-        registry.flush_pending_replies(face, replies);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
-            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                replies.send_response_final(rid, qos);
+        let dispatched = registry.with(|registry| {
+            plane.set_arriving(generation);
+            registry.dispatch_event(face, event);
+            registry.flush_pending_replies(face, replies);
+            for (rid, qos) in registry.take_pending_final_rids(face) {
+                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
+                    replies.send_response_final(rid, qos);
+                }
             }
-        }
+        });
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
     }
 }
 
@@ -1546,10 +1548,13 @@ pub(super) fn dispatch(
 /// staged queued on the group at once.
 #[cfg(not(feature = "queryable"))]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
-    move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
+    move |event, replies| {
+        let dispatched = registry.with(|registry| registry.dispatch(face, event, replies));
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
+    }
 }
 
 #[cfg(all(test, feature = "connectivity"))]
