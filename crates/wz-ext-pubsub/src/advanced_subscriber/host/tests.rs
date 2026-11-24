@@ -620,6 +620,36 @@ fn the_periodic_jobs_run_on_the_engine_and_stop_with_the_subscriber() {
     assert!(!retention());
 }
 
+/// An engine named by its own type hosts the same subscriber as the port's object does: the same
+/// entities and jobs declared, and the same retracted when it is dropped.
+#[test]
+fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
+    let options = || {
+        AdvancedSubscriberOptions::new().with_recovery(
+            RecoveryConfig::new()
+                .with_periodic_queries(Duration::from_millis(500))
+                .with_retention_period(Duration::from_secs(60)),
+        )
+    };
+    let concrete = Script::new(1);
+    let subscriber: EngineSubscriber<Script> =
+        EngineSubscriber::declare(&concrete, "demo/data", options(), |_| {})
+            .expect("the subscriber declares on the scripted engine as its own type");
+    drop(subscriber);
+    let object = Script::new(1);
+    let (subscriber, _delivered, _misses) = recording(&object, options());
+    drop(subscriber);
+    assert_eq!(concrete.events(), object.events());
+    assert_eq!(
+        concrete
+            .events()
+            .iter()
+            .filter(|e| *e == "stop ticker")
+            .count(),
+        2
+    );
+}
+
 /// A subscriber that wants a periodic job on an engine that runs none is refused, not left
 /// without the job.
 #[test]

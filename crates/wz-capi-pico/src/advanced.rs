@@ -916,8 +916,9 @@ pub(crate) struct AdvSubState {
     engine: Arc<Engine>,
     /// The subscriber the engine hosts. Dropping it retracts everything it declared, in the
     /// order the runtime's own subscriber does, so an implicit `z_drop` and an explicit
-    /// `ze_undeclare_advanced_subscriber` take the identical path.
-    subscriber: EngineSubscriber,
+    /// `ze_undeclare_advanced_subscriber` take the identical path. Hosted on the engine as the
+    /// build names it, so a build of one engine makes no table of the session's operations for it.
+    subscriber: EngineSubscriber<Engine>,
     /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`.
     keyexpr: String,
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -1085,7 +1086,7 @@ unsafe fn declare_subscriber_state(
         let miss = miss.clone();
         let mut inner = crate::pubsub::make_subscriber_callback(cclosure);
         EngineSubscriber::declare_with_miss_listener(
-            &crate::session::port_engine(&engine),
+            &engine,
             ke.clone(),
             opts,
             // The advanced subscriber hands an OWNED `Sample`; the existing marshal
