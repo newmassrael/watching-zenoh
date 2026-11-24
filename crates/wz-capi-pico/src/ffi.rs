@@ -106,7 +106,7 @@ impl CountIn {
     /// Hold one open in this owner until the hold is dropped: a closure's, or a background
     /// entity's place, which the owner's close waits for as it waits for a closure.
     pub(crate) fn hold(self) -> HeldIn {
-        self.open().open_one();
+        self.open().count_one(false);
         HeldIn(self)
     }
 
@@ -115,8 +115,20 @@ impl CountIn {
     /// it, as it is no closure.
     #[cfg(any(test, feature = "advanced"))]
     pub(crate) fn keep(self) -> KeptIn {
-        self.open().keep_one();
+        self.open().count_one(true);
         KeptIn(self)
+    }
+
+    /// One hold, or one keep (`kept`), let go of: the last of them let go of after the owner let
+    /// go of its place gives the place back. One body for both, out of line, as every drop of a
+    /// hold or a keep reaches it.
+    #[inline(never)]
+    fn let_go(&self, kept: bool) {
+        if self.open().uncount_one(kept) {
+            // SAFETY: the owner let go of its place and this was the last hold or keep counted in
+            // it, so the place is this call's to give back, once (`CountIn::new`).
+            unsafe { (self.give_back)(self.place) };
+        }
     }
 }
 
@@ -128,11 +140,7 @@ pub(crate) struct KeptIn(CountIn);
 #[cfg(any(test, feature = "advanced"))]
 impl Drop for KeptIn {
     fn drop(&mut self) {
-        if self.0.open().let_go_one() {
-            // SAFETY: the owner let go of its place and this was the last hold or keep counted in
-            // it, so the place is this drop's to give back, once (`CountIn::new`).
-            unsafe { (self.0.give_back)(self.0.place) };
-        }
+        self.0.let_go(true);
     }
 }
 
@@ -151,11 +159,7 @@ pub(crate) struct HeldIn(CountIn);
 
 impl Drop for HeldIn {
     fn drop(&mut self) {
-        if self.0.open().close_one() {
-            // SAFETY: the owner let go of its place and this was the last hold counted in it, so
-            // the place is this drop's to give back, once (`CountIn::new`).
-            unsafe { (self.0.give_back)(self.0.place) };
-        }
+        self.0.let_go(false);
     }
 }
 
@@ -237,39 +241,42 @@ impl OpenClosures {
     /// One more held open here: a closure counted in the owner, or a leg of a get, which lets it
     /// go with [`Self::close_one`].
     pub(crate) fn open_one(&self) {
-        let mut state = self.state.lock();
-        debug_assert!(
-            !state.retired,
-            "a closure is counted in an owner still held"
-        );
-        state.held = state.held.saturating_add(1);
+        self.count_one(false);
     }
 
     /// One closure let go of: `true` when it was the last one held and the owner has let go of
     /// its place, which this closure then gives back.
     pub(crate) fn close_one(&self) -> bool {
-        let mut state = self.state.lock();
-        state.held = state.held.saturating_sub(1);
-        // Every close is told, as a waiter may wait for fewer held rather than none
-        // ([`Self::wait_at_most`]).
-        self.none_open.notify_all();
-        state.unheld() && state.retired
+        self.uncount_one(false)
     }
 
-    /// One more keep of the owner's place, which no wait waits for.
-    #[cfg(any(test, feature = "advanced"))]
-    fn keep_one(&self) {
+    /// One more held open here, or one more keep of the owner's place (`kept`), which no wait
+    /// waits for.
+    fn count_one(&self, kept: bool) {
         let mut state = self.state.lock();
-        debug_assert!(!state.retired, "a place is kept for an owner still held");
-        state.kept = state.kept.saturating_add(1);
+        debug_assert!(
+            !state.retired,
+            "a closure or a keep is counted in an owner still held"
+        );
+        if kept {
+            state.kept = state.kept.saturating_add(1);
+        } else {
+            state.held = state.held.saturating_add(1);
+        }
     }
 
-    /// One keep let go of: `true` when nothing else holds or keeps the place and the owner has let
-    /// go of it, which this keep then gives back.
-    #[cfg(any(test, feature = "advanced"))]
-    fn let_go_one(&self) -> bool {
+    /// One held, or one keep (`kept`), let go of: `true` when nothing else holds or keeps the
+    /// place and the owner has let go of it, which the caller then gives back.
+    fn uncount_one(&self, kept: bool) -> bool {
         let mut state = self.state.lock();
-        state.kept = state.kept.saturating_sub(1);
+        if kept {
+            state.kept = state.kept.saturating_sub(1);
+        } else {
+            state.held = state.held.saturating_sub(1);
+            // Every close is told, as a waiter may wait for fewer held rather than none
+            // ([`Self::wait_at_most`]).
+            self.none_open.notify_all();
+        }
         state.unheld() && state.retired
     }
 
