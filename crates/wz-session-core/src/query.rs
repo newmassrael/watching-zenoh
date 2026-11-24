@@ -448,6 +448,21 @@ fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::Source
 // short-circuits to None so a `codec-request` subset that does not compose
 // querier values carries no value decode path.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn extract_query_value_parts(query: &QueryOwned) -> Option<(u32, Option<&[u8]>, &[u8])> {
+    #[cfg(not(feature = "query-value"))]
+    {
+        let _ = query;
+        None
+    }
+    #[cfg(feature = "query-value")]
+    {
+        let exts = query.extensions.as_deref()?;
+        crate::query_value_ext::decode_query_value_ext_parts_in(exts)
+    }
+}
+
+/// [`extract_query_value_parts`] with the encoding as an owned hint.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 fn extract_query_value(query: &QueryOwned) -> Option<(crate::sample::EncodingHint, &[u8])> {
     #[cfg(not(feature = "query-value"))]
     {
@@ -3060,11 +3075,11 @@ struct QueryProjection<'q> {
     attachment: Option<&'q [u8]>,
     /// The querier's source info.
     source_info: Option<crate::sample::SourceInfo>,
-    /// The value in its plain shape, read off the chain. A build with no heap does
-    /// not project a query's value: its encoding is an owned hint, and the queryables
-    /// of such a build (the admin space) read none.
+    /// The value in its plain shape, read off the chain where it lies: its encoding's packed id
+    /// and schema, and its payload. A build with no heap does not project a query's value: its
+    /// encoding is an owned hint, and the queryables of such a build (the admin space) read none.
     #[cfg(feature = "alloc")]
-    plain_value: Option<(crate::sample::EncodingHint, &'q [u8])>,
+    plain_value: Option<(u32, Option<&'q [u8]>, &'q [u8])>,
     /// The value held as shareable bytes: un-swapped out of shared memory, or a
     /// range of a frame the link lent. Preferred over `plain_value` when present.
     #[cfg(feature = "alloc")]
@@ -3822,7 +3837,7 @@ fn project_owned_query<'q>(
     // routed (`dispatch_request`), and its bytes come in as `unswapped_value`
     // and are lent as they are; the plain shape is still read off the
     // chain here, borrowed.
-    let plain_value = extract_query_value(query);
+    let plain_value = extract_query_value_parts(query);
     // R3061 -- the un-swapped value is held as the shareable type and LENT as it is,
     // so a value that is one shared-memory slice reaches each matched queryable as
     // the page it lies on (`QueryView::payload_shared`) as well as the bytes of it.
@@ -3903,13 +3918,28 @@ where
     #[cfg(all(feature = "alloc", feature = "query-value"))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
         Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
-        None => plain_value,
+        None => plain_value.map(|(packed_id, schema, payload)| {
+            let hint = crate::sample::EncodingHint {
+                packed_id,
+                schema: schema.map(<[u8]>::to_vec),
+            };
+            (hint, payload)
+        }),
     };
+    // The plain value's encoding where it lies, which a holder that keeps the query past its
+    // call reads there ([`crate::query_sink::QueryView::encoding_parts`]); a shared value's is
+    // its hint's.
+    #[cfg(all(feature = "alloc", feature = "query-value"))]
+    let lent_encoding = plain_value
+        .filter(|_| unswapped_value.is_none())
+        .map(|(packed_id, schema, _)| (packed_id, schema));
     #[cfg(all(feature = "alloc", not(feature = "query-value")))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
         let _ = plain_value;
         None
     };
+    #[cfg(not(all(feature = "alloc", feature = "query-value")))]
+    let lent_encoding = None;
     // R311y834 — resolved ONCE per inbound query beside the other
     // projections, because it is a property of the query rather than of any
     // matched queryable.
@@ -3976,6 +4006,7 @@ where
                     &crate::query_sink::ProvenQuery {
                         inner: &shared,
                         peer: requester,
+                        encoding: lent_encoding,
                     },
                     &mut responder,
                 )
@@ -3987,6 +4018,7 @@ where
                     &crate::query_sink::ProvenQuery {
                         inner: &query_view,
                         peer: requester,
+                        encoding: lent_encoding,
                     },
                     &mut responder,
                 )
@@ -4002,6 +4034,7 @@ where
             &crate::query_sink::ProvenQuery {
                 inner: &query_view,
                 peer: requester,
+                encoding: lent_encoding,
             },
             &mut responder,
         )

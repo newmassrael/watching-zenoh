@@ -754,7 +754,8 @@ fn a_sealed_round_refuses_and_counts_by_congestion_control() {
         round.counts(),
         RoundCounts {
             dropped: 2,
-            held_over: 1
+            held_over: 1,
+            unplaced: 0
         }
     );
     assert!(round.deliver());
