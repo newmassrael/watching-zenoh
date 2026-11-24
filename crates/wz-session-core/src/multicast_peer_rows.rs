@@ -274,7 +274,9 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
         let Self { fixed: _, grown: _ } = self;
     }
 
-    /// How many rows the table has: the fixed ones and those grown past them.
+    /// How many rows the table has: the fixed ones and those grown past them. Read where a
+    /// dispatcher retires every member with what it declared, and by the tests.
+    #[cfg(any(test, all(feature = "alloc", feature = "codec-declare")))]
     pub(crate) fn len(&self) -> usize {
         self.grown.rows().len().saturating_add(N)
     }
