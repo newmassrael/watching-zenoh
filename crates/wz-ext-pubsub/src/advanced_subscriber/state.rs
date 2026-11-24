@@ -12,6 +12,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
+use core::ffi::c_void;
 #[cfg(feature = "advanced-recovery")]
 use core::time::Duration;
 
@@ -82,13 +83,47 @@ impl Miss {
 /// listeners fire in the order they were declared. Upstream promises no order;
 /// registration order is one of the orders it permits, and a deterministic one
 /// is what a test (or a C program) can reason about.
+///
+/// # The listener lent at declaration
+///
+/// A host that declares its subscriber with one listener from the start, in the raw form an
+/// engine's own callbacks take ([`Self::lent`]), keeps it beside the map rather than in it, so
+/// the declaration takes no memory for it. It is the first registered, so it fires first, which
+/// is the order the map would give it.
 #[derive(Default)]
 pub struct MissHandlers {
     next_id: usize,
+    first: Option<(usize, Lent<unsafe fn(*mut c_void, Miss)>)>,
     handlers: BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
 }
 
 impl MissHandlers {
+    /// A registry holding one listener from the start, `call(context, miss)`, with
+    /// `drop(context)` run once after its last call, when it is retracted or the registry is
+    /// dropped.
+    ///
+    /// # Safety
+    /// `call` may be made with `context` from any thread until `drop` runs, and `drop` with it
+    /// once, after the last call, from any thread.
+    pub unsafe fn lent(
+        call: unsafe fn(*mut c_void, Miss),
+        context: *mut c_void,
+        drop: Option<unsafe fn(*mut c_void)>,
+    ) -> Self {
+        Self {
+            next_id: 1,
+            first: Some((
+                0,
+                Lent {
+                    call,
+                    context,
+                    drop,
+                },
+            )),
+            handlers: BTreeMap::new(),
+        }
+    }
+
     /// Hold `handler` and name it, so it can be retracted.
     pub fn register(&mut self, handler: Box<dyn FnMut(Miss) + Send>) -> usize {
         let id = self.next_id;
@@ -99,6 +134,10 @@ impl MissHandlers {
 
     /// Let go of the handler registered as `id`; one already gone is left alone.
     pub fn unregister(&mut self, id: usize) {
+        if self.first.as_ref().is_some_and(|(first, _)| *first == id) {
+            self.first = None;
+            return;
+        }
         self.handlers.remove(&id);
     }
 
@@ -106,11 +145,84 @@ impl MissHandlers {
     /// is dropped, which is upstream's behaviour: the sample stream never
     /// depends on anyone listening for its holes.
     fn fire(&mut self, miss: Miss) {
+        if let Some((_, first)) = self.first.as_ref() {
+            // SAFETY: the maker of the listener lets it be called from any thread until its drop,
+            // which runs only when this registry lets it go.
+            unsafe { (first.call)(first.context, miss) };
+        }
         for handler in self.handlers.values_mut() {
             handler(miss);
         }
     }
 }
+
+// SAFETY: the boxed listeners are `Send`, and a lent one's maker lets it be called and let go
+// of from any thread (`MissHandlers::lent`).
+unsafe impl Send for MissHandlers {}
+
+/// A callback in the raw form an engine's own callbacks take: a function, the context it reads,
+/// and what lets the context go after the last call, run when this is dropped. It holds no memory
+/// of its own.
+struct Lent<F> {
+    call: F,
+    context: *mut c_void,
+    drop: Option<unsafe fn(*mut c_void)>,
+}
+
+impl<F> Drop for Lent<F> {
+    fn drop(&mut self) {
+        if let Some(drop) = self.drop {
+            // SAFETY: the maker's (`OnSample::lent`, `MissHandlers::lent`): run once, after the
+            // last call.
+            unsafe { drop(self.context) };
+        }
+    }
+}
+
+/// The sample callback of a machine: the program's closure, boxed, or a function over a context
+/// lent in the raw form an engine's own callbacks take, which takes no memory.
+pub struct OnSample(SampleForm);
+
+enum SampleForm {
+    Boxed(Box<dyn FnMut(Delivery<'_>) + Send>),
+    Lent(Lent<unsafe fn(*mut c_void, Delivery<'_>)>),
+}
+
+impl OnSample {
+    /// The program's closure.
+    pub fn boxed(on_sample: Box<dyn FnMut(Delivery<'_>) + Send>) -> Self {
+        Self(SampleForm::Boxed(on_sample))
+    }
+
+    /// `call(context, sample)`, with `drop(context)` run once after the last call, when this
+    /// is dropped.
+    ///
+    /// # Safety
+    /// As [`MissHandlers::lent`]'s.
+    pub unsafe fn lent(
+        call: unsafe fn(*mut c_void, Delivery<'_>),
+        context: *mut c_void,
+        drop: Option<unsafe fn(*mut c_void)>,
+    ) -> Self {
+        Self(SampleForm::Lent(Lent {
+            call,
+            context,
+            drop,
+        }))
+    }
+
+    fn call(&mut self, sample: Delivery<'_>) {
+        match &mut self.0 {
+            SampleForm::Boxed(on_sample) => on_sample(sample),
+            // SAFETY: the maker lets it be called from any thread until its drop (`Self::lent`).
+            SampleForm::Lent(lent) => unsafe { (lent.call)(lent.context, sample) },
+        }
+    }
+}
+
+// SAFETY: a boxed callback is `Send`, and a lent one's maker lets it be called and let go of from
+// any thread (`OnSample::lent`).
+unsafe impl Send for OnSample {}
 
 /// What a miss listener reaches its subscriber's state through: the state's own lock, or what
 /// holds the lock with the rest of the subscriber.
@@ -550,7 +662,7 @@ pub struct State {
     /// vacuously true — a condition that can never be false reads as coverage
     /// while grading nothing.
     timestamped: HashMap<TimestampZid, TimestampedState>,
-    on_sample: Box<dyn FnMut(Delivery<'_>) + Send>,
+    on_sample: OnSample,
     /// R2814 — every declared sample-miss listener; see [`MissHandlers`].
     miss_handlers: MissHandlers,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true)
@@ -603,6 +715,11 @@ impl State {
         on_sample: Box<dyn FnMut(Delivery<'_>) + Send>,
         miss_handlers: MissHandlers,
     ) -> Self {
+        Self::delivering_to(OnSample::boxed(on_sample), miss_handlers)
+    }
+
+    /// [`Self::new`] over a sample callback in either of its forms.
+    pub fn delivering_to(on_sample: OnSample, miss_handlers: MissHandlers) -> Self {
         Self {
             sequenced: HashMap::default(),
             timestamped: HashMap::default(),
@@ -676,7 +793,7 @@ impl State {
     /// delivers live rather than storing a single sample to hand straight back.
     fn deliver_unsequenced(&mut self, sample: Delivery<'_>, now_ms: u64) {
         let Some(ts) = sample.view().timestamp().cloned() else {
-            (self.on_sample)(sample);
+            self.on_sample.call(sample);
             return;
         };
         #[cfg(feature = "advanced-history")]
@@ -688,7 +805,8 @@ impl State {
             on_sample,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         let state = timestamped
             .entry(ts.zid.clone())
             .or_insert_with(|| TimestampedState::new(now_ms));
@@ -846,7 +964,8 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         let state = sequenced
             .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
@@ -947,7 +1066,8 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         let state = sequenced
             .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
@@ -1064,7 +1184,8 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         let Some(source) = EntityGlobalId::new(&key.0, key.1) else {
             return;
         };
@@ -1116,7 +1237,8 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         for (source, state) in sequenced.iter_mut() {
             if state.pending_queries == 0 {
                 flush_sequenced(state, *source, on_sample, miss_handlers);
@@ -1418,7 +1540,8 @@ impl State {
             on_sample,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) =
+            &mut |sample: Delivery<'_>| on_sample.call(sample);
         let Some(id) = TimestampZid::new(zid) else {
             return;
         };

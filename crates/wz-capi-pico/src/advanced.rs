@@ -57,10 +57,9 @@ use wz_ext_pubsub::advanced_publisher::{
 };
 use wz_ext_pubsub::advanced_subscriber::{
     AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, Miss,
-    RecoveryConfig, SubscriberDetection,
+    MissHandlers, OnSample, RecoveryConfig, SubscriberDetection,
 };
 use wz_session_core::publish_options::PublishError;
-use wz_session_core::sink::SampleView;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::advanced_forms::PicoSubscriberForms;
@@ -950,32 +949,49 @@ pub(crate) struct AdvSubState {
 /// owner and the closure gives the place back (`crate::object_slot::Answering`).
 pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, SubscriberKept>;
 
-/// The sample callback the host keeps for an advanced subscriber. It reads the C closure where
-/// the subscriber's place keeps it, and when the host drops it, after its last call, it takes the
-/// closure out of the place and drops it, which may give the place back. Nothing is allocated for
-/// the closure.
-struct AdvSampleSink(*mut AdvSubState);
-
-// SAFETY: the closure it reads is a C sample closure, which this plane calls from any thread
-// (`CClosure` is `Sync` for it), and the place it names stands while this is held, as the closure
-// is counted in the place.
-unsafe impl Send for AdvSampleSink {}
-
-impl AdvSampleSink {
-    fn hand(&self, sample: &dyn SampleView) {
-        // SAFETY: the place stands while this is held, and what it keeps is taken out by nothing
-        // but this sink's drop.
-        let kept = unsafe { &*crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(self.0) };
-        crate::pubsub::hand_sample(&kept.closure, sample);
-    }
+/// The sample callback the host keeps for an advanced subscriber, lent over the subscriber's
+/// place: it reads the C closure where the place keeps it, so nothing is allocated for it.
+///
+/// # Safety
+/// `context` is an advanced subscriber's state in its place, whose kept closure is counted in the
+/// place and not taken out yet ([`let_go_adv_sample`]).
+unsafe fn hand_adv_sample(context: *mut c_void, sample: Delivery<'_>) {
+    // SAFETY: the caller's: the place stands while the closure it keeps is counted in it.
+    let kept = unsafe {
+        &*crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(context.cast::<AdvSubState>())
+    };
+    crate::pubsub::hand_sample(&kept.closure, sample.view());
 }
 
-impl Drop for AdvSampleSink {
-    fn drop(&mut self) {
-        // SAFETY: as `hand`'s: what the place keeps is taken out once, here, and dropped out of
-        // it, as the closure's drop may give the place back.
-        drop(unsafe { crate::pubsub::take_kept::<AdvSubState>(self.0.cast::<c_void>()) });
-    }
+/// The host let go of the sample callback, after its last call: the C closure is taken out of the
+/// place and dropped, which may give the place back.
+///
+/// # Safety
+/// As [`hand_adv_sample`]'s, called once, after the last call.
+unsafe fn let_go_adv_sample(context: *mut c_void) {
+    // SAFETY: the caller's: what the place keeps is taken out once, here, and dropped out of it,
+    // as the closure's drop may give the place back.
+    drop(unsafe { crate::pubsub::take_kept::<AdvSubState>(context) });
+}
+
+/// The miss listener the host holds from the start, lent over a count of the subscriber's miss
+/// set: every C miss listener declared on the set hears the miss.
+///
+/// # Safety
+/// `context` is a count of a miss set ([`MissSlot`]) not yet let go of ([`let_go_miss_set`]).
+unsafe fn fire_adv_miss(context: *mut c_void, miss: Miss) {
+    // SAFETY: the caller's: the count holds the set.
+    let set = unsafe { &*context.cast_const().cast::<ListenerSet<CMissClosure>>() };
+    fire_miss(set, &miss);
+}
+
+/// Let go of the count of the miss set the host's listener held.
+///
+/// # Safety
+/// As [`fire_adv_miss`]'s, called once, after the last call.
+unsafe fn let_go_miss_set(context: *mut c_void) {
+    // SAFETY: the caller's: the count was made by `Arc::into_raw` and is let go of once.
+    drop(unsafe { Arc::from_raw(context.cast_const().cast::<ListenerSet<CMissClosure>>()) });
 }
 
 /// The entries of one subscriber's miss set that have no handle to retract them with. Clearing
@@ -1164,22 +1180,31 @@ unsafe fn declare_subscriber_state(
         ))
         .cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
-    // closure is counted in the place before anything can call it or let it go.
-    let sink = unsafe {
+    // closure is counted in the place before anything can call it or let it go, so the place
+    // stands until the host lets go of the sample callback, and a C sample closure is called from
+    // any thread (`CClosure` is `Sync` for it).
+    let on_sample = unsafe {
         let kept = crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(state);
         crate::object_slot::count_in_entity::<AdvSubState, SubscriberKept, _>(
             state,
             &mut (*kept).closure,
         );
-        AdvSampleSink(state)
+        OnSample::lent(
+            hand_adv_sample,
+            state.cast::<c_void>(),
+            Some(let_go_adv_sample),
+        )
     };
-    let declared = EngineSubscriber::declare_with_miss_listener(
-        &engine,
-        ke,
-        opts,
-        move |sample: Delivery<'_>| sink.hand(sample.view()),
-        move |m: Miss| fire_miss(&miss, &m),
-    );
+    // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
+    // set is read through a shared borrow, which it admits from any thread.
+    let misses = unsafe {
+        MissHandlers::lent(
+            fire_adv_miss,
+            Arc::into_raw(miss).cast_mut().cast::<c_void>(),
+            Some(let_go_miss_set),
+        )
+    };
+    let declared = EngineSubscriber::declare_with(&engine, ke, opts, on_sample, misses);
     match declared {
         Ok(subscriber) => {
             (*state).subscriber = Some(subscriber);
@@ -1218,7 +1243,7 @@ unsafe fn free_advanced_subscriber(state: *mut AdvSubState) {
 ///
 /// A miss with no listener is silently dropped, which is pico's behaviour too:
 /// the listener is optional and the sample stream is unaffected by its absence.
-fn fire_miss(slot: &MissSlot, miss: &Miss) {
+fn fire_miss(slot: &ListenerSet<CMissClosure>, miss: &Miss) {
     let source = miss.source();
     let mut zid = [0u8; crate::zid::Z_ID_SIZE];
     for (to, from) in zid.iter_mut().zip(source.zid()) {

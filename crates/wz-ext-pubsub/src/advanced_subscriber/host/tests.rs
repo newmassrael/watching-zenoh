@@ -35,7 +35,7 @@ use super::super::options::{
     AdvancedSubscriberOptions, DeclarationForms, EntityForm, HistoryConfig, RecoveryConfig,
     SubscriberDetection,
 };
-use super::super::state::{Delivery, MissHandlers, State};
+use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
 use super::{EngineSubscriber, HostError};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
@@ -1207,5 +1207,110 @@ fn a_history_get_whose_key_does_not_fit_ends_at_once() {
         *delivered.lock().unwrap(),
         [10],
         "the history's end handed on what it held"
+    );
+}
+
+/// What the lent callbacks of a machine saw.
+#[derive(Default)]
+struct Seen {
+    samples: AtomicU64,
+    last: AtomicU64,
+    missed: AtomicU64,
+    dropped: AtomicU64,
+}
+
+/// # Safety
+/// `context` is a live `Seen`.
+unsafe fn seen_sample(context: *mut core::ffi::c_void, sample: Delivery<'_>) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.samples.fetch_add(1, Ordering::SeqCst);
+    seen.last
+        .store(u64::from(sample.view().payload()[0]), Ordering::SeqCst);
+}
+
+/// # Safety
+/// As [`seen_sample`]'s.
+unsafe fn seen_miss(context: *mut core::ffi::c_void, miss: Miss) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.missed
+        .fetch_add(u64::from(miss.nb()), Ordering::SeqCst);
+}
+
+/// # Safety
+/// As [`seen_sample`]'s.
+unsafe fn seen_drop(context: *mut core::ffi::c_void) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.dropped.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A machine whose sample callback and first miss listener are lent takes no memory for them: it
+/// calls each through its context, the lent listener hears a miss before one registered after it,
+/// retracting the lent listener lets its context go, and dropping the machine lets the sample
+/// callback's go, each once.
+#[test]
+fn lent_callbacks_take_no_memory_and_are_let_go_once() {
+    let seen = Seen::default();
+    let context = core::ptr::from_ref(&seen)
+        .cast_mut()
+        .cast::<core::ffi::c_void>();
+    let registered = Arc::new(Mutex::new(Vec::new()));
+
+    let before = allocations();
+    // SAFETY: `seen` outlives the machine, and every call is made on this thread.
+    let mut state = unsafe {
+        State::delivering_to(
+            OnSample::lent(seen_sample, context, Some(seen_drop)),
+            MissHandlers::lent(seen_miss, context, Some(seen_drop)),
+        )
+    };
+    let during = allocations() - before;
+    assert_eq!(during, 0, "lent callbacks allocate nothing");
+
+    let r = Arc::clone(&registered);
+    let second = state.miss_handlers().register(Box::new(move |miss: Miss| {
+        r.lock().unwrap().push(miss.nb());
+    }));
+    assert_ne!(second, 0, "the lent listener keeps its own id");
+    assert!(state.handle_live(&sample(0, 10), 1).is_none());
+    assert!(state.handle_live(&sample(2, 12), 2).is_none());
+    assert_eq!(
+        seen.samples.load(Ordering::SeqCst),
+        2,
+        "both samples delivered"
+    );
+    assert_eq!(seen.last.load(Ordering::SeqCst), 12);
+    assert_eq!(
+        seen.missed.load(Ordering::SeqCst),
+        1,
+        "the lent listener heard the hole"
+    );
+    assert_eq!(
+        *registered.lock().unwrap(),
+        [1],
+        "and so did the registered one"
+    );
+
+    state.miss_handlers().unregister(0);
+    assert_eq!(
+        seen.dropped.load(Ordering::SeqCst),
+        1,
+        "retracting it let it go"
+    );
+    assert!(state.handle_live(&sample(4, 14), 3).is_none());
+    assert_eq!(
+        seen.missed.load(Ordering::SeqCst),
+        1,
+        "a retracted listener hears nothing"
+    );
+    assert_eq!(*registered.lock().unwrap(), [1, 1]);
+
+    drop(state);
+    assert_eq!(
+        seen.dropped.load(Ordering::SeqCst),
+        2,
+        "the machine's drop let the sink go"
     );
 }

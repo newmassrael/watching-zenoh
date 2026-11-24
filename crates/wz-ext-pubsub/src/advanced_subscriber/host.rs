@@ -70,7 +70,7 @@ use super::plans::{
     RecoveredView,
 };
 use super::state::{
-    Delivery, Miss, MissHandlers, RecoveryRequest, SampleMissListener, State, StateCell,
+    Delivery, Miss, MissHandlers, OnSample, RecoveryRequest, SampleMissListener, State, StateCell,
 };
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
@@ -549,7 +549,13 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         options: AdvancedSubscriberOptions,
         on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
     ) -> Result<Self, HostError> {
-        Self::declare_with_misses(engine, keyexpr, options, on_sample, MissHandlers::default())
+        Self::declare_with(
+            engine,
+            keyexpr,
+            options,
+            OnSample::boxed(Box::new(on_sample)),
+            MissHandlers::default(),
+        )
     }
 
     /// [`Self::declare`] with one miss listener registered from the start, which never leaves.
@@ -562,14 +568,23 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     ) -> Result<Self, HostError> {
         let mut misses = MissHandlers::default();
         misses.register(Box::new(on_miss));
-        Self::declare_with_misses(engine, keyexpr, options, on_sample, misses)
+        Self::declare_with(
+            engine,
+            keyexpr,
+            options,
+            OnSample::boxed(Box::new(on_sample)),
+            misses,
+        )
     }
 
-    fn declare_with_misses(
+    /// [`Self::declare`] delivering to `on_sample` and reporting holes to the listeners
+    /// `misses` holds from the start, in whichever form each was made: a host whose callbacks are
+    /// lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for them.
+    pub fn declare_with(
         engine: &Arc<E>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
-        on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
+        on_sample: OnSample,
         misses: MissHandlers,
     ) -> Result<Self, HostError> {
         // Upstream's own config check opens its builder, before a single entity is declared.
@@ -594,7 +609,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         let timeout_ms = recovery_query_timeout_ms(options.query_timeout);
         let forms = options.forms.clone();
 
-        let state = State::new(Box::new(on_sample), misses)
+        let state = State::delivering_to(on_sample, misses)
             .with_retransmission(retransmission)
             .with_history(
                 usize::from(history.is_some()),
