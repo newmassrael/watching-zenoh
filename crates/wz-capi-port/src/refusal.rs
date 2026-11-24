@@ -33,7 +33,8 @@ pub enum Refusal {
     /// The call states what this engine does not carry out (a set of links, the one node a query
     /// is addressed to); taken without it, it would be something the caller did not ask for.
     NotHonoured(StatementNotHonoured),
-    /// What the request carries is past what the session's codec can put in one message.
+    /// What the request carries is past what the session's codec can put in one message, or past
+    /// what the session keeps of a query kept past its handler (`HELD_QUERY_PARAMS_BYTES`).
     ExceedsCapacity,
 }
 

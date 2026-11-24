@@ -17,6 +17,9 @@ use alloc::sync::Arc;
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
+use wz_session_core::wire_id::RequestId;
+
+use crate::Refusal;
 
 /// A C-level queryable id, keying what an engine holds for one C declaration: the entity id the
 /// queryable is declared under, of the width [`crate::SubId`] has for the same reason.
@@ -36,12 +39,41 @@ pub trait HeldQuery: Send {
     fn session_closed(&self) -> bool;
 }
 
+/// A query a C program keeps past its handler, as the engine that keeps it names it
+/// ([`QueryHolder::keep_query`]): plain values, so keeping one takes no memory of its own. Each
+/// keep is one hold of the query's `ResponseFinal`, given back once
+/// ([`crate::SessionEngine::release_held`]): a query kept twice is held twice under the same id.
+#[must_use = "a kept query holds its Final until it is released (`SessionEngine::release_held`)"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldQueryId {
+    /// What the engine knows the query's route by: the cooperative engine's generation of the link
+    /// the query came in on.
+    pub generation: u64,
+    /// The query's request id.
+    pub rid: RequestId,
+}
+
 /// What a queryable's callbacks are minted with: the session a query arrives on, as far as a query
 /// needs it.
 pub trait QueryHolder: Send + Sync {
     /// Keep the query `view` describes past its handler. Called from inside the handler, which is
     /// what makes the hold visible before the query's Final would otherwise go out.
     fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery>;
+
+    /// Keep the query `view` describes past its handler, its `ResponseFinal` held until the id
+    /// answered is released ([`crate::SessionEngine::release_held`]). The engine keeps what a
+    /// later reply reads of the query (its key, its parameters, its QoS) beside the hold
+    /// ([`crate::SessionEngine::held_parts`]), so nothing of it is copied out. Called from inside
+    /// the handler, as [`Self::hold_query`] is. `Ok(None)` when `view` is not the query this
+    /// thread's handler answers, which nothing can keep. Refused when the session has no room for
+    /// what the keep holds: [`Refusal::TableFull`] for the query's key, [`Refusal::KeyTooLong`],
+    /// [`Refusal::ExceedsCapacity`] for parameters longer than a hold keeps; [`Refusal::Closed`]
+    /// for a closed session; and [`Refusal::NotBuilt`] by an engine that keeps a query only as a
+    /// [`HeldQuery`], which is the provided answer.
+    fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
+        let _ = view;
+        Err(Refusal::NotBuilt)
+    }
 
     /// Whether the session has been closed: zenoh-pico refuses a reply on a query whose session
     /// is closed before it does anything else.
@@ -327,6 +359,13 @@ mod tests {
         assert_eq!(counts.drops.load(Ordering::SeqCst), 0, "held, not dropped");
         drop(sink);
         assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+    }
+
+    /// A holder that keeps a query only as a `HeldQuery` refuses a keep as not built, so no caller
+    /// reads a query nothing holds.
+    #[test]
+    fn a_holder_that_keeps_no_query_refuses_a_keep_as_not_built() {
+        assert_eq!(Holder(false).keep_query(&Query), Err(Refusal::NotBuilt));
     }
 
     /// A Rust program's closure is called with the query, the responder and the holder it is
