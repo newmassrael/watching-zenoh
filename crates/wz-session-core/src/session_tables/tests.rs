@@ -800,6 +800,59 @@ fn a_matching_verdict_is_recorded_through_shared_tables() {
     );
 }
 
+/// A listener's callback is handed each verdict it is owed once, is owed nothing for a change
+/// undone before it was handed, and stays owed while its callback is out for a call. Turned red by
+/// a walk that hands a verdict twice, that hands a change undone before it was handed, or that
+/// records as handed a verdict whose callback was out.
+#[test]
+fn a_listeners_callback_is_owed_its_verdict_until_it_takes_it() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let listener = tables.declare_matching_listener(filter, 3).unwrap();
+    let take = |callback: &mut u32| Some(*callback);
+    let out = |_: &mut u32| None::<u32>;
+    assert_eq!(
+        tables.take_owed_matching(&mut 0, take),
+        None,
+        "nothing moved"
+    );
+    let peers = Peers::default();
+    peers.declares.set(true);
+    assert_eq!(
+        tables.next_matching_change(&mut 0, &peers),
+        Some((listener, true))
+    );
+    assert_eq!(
+        tables.take_owed_matching(&mut 0, out),
+        None,
+        "its callback out"
+    );
+    assert_eq!(
+        tables.take_owed_matching(&mut 0, take),
+        Some((listener, true, 3)),
+        "still owed once its callback is back"
+    );
+    assert_eq!(tables.take_owed_matching(&mut 0, take), None, "handed once");
+    peers.declares.set(false);
+    assert_eq!(
+        tables.next_matching_change(&mut 0, &peers),
+        Some((listener, false))
+    );
+    peers.declares.set(true);
+    assert_eq!(
+        tables.next_matching_change(&mut 0, &peers),
+        Some((listener, true))
+    );
+    assert_eq!(
+        tables.take_owed_matching(&mut 0, take),
+        None,
+        "a change undone before it was handed owes nothing"
+    );
+}
+
 #[test]
 fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
     let mut tables = Tables::new();
