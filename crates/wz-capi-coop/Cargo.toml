@@ -129,7 +129,7 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
 # the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
 # supplies both (docs/upstream-parity.md section 5a).
-default = ["std"]
+default = ["std", "key-matching-listener"]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
@@ -194,6 +194,12 @@ queryable = [
 # which is pico's default build, the session delivers nothing locally. It needs nothing of
 # session-core that the engine does not already have.
 local-subscriber = []
+# A matching listener declared on a key rather than on an entity's write filter
+# (`SessionEngine::declare_matching_listener`): it judges through a write filter of its own, so
+# the session's filter table and its Interests take one row more for each matching listener. The
+# pico C ABI declares every listener on its entity's filter and leaves it out, so its tables keep
+# no such rows; without it the engine refuses the listener as not built.
+key-matching-listener = []
 # The listening role: a session that takes inbound links off the ports it listens on, each as a
 # face of its own beside the dial role's (`CoopConfig::listen`). The link layer's listener is the
 # stack's (`SessionLinks::open_listener`); a stack that gives none answers the endpoint as

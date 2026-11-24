@@ -182,8 +182,15 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         if cfg!(feature = "liveliness") { 3 } else { 0 }
     );
     assert_eq!(rows.keyexprs, 6);
-    assert_eq!(rows.filters(), Some(7));
-    assert_eq!(rows.interests(), Some(12));
+    // Five matching listeners, each with a filter of its own where a listener may be declared on a
+    // key.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        5
+    } else {
+        0
+    };
+    assert_eq!(rows.filters(), Some(7 + key_listeners));
+    assert_eq!(rows.interests(), Some(7 + key_listeners));
     let count = |part: &str| {
         plan.rows()
             .find(|row| row.part() == part)
@@ -852,6 +859,7 @@ fn an_undeclared_write_filters_id_names_no_later_filter() {
 /// the key; a listener declared on a filter asks nothing. Each Interest's Final goes with its own
 /// holder. Turned red by a second filter or a key's listener that takes the first one's Interest,
 /// or a filter's listener that asks one of its own.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn each_filter_and_each_keys_listener_asks_an_interest_of_its_own() {
     let router = Router::start(CatchAll::None);
@@ -904,4 +912,35 @@ fn each_filter_and_each_keys_listener_asks_an_interest_of_its_own() {
     until(&engine, "the second filter's Final", || {
         router.seen(|s| s.interests) == asked + 5
     });
+}
+
+/// A build that keeps no filter rows for a matching listener on a key refuses one as not built,
+/// its sink let go of. The CONTROL is a listener on an entity's filter, which every build takes.
+#[cfg(not(feature = "key-matching-listener"))]
+#[test]
+fn a_build_without_key_listeners_refuses_one_as_not_built() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let held = Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(held.clone());
+    let sink = MatchingSink::shared(move |_matching: bool| {
+        let _held = &guard;
+    });
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/none", sink, false),
+        Err(Refusal::NotBuilt)
+    );
+    assert_eq!(
+        held.load(Ordering::SeqCst),
+        1,
+        "the refused sink is let go of"
+    );
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/k/none").expect("a row is free");
+    assert!(
+        engine
+            .declare_filter_matching_listener(publisher, MatchingSink::shared(|_matching: bool| {}))
+            .is_ok(),
+        "CONTROL: a listener on an entity's filter"
+    );
 }

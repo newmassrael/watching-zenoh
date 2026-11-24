@@ -6752,15 +6752,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> Result<MatchId, Declined> {
-        // A plane the build does not hold is refused first, with nothing taken. Every refusal
-        // lets `sink` go as it returns, before the caller hears of it.
+        // A build that keeps no filter rows for a listener on a key, or does not hold the plane,
+        // refuses it first, with nothing taken. Every refusal lets `sink` go as it returns, before
+        // the caller hears of it.
+        if !cfg!(feature = "key-matching-listener") {
+            return Err(Declined::NotBuilt);
+        }
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
         let guard = self.live().ok_or(Declined::Closed)?;
-        // The listener is a row of the session's tables holding an Interest of its own: a full
-        // table, a key the session cannot hold or an Interest it cannot hold or number refuses it
-        // before anything is asked, as a listener that could ask no peer would never hear one.
+        // The listener is a row of the session's tables on a write filter of its own, which holds
+        // an Interest: a full table, a key the session cannot hold or an Interest it cannot hold or
+        // number refuses it before anything is asked, as a listener that could ask no peer would
+        // never hear one.
         let declared = tables_mut(&guard.0.session.registry).declare_matching_listener_on(
             plane_of(plane),
             keyexpr,
@@ -6795,7 +6800,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let handle = row_of(id)?;
             let place = {
                 let tables = tables(&core.session.registry);
-                let interest = tables.matching_listeners().get(handle)?.interest();
+                let row = tables.matching_listeners().get(handle)?;
+                // A listener declared on a key ends the Interest of the filter it owns; one declared
+                // on an entity's filter ends none.
+                let owned = row.owns_filter().then_some(row.filter());
+                let interest =
+                    owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
                 interest_rank(&tables, interest)
             };
             let unwatched =
