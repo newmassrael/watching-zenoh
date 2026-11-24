@@ -2046,6 +2046,89 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
 }
 
+/// An open asked for rows of the advanced publishers' caches lays out `ADVANCED_CACHE_ROWS` of them
+/// in its own arena and lends them a row at a time, aligned, none past them; a row goes back to the
+/// session that lent it and no other, and is lent again. An open asked for none lends none.
+#[cfg(feature = "cache-rows")]
+#[test]
+fn an_open_lends_the_rows_of_its_caches_from_its_own_arena() {
+    use crate::arena::{AllocatorMemory, HeldPlaces};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_capi_port::CacheRowLender;
+    use wz_session_core::bounded::ARENA_ALIGN;
+    use wz_session_core::caps::ADVANCED_CACHE_ROWS;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(64, 8).expect("a layout");
+    let open = |router: &Router, held: HeldPlaces| {
+        Engine::open_made_in(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            || config(router),
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            &AllocatorMemory,
+            held,
+        )
+        .expect("the session opens")
+    };
+    let (router, other_router) = (Router::start(CatchAll::None), Router::start(CatchAll::None));
+    let one = open(&router, HeldPlaces::NONE.with_cache_rows(layout));
+    let other = open(&other_router, HeldPlaces::NONE.with_cache_rows(layout));
+    let rows = ADVANCED_CACHE_ROWS;
+    assert!(rows > 0, "the build keeps cache rows");
+    assert_eq!(one.cache_row_counts(), (0, rows));
+
+    let mut lent: Vec<_> = (0..rows)
+        .map(|_| {
+            one.claim_cache_row()
+                .expect("a row for each the limit admits")
+        })
+        .collect();
+    assert!(lent
+        .iter()
+        .all(|row| row.as_ptr() as usize % layout.align() == 0));
+    assert!(ARENA_ALIGN >= layout.align());
+    assert_eq!(one.claim_cache_row(), None, "none past them");
+
+    let theirs = other
+        .claim_cache_row()
+        .expect("the other session's rows are its own");
+    // SAFETY: a row the other session lent and nothing holds.
+    assert!(
+        !unsafe { one.give_back_cache_row(theirs) },
+        "a session takes back no row another lent"
+    );
+    assert_eq!(other.cache_row_counts(), (1, rows));
+    // SAFETY: as above, given back to the session that lent it.
+    assert!(unsafe { other.give_back_cache_row(theirs) });
+
+    let first = lent.pop().expect("a lent row");
+    // SAFETY: a row this session lent and nothing holds.
+    assert!(unsafe { one.give_back_cache_row(first) });
+    assert_eq!(
+        one.claim_cache_row(),
+        Some(first),
+        "a row given back is lent again"
+    );
+    lent.push(first);
+    for row in lent {
+        // SAFETY: each a row this session lent, given back once.
+        assert!(unsafe { one.give_back_cache_row(row) });
+    }
+    assert_eq!(one.cache_row_counts(), (0, rows));
+
+    let none = open(&router, HeldPlaces::NONE);
+    assert_eq!(
+        none.cache_row_counts(),
+        (0, 0),
+        "an open asked for no row lays out none"
+    );
+    assert_eq!(none.claim_cache_row(), None);
+}
+
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
 /// the one it holds, and letting go of it closes the session while the engine itself lives on in
 /// the other holders, as an entity declared on a session that is dropped finds it closed.

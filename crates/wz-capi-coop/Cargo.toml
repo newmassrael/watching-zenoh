@@ -141,6 +141,11 @@ host-sys = ["wz-capi-port/os-sys", "wz-runtime-coop/host-lock-sys"]
 # starts none leaves it out, so the job table, the cut to a read's wait and the run after a step
 # are not in its text (the capability-cost gate measures it).
 ticker = []
+# Rows for the samples of the advanced publishers' caches (`ADVANCED_CACHE_ROWS`): laid out in the
+# session's arena at its open, of the layout the ABI names (`HeldPlaces::with_cache_rows`), and lent
+# to it a row at a time (`CacheRowLender`), so a cache's put copies its sample into the session's
+# memory. A build with no advanced publisher leaves it out, and its plan has no row for them.
+cache-rows = []
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the

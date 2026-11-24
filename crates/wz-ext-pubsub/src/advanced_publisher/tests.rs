@@ -212,7 +212,7 @@ impl AdvancedPublisherPlane for RecordingPlane {
             Some(rows) => {
                 let (lender, _out) = crate::advanced_cache::test_rows::HeapRows::new(rows);
                 CacheStore::over_rows(config, Box::new(lender))
-                    .ok_or_else(|| AdvancedPublisherError::Plane(String::from("cache rows")))
+                    .ok_or(AdvancedPublisherError::CacheRowsExhausted)
             }
         }
     }
@@ -739,6 +739,9 @@ fn a_cache_with_too_few_rows_is_refused_before_anything_is_declared() {
         options,
         SessionZid::from([0x01]),
     );
-    assert!(matches!(refused, Err(AdvancedPublisherError::Plane(_))));
+    assert!(matches!(
+        refused,
+        Err(AdvancedPublisherError::CacheRowsExhausted)
+    ));
     assert!(plane.events().is_empty(), "nothing was declared");
 }

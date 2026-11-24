@@ -395,6 +395,11 @@ pub enum AdvancedPublisherError {
     /// `pub type EntityId = u32;`). Upstream's counter wraps onto ids a live
     /// entity may still hold; wz refuses the declaration instead.
     EntityIdsExhausted,
+    /// The session keeps its caches' samples in rows it reserved at its open
+    /// (`ADVANCED_CACHE_ROWS`), and fewer are free than the cache keeps samples.
+    /// Refused before anything is declared; upstream's cache takes the heap
+    /// instead.
+    CacheRowsExhausted,
 }
 
 /// A plain publisher a plane declared for an advanced one, with the entity id it

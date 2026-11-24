@@ -600,6 +600,9 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
+            // A cache deeper than the session's free rows is a full room, as every fixed room of
+            // this ABI answers it.
+            Err(AdvancedPublisherError::CacheRowsExhausted) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
         let mut boxed = Box::new(AdvPubState {
