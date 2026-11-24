@@ -1312,7 +1312,7 @@ struct NodeSaved {
 /// When the capture it stopped in is still a PREFIX of the capture now (the same
 /// lists, nothing trimmed from a list's front: see
 /// `Dissection::capture_order_since`). A message that names a node is folded
-/// like any other: each list is kept apart ([`ListPart`]) and the lists are
+/// like any other: each list is kept apart (`ListPart`) and the lists are
 /// joined at every call, so the bytes a direction carried before its handshake
 /// are credited to the node it names, and a node a late handshake names on an
 /// earlier list is numbered before the nodes later lists named, without folding
