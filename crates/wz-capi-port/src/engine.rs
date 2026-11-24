@@ -33,7 +33,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
-use crate::entity_place::{CacheRowLender, PlaceLender};
+use crate::entity_place::{CacheBytes, PlaceLender};
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
@@ -304,10 +304,10 @@ pub trait SessionEngine: Send + Sync + 'static {
         None
     }
 
-    /// Where the samples of the session's advanced publishers' caches lie when the session's
-    /// memory lays rows out for them at its open. `None`, the provided answer, from an engine
-    /// whose sessions keep no such rows, whose caches keep their samples on the heap.
-    fn cache_row_lender(&self) -> Option<&dyn CacheRowLender> {
+    /// The ring the session's advanced publishers' caches keep their samples in, when the session
+    /// reserves one at its open. `None`, the provided answer, from an engine whose sessions keep
+    /// none, whose caches keep their samples on the heap.
+    fn cache_bytes(&self) -> Option<&dyn CacheBytes> {
         None
     }
 

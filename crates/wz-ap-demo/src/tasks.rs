@@ -964,7 +964,7 @@ fn emit_one_push(
             e @ (PublishAliasError::ExceedsCapacity
             | PublishAliasError::TimestampExhausted
             | PublishAliasError::ClockUntrusted
-            | PublishAliasError::ExceedsCacheRow),
+            | PublishAliasError::ExceedsCacheRoom),
         ) => {
             log::error!(
                 "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \

@@ -221,11 +221,11 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
-    + CACHE_ROW_ROWS;
+    + CACHE_RING_ROWS;
 
-/// The flags and the rows of the samples the advanced publishers' caches keep
-/// ([`HeldPlaces::with_cache_rows`]), in a build that lays them out.
-const CACHE_ROW_ROWS: usize = 2 * cfg!(feature = "cache-rows") as usize;
+/// The flag and the span of the ring the advanced publishers' caches keep their samples in
+/// (`advanced-cache`).
+const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -267,9 +267,6 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
 pub struct HeldPlaces {
     handle: Option<Layout>,
     entities: [Option<Layout>; ENTITY_KINDS],
-    /// The layout of a row of the advanced publishers' caches, none for no row.
-    #[cfg(feature = "cache-rows")]
-    cache_rows: Option<Layout>,
 }
 
 impl HeldPlaces {
@@ -277,8 +274,6 @@ impl HeldPlaces {
     pub const NONE: Self = Self {
         handle: None,
         entities: [None; ENTITY_KINDS],
-        #[cfg(feature = "cache-rows")]
-        cache_rows: None,
     };
 
     /// A place of `layout` for the ABI's handle of the session, and none for its entities.
@@ -286,8 +281,6 @@ impl HeldPlaces {
         Self {
             handle: Some(layout),
             entities: [None; ENTITY_KINDS],
-            #[cfg(feature = "cache-rows")]
-            cache_rows: None,
         }
     }
 
@@ -296,14 +289,6 @@ impl HeldPlaces {
         if let Some(place) = self.entities.get_mut(kind as usize) {
             *place = Some(layout);
         }
-        self
-    }
-
-    /// These places, with a row of `layout` for each sample the session's advanced publishers'
-    /// caches keep together (`ADVANCED_CACHE_ROWS`).
-    #[cfg(feature = "cache-rows")]
-    pub fn with_cache_rows(mut self, layout: Layout) -> Self {
-        self.cache_rows = Some(layout);
         self
     }
 }
@@ -631,11 +616,10 @@ pub struct SessionRows {
     held_queries: usize,
     /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
     key_bytes: usize,
-    /// The rows of the samples the session's advanced publishers' caches keep together
-    /// (`ADVANCED_CACHE_ROWS`), each of the layout the ABI names, so laid out with its places
-    /// ([`ArenaPlan::holding`]).
-    #[cfg(feature = "cache-rows")]
-    cache_rows: usize,
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`), none for no ring.
+    #[cfg(feature = "advanced-cache")]
+    cache_bytes: usize,
 }
 
 impl SessionRows {
@@ -661,11 +645,12 @@ impl SessionRows {
         self.key_bytes
     }
 
-    /// How many rows the session keeps for the samples of its advanced publishers' caches
-    /// (`ADVANCED_CACHE_ROWS`).
-    #[cfg(feature = "cache-rows")]
-    pub fn cache_rows(&self) -> usize {
-        self.cache_rows
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
+    /// ([`CacheSpan::claimed`]).
+    #[cfg(feature = "advanced-cache")]
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
     }
 }
 
@@ -678,9 +663,6 @@ pub struct PlaceRows {
     /// The bytes of each place the ABI keeps an entity of a kind in, by [`EntityKind`], none for
     /// no place.
     entity_bytes: [usize; ENTITY_KINDS],
-    /// The bytes and the count of the rows of the advanced publishers' caches, none for no row.
-    #[cfg(feature = "cache-rows")]
-    cache_rows: (usize, usize),
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
@@ -705,14 +687,6 @@ impl PlaceRows {
         {
             if bytes != 0 {
                 *cells = Some(lend.byte_cells(bytes, rows.of_kind(kind)));
-            }
-        }
-        // The cache rows last, as the plan laid them out after the entities' places.
-        #[cfg(feature = "cache-rows")]
-        {
-            let (bytes, count) = self.cache_rows;
-            if bytes != 0 {
-                entities.cache_rows = Some(lend.byte_cells(bytes, count));
             }
         }
         PlaceTables { handle, entities }
@@ -1061,13 +1035,21 @@ impl ArenaPlan {
         } else {
             0
         };
-        #[cfg(feature = "cache-rows")]
+        #[cfg(feature = "advanced-cache")]
         {
-            plan.session.cache_rows = plan.lent(
-                "ADVANCED_CACHE_ROWS",
-                Quota::at_most(caps::ADVANCED_CACHE_ROWS),
-                caps::ADVANCED_CACHE_ROWS,
+            plan.session.cache_bytes = plan.lent(
+                "ADVANCED_CACHE_BYTES",
+                Quota::at_most(caps::ADVANCED_CACHE_BYTES),
+                caps::ADVANCED_CACHE_BYTES,
             );
+            if plan.session.cache_bytes != 0 {
+                plan.put_table(
+                    ["cache ring flag", "cache ring"],
+                    "ADVANCED_CACHE_BYTES",
+                    1,
+                    plan.session.cache_bytes,
+                );
+            }
         }
         plan.put_entities();
         plan.settled()
@@ -1309,8 +1291,7 @@ impl ArenaPlan {
 
     /// The plan with the places `held` names, lent after every other row: the ABI's handle of the
     /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
-    /// each row the session keeps of the kind, then, with `cache-rows`, a row of the layout
-    /// [`HeldPlaces::with_cache_rows`] names for each sample the caches keep (`ADVANCED_CACHE_ROWS`). What the ABI keeps there takes no memory of its
+    /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
     /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
     /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
     /// already is not laid out again. Refused as past the address space when a place asks for more
@@ -1347,22 +1328,6 @@ impl ArenaPlan {
             self.put_table([flags, places], basis, count, place.size());
             if let Some(bytes) = self.places.entity_bytes.get_mut(kind as usize) {
                 *bytes = place.size();
-            }
-        }
-        #[cfg(feature = "cache-rows")]
-        if let Some(row) = held.cache_rows {
-            if row.align() > ARENA_ALIGN {
-                return Err(ArenaRefused::TooLarge);
-            }
-            let count = self.session.cache_rows;
-            if row.size() != 0 && count != 0 && self.places.cache_rows.0 == 0 {
-                self.put_table(
-                    ["cache row flags", "cache rows"],
-                    "ADVANCED_CACHE_ROWS",
-                    count,
-                    row.size(),
-                );
-                self.places.cache_rows = (row.size(), count);
             }
         }
         self.settled()
@@ -1806,18 +1771,12 @@ impl HandlePlace {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EntityPlaces {
     cells: [Option<LentByteCells>; ENTITY_KINDS],
-    /// The rows of the advanced publishers' caches, if the arena holds them: kept with the
-    /// entities' places, as they are lent and given back as those are.
-    #[cfg(feature = "cache-rows")]
-    cache_rows: Option<LentByteCells>,
 }
 
 impl EntityPlaces {
     /// No place of any kind.
     pub(crate) const NONE: Self = Self {
         cells: [None; ENTITY_KINDS],
-        #[cfg(feature = "cache-rows")]
-        cache_rows: None,
     };
 
     /// The table of `kind`'s places, if the arena holds one.
@@ -1852,38 +1811,6 @@ impl EntityPlaces {
         }
     }
 
-    /// A free row for a sample of an advanced publisher's cache, or `None` when every one is lent
-    /// or the arena holds none. The row is the ABI's until it gives it back
-    /// ([`Self::give_back_cache_row`]).
-    #[cfg(feature = "cache-rows")]
-    pub(crate) fn claim_cache_row(&self) -> Option<NonNull<u8>> {
-        let buffer = self.cache_rows?.claim()?;
-        let (base, _) = buffer.raw();
-        // The claim is held by the ABI's row from here and ended by `give_back_cache_row`, not by
-        // the buffer's drop.
-        core::mem::forget(buffer);
-        NonNull::new(base)
-    }
-
-    /// Give back `row`: `false`, and it stays lent, when it is no row these tables lent.
-    ///
-    /// # Safety
-    /// `row` is a row a session's tables lent the ABI and the ABI has not given back, and nothing
-    /// lies there any more.
-    #[cfg(feature = "cache-rows")]
-    pub(crate) unsafe fn give_back_cache_row(&self, row: NonNull<u8>) -> bool {
-        // SAFETY: the caller's: the claim the row held ends here, once.
-        self.cache_rows
-            .is_some_and(|cells| unsafe { cells.release_at(row) })
-    }
-
-    /// How many rows of the caches are lent, and how many the arena holds.
-    #[cfg(all(test, feature = "cache-rows"))]
-    pub(crate) fn cache_row_counts(&self) -> (usize, usize) {
-        self.cache_rows
-            .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))
-    }
-
     /// How many places of `kind` are lent, and how many the arena holds.
     #[cfg(test)]
     pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
@@ -1910,6 +1837,47 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
     let (base, len) = buffer.raw();
     core::mem::forget(buffer);
     Some((NonNull::new(base)?, len))
+}
+
+/// The span of a session's arena its advanced publishers' caches keep their ring in
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
+/// it holds an empty ring, and lent under the engine's lock of its own
+/// (`wz_capi_port::CacheBytes`).
+#[cfg(feature = "advanced-cache")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CacheSpan {
+    base: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a span is an address in a session's arena and its length; its bytes are reached only
+// through the engine's lock of the span, so handing the span to another thread shares nothing.
+#[cfg(feature = "advanced-cache")]
+unsafe impl Send for CacheSpan {}
+
+#[cfg(feature = "advanced-cache")]
+impl CacheSpan {
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
+    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
+        let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(bytes),
+            left: 0,
+        }))?;
+        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
+        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
+        Ok(Self { base, len })
+    }
+
+    /// The span's bytes.
+    ///
+    /// # Safety
+    /// The caller holds the span alone for as long as the bytes are borrowed, and the arena the
+    /// span lies in stands that long.
+    pub(crate) unsafe fn bytes<'a>(self) -> &'a mut [u8] {
+        // SAFETY: the caller's; the span is `len` bytes of the arena.
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    }
 }
 
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let

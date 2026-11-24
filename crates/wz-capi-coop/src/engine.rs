@@ -45,6 +45,8 @@ use portable_atomic::AtomicU64;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(feature = "advanced-cache")]
+use crate::arena::CacheSpan;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, EntityKind, EntityPlace,
     EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables, SessionArena,
@@ -665,6 +667,15 @@ struct OpenDecided {
     key_forms: LinkKeyForms,
 }
 
+/// What the open lent the engine apart from the session's state ([`CoopEngine::core_of`]): the
+/// place of the ABI's handle, and the ring of the advanced publishers' caches, which the engine
+/// locks apart from the state.
+struct LentApart {
+    handle_place: Option<HandlePlace>,
+    #[cfg(feature = "advanced-cache")]
+    cache: Option<CacheSpan>,
+}
+
 /// What the arena of a session lends it at its open ([`lend_session`]). The arena is the last
 /// field, so a value of this let go of whole lets every table lent from it go first.
 struct SessionLent {
@@ -684,6 +695,9 @@ struct SessionLent {
     ended: EndedLegs,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
+    /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
+    #[cfg(feature = "advanced-cache")]
+    cache: Option<CacheSpan>,
     arena: SessionArena,
 }
 
@@ -698,6 +712,8 @@ struct StateTables {
     keys: LentKeys,
     #[cfg(feature = "query")]
     legs: Rows<Ended, { usize::MAX }>,
+    #[cfg(feature = "advanced-cache")]
+    cache: Option<LentByteCells>,
 }
 
 impl SessionRows {
@@ -713,6 +729,8 @@ impl SessionRows {
             keys: lend.keys(self.key_bytes(), longest),
             #[cfg(feature = "query")]
             legs: lend.table(self.gets().legs().unwrap_or(usize::MAX)),
+            #[cfg(feature = "advanced-cache")]
+            cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
         }
     }
 }
@@ -750,6 +768,8 @@ fn lend_session(
         keys,
         #[cfg(feature = "query")]
         legs,
+        #[cfg(feature = "advanced-cache")]
+        cache,
     } = plan
         .session()
         .lent_from(&mut lend, config.limits.max_keyexpr_bytes_held());
@@ -758,6 +778,10 @@ fn lend_session(
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    #[cfg(feature = "advanced-cache")]
+    let cache = cache
+        .map(|cells| CacheSpan::claimed(cells, plan.session().cache_bytes()))
+        .transpose()?;
     let ClaimedPlaces {
         lane_area,
         lane_bytes,
@@ -810,6 +834,8 @@ fn lend_session(
         ended: EndedLegs::over(legs),
         handle_place,
         places,
+        #[cfg(feature = "advanced-cache")]
+        cache,
         arena,
     })
 }
@@ -978,6 +1004,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The place the arena lent the ABI's handle of the session, when the open was asked for one
     /// ([`CoopDrive::handle_place`]).
     handle_place: Option<HandlePlace>,
+    /// The ring the session's advanced publishers' caches keep their samples in, under a lock of
+    /// its own, which nothing that holds the session's lock takes ([`wz_capi_port::CacheBytes`]).
+    #[cfg(feature = "advanced-cache")]
+    cache: Mutex<Option<CacheSpan>>,
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
@@ -3943,9 +3973,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "shared-key-ids")]
             key_forms,
         };
-        let (core, handle_place) =
-            Self::core_of(links, clock, entropy, config, decided, &plan, lent);
-        Ok(Self::engine_of(core, handle_place))
+        let (core, apart) = Self::core_of(links, clock, entropy, config, decided, &plan, lent);
+        Ok(Self::engine_of(core, apart))
     }
 
     /// The session's state over `links`, on `clock` and `entropy`, out of `config`, what its open
@@ -3961,7 +3990,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         decided: OpenDecided,
         plan: &ArenaPlan,
         lent: SessionLent,
-    ) -> (Core<L, C>, Option<HandlePlace>) {
+    ) -> (Core<L, C>, LentApart) {
         let OpenDecided {
             policy,
             zid: wire,
@@ -4067,13 +4096,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             places: lent.places,
             arena: lent.arena,
         };
-        (core, lent.handle_place)
+        let apart = LentApart {
+            handle_place: lent.handle_place,
+            #[cfg(feature = "advanced-cache")]
+            cache: lent.cache,
+        };
+        (core, apart)
     }
 
-    /// The engine over `core`, held where its own handle (`this`) reaches it, with the ABI's
-    /// handle's place `handle_place`. Out of line, so the open's measure shows it apart.
+    /// The engine over `core`, held where its own handle (`this`) reaches it, with what the open
+    /// lent apart from the state (`apart`). Out of line, so the open's measure shows it apart.
     #[inline(never)]
-    fn engine_of(core: Core<L, C>, handle_place: Option<HandlePlace>) -> Arc<Self> {
+    fn engine_of(core: Core<L, C>, apart: LentApart) -> Arc<Self> {
+        let LentApart {
+            handle_place,
+            #[cfg(feature = "advanced-cache")]
+            cache,
+        } = apart;
         let samples = core.lane.clone();
         let wire = core.wire_zid;
         #[cfg(feature = "queryable")]
@@ -4129,6 +4168,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             deliveries: Deliveries::new(),
             arena_bytes,
             handle_place,
+            #[cfg(feature = "advanced-cache")]
+            cache: Mutex::new(cache),
             #[cfg(test)]
             takes: Takes::default(),
             this: this.clone(),
@@ -4179,12 +4220,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(test)]
     pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
         self.core.lock().0.places.counts(kind)
-    }
-
-    /// How many rows of the caches the ABI holds now, and how many the session's arena lends.
-    #[cfg(all(test, feature = "cache-rows"))]
-    pub(crate) fn cache_row_counts(&self) -> (usize, usize) {
-        self.core.lock().0.places.cache_row_counts()
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
@@ -6460,8 +6495,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(self)
     }
 
-    #[cfg(feature = "cache-rows")]
-    fn cache_row_lender(&self) -> Option<&dyn wz_capi_port::CacheRowLender> {
+    #[cfg(feature = "advanced-cache")]
+    fn cache_bytes(&self) -> Option<&dyn wz_capi_port::CacheBytes> {
         Some(self)
     }
 
@@ -7488,23 +7523,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     }
 }
 
-/// The rows the session's arena laid out at its open for the samples of its advanced publishers'
-/// caches ([`HeldPlaces::with_cache_rows`]), lent and given back under the session's lock, as
-/// every table of its arena is.
-#[cfg(feature = "cache-rows")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheRowLender
+/// The ring the session's arena laid out at its open for its advanced publishers' caches
+/// ([`CacheSpan`]), lent under a lock of its own: a cache's put and its queryable's answer take
+/// it, from whatever thread, and neither takes the session's lock with it.
+#[cfg(feature = "advanced-cache")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes
     for CoopEngine<L, C>
 {
-    /// Closed or not, as a place is: a row is the session's memory and not its state.
-    fn claim_cache_row(&self) -> Option<core::ptr::NonNull<u8>> {
-        self.core.lock().0.places.claim_cache_row()
-    }
-
-    /// Closed or not: the arena the row lies in is the session's until the engine is let go,
-    /// which the cache that holds the row holds off.
-    unsafe fn give_back_cache_row(&self, row: core::ptr::NonNull<u8>) -> bool {
-        // SAFETY: the caller's.
-        unsafe { self.core.lock().0.places.give_back_cache_row(row) }
+    /// Closed or not: the ring is the session's memory and not its state, and stands until the
+    /// engine is let go, which the caches that hold the engine hold off. A plan of no ring lends
+    /// an empty span.
+    fn with_cache_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+        let held = self.cache.lock();
+        match *held {
+            // SAFETY: the span is the arena's, lent to this lock alone, which is held for the call,
+            // and the arena stands while the engine does.
+            Some(span) => with(unsafe { span.bytes() }),
+            None => with(&mut []),
+        }
     }
 }
 

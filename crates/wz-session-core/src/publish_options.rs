@@ -738,13 +738,12 @@ pub enum PublishError {
     /// reports to the caller, as zenoh-pico's put does. No wire bytes were emitted. Under zenoh's
     /// profile a congestion drop is the publication's success, and this is never answered.
     HeldConduit,
-    /// An advanced publisher's sample was refused because its cache keeps samples in rows of
-    /// fixed room (`ADVANCED_CACHE_SAMPLE_BYTES` of payload and attachment, a key of
-    /// `MAX_KEYEXPR_BYTES`, a schema of `MAX_ENCODING_SCHEMA_BYTES`) and the sample is larger: a
-    /// sample sent and not kept would leave a recovering subscriber's query empty. No wire bytes
-    /// were emitted, and the sample took no time and no sequence number. Upstream keeps a cached
-    /// sample of any size on the heap.
-    ExceedsCacheRow,
+    /// An advanced publisher's sample was refused because its cache keeps samples as records of
+    /// its session's ring (`ADVANCED_CACHE_BYTES`) and the sample's record is longer than the
+    /// whole ring: a sample sent and not kept would leave a recovering subscriber's query empty.
+    /// No wire bytes were emitted, and the sample took no time and no sequence number. Upstream
+    /// keeps a cached sample of any size on the heap.
+    ExceedsCacheRoom,
 }
 
 impl core::fmt::Display for PublishError {
@@ -790,10 +789,10 @@ impl core::fmt::Display for PublishError {
                 "PublishError: another sender held this droppable Push's conduit \
                  and the queue profile drops it at once; the Push was not emitted"
             ),
-            PublishError::ExceedsCacheRow => write!(
+            PublishError::ExceedsCacheRoom => write!(
                 f,
-                "PublishError: the sample is larger than a row of its publisher's \
-                 cache; the Push was not emitted"
+                "PublishError: the sample's record is longer than its session's \
+                 cache ring; the Push was not emitted"
             ),
         }
     }

@@ -600,9 +600,9 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
-            // A cache deeper than the session's free rows is a full room, as every fixed room of
-            // this ABI answers it.
-            Err(AdvancedPublisherError::CacheRowsExhausted) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            // A session whose ring of cached samples holds no record has no room for a cache, as
+            // every fixed room of this ABI answers it.
+            Err(AdvancedPublisherError::CacheRingUnavailable) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
         let mut boxed = Box::new(AdvPubState {
@@ -710,7 +710,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         // early return below still honours the C side's ownership transfer.
         let buf = crate::pubsub::take_moved_bytes(payload);
         // The moved attachment and encoding are held here for as long as the put reads them and
-        // lent to it, as a plain put's are: the put copies them only into its cache's row.
+        // lent to it, as a plain put's are: the put copies them only into its cache's record.
         let mut attachment = None;
         let mut encoding = None;
         if !options.is_null() {
@@ -751,10 +751,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
 /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
 /// a session with no time left, and the `trusted-only` policy withholding an untrusted clock's
 /// stamp, which pico has no policy for and whose sample is as unmade. A sample the queue profile
-/// dropped behind a held conduit answers pico's failed send, as a plain put does. A sample larger
-/// than a row of the cache answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as every fixed room of this ABI
-/// does when it is full: pico's cache would have copied it to the heap, and a cache of rows has no
-/// room for it.
+/// dropped behind a held conduit answers pico's failed send, as a plain put does. A sample whose
+/// record is longer than the session's ring of cached samples answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`,
+/// as every fixed room of this ABI does when it is full: pico's cache would have copied it to the
+/// heap, and the ring has no room for it.
 fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
@@ -762,7 +762,7 @@ fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
             Z_ERR_TIMESTAMP_GENERATION_FAILED
         }
         Err(PublishError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
-        Err(PublishError::ExceedsCacheRow) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        Err(PublishError::ExceedsCacheRoom) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -1899,9 +1899,9 @@ mod tests {
             "a sample dropped behind a held conduit answers pico's failed send"
         );
         assert_eq!(
-            advanced_publish_code(Err(PublishError::ExceedsCacheRow)),
+            advanced_publish_code(Err(PublishError::ExceedsCacheRoom)),
             Z_ERR_SYSTEM_OUT_OF_MEMORY,
-            "a sample larger than a row of the cache answers the full room's code"
+            "a sample longer than the cache ring answers the full room's code"
         );
     }
 

@@ -48,16 +48,12 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::alloc::Layout;
-use core::mem::MaybeUninit;
-use core::ptr::NonNull;
 
-use wz_session_core::caps;
 use wz_session_core::publish_options::PublishError;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::sample::{
-    BoundedEncoding, EncodingHint, EncodingRef, QosLevel, SampleKind, SourceInfo, TimestampHint,
+    EncodingHint, EncodingRef, QosLevel, SampleKind, SourceInfo, TimestampHint,
 };
 
 use crate::prelude::*;
@@ -308,9 +304,14 @@ impl Default for CacheConfig {
 /// What a ring's lock panics with when a panic of its holder poisoned it.
 const RING_POISONED: &str = "advanced cache ring mutex poisoned";
 
-/// A sample as a put hands it to its cache, borrowed where the put holds it: a ring of rows copies
-/// it into a row ([`CacheRow`]), a ring on the heap into a [`CachedSample`] of its own. The stamps
-/// a put takes only once the sample is known to fit go to [`CacheStore::retain`] beside it.
+mod ring;
+
+use ring::RecordRing;
+
+/// A sample as a put hands it to its cache, borrowed where the put holds it: a session's ring
+/// copies it into a record of its own length ([`CacheBytes`]), a cache on the heap into a
+/// [`CachedSample`]. The stamps a put takes only once the sample is known to fit go to
+/// [`CacheStore::retain`] beside it.
 pub struct SampleBody<'a> {
     /// The key the sample was published on.
     pub keyexpr: &'a str,
@@ -329,23 +330,6 @@ pub struct SampleBody<'a> {
 }
 
 impl SampleBody<'_> {
-    /// Whether a row has room for the sample: a key a session holds
-    /// (`MAX_KEYEXPR_BYTES`), a payload and an attachment together within
-    /// `ADVANCED_CACHE_SAMPLE_BYTES`, and a schema a kept encoding holds.
-    fn fits_a_row(&self) -> bool {
-        let value = self
-            .payload
-            .len()
-            .checked_add(self.attachment.map_or(0, <[u8]>::len));
-        let schema = self
-            .encoding
-            .and_then(|encoding| encoding.schema)
-            .map_or(0, <[u8]>::len);
-        self.keyexpr.len() <= caps::MAX_KEYEXPR_BYTES
-            && value.is_some_and(|value| value <= caps::ADVANCED_CACHE_SAMPLE_BYTES)
-            && schema <= caps::MAX_ENCODING_SCHEMA_BYTES
-    }
-
     /// A sample of its own on the heap, these parts copied.
     fn to_cached(&self, source_info: Option<SourceInfo>, timestamp: TimestampHint) -> CachedSample {
         self.keeping_shared(
@@ -389,236 +373,49 @@ impl CachedSample {
     }
 }
 
-/// The bytes of a row's room: the key, then the payload and the attachment.
-const ROW_ROOM: usize = caps::MAX_KEYEXPR_BYTES + caps::ADVANCED_CACHE_SAMPLE_BYTES;
-
-/// One row of a cache's ring in memory a host lends ([`RowLender`]): a sample copied in where the
-/// put held it, so a put takes no memory of its own. Laid out by [`CacheRow::LAYOUT`], written in
-/// place and never moved, and never made by value: its room is larger than a stack can spare.
-pub struct CacheRow {
-    /// The next row of the ring: the oldest after the newest.
-    next: NonNull<CacheRow>,
-    /// What the row holds of its sample beside its bytes; `None` while it holds none.
-    head: Option<RowHead>,
-    /// The sample's key, then its payload, then its attachment, as long as `head` says.
-    room: MaybeUninit<[u8; ROW_ROOM]>,
+/// The bytes of a session's ring of cached samples (`ADVANCED_CACHE_BYTES`), which every cache of
+/// the session keeps its records in: memory the session reserved at its open, zeroed then, and
+/// lent to one caller at a time under a lock of its own.
+pub trait CacheBytes: Send + Sync {
+    /// Call `with` with the ring's bytes, alone. `with` calls into nothing that takes the bytes
+    /// again.
+    fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8]));
 }
 
-/// What a row holds of its sample beside the bytes in its room.
-struct RowHead {
-    key_len: usize,
-    payload_len: usize,
-    attachment_len: Option<usize>,
-    encoding: Option<BoundedEncoding>,
-    source_info: Option<SourceInfo>,
-    timestamp: TimestampHint,
-    kind: SampleKind,
-    #[cfg(feature = "transport-shm")]
-    shared: Option<wz_session_core::extshm::ShmSendHandle>,
+/// A cache's records in its session's ring: the ring, the cache's owner id there, and how many
+/// records it keeps at most.
+struct RingCache {
+    bytes: Box<dyn CacheBytes>,
+    owner: u32,
+    max_samples: usize,
 }
 
-impl CacheRow {
-    /// The layout a host lays each row out by.
-    pub const LAYOUT: Layout = Layout::new::<CacheRow>();
-
-    /// Make an empty row at `row`, whose next row is `next`.
-    ///
-    /// # Safety
-    /// `row` is sized and aligned for a row and holds none.
-    unsafe fn init(row: NonNull<CacheRow>, next: NonNull<CacheRow>) {
-        let at = row.as_ptr();
-        // SAFETY: the caller's; the room is left as it is, read only as far as a head says.
-        unsafe {
-            core::ptr::addr_of_mut!((*at).next).write(next);
-            core::ptr::addr_of_mut!((*at).head).write(None);
-        }
-    }
-
-    /// `bytes` at `offset` of the room. The caller has checked they fit.
-    fn put_bytes(&mut self, offset: usize, bytes: &[u8]) {
-        debug_assert!(offset + bytes.len() <= ROW_ROOM);
-        // SAFETY: the range lies in the room, which this row holds alone, and `bytes` lies
-        // elsewhere: it is the put's.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.room.as_mut_ptr().cast::<u8>().add(offset),
-                bytes.len(),
-            );
-        }
-    }
-
-    /// `len` bytes at `offset` of the room, which a sample wrote.
-    fn bytes(&self, offset: usize, len: usize) -> &[u8] {
-        debug_assert!(offset + len <= ROW_ROOM);
-        // SAFETY: a head counts only bytes its sample wrote into the room, at these offsets.
-        unsafe { core::slice::from_raw_parts(self.room.as_ptr().cast::<u8>().add(offset), len) }
-    }
-
-    /// Write `body` and its stamps into the row, and hand back what it held before.
-    fn write(
-        &mut self,
-        body: SampleBody<'_>,
-        source_info: Option<SourceInfo>,
-        timestamp: TimestampHint,
-    ) -> Option<RowHead> {
-        let key_len = body.keyexpr.len();
-        let payload_len = body.payload.len();
-        self.put_bytes(0, body.keyexpr.as_bytes());
-        self.put_bytes(key_len, body.payload);
-        if let Some(attachment) = body.attachment {
-            self.put_bytes(key_len + payload_len, attachment);
-        }
-        let head = RowHead {
-            key_len,
-            payload_len,
-            attachment_len: body.attachment.map(<[u8]>::len),
-            encoding: body
-                .encoding
-                .and_then(|encoding| BoundedEncoding::of(encoding).ok()),
-            source_info,
-            timestamp,
-            kind: body.kind,
-            #[cfg(feature = "transport-shm")]
-            shared: body.shared,
-        };
-        self.head.replace(head)
-    }
-
-    /// The sample the row holds, read where it lies.
-    fn held(&self) -> Option<Held<'_>> {
-        let head = self.head.as_ref()?;
-        let keyexpr = core::str::from_utf8(self.bytes(0, head.key_len)).ok()?;
-        let payload = self.bytes(head.key_len, head.payload_len);
-        #[cfg(feature = "transport-shm")]
-        let payload = head
-            .shared
-            .as_ref()
-            .map_or(payload, |shared| shared.bytes());
-        Some(Held {
-            keyexpr,
-            bytes: payload,
-            source_info: head.source_info.as_ref(),
-            timestamp: &head.timestamp,
-            kind: head.kind,
-            encoding: head.encoding.as_ref().map(BoundedEncoding::view),
-            attachment: head
-                .attachment_len
-                .map(|len| self.bytes(head.key_len + head.payload_len, len)),
-            #[cfg(feature = "transport-shm")]
-            shared: head.shared.as_ref(),
-        })
-    }
-}
-
-/// Where a cache's rows lie: memory a host lends a cache a row at a time and takes back when the
-/// cache lets the row go, as a session lends rows of the memory it reserved at its open.
-///
-/// # Safety
-/// A row [`Self::claim_row`] hands out is sized and aligned by [`CacheRow::LAYOUT`], held by
-/// nothing else, and stays where it is until it is given back to this lender.
-pub unsafe trait RowLender: Send + Sync {
-    /// A free row, or `None` when every row is lent.
-    fn claim_row(&self) -> Option<NonNull<u8>>;
-
-    /// Take back `row`.
-    ///
-    /// # Safety
-    /// `row` is one this lender handed out and has not taken back, and holds nothing any more.
-    unsafe fn give_back_row(&self, row: NonNull<u8>);
-}
-
-/// A ring of rows a host lent: a cycle of rows, each linked to the next, the oldest held sample
-/// first.
-struct LentRing {
-    /// The oldest row that holds a sample, or the first to be written while none does.
-    oldest: NonNull<CacheRow>,
-    /// The row the next sample is written to: the oldest, once every row holds one.
-    next_free: NonNull<CacheRow>,
-    /// How many rows the ring holds.
-    rows: usize,
-    /// How many of them hold a sample.
-    held: usize,
-    lender: Box<dyn RowLender>,
-}
-
-// SAFETY: the rows are the ring's alone from their claim to their give-back, and are reached only
-// through it, under the store's lock; the lender is `Send + Sync`.
-unsafe impl Send for LentRing {}
-
-impl LentRing {
-    /// A ring of `rows` rows `lender` lends, or `None` when it lends fewer, with every row it
-    /// lent given back.
-    fn claim(lender: Box<dyn RowLender>, rows: usize) -> Option<Self> {
-        let first = lender.claim_row()?.cast::<CacheRow>();
-        // SAFETY: the lender's: the row is a row's place, and the ring's alone.
-        unsafe { CacheRow::init(first, first) };
-        let mut ring = Self {
-            oldest: first,
-            next_free: first,
-            rows: 1,
-            held: 0,
-            lender,
-        };
-        let mut last = first;
-        while ring.rows < rows {
-            // A refusal drops the ring, which gives back every row it holds.
-            let row = ring.lender.claim_row()?.cast::<CacheRow>();
-            // SAFETY: as for the first; the new row closes the cycle and `last` points at it.
-            unsafe {
-                CacheRow::init(row, first);
-                (*last.as_ptr()).next = row;
+impl RingCache {
+    /// Run `with` over the session's ring, which every ring cache was made over
+    /// ([`CacheStore::in_ring`]).
+    fn with_ring(&self, with: &mut dyn FnMut(&mut RecordRing<'_>)) {
+        self.bytes.with_bytes(&mut |span| {
+            if let Some(mut ring) = RecordRing::over(span) {
+                with(&mut ring);
             }
-            last = row;
-            ring.rows += 1;
-        }
-        Some(ring)
-    }
-
-    /// Write a sample into the next free row, the oldest once every row holds one, and hand back
-    /// what that row held.
-    fn retain(
-        &mut self,
-        body: SampleBody<'_>,
-        source_info: Option<SourceInfo>,
-        timestamp: TimestampHint,
-    ) -> Option<RowHead> {
-        // SAFETY: the row is one of the ring's, which no other reference reaches while the ring is
-        // borrowed mutably.
-        let row = unsafe { self.next_free.as_mut() };
-        let evicted = row.write(body, source_info, timestamp);
-        if self.held == self.rows {
-            self.oldest = row.next;
-        } else {
-            self.held += 1;
-        }
-        self.next_free = row.next;
-        evicted
+        });
     }
 }
 
-impl Drop for LentRing {
+impl Drop for RingCache {
+    /// The cache's records go with it, so their bytes come back to the session's other caches.
     fn drop(&mut self) {
-        let mut at = self.oldest;
-        for _ in 0..self.rows {
-            // SAFETY: each of the ring's rows is visited once, in the order they are linked, its
-            // next read before it goes back, and what it held let go of before.
-            unsafe {
-                let next = at.as_ref().next;
-                core::ptr::drop_in_place(core::ptr::addr_of_mut!((*at.as_ptr()).head));
-                self.lender.give_back_row(at.cast());
-                at = next;
-            }
-        }
+        let owner = self.owner;
+        self.with_ring(&mut |ring| ring.forget(owner));
     }
 }
 
-/// One retained sample as an answer reads it, wherever its ring keeps it.
+/// One retained sample as an answer reads it, wherever its cache keeps it.
 struct Held<'a> {
     keyexpr: &'a str,
     bytes: &'a [u8],
-    source_info: Option<&'a SourceInfo>,
-    timestamp: &'a TimestampHint,
+    source_info: Option<SourceInfo>,
+    timestamp: TimestampHint,
     kind: SampleKind,
     encoding: Option<EncodingRef<'a>>,
     attachment: Option<&'a [u8]>,
@@ -632,8 +429,8 @@ impl<'a> Held<'a> {
         Self {
             keyexpr: &sample.keyexpr,
             bytes: sample.bytes(),
-            source_info: sample.source_info.as_ref(),
-            timestamp: &sample.timestamp,
+            source_info: sample.source_info.clone(),
+            timestamp: sample.timestamp.clone(),
             kind: sample.kind,
             encoding: sample.encoding.as_ref().map(EncodingHint::view),
             attachment: sample.attachment.as_deref(),
@@ -643,7 +440,7 @@ impl<'a> Held<'a> {
     }
 }
 
-/// The samples a ring holds, oldest first, as an answer walks them.
+/// The samples a cache holds, oldest first, as an answer walks them.
 trait HeldSamples {
     /// Call `each` with every sample held, oldest first.
     fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>));
@@ -655,63 +452,46 @@ impl HeldSamples for VecDeque<CachedSample> {
     }
 }
 
-impl HeldSamples for LentRing {
-    fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
-        let mut at = self.oldest;
-        for _ in 0..self.held {
-            // SAFETY: the row is one of the ring's, read while the ring is borrowed.
-            let row = unsafe { at.as_ref() };
-            if let Some(held) = row.held() {
-                each(held);
-            }
-            at = row.next;
-        }
-    }
-}
-
-/// Where a cache keeps its samples: on the heap, each a [`CachedSample`] of its own, or in rows a
-/// host lent.
+/// Where a cache keeps its samples: on the heap, each a [`CachedSample`] of its own, or as records
+/// of its session's ring.
 enum Samples {
     /// On the heap, at most `max_samples` of them.
     Heap {
         samples: VecDeque<CachedSample>,
         max_samples: usize,
     },
-    /// In rows a host lent.
-    Lent(LentRing),
+    /// In the session's ring.
+    Ring(RingCache),
 }
 
 impl HeldSamples for Samples {
     fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
         match self {
             Self::Heap { samples, .. } => samples.for_each_held(each),
-            Self::Lent(ring) => ring.for_each_held(each),
+            Self::Ring(cache) => {
+                let owner = cache.owner;
+                cache.with_ring(&mut |ring| ring.each_of(owner, &mut *each));
+            }
         }
     }
-}
-
-/// What a ring let go of to take a new sample, held only to be dropped once its lock is released.
-#[derive(Default)]
-struct Evicted {
-    _sample: Option<CachedSample>,
-    _row: Option<RowHead>,
 }
 
 /// A cache's samples and what they keep alive together.
 struct Ring {
     samples: Samples,
-    /// The publisher's key, kept declared for as long as the ring is ([`CacheStore::hold_key`]).
+    /// The publisher's key, kept declared for as long as the cache is ([`CacheStore::hold_key`]).
     key: Option<Retained>,
 }
 
 impl Ring {
-    /// Keep a new sample, and hand back what was let go of to make room.
+    /// Keep a new sample, and hand back what the heap let go of to make room. A ring lets go of
+    /// what its records held as it writes over them, and holds nothing that reaches the session.
     fn keep(
         &mut self,
         body: SampleBody<'_>,
         source_info: Option<SourceInfo>,
         timestamp: TimestampHint,
-    ) -> Evicted {
+    ) -> Option<CachedSample> {
         match &mut self.samples {
             Samples::Heap {
                 samples,
@@ -721,18 +501,29 @@ impl Ring {
                 samples.push_back(body.to_cached(source_info, timestamp));
                 evicted
             }
-            Samples::Lent(ring) => Evicted {
-                _sample: None,
-                _row: ring.retain(body, source_info, timestamp),
-            },
+            Samples::Ring(cache) => {
+                let (owner, max_samples) = (cache.owner, cache.max_samples);
+                let mut body = Some(body);
+                let mut stamps = Some(source_info);
+                cache.with_ring(&mut |ring| {
+                    if let (Some(body), Some(source_info)) = (body.take(), stamps.take()) {
+                        ring.keep(owner, max_samples, body, source_info, &timestamp);
+                    }
+                });
+                None
+            }
         }
     }
 
-    /// How many samples the ring holds.
+    /// How many samples the cache holds.
     fn len(&self) -> usize {
         match &self.samples {
             Samples::Heap { samples, .. } => samples.len(),
-            Samples::Lent(ring) => ring.held,
+            Samples::Ring(cache) => {
+                let (owner, mut live) = (cache.owner, 0);
+                cache.with_ring(&mut |ring| live = ring.live(owner));
+                live
+            }
         }
     }
 }
@@ -746,14 +537,11 @@ impl Ring {
 /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
 /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
 /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
-fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Evicted {
-    Evicted {
-        _sample: if samples.len() >= max_samples {
-            samples.pop_front()
-        } else {
-            None
-        },
-        _row: None,
+fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Option<CachedSample> {
+    if samples.len() >= max_samples {
+        samples.pop_front()
+    } else {
+        None
     }
 }
 
@@ -768,18 +556,19 @@ fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Ev
 /// the same on both, so they are one type and the host brings only the
 /// declaration (`AdvancedPublisherPlane::declare_cache_queryable` of the runtime).
 ///
-/// The samples lie on the heap ([`Self::new`]) or in rows of memory a host lends
-/// ([`Self::over_rows`]), a session's that reserved them at its open: a put into rows takes no
-/// memory, and is refused when a row has no room for its sample ([`Self::check_room`]).
+/// The samples lie on the heap ([`Self::new`]) or as records of the session's ring
+/// ([`Self::in_ring`]), memory the session reserved at its open and shares among its caches: a put
+/// into the ring takes no memory, and is refused when its record is longer than the whole ring
+/// ([`Self::check_room`]).
 ///
 /// Cloning shares the ring: the publisher feeds it and the queryable's handler
 /// reads it, and both hold one of these.
 #[derive(Clone)]
 pub struct CacheStore {
     ring: Arc<Mutex<Ring>>,
-    /// Whether the samples lie in lent rows, read without the lock: what a row has room for is
-    /// fixed by the build.
-    in_rows: bool,
+    /// The bytes of records the session's ring holds, for a cache in one, read without the lock:
+    /// what the ring has room for is fixed at its open.
+    ring_bytes: Option<usize>,
     /// R2596 — copied into the answering handler beside the ring: the reply QoS
     /// is a property of the CACHE, so it is fixed at construction exactly as
     /// the depth is, not read per query.
@@ -787,30 +576,45 @@ pub struct CacheStore {
 }
 
 impl CacheStore {
-    /// An empty ring of `config`'s depth on the heap.
+    /// An empty cache of `config`'s depth on the heap.
     pub fn new(config: CacheConfig) -> Self {
         Self::over(
             Samples::Heap {
                 samples: VecDeque::new(),
                 max_samples: config.max_samples,
             },
+            None,
             config,
         )
     }
 
-    /// An empty ring of `config`'s depth in rows `lender` lends, one per sample and at least one,
-    /// as a depth of none keeps one sample on the heap too. `None` when the lender has fewer rows
-    /// free, having kept none.
-    pub fn over_rows(config: CacheConfig, lender: Box<dyn RowLender>) -> Option<Self> {
-        let ring = LentRing::claim(lender, config.max_samples.max(1))?;
-        Some(Self::over(Samples::Lent(ring), config))
+    /// An empty cache of `config`'s depth (one sample at least, as a depth of none keeps one on
+    /// the heap too) in the session's ring `bytes` lends. `None` when the bytes hold no ring: too
+    /// few for one record, or not laid on a record's alignment.
+    pub fn in_ring(config: CacheConfig, bytes: Box<dyn CacheBytes>) -> Option<Self> {
+        let mut made = None;
+        bytes.with_bytes(&mut |span| {
+            if let Some(mut ring) = RecordRing::over(span) {
+                made = Some((ring.register(), ring.capacity()));
+            }
+        });
+        let (owner, ring_bytes) = made?;
+        Some(Self::over(
+            Samples::Ring(RingCache {
+                bytes,
+                owner,
+                max_samples: config.max_samples.max(1),
+            }),
+            Some(ring_bytes),
+            config,
+        ))
     }
 
     /// A store of `samples`, answering with `config`'s QoS.
-    fn over(samples: Samples, config: CacheConfig) -> Self {
+    fn over(samples: Samples, ring_bytes: Option<usize>, config: CacheConfig) -> Self {
         Self {
-            in_rows: matches!(samples, Samples::Lent(_)),
             ring: Arc::new(Mutex::new(Ring { samples, key: None })),
+            ring_bytes,
             replies_config: config.replies_config,
         }
     }
@@ -837,22 +641,26 @@ impl CacheStore {
         }
     }
 
-    /// Whether the cache can keep `body`: always on the heap; in rows, when a row has room for it
-    /// (`ADVANCED_CACHE_SAMPLE_BYTES`). A put asks before it takes a time or a sequence number and
-    /// refuses a sample the cache cannot keep, sending nothing: a sample sent and not kept would
-    /// leave empty a recovering subscriber's `get` that upstream's cache answers.
+    /// Whether the cache can keep `body`: always on the heap; in the session's ring, when its
+    /// record is no longer than the whole ring (`ADVANCED_CACHE_BYTES`), which room the oldest
+    /// records make for it. A put asks before it takes a time or a sequence number and refuses a
+    /// sample the cache cannot keep, sending nothing: a sample sent and not kept would leave empty
+    /// a recovering subscriber's `get` that upstream's cache answers.
     pub fn check_room(&self, body: &SampleBody<'_>) -> Result<(), PublishError> {
-        if !self.in_rows || body.fits_a_row() {
-            Ok(())
-        } else {
-            Err(PublishError::ExceedsCacheRow)
+        match self.ring_bytes {
+            Some(ring_bytes)
+                if !ring::record_bytes(body).is_some_and(|bytes| bytes <= ring_bytes) =>
+            {
+                Err(PublishError::ExceedsCacheRoom)
+            }
+            _ => Ok(()),
         }
     }
 
     /// Keep a sample a put published, with the stamps it went out with, letting the oldest go
-    /// when the ring is full. A sample [`Self::check_room`] refuses is not kept.
+    /// when the cache is full. A sample [`Self::check_room`] refuses is not kept.
     ///
-    /// What the ring let go of is dropped AFTER the ring's lock is released: what it
+    /// What the heap let go of is dropped AFTER the cache's lock is released: what it
     /// [retains](Retained) may re-enter the session as it goes (a key's
     /// retraction does), and this mutex is not reentrant.
     pub fn retain(
@@ -862,18 +670,18 @@ impl CacheStore {
         timestamp: TimestampHint,
     ) {
         if self.check_room(&body).is_err() {
-            log::warn!("AdvancedCache{{}} a sample past a row's room is not kept");
+            log::warn!("AdvancedCache{{}} a sample longer than the ring is not kept");
             return;
         }
         let evicted = lock_or_panic(&self.ring, RING_POISONED).keep(body, source_info, timestamp);
         drop(evicted);
     }
 
-    /// Push a sample made on the heap into the ring, letting the oldest go when the ring is full
-    /// (zenoh advanced_cache.rs:368-377); a ring of rows copies it in, as [`Self::retain`] does.
-    /// What was let go of is dropped after the lock is released, as there.
+    /// Push a sample made on the heap into the cache, letting the oldest go when it is full
+    /// (zenoh advanced_cache.rs:368-377); a cache in the ring copies it into a record, as
+    /// [`Self::retain`] does. What was let go of is dropped after the lock is released, as there.
     pub fn cache_sample(&self, sample: CachedSample) {
-        if self.in_rows {
+        if self.ring_bytes.is_some() {
             self.retain(
                 sample.body(),
                 sample.source_info.clone(),
@@ -892,16 +700,16 @@ impl CacheStore {
                     samples.push_back(sample);
                     evicted
                 }
-                // A store is made over rows or over the heap once, and `in_rows` says which.
-                Samples::Lent(_) => Evicted::default(),
+                // A store is made over a ring or over the heap once, and `ring_bytes` says which.
+                Samples::Ring(_) => None,
             }
         };
         drop(evicted);
     }
 
-    /// Keep `key` declared for as long as the ring is: zenoh-pico's cached sample holds a
+    /// Keep `key` declared for as long as the cache is: zenoh-pico's cached sample holds a
     /// reference to the key it was published on, so the key goes when the last cached sample
-    /// does, and a cache lets its samples go when it goes. A ring holds one, as every sample of a
+    /// does, and a cache lets its samples go when it goes. A cache holds one, as every sample of a
     /// publisher is published on its one key; a second is let go of at once.
     pub fn hold_key(&self, key: Retained) {
         let refused = {
@@ -922,7 +730,7 @@ impl CacheStore {
         lock_or_panic(&self.ring, RING_POISONED).len()
     }
 
-    /// True when the ring holds no samples.
+    /// True when the cache holds no samples.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -950,7 +758,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
         .and_then(time_range::parse)
         .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
     let matches = |s: &Held<'_>| {
-        sample_matches_sn(s.source_info.map(|si| si.sn), sn_range)
+        sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range)
             && sample_matches_time(s.timestamp.time, time_range)
     };
 
@@ -998,8 +806,8 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
         // `z_query_reply_options_t` each do. Set on the shared `meta` so the
         // Put and Del arms cannot drift.
         let meta = ReplyMeta::new()
-            .with_timestamp(Some(s.timestamp))
-            .with_source_info(s.source_info)
+            .with_timestamp(Some(&s.timestamp))
+            .with_source_info(s.source_info.as_ref())
             .with_qos(Some(replies_config.qos()));
         // R3063 -- a sample cached as a buffer of shared memory is replied AS the buffer, so a
         // recovering subscriber that can map the segment is sent the descriptor again, as
@@ -1081,48 +889,32 @@ fn sample_matches_time(sample_time: u64, range: Option<TimeRange<WallTime>>) -> 
     range.map_or(true, |r| contains_ntp64(&r, sample_time))
 }
 
-/// A lender of rows from the heap for the tests of a ring of rows, which counts the rows out.
+/// A ring of cached samples over bytes of the heap for the tests, laid on a record's alignment, and
+/// lent under a lock as a session's are.
 #[cfg(test)]
-pub(crate) mod test_rows {
+pub(crate) mod test_ring {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// At most `limit` rows, each allocated by itself; `out` counts those lent and not given back.
-    pub(crate) struct HeapRows {
-        limit: usize,
-        out: Arc<AtomicUsize>,
-    }
+    /// `span` bytes, shared by every cache made over a clone.
+    #[derive(Clone)]
+    pub(crate) struct HeapRing(Arc<std::sync::Mutex<Vec<u64>>>);
 
-    impl HeapRows {
-        /// A lender of at most `limit` rows, and the count of its rows out.
-        pub(crate) fn new(limit: usize) -> (Self, Arc<AtomicUsize>) {
-            let out = Arc::new(AtomicUsize::new(0));
-            (
-                Self {
-                    limit,
-                    out: Arc::clone(&out),
-                },
-                out,
-            )
+    impl HeapRing {
+        /// A ring of `span` bytes, rounded down to words.
+        pub(crate) fn new(span: usize) -> Self {
+            Self(Arc::new(std::sync::Mutex::new(vec![0u64; span / 8])))
         }
     }
 
-    // SAFETY: each row is an allocation of a row's layout of its own, given back once.
-    unsafe impl RowLender for HeapRows {
-        fn claim_row(&self) -> Option<NonNull<u8>> {
-            if self.out.load(Ordering::SeqCst) >= self.limit {
-                return None;
-            }
-            // SAFETY: a row's layout has a size.
-            let row = NonNull::new(unsafe { std::alloc::alloc(CacheRow::LAYOUT) })?;
-            self.out.fetch_add(1, Ordering::SeqCst);
-            Some(row)
-        }
-
-        unsafe fn give_back_row(&self, row: NonNull<u8>) {
-            self.out.fetch_sub(1, Ordering::SeqCst);
-            // SAFETY: the caller's: the row is one this lender allocated with this layout.
-            unsafe { std::alloc::dealloc(row.as_ptr(), CacheRow::LAYOUT) };
+    impl CacheBytes for HeapRing {
+        fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+            let mut words = self.0.lock().unwrap();
+            let len = words.len() * 8;
+            // SAFETY: the words are this ring's, borrowed mutably under its lock for the call, and
+            // any bytes are a valid `u8`.
+            let bytes =
+                unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), len) };
+            with(bytes);
         }
     }
 }

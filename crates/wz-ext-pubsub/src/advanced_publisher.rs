@@ -111,7 +111,7 @@ impl MissDetectionConfig {
 ///
 /// Each value is the options' own or lent by its holder for as long as the put runs, as a plain
 /// publish's options take them ([`PublishOptions`]): a C program's encoding and attachment are
-/// read where the program keeps them, and the put copies them only into its cache's row.
+/// read where the program keeps them, and the put copies them only into its cache's record.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct AdvancedPutOptions<'a> {
@@ -415,11 +415,11 @@ pub enum AdvancedPublisherError {
     /// `pub type EntityId = u32;`). Upstream's counter wraps onto ids a live
     /// entity may still hold; wz refuses the declaration instead.
     EntityIdsExhausted,
-    /// The session keeps its caches' samples in rows it reserved at its open
-    /// (`ADVANCED_CACHE_ROWS`), and fewer are free than the cache keeps samples.
-    /// Refused before anything is declared; upstream's cache takes the heap
-    /// instead.
-    CacheRowsExhausted,
+    /// The session keeps its caches' samples in a ring it reserved at its open
+    /// (`ADVANCED_CACHE_BYTES`), and its ring holds no record: too few bytes
+    /// for one. Refused before anything is declared; upstream's cache takes the
+    /// heap instead.
+    CacheRingUnavailable,
 }
 
 /// A plain publisher a plane declared for an advanced one, with the entity id it
@@ -530,9 +530,9 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     ) -> Result<Self::Queryable, AdvancedPublisherError>;
 
     /// The store a cache of `config` keeps its samples in, made before anything is declared. On
-    /// the heap by default ([`CacheStore::new`]); a host whose session lends rows of the memory it
-    /// reserved at its open answers a store over them ([`CacheStore::over_rows`]), and refuses the
-    /// cache when the session has too few rows free.
+    /// the heap by default ([`CacheStore::new`]); a host whose session keeps a ring of cached
+    /// samples in the memory it reserved at its open answers a store in it
+    /// ([`CacheStore::in_ring`]), and refuses the cache when the ring holds no record.
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
         Ok(CacheStore::new(config))
     }
@@ -880,9 +880,9 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr_for(0))
             .map_err(AdvancedPublisherError::InvalidAdvKeyexpr)?;
 
-        // The cache's store, before any declaration: a host whose session lends the cache rows
-        // of its own memory refuses a cache it has too few free for, and that is refused like
-        // the checks above, with nothing on the wire.
+        // The cache's store, before any declaration: a host whose session keeps its caches in a
+        // ring of its own memory refuses a cache when the ring holds no record, and that is
+        // refused like the checks above, with nothing on the wire.
         let store = options
             .cache
             .map(|config| plane.cache_store(config))

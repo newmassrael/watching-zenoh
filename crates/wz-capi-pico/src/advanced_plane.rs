@@ -21,11 +21,10 @@
 //! [`AdvancedPublisherOn`]: wz_ext_pubsub::advanced_publisher::AdvancedPublisherOn
 
 use alloc::sync::Arc;
-use core::ptr::NonNull;
 use core::time::Duration;
 
 use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine, Ticker, WireKey};
-use wz_ext_pubsub::advanced_cache::{CacheConfig, CacheStore, Retained, RowLender};
+use wz_ext_pubsub::advanced_cache::{CacheBytes, CacheConfig, CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
@@ -75,25 +74,18 @@ impl PicoPlane {
     }
 }
 
-/// The rows of a session's arena a cache keeps its samples in, holding the session's engine so the
-/// arena stands for as long as the cache does.
-struct SessionCacheRows(Arc<dyn SessionEngine>);
+/// The ring a session's caches keep their samples in, holding the session's engine so the ring
+/// stands for as long as a cache in it does.
+struct SessionCacheBytes(Arc<crate::session::Engine>);
 
-// SAFETY: the rows are the session's, laid out at its open by `CacheRow::LAYOUT`
-// (`crate::object_slot::held_places`), each lent once until it is given back, in an arena that
-// stands while the engine held here does.
-unsafe impl RowLender for SessionCacheRows {
-    fn claim_row(&self) -> Option<NonNull<u8>> {
-        self.0.cache_row_lender()?.claim_cache_row()
-    }
-
-    unsafe fn give_back_row(&self, row: NonNull<u8>) {
-        // SAFETY: the caller's: a row this session lent, which holds nothing any more.
-        let given = self
-            .0
-            .cache_row_lender()
-            .is_some_and(|lender| unsafe { lender.give_back_cache_row(row) });
-        debug_assert!(given, "a row goes back to the session that lent it");
+impl CacheBytes for SessionCacheBytes {
+    fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+        match SessionEngine::cache_bytes(&*self.0) {
+            Some(ring) => ring.with_cache_bytes(with),
+            // An engine that keeps no ring is never asked for one: its caches keep their samples
+            // on the heap (`PicoPlane::cache_store`).
+            None => with(&mut []),
+        }
     }
 }
 
@@ -203,16 +195,18 @@ impl AdvancedPublisherPlane for PicoPlane {
             .map_err(|code| Self::refusal("cache queryable", code))
     }
 
-    /// In rows of the session's arena when the session lends them (the cooperative engine, which
-    /// laid them out at its open: `crate::object_slot::held_places`), so a put takes no memory;
-    /// a cache deeper than the rows free is refused. On the heap on an engine that lends none.
+    /// In the session's ring of cached samples when the session keeps one (the cooperative engine,
+    /// which reserved it at its open), so a put takes no memory; a ring that holds no record
+    /// refuses the cache. On the heap on an engine that keeps none.
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
-        let engine = crate::session::port_engine(&self.session.engine);
-        if engine.cache_row_lender().is_none() {
+        if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
             return Ok(CacheStore::new(config));
         }
-        CacheStore::over_rows(config, Box::new(SessionCacheRows(engine)))
-            .ok_or(AdvancedPublisherError::CacheRowsExhausted)
+        CacheStore::in_ring(
+            config,
+            Box::new(SessionCacheBytes(Arc::clone(&self.session.engine))),
+        )
+        .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {
