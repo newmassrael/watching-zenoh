@@ -574,8 +574,6 @@ pub mod ext_interface;
 // (the supervision deadline of the observation plane).
 mod ffi;
 #[cfg(feature = "query")]
-// Totality debt TD-169 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod get;
 // A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
 // `targeted-query` policy is off.
