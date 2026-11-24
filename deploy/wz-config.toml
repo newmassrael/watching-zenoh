@@ -2658,6 +2658,34 @@ value = 1
 reason = "zenoh-pico bounds its transport events listeners by no count; its info example holds one in the background, and its tests hold one at a time."
 
 [[limit]]
+id = "MAX_LINK_EVENTS_LISTENERS"
+kconfig = "WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The link events listeners a session holds at once, each told when a link
+to a peer comes up or goes. Declaring one more is refused while the table
+is full. Apart from the transport events listeners' bound, so a profile
+that holds more of one kind spends nothing on the other.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the link events listeners a session declares, and zenoh-pico has no constant for them; the default holds four, more than any of zenoh-pico's own examples or tests holds on one session at once."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its link events listeners by no count; its info example holds one in the background, and its tests hold one at a time."
+
+[[limit]]
 id = "MAX_DECL_WATCH_EVENTS"
 kconfig = "WZ_LIMIT_MAX_DECL_WATCH_EVENTS"
 kind = "bound"

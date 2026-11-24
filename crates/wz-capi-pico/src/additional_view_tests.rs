@@ -476,6 +476,10 @@ fn every_constant_the_replay_doors_read_is_the_core_s() {
         crate::decl_watch::WZ_EXT_DECL_UNDECLARED
     );
     assert_eq!(
+        view::decl_watch::WZ_EXT_DECL_LOST,
+        crate::decl_watch::WZ_EXT_DECL_LOST
+    );
+    assert_eq!(
         view::decl_watch::WZ_EXT_DECL_QUERYABLE,
         crate::decl_watch::WZ_EXT_DECL_QUERYABLE
     );
