@@ -622,6 +622,30 @@ pub const ADVANCED_CACHE_BYTES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_ADVANCED_PUBLISHERS`] is bound.
+pub const MAX_ADVANCED_PUBLISHERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_SUBSCRIBERS`] is bound.
+pub const MAX_ADVANCED_SUBSCRIBERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
