@@ -207,7 +207,48 @@ impl<K> CellRc<K> {
     }
 }
 
+impl<A, B> CellRc<(A, B)> {
+    /// `first` and `second` together in one cell of `cells` ([`Self::in_cells`], or one of the
+    /// heap when no table is lent), and a handle on each: two values that are made together and
+    /// shared apart, the cell given back with the last handle on either. Both back when no cell
+    /// takes them.
+    pub fn halves(
+        cells: Option<&LentByteCells>,
+        first: A,
+        second: B,
+    ) -> Result<(CellRc<A>, CellRc<B>), (A, B)> {
+        let pair = Self::in_cells(cells, (first, second))?;
+        let other = pair.clone();
+        // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
+        // lives as long as the cell does; the cell's release drops the pair it was placed as.
+        unsafe {
+            Ok((
+                pair.part(|pair| {
+                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).0))
+                }),
+                other.part(|pair| {
+                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).1))
+                }),
+            ))
+        }
+    }
+}
+
 impl<T: ?Sized> CellRc<T> {
+    /// This handle as one on a part of its value, `as_part` answering where the part lies.
+    ///
+    /// # Safety
+    /// `as_part` answers a pointer to a value that lives as long as the value it is handed: the
+    /// cell's release drops the whole value it was placed as, never the part alone.
+    unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U> {
+        let this = core::mem::ManuallyDrop::new(self);
+        CellRc {
+            head: this.head,
+            value: as_part(this.value),
+            _owns: PhantomData,
+        }
+    }
+
     /// This handle as one on `U`, the value seen through `as_u`: a trait object of it.
     ///
     /// # Safety
@@ -439,5 +480,38 @@ mod tests {
         }
         assert_eq!(drops.get(), 2, "each value dropped once");
         assert_eq!(cells.in_use(), 0, "and the table's cell given back");
+    }
+
+    /// Two values placed as halves share one cell: each handle names its own value, the cell
+    /// keeps both until the last handle on either goes, and halves placed in a lent table take
+    /// no memory of the heap. Turned red by halves boxed while a table is lent, or by a cell
+    /// given back while a handle on one half lives.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn halves_share_one_cell_until_the_last_handle_on_either() {
+        let cells = table(CellRc::<(Counted, u32)>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let (placed, made) = crate::table_tests::allocations(|| {
+            CellRc::halves(Some(&cells), Counted(drops.clone()), 7u32)
+        });
+        let (first, second) = placed.ok().expect("a cell");
+        assert_eq!(made, 0, "halves in a lent table take no memory of the heap");
+        assert_eq!((cells.in_use(), *second), (1, 7), "one cell holds both");
+        drop(first);
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (0, 1),
+            "the other half keeps the cell and both values"
+        );
+        drop(second);
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (1, 0),
+            "the last handle drops both and gives the cell back"
+        );
+        let (_, boxed) = CellRc::halves(None, Counted(drops.clone()), 8u32)
+            .ok()
+            .expect("the heap when no table is lent");
+        assert_eq!((*boxed, cells.in_use()), (8, 0), "the heap's takes no cell");
     }
 }

@@ -98,7 +98,7 @@ impl<U> core::ops::Deref for NoShared<U> {
 #[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> ShareValues for CoopRuntime<C, D> {
     fn share<U>(value: U) -> Self::Shared<U> {
-        Rc::new(value)
+        crate::link_cells::CellRc::boxed(value)
     }
 }
 
@@ -119,15 +119,13 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     #[cfg(feature = "session-slot")]
     type LinkSink = SlotSink<D>;
 
-    // R311y205 (transport-multilink IMPL-2b-i) — the MCU shareable pointer is
-    // `Rc`, not `Arc`: the single-task sync drive loop shares the aggregation
-    // core only within its own task, never across threads, so the refcount needs
-    // no atomics — the same seam that unblocks the no-alloc M0+ session reach
-    // (`alloc::sync::Arc` requires `target_has_atomic = "ptr"`, absent on
-    // ARMv6-M; `Rc` lowers to plain loads / stores). The MCU profile is
-    // rsa-AP-only and always N=1, so this is only ever a refcount-1 pointer here.
+    // The shareable pointer is a cell handle, counted as an `Rc` is and not atomically: the
+    // single-task drive loop shares the kernel and the link only within its own task, and
+    // ARMv6-M has no atomic pointer. A cell handle, so an engine that reserved a table of cells
+    // places a link's halves in one of them (`CellRc::halves`), and the same type names halves
+    // on the heap (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
-    type Shared<U> = Rc<U>;
+    type Shared<U> = crate::link_cells::CellRc<U>;
 
     // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
     // is one value in its slot, with its kernel and its link as its own fields

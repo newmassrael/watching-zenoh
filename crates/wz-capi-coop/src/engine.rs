@@ -143,6 +143,7 @@ use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(feature = "listen")]
 use wz_session_core::session_actions::Probed;
+use wz_session_core::session_actions::{LinkState, SessionCore};
 use wz_session_core::session_init_params::{
     HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
 };
@@ -2453,6 +2454,14 @@ impl<C: ClockSource + 'static> LinkGates for C {
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
 type LinkGate<C> = <C as LinkGates>::Gate;
 
+/// The two halves the actions of a link of a session on the clock `C` hold, which the session
+/// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
+/// own state and the session's kernel.
+type LinkHalves<C> = (
+    LinkState<CoopRuntime<C>>,
+    SessionCore<CoopRuntime<C>, CoopTime<C>>,
+);
+
 /// The arena a session over `links` opens `config` with: the rows its limits size, a cell for
 /// each link's driver as large as the largest the links open, and a cell for each link's gates.
 /// The one plan an open reserves by.
@@ -2465,6 +2474,7 @@ pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
             driver: links.link_cell_bytes(),
             gate: CellRc::<LinkGate<C>>::cell_bytes(),
             actions: CellRc::<McuActions<C>>::cell_bytes(),
+            halves: CellRc::<LinkHalves<C>>::cell_bytes(),
         })
     })
 }
@@ -2593,7 +2603,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
+        // The link's halves lie in its cell of the session's table, as its actions do: a link made
+        // after the open takes no memory of the heap for them.
+        let actions = McuActions::<C>::build_held(
+            sink,
+            params,
+            self.session_time.clone(),
+            |link, kernel| self.transport.place_halves(link, kernel, endpoint),
+        )?;
         let actions = self.transport.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
@@ -3811,6 +3828,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 wire_zid: wire,
                 gate_cells: lent.cells.gate,
                 actions_cells: lent.cells.actions,
+                halves_cells: lent.cells.halves,
                 #[cfg(feature = "shared-key-ids")]
                 key_forms,
                 router: lent.router,
@@ -3989,6 +4007,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
+    }
+
+    /// How many cells of the session's table of links' halves hold a link's halves now: `None`
+    /// for a session whose plan laid out no such table.
+    #[cfg(test)]
+    pub(crate) fn link_halves_in_use(&self) -> Option<usize> {
+        self.core
+            .lock()
+            .0
+            .transport
+            .halves_cells
+            .as_ref()
+            .map(LentByteCells::in_use)
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at

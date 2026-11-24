@@ -4651,23 +4651,47 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         R: ShareValues,
     {
+        let held = Self::build_held(driver, params, clock, |link, kernel| {
+            Ok::<_, core::convert::Infallible>((Self::hold_link(link), Self::hold_core(kernel)))
+        });
+        match held {
+            Ok(actions) => actions,
+            Err(never) => match never {},
+        }
+    }
+
+    /// The bundle built from its parts, each half held where `hold` puts it: the runtime's
+    /// shared pointer for [`Self::build`], or a place its caller reserved (a session's arena),
+    /// so a link made after the session opened takes no memory of the heap for them. `Err` with
+    /// what `hold` refused, the halves dropped.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn build_held<E>(
+        driver: R::LinkSink,
+        params: SessionInitParams,
+        clock: T,
+        hold: impl FnOnce(
+            LinkState<R>,
+            SessionCore<R, T>,
+        ) -> Result<(R::Shared<LinkState<R>>, R::Shared<SessionCore<R, T>>), E>,
+    ) -> Result<Self, E> {
         let seed = LinkSeed::open::<R>(&driver);
         let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
-        let mut core = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
+        let mut kernel = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
         // SAFETY: both are uninitialised locals, and each function writes every field of what
         // it is given (the field list is checked to be whole), so both are whole after.
-        let (link, core) = unsafe {
+        let (link, kernel) = unsafe {
             Self::init_link(link.as_mut_ptr(), driver, &seed);
-            Self::init_core(core.as_mut_ptr(), params, clock, seed);
-            (link.assume_init(), core.assume_init())
+            Self::init_core(kernel.as_mut_ptr(), params, clock, seed);
+            (link.assume_init(), kernel.assume_init())
         };
-        Self {
-            link: Self::hold_link(link),
-            core: Self::hold_core(core),
+        let (link, core) = hold(link, kernel)?;
+        Ok(Self {
+            link,
+            core,
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
-        }
+        })
     }
 
     /// The bundle built where it is kept, a slot's storage (`SlotClaim::open`): the link half and
