@@ -105,6 +105,17 @@ compile_error!(
      `scout-datagram` over its own stack"
 );
 
+// Each member's keyexprs are read under the member's tag, which only a group that lends its records
+// carries. A build graph that unified in a selector reading the group's batch owned (the session
+// core's `multicast-declarations`, or `transport-stats` here) would hand every member's id to one
+// table and read one member's key by another's: refused here, until the owned walk carries the tag.
+#[cfg(feature = "multicast-declarations")]
+const _: () = assert!(
+    wz_session_core::driver_loop::GROUP_RECORDS_TAGGED_BY_MEMBER,
+    "wz-capi-coop: `multicast-declarations` needs a group that lends its records, each tagged by its \
+     member; `transport-stats` and the session core's own `multicast-declarations` read them owned"
+);
+
 #[cfg(feature = "listen")]
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.

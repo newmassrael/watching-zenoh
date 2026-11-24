@@ -6185,7 +6185,11 @@ mod tests {
     ))]
     #[test]
     fn a_members_keyexpr_binds_under_its_tag_and_one_past_its_bound_is_counted() {
-        use crate::driver_loop::InPlaceRecord;
+        use crate::driver_loop::{InPlaceRecord, GROUP_RECORDS_TAGGED_BY_MEMBER};
+        const _: () = assert!(
+            GROUP_RECORDS_TAGGED_BY_MEMBER,
+            "a build whose records carry their member says so to the crates that rely on it"
+        );
         let declare = wz_codecs::lent::Declare {
             body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::lent::DeclKexpr {
