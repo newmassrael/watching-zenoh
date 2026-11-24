@@ -930,8 +930,8 @@ pub(crate) struct AdvSubState {
     /// subscriber is taken out to run on with its entities standing. Hosted on the engine as the
     /// build names it, so a build of one engine makes no table of the session's operations for it.
     subscriber: Option<EngineSubscriber<Engine>>,
-    /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`.
-    keyexpr: String,
+    /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`: a borrow of the key the
+    /// subscriber keeps, which no copy of this state's doubles.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
     /// The miss listeners the C side declares AFTER declaring this. See the
     /// module doc.
@@ -1015,10 +1015,16 @@ impl Drop for BackgroundMiss {
 }
 
 impl AdvSubState {
-    /// Point the cached view at this state's own keyexpr, where the state lies.
+    /// Point the cached view at the key the subscriber keeps.
     fn bind(&mut self) {
+        let keyexpr = self.keyexpr().unwrap_or_default();
         self.loaned_keyexpr =
-            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+            crate::abi::z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
+    }
+
+    /// The key the subscriber subscribes to, while its owner holds it.
+    fn keyexpr(&self) -> Option<&str> {
+        self.subscriber.as_ref().map(EngineSubscriber::keyexpr)
     }
 }
 
@@ -1149,8 +1155,6 @@ unsafe fn declare_subscriber_state(
             AdvSubState {
                 engine: Arc::clone(&engine),
                 subscriber: None,
-                // R311y559 — kept for `ze_advanced_subscriber_keyexpr`.
-                keyexpr: ke,
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 background_miss: BackgroundMiss::new(miss.clone()),
                 miss: miss.clone(),
@@ -1171,7 +1175,7 @@ unsafe fn declare_subscriber_state(
     };
     let declared = EngineSubscriber::declare_with_miss_listener(
         &engine,
-        (*state).keyexpr.clone(),
+        ke,
         opts,
         move |sample: Delivery<'_>| sink.hand(sample.view()),
         move |m: Miss| fire_miss(&miss, &m),
@@ -1559,7 +1563,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         else {
             return Z_ERR_NULL;
         };
-        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(&state.keyexpr);
+        let Some(keyexpr) = state.keyexpr() else {
+            return Z_ERR_NULL;
+        };
+        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
         let history = if options.is_null() {
             false
         } else {
@@ -1931,7 +1938,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         if state.engine.is_closed() {
             return crate::result::Z_ERR_SESSION_CLOSED;
         }
-        let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(&state.keyexpr);
+        let Some(keyexpr) = state.keyexpr() else {
+            return Z_ERR_NULL;
+        };
+        let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
         let history = !options.is_null() && (*options).history;
         let engine = state.engine.clone();
         let Some(slot) = crate::object_slot::Slot::take_entity(
@@ -2086,7 +2096,6 @@ mod tests {
             AdvSubState {
                 engine,
                 subscriber: Some(subscriber),
-                keyexpr: "demo/data".to_owned(),
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
                 background_miss: BackgroundMiss::new(set.clone()),
                 miss: set.clone(),
@@ -2101,6 +2110,44 @@ mod tests {
             _pad: [0u8; SUBSCRIBER_PAD],
         };
         (owned, set)
+    }
+
+    /// The key a loaned advanced subscriber shows is read where its subscriber keeps it: the state
+    /// holds no copy of its own. Turned red by a view bound to a copy of the key.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn a_subscribers_key_view_reads_the_key_its_subscriber_keeps() {
+        let shared = Arc::new(
+            wz_capi_core::faces::SharedSession::new(
+                wz_capi_core::runtime::runtime_impl::TokioTime::new(),
+                [0x11; 16].into(),
+                wz_session_core::policy::SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
+        let (owned, _miss) = face_less_subscriber(&shared);
+        let state = owned.handle.cast::<AdvSubState>();
+        let loaned = &owned as *const ze_owned_advanced_subscriber_t
+            as *const ze_loaned_advanced_subscriber_t;
+        // SAFETY: `state` is the live state behind `owned`, held on this frame until the undeclare
+        // below consumes it.
+        unsafe {
+            (*state).bind();
+            let kept = (*state)
+                .subscriber
+                .as_ref()
+                .expect("the owner holds its subscriber")
+                .keyexpr();
+            let view = advanced_subscriber_keyexpr(loaned);
+            assert_eq!(crate::keyexpr::keyexpr_str(view), Some("demo/data"));
+            assert_eq!(
+                (*view)._start,
+                kept.as_ptr(),
+                "the view reads the subscriber's key"
+            );
+            let mut moved = ze_moved_advanced_subscriber_t { _this: owned };
+            ze_undeclare_advanced_subscriber(&mut moved);
+        }
     }
 
     #[cfg(feature = "engine-tokio")]
