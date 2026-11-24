@@ -1944,7 +1944,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(feature = "codec-declare")]
         if let Some(declare) = record.declare() {
-            self.absorb_declare_view(&declare.body, subs.own_space());
+            self.absorb_declare_view(&declare.body, subs.own_space(), 0);
         }
         #[cfg(feature = "declare-subscriber")]
         if let Some(interest) = record.interest() {
@@ -3456,7 +3456,9 @@ impl<P: Storage> SubscriberPeer<P> {
     /// ([`crate::wireexpr_resolve::resolve_declared_keyexpr_view`]), into a
     /// bounded buffer, so the slot profile absorbs an alias without the heap and
     /// without the owned `DeclareOwned` it could not build. Every other arm is
-    /// another registry's, as in the owned form.
+    /// another registry's, as in the owned form. The alias is bound and unbound under
+    /// `sender`, the sender of the declaration ([`crate::wire_id::sender_peer_key`]): 0 for the
+    /// one peer of a link.
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
@@ -3466,6 +3468,7 @@ impl<P: Storage> SubscriberPeer<P> {
         &mut self,
         body: &wz_codecs::lent::DeclareVariant<'_>,
         own: Option<crate::wireexpr_resolve::OwnSpace<'_, O>>,
+        sender: u64,
     ) {
         use wz_codecs::lent::DeclareVariant;
         match body {
@@ -3473,7 +3476,7 @@ impl<P: Storage> SubscriberPeer<P> {
                 let mut frame = Default::default();
                 let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view_over(
                     &d.keyexpr.body,
-                    self.naming.spaces(),
+                    self.naming.spaces().from_sender(sender),
                     own,
                     crate::wireexpr_resolve::ComposeRoom::buffer(&mut self.compose, &mut frame),
                 ) {
@@ -3496,7 +3499,7 @@ impl<P: Storage> SubscriberPeer<P> {
                 // A refusal is counted by the table itself, as for the owned form.
                 let quota = self.naming.alias_quota;
                 let _ = self.naming.aliases.bind_within(
-                    crate::wire_id::declared_peer_key(d.id),
+                    crate::wire_id::declared_sender_peer_key(sender, d.id),
                     text,
                     |count| quota.admits(count),
                 );
@@ -3504,7 +3507,7 @@ impl<P: Storage> SubscriberPeer<P> {
             DeclareVariant::CodecZenohUndeclKexpr(u) => {
                 self.naming
                     .aliases
-                    .unbind(crate::wire_id::declared_peer_key(u.id));
+                    .unbind(crate::wire_id::declared_sender_peer_key(sender, u.id));
             }
             // The other arms are the dedicated registries', as in the owned form.
             DeclareVariant::CodecZenohDeclSubscriber(_)
