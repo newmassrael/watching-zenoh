@@ -147,6 +147,15 @@ pub fn census_json(d: &crate::Dissection) -> String {
 /// before the tap started cannot be judged against `key == demo/**`, and
 /// counting it as a non-match would make a short total look whole.
 ///
+/// # A `row` term reads the places the documents give the rows
+///
+/// A census writes no rows, but every record it judges is a row of the field
+/// and selection documents, and a `row` term compares the place the selection
+/// document writes it at. The selector is read against those places before any
+/// plane judges a record ([`crate::filter::Filter::rows_numbered_by`]), so a
+/// `row` term is decided here as it is there; a row of a list no document
+/// writes has no place and stays undecided.
+///
 /// # A `zid` prefix that begins more than one node
 ///
 /// A `zid` term may be written as a prefix of eight digits or more, and which
@@ -166,7 +175,8 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     // get it.
     let nodes = crate::node::nodes(d);
     let grouping = crate::node::SessionGrouping::of(&nodes);
-    let throughput = crate::agg::aggregate_grouped(d, filter, &grouping);
+    let read = read_against_the_rows(d, filter);
+    let throughput = crate::agg::aggregate_grouped(d, &read, &grouping);
     census_document(
         d,
         filter,
@@ -175,9 +185,9 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
             // was observed is what is held.
             observed: crate::ordered_fold::Observed::of(&d.message_frames_in_capture_order()),
             #[cfg(feature = "network-codecs")]
-            exchanges: crate::exchange::exchanges_grouped(d, filter, &grouping),
+            exchanges: crate::exchange::exchanges_grouped(d, &read, &grouping),
             #[cfg(feature = "network-codecs")]
-            payloads: crate::payload::payloads_grouped(d, filter, &grouping),
+            payloads: crate::payload::payloads_grouped(d, &read, &grouping),
             #[cfg(feature = "network-codecs")]
             interests: crate::interest::interests_grouped(d, &grouping),
             throughput,
@@ -198,7 +208,10 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
 /// of a growing capture. `memory` keeps the planes of each selector it has been
 /// asked under, up to [`crate::CensusMemory::selector_memories`], one by default:
 /// asked under a selector it has no planes for, it begins that selector's, and
-/// with one memory that gives up the previous selector's.
+/// with one memory that gives up the previous selector's. A selector with a
+/// `row` term keeps its planes while the rows the term picks stay where they
+/// were, and begins them again when a row was placed before one of them, which
+/// moves its place: the planes judged every record they hold by the old places.
 ///
 /// The node census is kept the same way ([`crate::node::NodeMemory`]): it is
 /// what the grouping, and so the validity of every other plane's fold, is derived
@@ -236,7 +249,7 @@ pub fn census_json_where_resumable_progress(
     memory: &mut crate::CensusMemory,
     progress: Option<&crate::Progress<'_>>,
 ) -> Option<String> {
-    memory.for_filter(filter);
+    memory.for_filter(filter, read_against_the_rows(d, filter));
     let (nodes, folded, observed) = memory.census(d, progress)?;
     let document = census_document(
         d,
@@ -257,6 +270,32 @@ pub fn census_json_where_resumable_progress(
         p.finish();
     }
     Some(document)
+}
+
+/// `filter` with its `row` terms read against the places the documents give
+/// the rows of `d` ([`crate::filter::Filter::rows_numbered_by`]), once and
+/// before any plane judges a record, as the field and selection doors read
+/// them: a census writes no rows of its own, and the place a `row` term
+/// compares is the one the selection document writes the row at.
+///
+/// A build without `dissect` has no document that places a row, so its `row`
+/// terms stay as written and judge every row undecided. `flow` terms are not
+/// read here: a census is handed no numbering of the lists but their positions.
+#[cfg(feature = "dissect")]
+fn read_against_the_rows(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+) -> crate::filter::Filter {
+    crate::fields_json::read_against_the_documents(d, filter, None)
+}
+
+/// See the `dissect` build's twin: no document places a row here.
+#[cfg(not(feature = "dissect"))]
+fn read_against_the_rows(
+    _d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+) -> crate::filter::Filter {
+    filter.clone()
 }
 
 /// The planes of a census document, however they were made.

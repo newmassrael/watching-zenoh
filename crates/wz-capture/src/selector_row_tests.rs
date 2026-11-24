@@ -310,12 +310,9 @@ fn words_in(d: &crate::Dissection, selector: &str) -> Vec<String> {
         .collect()
 }
 
-/// One Put from 10.0.0.1:`port` to 10.0.0.2:7447, as packet `i`.
+/// One Put on `a/b` from 10.0.0.1:`port` to 10.0.0.2:7447, as packet `i`.
 fn put_from(d: &mut crate::Dissection, i: usize, port: u16) {
-    use crate::payload::tests_support::push_declaring;
-    let wire = crate::datagram_tests::frame_carrying(&push_declaring("a/b", 5, b"x"));
-    let packet = crate::datagram_tests::udp_packet([10, 0, 0, 1], port, [10, 0, 0, 2], 7447, &wire);
-    d.push_packet_at(crate::link::LINKTYPE_ETHERNET, i, Some(i as u64), &packet);
+    put_on(d, i, port, "a/b");
 }
 
 /// One UDP flow per source port, one Put per packet, in the order `ports`
@@ -413,6 +410,98 @@ fn a_row_term_is_decided_only_against_the_documents_places() {
         read.matches(&view(Some(unplaced), Record::None)),
         Truth::Unknown
     );
+}
+
+/// The keyexpr plane of a census document: what lies between its key and the
+/// node plane's.
+fn keyexpr_plane(census: &str) -> &str {
+    let from = census.find(",\"keyexprs\":").expect("a keyexpr plane");
+    let to = census.find(",\"nodes\":").expect("a node plane");
+    &census[from..to]
+}
+
+/// One Put on `key` from 10.0.0.1:`port` to 10.0.0.2:7447, as packet `i`.
+fn put_on(d: &mut crate::Dissection, i: usize, port: u16, key: &'static str) {
+    use crate::payload::tests_support::push_declaring;
+    let wire = crate::datagram_tests::frame_carrying(&push_declaring(key, 5, b"x"));
+    let packet = crate::datagram_tests::udp_packet([10, 0, 0, 1], port, [10, 0, 0, 2], 7447, &wire);
+    d.push_packet_at(crate::link::LINKTYPE_ETHERNET, i, Some(i as u64), &packet);
+}
+
+/// A census writes no rows, and still decides a `row` term by the place the
+/// selection document gives the row that carried each record: row 1 is the Put
+/// on `a/b`, row 2 the one on `a/c`, and no record is left undecided.
+#[test]
+fn a_census_decides_a_row_term_by_the_documents_places() {
+    let d = capture();
+    let filter = Filter::parse("row == 1").expect("compiles");
+    let census = crate::census_json::census_json_where(&d, &filter);
+    let keyexprs = keyexpr_plane(&census);
+    assert!(keyexprs.contains("\"keyexpr\":\"a/b\""), "{keyexprs}");
+    assert!(!keyexprs.contains("\"keyexpr\":\"a/c\""), "{keyexprs}");
+    assert!(keyexprs.contains("\"matched\":1,"), "{keyexprs}");
+    assert!(keyexprs.contains("\"undecided\":0}"), "{keyexprs}");
+    // The complement picks the other Put, and still decides every record.
+    let other = Filter::parse("row != 1").expect("compiles");
+    let census = crate::census_json::census_json_where(&d, &other);
+    let keyexprs = keyexpr_plane(&census);
+    assert!(keyexprs.contains("\"keyexpr\":\"a/c\""), "{keyexprs}");
+    assert!(keyexprs.contains("\"undecided\":0}"), "{keyexprs}");
+}
+
+/// A kept census goes on while the rows a `row` term picks stay where they
+/// were, and begins again when a row is placed before one of them: a Put on
+/// the first flow moves the second flow's row from 1 to 2, and row 1 is then
+/// the first flow's second Put. At every step the kept census is the census a
+/// fresh fold writes.
+#[test]
+fn a_kept_census_begins_again_when_the_rows_a_row_term_picks_move() {
+    use crate::census_json::{census_json_where, census_json_where_resumable};
+    let filter = Filter::parse("row == 1").expect("compiles");
+    let mut d = crate::Dissection::new();
+    put_on(&mut d, 0, 43210, "a/x");
+    put_on(&mut d, 1, 43211, "b/x");
+    let mut memory = crate::CensusMemory::new();
+    let first = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(first, census_json_where(&d, &filter));
+    let plane = keyexpr_plane(&first);
+    assert!(plane.contains("\"keyexpr\":\"b/x\""), "{plane}");
+    assert!(!plane.contains("\"keyexpr\":\"a/x\""), "{plane}");
+
+    // A row after every picked one moves none of them: the planes go on.
+    let restarts = memory.stats().restarts;
+    put_on(&mut d, 2, 43211, "b/x");
+    let appended = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(appended, census_json_where(&d, &filter));
+    assert_eq!(memory.stats().restarts, restarts);
+
+    // A row before the picked one moves it: the planes begin again.
+    put_on(&mut d, 3, 43210, "a/x");
+    let moved = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(moved, census_json_where(&d, &filter));
+    assert!(memory.stats().restarts > restarts);
+    let plane = keyexpr_plane(&moved);
+    assert!(plane.contains("\"keyexpr\":\"a/x\""), "{plane}");
+    assert!(!plane.contains("\"keyexpr\":\"b/x\""), "{plane}");
+}
+
+/// The planes are kept under the selector as typed: a reading that moved
+/// takes the selector's own slot again, not another selector's.
+#[test]
+fn a_row_term_that_moved_keeps_one_selector_memory() {
+    use crate::census_json::{census_json_where, census_json_where_resumable};
+    let filter = Filter::parse("row > 0").expect("compiles");
+    let mut d = crate::Dissection::new();
+    put_on(&mut d, 0, 43210, "a/x");
+    let mut memory = crate::CensusMemory::new();
+    memory.set_selector_memories(4);
+    for i in 1..4 {
+        put_on(&mut d, i, 43210, "a/x");
+        let kept = census_json_where_resumable(&d, &filter, &mut memory);
+        assert_eq!(kept, census_json_where(&d, &filter));
+    }
+    assert_eq!(memory.selectors_in_use(), 1);
+    assert_eq!(memory.selector_evictions(), 0);
 }
 
 /// `row` takes an integer and the six comparisons, and nothing else.

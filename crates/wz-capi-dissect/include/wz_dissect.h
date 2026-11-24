@@ -1757,7 +1757,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":28,
+ *     {"document":{"name":"census","revision":29,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1809,7 +1809,7 @@
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":28,"key":"mode","values":[...],
+ *     {"name":"census","revision":29,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -2696,14 +2696,19 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * list moves no row's number, and a max_messages_shown_per_flow moves none
  * either; where no ceiling has taken a row, a row's number is its index in the
  * selection document's `rows`. A row's number moves when a flow written before
- * it gains a row; a live handle's `seq` is the number that never moves. The
- * doors that write those rows read a `row` term against the capture as they render it:
- * the field documents, wz_dissect_live_selection and its siblings, and
- * wz_dissect_live_selected_packets; wz_dissect_live_selection_since begins its
- * memory again when the rows a `row` term picks have changed. A census and the
- * values door write no such rows, and a `row` term there is UNDECIDED. A row of
- * a list no document writes (a recovered QUIC stream, a serial line) has no
- * place and is UNDECIDED too.
+ * it gains a row; a live handle's `seq` is the number that never moves. Every
+ * door that takes a selector reads a `row` term against the capture as it is
+ * when the door is called, once and before any row is judged: the field
+ * documents, wz_dissect_live_selection and its siblings,
+ * wz_dissect_live_selected_packets, and (census revision 29, values-document
+ * revision 4) the census doors and the values doors, which write no rows of
+ * their own and judge each record by the place of the row that carried it. A
+ * door that keeps a memory between calls (wz_dissect_live_selection_since,
+ * wz_dissect_live_census, the values doors) begins it again when the rows a
+ * `row` term picks have changed, which a selector like `row > 5` does at
+ * every call that brought a row, so such a selector costs a whole walk a call.
+ * A row of a list no document writes (a recovered QUIC stream, a serial line)
+ * has no place and is UNDECIDED.
  *
  * (ABI 60, selector_fields revision 8) TIME AS A PERSON WRITES IT. `time` takes
  * milliseconds since the Unix epoch, and also:
@@ -8635,7 +8640,7 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":3},
+ *     {"document":{"name":"field_values","revision":4},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
  *                  "keyexpr_source":"wire","segment":null,
@@ -8701,6 +8706,14 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * revision 3 a reply's pieces joined whichever stream shared their key and
  * transfer number.
  *
+ * THE ROW'S NUMBERS, at values-document revision 4. The selector reads the
+ * numbers the handle's other documents print: a `flow` term compares the
+ * list's `list_id`, and a `row` term the place the selection document writes
+ * the row at (THE SELECTOR LANGUAGE has both). Before revision 4 a `flow` term
+ * compared the list's position among the handle's lists, which is its
+ * `list_id` only while the handle's numbering and the lists' order agree, and
+ * a `row` term was UNDECIDED and wrote no record.
+ *
  * @values field_values keyexpr_source
  * @values field_values place
  * @values field_values unjoined
@@ -8712,8 +8725,8 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * that asks again from the `through_seq` it was given pays for what arrived
  * since. The handle keeps the payloads the selector picked past the cursor until
  * a cursor passes them, so another declaration text or path list reads them
- * without walking again; another selector or a lower cursor walks from the first
- * message.
+ * without walking again; another selector, a lower cursor, or a `row` term
+ * whose rows moved walks from the first message.
  *
  * WZ_DISSECT_ERR_INVALID_ARG for a null pointer, text that is not UTF-8, or a
  * path list that names no path, more than 64, or a line with a control character

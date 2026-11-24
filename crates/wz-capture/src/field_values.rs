@@ -542,6 +542,10 @@ pub struct ValuesMemory {
     fold: crate::ordered_fold::Resumable<ValuesFold>,
     /// The selector the fold is for.
     selector: Option<String>,
+    /// That selector as the fold judges records by it: its `flow` terms read
+    /// against the handle's list ids and its `row` terms against the places
+    /// the rows had at the last call. Another reading is another walk.
+    read: Option<crate::filter::Filter>,
     /// The cursor the memory was last asked at: the payloads held are the ones
     /// after it, so a lower cursor cannot be answered from them.
     asked_from: u64,
@@ -675,7 +679,13 @@ pub fn field_values_since(
     // them is another walk; every other declaration is read when a record is
     // written, and another text of those reads the same kept payloads.
     let keying = map.keying_text();
+    // A `flow` term compares the handle's list ids and a `row` term the places
+    // the documents give the rows, so the selector is read against both before
+    // the walk, as the selection doors read it. Places that moved since the
+    // last call judge the payloads already walked differently: another walk.
+    let read = crate::fields_json::read_against_the_documents(dissection, ask.filter, Some(ids));
     if memory.selector.as_deref() != Some(ask.selector)
+        || memory.read.as_ref() != Some(&read)
         || ask.after_seq < memory.asked_from
         || memory.keying != keying
     {
@@ -685,7 +695,7 @@ pub fn field_values_since(
     memory
         .fold
         .advance(dissection, &grouping, &mut memory.stats, progress, || {
-            let mut plane = crate::payload::PayloadFold::begin(dissection, ask.filter, &grouping);
+            let mut plane = crate::payload::PayloadFold::begin(dissection, &read, &grouping);
             plane.fix_key_ids(map.key_bindings());
             ValuesFold {
                 plane,
@@ -695,6 +705,7 @@ pub fn field_values_since(
         })
         .ok_or(ValuesError::Cancelled)?;
     memory.selector = Some(String::from(ask.selector));
+    memory.read = Some(read);
     memory.asked_from = ask.after_seq;
     memory.keying = keying;
     let Some(fold) = memory.fold.fold_mut() else {

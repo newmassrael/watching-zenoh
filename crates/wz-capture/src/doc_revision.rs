@@ -5549,6 +5549,37 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // A `row` TERM IS DECIDED BY THE DOORS THAT WRITE NO ROWS, and no key or
+    // word moves on either document.
+    //
+    // * The census (29) reads a `row` term against the places the selection
+    //   document gives the rows before any plane judges a record, so the planes
+    //   a selector narrows count a record matched or rejected by the place of
+    //   the row that carried it, where they counted it `undecided`. A live
+    //   handle's census begins its planes again when those rows move.
+    // * The values document (4) reads the selector as the selection doors do:
+    //   a `row` term by the row's place, where it was undecided and wrote no
+    //   record, and a `flow` term by the handle's `list_id`, where it compared
+    //   the list's position. Records may be written that were not, and the
+    //   reverse.
+    DocumentShape {
+        document: CENSUS,
+        revision: 29,
+        keys: CENSUS_R28_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 4,
+        keys: FIELD_VALUES_R2_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R2_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R2_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -51184,7 +51215,9 @@ mod tests {
             // and declared, the exchange plane `maybe_other_link`, and a
             // request id began to pair across a named session's links.
             // To 28 when `dropped_by_limits.caps` gained `chain_bytes`.
-            (CENSUS, 28u32),
+            // To 29 when a `row` term began to be read against the places the
+            // documents give the rows: values only.
+            (CENSUS, 29u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -51572,7 +51605,9 @@ mod tests {
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
             // live ones, and a request's or an error's were joined no more.
-            (FIELD_VALUES, 3),
+            // To 4 when the selector began to read `row` by the row's place
+            // and `flow` by the handle's list id: values only.
+            (FIELD_VALUES, 4),
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its

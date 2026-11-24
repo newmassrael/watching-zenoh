@@ -73,7 +73,7 @@
 //! | `e2e.crc` | `ok` `error`; absent where the record carries no frame | `==` `!=` | as `e2e` |
 //! | `e2e.counter` | `none` `repeat` `out_of_range` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
 //! | `e2e.timeout` | `ok` `error` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
-//! | `row` | an integer, the row's place in the documents' row order, from 0 | `==` `!=` `<` `<=` `>` `>=` | the plane was not given the row's facts, or was not told where the documents place it (a census, which writes no rows) |
+//! | `row` | an integer, the row's place in the documents' row order, from 0 | `==` `!=` `<` `<=` `>` `>=` | the plane was not given the row's facts, or was not told where the documents place it (a build without `dissect`, which has no document to place a row) |
 //! | `zids` | either end's zid, the sender's or the receiver's, as `zid` takes it | `==` `!=` | an end that is not the node is one this capture never saw name itself, or the value is an ambiguous prefix |
 //! | `session` | the two zids of a session, either order, `a/b`, each as `zid` takes it | `==` `!=` | an end that is one of the two is matched with one this capture never saw name itself, or a value is an ambiguous prefix |
 //!
