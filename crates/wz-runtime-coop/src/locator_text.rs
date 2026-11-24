@@ -180,8 +180,12 @@ fn ipv6_address(text: &mut Text<'_>) -> Option<[u16; 8]> {
     let room = tail.len().saturating_sub(head_size);
     let (tail_size, _) = ipv6_groups(text, tail.get_mut(..room)?);
     let at = head.len().saturating_sub(tail_size);
-    for (slot, group) in head.iter_mut().skip(at).zip(tail) {
-        *slot = group;
+    // One copy of the groups read, and not a step for each place they might take: `at` leaves as
+    // many places at the end as there are groups.
+    if let (Some(places), Some(groups)) = (head.get_mut(at..), tail.get(..tail_size)) {
+        if places.len() == groups.len() {
+            places.copy_from_slice(groups);
+        }
     }
     Some(head)
 }
