@@ -1585,14 +1585,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
     }
 }
 
-/// Whose callback runs on a thread now (`Deliveries::run`): a queryable's, by its id, which a get of
-/// the session's own made from inside it reads so as not to call it inside itself.
-#[cfg(feature = "local-queryable")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TargetKey {
-    Queryable(QblId),
-}
-
 /// The read task: a thread that steps the session until it is told to stop.
 struct ReadTask {
     stop: Arc<AtomicBool>,
@@ -4942,25 +4934,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 sink(matching);
             }
         }
-        let asked = self.hand_queries();
-        handed || asked
-    }
-
-    /// Hand each get of the session's own it queued for a queryable whose callback the asking
-    /// thread was inside of to that callback, and send what it answered. Whether one was handed.
-    /// A link's queries are handed out with the round.
-    #[cfg(feature = "local-queryable")]
-    fn hand_queries(&self) -> bool {
-        let mut handed = false;
-        while self.plane.queries.is_pending() {
-            let next = self.plane.queries.lock().pop_front();
-            let Some((call, query, generation)) = next else {
-                break;
-            };
-            handed = true;
-            self.run_queryable(&call, &query, generation);
-            self.end_query_call(call);
-        }
         handed
     }
 
@@ -4974,10 +4947,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !call.retired() {
             let _answering =
                 query::Answering::enter(self as *const Self as usize, generation, query.rid());
-            // A get of the session's own made from inside this callback reads it as running here,
-            // and leaves its query for when it returns.
-            #[cfg(feature = "local-queryable")]
-            let _running = self.deliveries.run(TargetKey::Queryable(call.id()));
             let mut responder = query::responder_for(
                 query.rid(),
                 query.keyexpr(),
@@ -5015,28 +4984,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         drop(row);
         // Only now is the row's drop over, which a waiting undeclaration reads.
         drop(letting_go);
-    }
-
-    /// End each call of the queries no callback was handed yet, which go unanswered: what the
-    /// session's close does before it lets go of its rows, as a row a call of which is owed is let
-    /// go of only once the call ends.
-    #[cfg(feature = "local-queryable")]
-    fn discard_queries(&self) {
-        loop {
-            let next = self.plane.queries.lock().pop_front();
-            let Some((call, query, _)) = next else {
-                break;
-            };
-            drop(query);
-            self.end_query_call(call);
-        }
-    }
-
-    /// A build whose session asks none of its own queryables queues no query: a link's are handed
-    /// out with the round.
-    #[cfg(not(feature = "local-queryable"))]
-    fn hand_queries(&self) -> bool {
-        false
     }
 
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
@@ -6049,10 +5996,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Hand the session's own get to each of its queryables it was asked of, inside the get and
-    /// with no lock held, as zenoh-pico's `_z_session_deliver_query_locally` runs them on the
-    /// caller's thread, then hand out what they answered. A queryable whose callback this thread is
-    /// inside of would wait on itself if called here: its query is kept, copied, for the delivery
-    /// that callback returns to.
+    /// with no lock held, then hand out what they answered. Each is called at once on the caller's
+    /// thread, one whose callback this thread is inside of as well, as zenoh-pico's
+    /// `_z_session_deliver_query_locally` hands it to `_z_trigger_queryables`, which calls each
+    /// callback where it stands (`vendor/zenoh-pico/src/session/queryable.c` @
+    /// `qle_info->_callback(&query, qle_info->_arg);`): a callback is called through a shared
+    /// borrow, from inside itself too, so nothing of the query is kept or copied.
     #[cfg(feature = "local-queryable")]
     fn hand_own_get(&self, asked: query::Asked, get: &query::OwnGet<'_>) {
         {
@@ -6060,16 +6009,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // nothing itself, as one inside a delivery does.
             let _delivering = self.deliveries.enter();
             for call in asked {
-                if self.deliveries.runs_here(TargetKey::Queryable(call.id())) {
-                    self.plane.queries.lock().push_back((
-                        call,
-                        query::OwnedQuery::of(get),
-                        query::LOCAL_QUERY,
-                    ));
-                } else {
-                    self.run_queryable(&call, get, query::LOCAL_QUERY);
-                    self.end_query_call(call);
-                }
+                self.run_queryable(&call, get, query::LOCAL_QUERY);
+                self.end_query_call(call);
             }
         }
         self.deliver();
@@ -7880,10 +7821,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // go first, then every row the close emptied.
         self.samples.discard();
         self.let_go_of_released();
-        // The queries no callback will now answer go first: each holds a call of its queryable's
-        // row, which the row's undeclaration below would wait for.
-        #[cfg(feature = "local-queryable")]
-        self.discard_queries();
         self.let_go_of_rows();
     }
 
