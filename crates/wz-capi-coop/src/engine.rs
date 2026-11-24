@@ -77,6 +77,9 @@ use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next, Phase, Signals, Turn};
+use wz_runtime_coop::face_send::{self, Behind};
+#[cfg(any(feature = "listen", feature = "group"))]
+use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
@@ -122,9 +125,6 @@ use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::push_build;
-use wz_session_core::qos::CongestionControl;
-#[cfg(any(feature = "listen", feature = "group"))]
-use wz_session_core::qos::Priority;
 use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(feature = "listen")]
@@ -945,7 +945,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
     #[cfg(any(feature = "listen", feature = "group"))]
-    handed_at_most: [usize; Priority::NUM],
+    handed_limits: HandedLimits,
     /// The droppable publishes dropped before they reached a link: on the faces a held session
     /// waits on, for want of room or by the profile's drop at once ([`Self::live_to_publish`]),
     /// one each whatever the number of those faces. Charged to the transport's drops in
@@ -1135,28 +1135,9 @@ impl RoomTable {
 }
 
 /// What a droppable publish that found the session held is told of the faces it would be sent
-/// to. Each face is a transport of its own, as each of zenoh's is: the publish is dropped on the
-/// faces its holder waits on and still sent to the others ([`CoopEngine::live_to_publish`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Room {
-    /// Every face asked takes bytes, or the holder is a publish between its sends or a read
-    /// working out its wait: whoever holds the session is not waiting on a face, and the session
-    /// is tried again.
-    Free,
-    /// Nothing was asked: what holds the session is not a publish (a read step, a timer, the
-    /// drive), which lets go of it once its step is done, and the queue profile drops a message
-    /// only behind a send. The publish waits for the session, blocked, as a send's lock that the
-    /// holder does not hold would not stop pico's put.
-    Stepping,
-    /// These faces took no bytes within the wait.
-    Congested(DroppedOn),
-    /// No face that is up gives a wait to ask.
-    Unasked,
-    /// Nothing was asked: this face is held by another publish sending on it, and the queue
-    /// profile drops a message behind it at once and reports it to the caller, as pico's
-    /// try-lock drop does.
-    Held(FaceId),
-}
+/// to, the faces that took no bytes named by their places in the table of rooms: what the face's
+/// send value reads into what the publish does ([`face_send::Room::behind`]).
+pub(crate) type Room = face_send::Room<DroppedOn>;
 
 /// Where a fan-out begins and whether its sends wait for no slot ([`CoopEngine::fan_out_in`]): a
 /// build that listens holds many links over pools of buffers they share, whose blocking publish
@@ -4321,7 +4302,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
         #[cfg(any(feature = "listen", feature = "group"))]
-        let handed_at_most = core.config.tx_queue.sizes;
+        let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
         Arc::new_cyclic(|this| Self {
             core: CoreLock::new(core),
@@ -4335,7 +4316,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             owed: AtomicBool::new(false),
             input_held: AtomicBool::new(false),
             #[cfg(any(feature = "listen", feature = "group"))]
-            handed_at_most,
+            handed_limits,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
             samples,
@@ -4698,29 +4679,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let room = self
                 .rooms
                 .for_held(self.held_drop, self.holder(), self.wait_before_drop_us);
-            let dropped = match room {
-                Room::Free => {
+            let dropped = match room.behind() {
+                Behind::TryAgain => {
                     #[cfg(test)]
                     self.takes.spins.fetch_add(1, Ordering::Relaxed);
                     core::hint::spin_loop();
                     continue;
                 }
-                Room::Unasked | Room::Stepping => {
+                Behind::WaitForSession => {
                     return self.live().map_or(ToPublish::Closed, ToPublish::Live)
                 }
                 #[cfg(any(feature = "listen", feature = "group"))]
-                Room::Congested(faces) => ToPublish::DroppedOn { faces, told: false },
-                #[cfg(any(feature = "listen", feature = "group"))]
-                Room::Held(face) => ToPublish::DroppedOn {
-                    faces: self.rooms.dropped_on(face),
-                    told: true,
+                Behind::Dropped { on, told } => ToPublish::DroppedOn {
+                    faces: match on {
+                        DropSet::Faces(faces) => faces,
+                        DropSet::Face(face) => self.rooms.dropped_on(face),
+                    },
+                    told,
                 },
                 // The dial face alone: the face congested, or held by another publish's send, is
                 // that face, and there is no other to owe the publish to.
                 #[cfg(not(any(feature = "listen", feature = "group")))]
-                Room::Congested(_) => ToPublish::DroppedOn { told: false },
-                #[cfg(not(any(feature = "listen", feature = "group")))]
-                Room::Held(_) => ToPublish::DroppedOn { told: true },
+                Behind::Dropped { told, .. } => ToPublish::DroppedOn { told },
             };
             #[cfg(feature = "transport-stats")]
             self.unsent_drops.fetch_add(1, Ordering::Relaxed);
@@ -5031,11 +5011,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Ok(0);
         }
         let meta = opts.push_metadata();
-        // zenoh's `is_droppable`: a best-effort message, or one whose congestion control is `Drop`
-        // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
-        // A message with no QoS of its own is sent with the default's, as the send reads it.
+        // zenoh's `is_droppable` (`face_send::droppable`). A message with no QoS of its own is sent
+        // with the default's, as the send reads it.
         let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
-        let droppable = !opts.reliable_bool() || congestion == CongestionControl::Drop;
+        let droppable = face_send::droppable(opts.reliable_bool(), congestion);
         let core = match self.live_to_publish(droppable) {
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
@@ -5325,10 +5304,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let priority = opts.priority_band();
         {
             let mut handed = self.handed();
-            let room = self
-                .handed_at_most
-                .get(priority as usize)
-                .is_some_and(|most| handed.held_at(priority) < *most);
+            let room = self.handed_limits.keeps(priority, handed.held_at(priority));
             if room && handed.keep(keyexpr, payload, opts, dropped_on) {
                 self.owed.store(true, Ordering::SeqCst);
             }
