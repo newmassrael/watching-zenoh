@@ -226,14 +226,17 @@ impl Drop for KeyText {
 
 /// The key arena of `engine`'s session: the cooperative engine always keeps one and is reached as
 /// its own type, so a key's hold, share and release are calls resolved when the build is made.
+///
+/// Both arms take the `Arc` a holder keeps: on the tokio engine `Engine` is a trait object, and an
+/// `&Arc<Engine>` handed where an `&Engine` is asked would be unsized, not dereferenced.
 #[cfg(not(feature = "engine-tokio"))]
-fn key_arena(engine: &Engine) -> Option<&Engine> {
-    Some(engine)
+fn key_arena(engine: &Arc<Engine>) -> Option<&Engine> {
+    Some(Arc::as_ref(engine))
 }
 
 /// The key arena of the session behind the port, when its engine keeps one.
 #[cfg(feature = "engine-tokio")]
-fn key_arena(engine: &Engine) -> Option<&dyn SessionKeys> {
+fn key_arena(engine: &Arc<Engine>) -> Option<&dyn SessionKeys> {
     engine.key_arena()
 }
 
