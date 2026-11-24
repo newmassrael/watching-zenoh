@@ -7,6 +7,7 @@
 //! same id sent to a session that holds no dictionary, which drops it as upstream does. The ids
 //! and keys are synthetic.
 
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
@@ -23,12 +24,12 @@ use wz_session_core::policy::{KeyWireForm, SessionPolicy};
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
-use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen, SharedKeyIds};
+use wz_session_core::shared_key_ids::{key_wire, KeyIds, KeyIdsAtOpen, KeyWire, SharedKeyIds};
 use wz_session_core::sink::SampleView;
 use wz_session_core::wire_id::ExprId;
 use wz_session_core::WhatAmI;
 
-use super::get::remote_get;
+use super::get::{count_end, ignore_reply, remote_get};
 use super::listen::{eventually, Stepped};
 use super::{client_config, Engine, LOOPBACK};
 use crate::{CoopConfig, KeyWireFormRefused, OpenError, OpenKeyIds};
@@ -315,6 +316,46 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
     assert_eq!(
         *replies.lock().unwrap(),
         [("lab/q/x".to_owned(), b"answer".to_vec())]
+    );
+}
+
+/// The legs of the get that counts its allocations by a shared id, ended: a counter of its own,
+/// as the leg may end after its test returns.
+static SHARED_GET_ENDS: AtomicUsize = AtomicUsize::new(0);
+
+/// A get on a link of the shared form names its key by the dictionary's id and the rest of the
+/// key, the rest read where the key lies, so it is asked with no allocation. The CONTROL is the
+/// form the link names this key in: the dictionary's prefix and the rest, not the literal.
+///
+/// Turned red by a key on the link that copies the rest (`WireKey::aliased` over `String::from`
+/// in `wz_capi_port::wire_on_link`).
+#[test]
+fn a_get_by_a_shared_id_and_the_rest_allocates_nothing() {
+    assert_eq!(
+        key_wire(KeyWireForm::Shared, &dictionary(), "lab/q/x", false),
+        KeyWire::Shared {
+            id: 43,
+            suffix: Some("/x")
+        },
+        "CONTROL: the link names the key by the dictionary's prefix and the rest"
+    );
+    let (listener, endpoint) = listener(Some(dictionary()), KeyWireForm::Shared);
+    let _client = dialler(&listener, &endpoint);
+    let context = core::ptr::from_ref(&SHARED_GET_ENDS)
+        .cast_mut()
+        .cast::<core::ffi::c_void>();
+    let opts = remote_get();
+    let mut issued = Ok(0);
+    let allocations = super::redial_heap::counted(|| {
+        issued = listener.get_on_wire("lab/q/x", &WireKey::literal(), &opts, None, &mut || {
+            // SAFETY: the counter is a static, which outlives every leg.
+            unsafe { ReplyCallback::raw(ignore_reply, context, Some(count_end)) }
+        });
+    });
+    assert_eq!(issued, Ok(1), "one leg for the one face");
+    assert_eq!(
+        allocations, 0,
+        "a get by a shared id and the rest is asked with no allocation"
     );
 }
 

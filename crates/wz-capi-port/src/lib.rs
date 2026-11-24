@@ -1005,13 +1005,18 @@ impl WireKey {
 /// (`SessionLinkActions::key_wire_on_link`): `None` for the declared form, which keeps `wire` as
 /// the ABI made it; the literal; or an id of the dictionary every node of the deployment shares,
 /// with the rest of the key, which no declaration precedes and which therefore keeps nothing.
+///
+/// The rest is the end of the key the link was asked about, so the key made names it by its
+/// length and is read against that key ([`WireKey::names_in`]): naming it copies nothing.
 #[cfg(feature = "shared-key-ids")]
 pub fn wire_on_link(link: wz_session_core::shared_key_ids::KeyWire<'_>) -> Option<WireKey> {
     use wz_session_core::shared_key_ids::KeyWire;
     match link {
         KeyWire::Declared => None,
         KeyWire::Literal => Some(WireKey::literal()),
-        KeyWire::Shared { id, suffix } => Some(WireKey::aliased(id, suffix.map(String::from))),
+        KeyWire::Shared { id, suffix } => {
+            Some(WireKey::aliased_tail(id, suffix.map_or(0, str::len)))
+        }
     }
 }
 
@@ -1102,6 +1107,36 @@ mod link_form_tests {
                 aggregate: true,
             })
         );
+    }
+
+    /// A key on a link of the shared form names the dictionary's id and the rest of the key, read
+    /// where the key lies rather than copied into the wire key.
+    ///
+    /// # Control
+    ///
+    /// A wire key that copies the rest (`WireKey::aliased` over `String::from`) reds the pointer
+    /// assertion; one whose length is not the rest's reds the first.
+    #[test]
+    fn a_key_on_a_shared_link_names_the_end_of_the_key_where_it_lies() {
+        let rest = KEY.get("lab/rig".len()..).expect("the rest of the key");
+        let wire = wire_on_link(KeyWire::Shared {
+            id: 40,
+            suffix: Some(rest),
+        })
+        .expect("the shared form names the key its own way");
+        assert_eq!(wire.names_in(KEY), (40, Some("/alpha")));
+        assert_eq!(
+            wire.names_in(KEY).1.map(str::as_ptr),
+            Some(rest.as_ptr()),
+            "the rest is read where the key lies"
+        );
+        let whole = wire_on_link(KeyWire::Shared {
+            id: 41,
+            suffix: None,
+        })
+        .expect("the shared form names the key its own way");
+        assert_eq!(whole.names_in(KEY), (41, None));
+        assert!(wire_on_link(KeyWire::Declared).is_none());
     }
 
     #[test]
