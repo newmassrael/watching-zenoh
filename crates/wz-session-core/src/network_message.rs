@@ -428,15 +428,20 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
 
 /// [`judge_chain`] over the header bytes a chain yields, held or walked where its frame lies: the
 /// verdict reads the headers and nothing else of an entry.
-// [`judge_chain`]'s union, which it serves, and the Request read where its frame
-// lies (`request_view_admission`), which walks its chains and calls this alone.
+// [`judge_chain`]'s union, which it serves and which holds the Put verdict's
+// (`judge_put_chain`) and the Response read where its frame lies
+// (`response_view_admission`), and the Request read where its frame lies
+// (`request_view_admission`), which walks its chains and calls this alone.
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-declare",
-    feature = "codec-push",
+    all(feature = "codec-declare", feature = "rx-control"),
+    all(feature = "codec-push", feature = "rx-push"),
     all(
         feature = "codec-frame",
-        any(feature = "codec-request", feature = "codec-response"),
+        any(
+            feature = "codec-request",
+            all(feature = "codec-response", feature = "rx-response")
+        ),
         any(
             test,
             feature = "session-unicast",
@@ -446,6 +451,7 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
     all(
         feature = "codec-frame",
         feature = "rx-lent-control",
+        any(feature = "rx-control", feature = "rx-response"),
         any(
             test,
             feature = "session-unicast",
@@ -453,8 +459,6 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
         )
     )
 ))]
-// Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
-#[allow(dead_code)]
 fn judge_headers(
     carrier: crate::ext_admit::ExtCarrier,
     headers: Option<impl Iterator<Item = u8>>,
@@ -467,8 +471,32 @@ fn judge_headers(
 /// `first` unless it is admissible, and then `next()`: the
 /// chains of a message are read in the order upstream reads them, the envelope's
 /// before the body's, and the first offender is the one reported.
-// Only the messages that carry a body have a second chain to read.
-#[allow(dead_code)]
+// The union of its callers: the messages that carry a body, which have a second chain to read
+// (the Declare, Push, Request and Response verdicts, and the Request and Response read where
+// their frame lies).
+#[cfg(any(
+    all(
+        feature = "codec-declare",
+        any(feature = "alloc", feature = "rx-control")
+    ),
+    all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")),
+    all(
+        feature = "alloc",
+        any(feature = "codec-request", feature = "codec-response")
+    ),
+    all(
+        feature = "codec-frame",
+        any(
+            feature = "codec-request",
+            all(feature = "codec-response", feature = "rx-response")
+        ),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
 fn then_judge(
     first: crate::ext_admit::ExtAdmission,
     next: impl FnOnce() -> crate::ext_admit::ExtAdmission,
@@ -722,16 +750,22 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
 /// one of them, so the chain is judged by the headers it writes
 /// ([`crate::put_payload::chain_headers`]). The Push, the Reply and the Request
 /// that carry a Put all judge it here.
+// The union of its callers: the owned message's Push, Response and (with `request-put-del`)
+// Request, and the Push read where its frame lies (`push_view_admission`), whose owned-walk
+// form the first already covers.
 #[cfg(any(
-    feature = "codec-push",
     all(
         feature = "alloc",
-        any(feature = "codec-response", feature = "codec-request")
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            all(feature = "codec-request", feature = "request-put-del")
+        )
     ),
     all(
         feature = "codec-frame",
-        feature = "codec-response",
-        feature = "rx-response",
+        feature = "codec-push",
+        feature = "rx-push",
         any(
             test,
             feature = "session-unicast",
@@ -739,8 +773,6 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
         )
     )
 ))]
-// Unused in a build whose request codec carries no Put.
-#[allow(dead_code)]
 fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> crate::ext_admit::ExtAdmission {
@@ -1907,15 +1939,37 @@ enum Lend {
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     ),
+    // The union of its callers, the lent readers of each kind.
     any(
-        feature = "codec-push",
+        all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            )
+        ),
         feature = "codec-request",
-        feature = "codec-response",
-        feature = "rx-lent-control"
+        all(
+            feature = "codec-response",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-response"
+            )
+        ),
+        all(
+            feature = "codec-response-final",
+            feature = "rx-response",
+            feature = "rx-lent-control"
+        ),
+        all(feature = "rx-control", feature = "rx-lent-control")
     )
 ))]
-// Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
-#[allow(dead_code)]
 fn admit_lent(
     admission: crate::ext_admit::ExtAdmission,
 ) -> Result<(), crate::parse_error::InboundParseError> {
