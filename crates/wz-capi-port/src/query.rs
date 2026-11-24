@@ -265,6 +265,18 @@ mod tests {
     impl ReplyOut for Out {
         fn reply(&mut self, _payload: &[u8]) {}
         fn reply_del(&mut self) {}
+        fn reply_err(
+            &mut self,
+            _encoding_id: Option<u32>,
+            _schema: Option<&[u8]>,
+            _payload: &[u8],
+        ) {
+        }
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
     }
 
     /// A face's holder whose session is closed or not.
