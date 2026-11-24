@@ -50,8 +50,12 @@ const fn row_capacity<const N: usize>() -> usize {
 /// Branchless across the view / declared arms by construction: both keep the
 /// literal at slots 0/1 (see [`z_loaned_keyexpr_t`]).
 ///
+/// Out of line: every door that names a key reads it here, and each copy inlined carried the
+/// UTF-8 check of its own.
+///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+#[inline(never)]
 pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a str> {
     if ke.is_null() {
         return None;

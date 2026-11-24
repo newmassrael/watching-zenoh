@@ -2066,6 +2066,9 @@ impl PutCarried {
 /// switch it is `Any`, and the session's own subscribers are reached ONCE, through the
 /// registry's local plane (faces take the remote half, the plane the local one), inside
 /// the call and on the calling thread, which is where pico delivers them.
+///
+/// Out of line: five doors start from it, and each copy inlined wrote the whole options value.
+#[inline(never)]
 fn put_options() -> PublishOptions<'static> {
     let mut opts = PublishOptions::default()
         .with_reliability(Reliability::Reliable)
