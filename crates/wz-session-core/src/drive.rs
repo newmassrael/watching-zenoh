@@ -922,15 +922,18 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             return outcome;
         }
     }
-    // The peer's chain is read once for every reader below: its patch level off an Init (some
-    // for every Init), and, for the readers of a slice of owned entries that the extensions a
-    // build with an allocator negotiates take, the chain made owned once.
+    // The peer's chain is read once for every reader below: its patch level and its region
+    // identity off an Init in one walk (some for every Init), and, for the readers of a slice of
+    // owned entries that the extensions a build with an allocator negotiates take, the chain
+    // made owned once.
     #[cfg(feature = "codec-init-body")]
-    let peer_patch = match facts {
+    let (peer_patch, peer_region) = match facts {
         crate::inbound::ControlFacts::Init(init) => {
-            Some(crate::extpatch::peer_patch_in(init.extensions.entries()))
+            let (patch, region) =
+                crate::extregion::peer_patch_and_region_in(init.extensions.entries());
+            (Some(patch), Some(region))
         }
-        _ => None,
+        _ => (None, None),
     };
     #[cfg(any(
         all(
@@ -1191,9 +1194,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // one sits after its own reject: a refused Init must not have
     // its other extensions merged into the session first.
     #[cfg(feature = "codec-init-body")]
-    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
-    {
-        if !actions.admit_peer_region_in(extensions.entries()) {
+    if let Some(region) = peer_region {
+        if !actions.admit_read_peer_region(region) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::InitRegionRejected;
         }

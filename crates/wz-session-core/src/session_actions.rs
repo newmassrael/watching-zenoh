@@ -8981,16 +8981,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the initiator the InitAck's — the both-sides shape
     /// [`Self::negotiate_patch_against_peer`] has.
     pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
-        self.admit_peer_region_in(extensions)
+        self.admit_read_peer_region(crate::extregion::peer_region(extensions))
     }
 
-    /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRead`).
-    pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
+    /// [`Self::admit_peer_region`] over the region as a walk of the chain read it
+    /// ([`crate::extregion::peer_patch_and_region_in`]), for the handshake that reads the
+    /// patch level off the same walk.
+    pub fn admit_read_peer_region(
         &self,
-        extensions: impl IntoIterator<Item = E>,
+        region: Result<Option<crate::extregion::RegionName>, crate::extregion::RegionNameError>,
     ) -> bool {
-        match crate::extregion::peer_region_in(extensions) {
+        match region {
             Ok(region) => {
                 R::with_mutex_mut(&self.peer_region, |s| *s = region);
                 true
