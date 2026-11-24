@@ -3201,12 +3201,14 @@ wire = "none"
 help = '''
 The replies a session's queryables may have ready to send between two
 sends. One more is refused and counted, and the handler that made it is
-told.
+told. The same count bounds the keys whose latest reply the session's
+consolidating gets hold until their Final: a reply of a key past them is
+handed to the get's callback at once, unconsolidated, and counted.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: wz holds the replies of its queryables between two sends in a table of its own."
+reason = "No key of upstream's configuration bounds it: wz holds the replies of its queryables between two sends in a table of its own. Upstream's Latest get holds one reply per key on the heap, of any count, and delivers each key's latest at the Final; wz holds them in rows of the session's memory, and a reply of a key past the rows is delivered at once instead of held, so such a get may deliver two replies of one key where upstream delivers one, and loses none."
 
 [limit.pico_preset]
 value = 2
@@ -3423,53 +3425,32 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen holds a heartbeat for each of sixteen publishers of a session."
 
 [[limit]]
-id = "ADVANCED_CACHE_SAMPLE_BYTES"
-kconfig = "WZ_LIMIT_ADVANCED_CACHE_SAMPLE_BYTES"
+id = "ADVANCED_CACHE_BYTES"
+kconfig = "WZ_LIMIT_ADVANCED_CACHE_BYTES"
 kind = "bound"
 driven = "local"
-default = 4096
+default = 1712
 storage = "capacity"
 scope = "session"
 binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The bytes one sample an advanced publisher's cache keeps may carry, its
-payload and its attachment together: the room of each row of the session's
-cache table. A put whose sample does not fit is refused with
-_Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent, as a cache that could not keep the
-sample would leave a subscriber's recovery of it empty.
+The bytes the caches of a session's advanced publishers keep their samples in
+together, reserved when the session opens: one ring of records, each a
+sample's header, key, encoding schema, payload and attachment, as long as they
+are. A cache keeps at most its own max_samples records; a new record that finds
+no room lets the oldest records go first. A put whose record is longer than the
+whole ring is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the sample an advanced cache keeps: zenoh and zenoh-pico keep each cached sample whole on the heap, of any size. wz keeps it in a row of fixed room, so that a put allocates nothing, and refuses at the put a sample past the room, which upstream would cache. 4096 is zenoh-pico's FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the largest message its default build rejoins."
-
-[[limit]]
-id = "ADVANCED_CACHE_ROWS"
-kconfig = "WZ_LIMIT_ADVANCED_CACHE_ROWS"
-kind = "bound"
-driven = "local"
-default = 16
-storage = "capacity"
-scope = "session"
-binding_heap = "build"
-binding_fixed = "build"
-wire = "none"
-help = '''
-The samples the caches of a session's advanced publishers keep together: the
-rows of the session's cache table, each of ADVANCED_CACHE_SAMPLE_BYTES, which
-the session reserves when it opens. An advanced publisher whose cache asks for
-more rows than are free is refused at its declaration.
-'''
-
-[limit.upstream]
-zenoh = "none"
-reason = "No key of upstream's configuration bounds the samples the caches of a session keep: each advanced publisher's cache keeps its max_samples on the heap. Sixteen holds the deepest cache zenoh-pico's tests declare, ten samples, and room besides."
+reason = "No key of upstream's configuration bounds what the caches of a session keep: zenoh and zenoh-pico keep each cached sample on the heap, as long as it is, at most max_samples of each cache. wz keeps the records in one ring of the session's memory, as long as they are, so a put allocates nothing, and lets the oldest records of any cache go when a new one finds no room, which upstream does only past a cache's max_samples. 1712 is ten records, the deepest cache zenoh-pico's tests declare (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`), of the longest key they publish on (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `const char *expr = \"zenoh-pico/advanced-pubsub/test/retransmission_sample_miss\";`, 58 bytes) and the longest payload their buffer holds (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `char buf[16];`, 15 bytes): 88 bytes of header and 73 of key and payload, 168 with the padding to 8, ten of them and the ring's 32 bytes."
 
 [limit.pico_preset]
-value = 10
-reason = "zenoh-pico bounds its caches by no count; the deepest cache its API tests declare keeps ten samples (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`), one advanced publisher at a time."
+value = 1552
+reason = "Ten records of the samples zenoh-pico's tests put into a cache of ten (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`): the longest key they publish on, 58 bytes, and a payload of one byte (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `put_str(z_loan(pub), \"1\");`), 88 bytes of header and 59 of key and payload, 152 with the padding to 8, ten of them and the ring's 32 bytes."
 
 [[limit]]
 id = "MAX_LOCATOR_LEN"
@@ -4571,6 +4552,37 @@ reason = "No key of upstream's configuration states it: the declaration-sync-pac
 # so a stated value past the build's is refused by name in such a build; the heap engine sizes them
 # from the session's value (`on_heap = "quota"`), anywhere in the range.
 [[limit]]
+id = "HANDED_LEG_BYTES"
+kconfig = "WZ_LIMIT_HANDED_LEG_BYTES"
+kind = "parameter"
+range = [1, 4294967295]
+on_heap = "quota"
+default = 4096
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a publish the session holds no room for is dropped on every face, a drop
+# the publish already counted, and nothing different reaches a peer.
+wire = "none"
+help = '''
+How many bytes a session holds of the droppable publishes it owes its other
+faces when a publish finds the session held by a send that waits on one face:
+the publish is dropped on that face and kept, in room the session took at open,
+until whoever holds the session next sends it to the others. The room is cut
+into places of the batch the session advertises, one publish to a place, its key,
+payload and attachment together; a publish longer than a place, or one that
+finds every place held, is dropped on every face. The room is reserved only
+when the held-publish-drop policy keeps such publishes for the other faces. At
+least 1; a session may lower it and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: each zenoh transport has a transmission queue of its own (`transport/link/tx/queue/size`), so a message that one transport's full queue drops is still queued on the others. The cooperative engine holds every face under one lock, and keeps what the other faces' queues would still take here. The default keeps two batches of the session's default size (PICO_UNICAST_BATCH_BYTES, 2,048), the publishes another thread makes while one send waits at most `congestion_control/drop/wait_before_drop`."
+
+[[limit]]
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
 kind = "parameter"
@@ -5584,6 +5596,30 @@ read no id of a dictionary, with any value but `declared`. Interests and
 liveliness interests name their keys as under `declared`.
 '''
 
+[[policy]]
+id = "held-publish-drop"
+kind = "choice"
+kconfig = "WZ_POLICY_HELD_PUBLISH_DROP"
+choices = ["held-faces", "every-face"]
+default = "held-faces"
+upstream = "Gives each transport a transmission queue of its own, so a droppable message that one transport's full queue drops is still queued on the session's other transports: `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a droppable message that finds it held is dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-face`."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the other faces' peers receive the publish under one value and not the other.
+wire = "visible"
+since = 2
+help = '''
+What a droppable publish is dropped on when it finds the session held by a send
+that waits on one of its faces, in an engine that holds every face under one
+lock. `held-faces` drops it on the faces the send waits on and keeps it, in
+HANDED_LEG_BYTES of room the session reserves when it opens, until whoever
+holds the session next sends it to the other faces, as each of upstream's
+transports drops only on its own queue. `every-face` drops it on every face at
+once and reserves no room, as zenoh-pico, whose peers share one transmit lock,
+does.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -5637,6 +5673,7 @@ zid-derivation = "random"
 handshake-stray-message = "fail"
 handshake-cookie = "stateless"
 key-wire-form = "declared"
+held-publish-drop = "held-faces"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

@@ -193,8 +193,6 @@ pub mod join_handle;
 #[cfg(feature = "runtime")]
 pub mod local;
 #[cfg(feature = "runtime")]
-// Totality debt TD-205 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
 mod static_tests;
@@ -231,8 +229,6 @@ pub use yield_now::{yield_now, YieldNow};
 // composes before the sync drive-loop consumer (`session_drive`) wires it
 // to live lwIP sockets.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-206 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod session_runtime;
 
 // R2915 — the cooperative unicast session drive loop, generic over the
@@ -241,7 +237,7 @@ pub mod session_runtime;
 // network stack is not lwIP (Zephyr's own sockets) drives the same loop.
 #[cfg(feature = "session-unicast")]
 // Totality debt TD-203 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(clippy::indexing_slicing)]
 pub mod session_drive;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
@@ -278,6 +274,11 @@ pub mod udp_link;
 // is out: one for both links of this crate, the datagram link above and the stream link below.
 #[cfg(feature = "session-unicast")]
 pub mod link_storage;
+
+// The droppable publishes a session that holds every face under one lock keeps for the faces they
+// were not dropped on, in room the session took at open. Documented in its own `//!`.
+#[cfg(all(feature = "session-unicast", feature = "alloc"))]
+pub mod handed;
 
 // The cells a session's links' drivers live in, each named by counted handles as an `Rc` would
 // name it, lent from the session's arena: a link taken after the open takes no memory of the heap.

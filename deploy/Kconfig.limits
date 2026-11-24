@@ -421,7 +421,9 @@ config WZ_LIMIT_MAX_PENDING_REPLIES
 	help
 	  The replies a session's queryables may have ready to send between two
 	  sends. One more is refused and counted, and the handler that made it is
-	  told.
+	  told. The same count bounds the keys whose latest reply the session's
+	  consolidating gets hold until their Final: a reply of a key past them is
+	  handed to the get's callback at once, unconsolidated, and counted.
 
 config WZ_LIMIT_MAX_PENDING_FINALS
 	int "MAX_PENDING_FINALS"
@@ -502,25 +504,17 @@ config WZ_LIMIT_MAX_TICKERS
 	  session reserves when it opens. Starting one more is refused, as an engine
 	  with no periodic jobs refuses it.
 
-config WZ_LIMIT_ADVANCED_CACHE_SAMPLE_BYTES
-	int "ADVANCED_CACHE_SAMPLE_BYTES"
-	default 4096
+config WZ_LIMIT_ADVANCED_CACHE_BYTES
+	int "ADVANCED_CACHE_BYTES"
+	default 1552 if WZ_LIMITS_ZENOH_PICO
+	default 1712
 	help
-	  The bytes one sample an advanced publisher's cache keeps may carry, its
-	  payload and its attachment together: the room of each row of the session's
-	  cache table. A put whose sample does not fit is refused with
-	  _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent, as a cache that could not keep the
-	  sample would leave a subscriber's recovery of it empty.
-
-config WZ_LIMIT_ADVANCED_CACHE_ROWS
-	int "ADVANCED_CACHE_ROWS"
-	default 10 if WZ_LIMITS_ZENOH_PICO
-	default 16
-	help
-	  The samples the caches of a session's advanced publishers keep together: the
-	  rows of the session's cache table, each of ADVANCED_CACHE_SAMPLE_BYTES, which
-	  the session reserves when it opens. An advanced publisher whose cache asks for
-	  more rows than are free is refused at its declaration.
+	  The bytes the caches of a session's advanced publishers keep their samples in
+	  together, reserved when the session opens: one ring of records, each a
+	  sample's header, key, encoding schema, payload and attachment, as long as they
+	  are. A cache keeps at most its own max_samples records; a new record that finds
+	  no room lets the oldest records go first. A put whose record is longer than the
+	  whole ring is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent.
 
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
@@ -972,6 +966,21 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	  retries. Each declaration sent starts the stretch again. 0 gives up only when
 	  the link itself ends. The tokio engine, the cooperative engine and the
 	  fixed-memory slot client read it alike.
+
+config WZ_LIMIT_HANDED_LEG_BYTES
+	int "HANDED_LEG_BYTES"
+	range 1 4294967295
+	default 4096
+	help
+	  How many bytes a session holds of the droppable publishes it owes its other
+	  faces when a publish finds the session held by a send that waits on one face:
+	  the publish is dropped on that face and kept, in room the session took at open,
+	  until whoever holds the session next sends it to the others. The room is cut
+	  into places of the batch the session advertises, one publish to a place, its key,
+	  payload and attachment together; a publish longer than a place, or one that
+	  finds every place held, is dropped on every face. The room is reserved only
+	  when the held-publish-drop policy keeps such publishes for the other faces. At
+	  least 1; a session may lower it and never raise it.
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"

@@ -1282,4 +1282,46 @@ config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_LITERAL
 	  Whether `literal` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
+choice WZ_POLICY_HELD_PUBLISH_DROP
+	prompt "held-publish-drop"
+	default WZ_POLICY_HELD_PUBLISH_DROP_HELD_FACES
+	help
+	  What a droppable publish is dropped on when it finds the session held by a send
+	  that waits on one of its faces, in an engine that holds every face under one
+	  lock. `held-faces` drops it on the faces the send waits on and keeps it, in
+	  HANDED_LEG_BYTES of room the session reserves when it opens, until whoever
+	  holds the session next sends it to the other faces, as each of upstream's
+	  transports drops only on its own queue. `every-face` drops it on every face at
+	  once and reserves no room, as zenoh-pico, whose peers share one transmit lock,
+	  does.
+	  Upstream: Gives each transport a transmission queue of its own, so a droppable
+	  message that one transport's full queue drops is still queued on the session's
+	  other transports: `held-faces`. zenoh-pico's peers of one unicast transport
+	  share one transmit lock, and a droppable message that finds it held is dropped
+	  for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret =
+	  _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`):
+	  `every-face`.
+
+config WZ_POLICY_HELD_PUBLISH_DROP_HELD_FACES
+	bool "held-faces"
+
+config WZ_POLICY_HELD_PUBLISH_DROP_EVERY_FACE
+	bool "every-face"
+
+endchoice
+
+config WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_HELD_FACES
+	bool "held-publish-drop allows held-faces" if !WZ_POLICY_HELD_PUBLISH_DROP_HELD_FACES
+	default y
+	help
+	  Whether `held-faces` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_EVERY_FACE
+	bool "held-publish-drop allows every-face" if !WZ_POLICY_HELD_PUBLISH_DROP_EVERY_FACE
+	default y
+	help
+	  Whether `every-face` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
 endmenu

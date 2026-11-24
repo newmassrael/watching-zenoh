@@ -649,8 +649,9 @@ suites (C1co, Layer Z) unchanged.
     and its entities still keep the engine as the port's trait object, because the engine is made
     in its own `Arc` and an enum of two engines would be a second allocation; one engine type
     there needs the links to be one type (an enum of the two at `SessionLinks` and its pump, in
-    `wz-runtime-coop`'s traits). What serves any engine keeps the trait object, an open set: the
-    advanced plane's host and its periodic job (`port_engine`), and the admin space's weak hold.
+    `wz-runtime-coop`'s traits). The advanced subscriber's host and the periodic jobs are generic
+    over the engine (`EngineSubscriber<E>`, `Ticker<T>`), so they take the ABI's `Engine` as
+    it is; what keeps the trait object is the admin space's weak hold.
 12. **U11. The static runtime under the engine.** `wz-runtime-coop` `local.rs`, `executor.rs`,
     `runtime_impl.rs`, `session_runtime.rs`, `wz-capi-coop` `engine/ticker.rs`. Family: idle
     step. Tests: the session's tasks placed at open; a timer table at its limit.

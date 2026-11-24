@@ -74,6 +74,14 @@ fn rooms(answers: &Answers) -> LinkRooms<Answers> {
     LinkRooms::new(answers.clone(), 4)
 }
 
+/// The places of the faces `room` names congested, or `None` for another answer.
+fn congested(room: Room) -> Option<Vec<usize>> {
+    match room {
+        Room::Congested(set) => Some((0..64).filter(|at| set.contains(*at)).collect()),
+        _ => None,
+    }
+}
+
 /// A session none of whose links gives a wait cannot be asked: the publish waits for the session.
 #[test]
 fn a_session_whose_links_give_no_wait_is_not_asked() {
@@ -95,7 +103,11 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     assert_eq!(answers.asked(10), [1_234]);
 
     rooms.hold(2, answers.face(20, false));
-    assert_eq!(rooms.within(1_234), Room::Congested(vec![2]));
+    assert_eq!(
+        congested(rooms.within(1_234)),
+        Some(vec![1]),
+        "the second face's place"
+    );
     assert_eq!(answers.asked(20), [1_234], "the full link was asked");
 }
 
@@ -109,7 +121,7 @@ fn only_the_faces_without_room_are_the_congestion() {
     rooms.hold(1, answers.face(10, false));
     rooms.hold(2, answers.face(20, true));
     rooms.hold(3, answers.face(30, false));
-    assert_eq!(rooms.within(1_000), Room::Congested(vec![1, 3]));
+    assert_eq!(congested(rooms.within(1_000)), Some(vec![0, 2]));
     assert_eq!(answers.asked(10), [1_000], "the first spends the wait");
     assert_eq!(
         answers.asked(20),
@@ -192,8 +204,8 @@ fn a_link_that_has_gone_is_not_asked() {
     let rooms = rooms(&answers);
     rooms.hold(1, answers.face(10, false));
     assert_eq!(
-        rooms.within(1_000),
-        Room::Congested(vec![1]),
+        congested(rooms.within(1_000)),
+        Some(vec![0]),
         "CONTROL: while it is up"
     );
     rooms.forget(1);
@@ -207,6 +219,40 @@ fn a_link_that_has_gone_is_not_asked() {
     );
     rooms.forget_all();
     assert_eq!(rooms.within(1_000), Room::Unasked);
+}
+
+/// A face keeps its place while it is up, and a publish dropped on a set read at one mark is sent
+/// to the faces that held their places then and are not in it: one it was dropped on, and one
+/// that takes a freed place after the drop, are passed over, as a transport that opened after a
+/// publish is not sent it. A face that holds no place is named as every face, which drops the
+/// publish on all. Turned red by a place reused without its mark, or a face with no place the set
+/// leaves out.
+#[cfg(any(feature = "listen", feature = "group"))]
+#[test]
+fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, false));
+    rooms.hold(2, answers.face(20, true));
+    let Room::Congested(dropped) = rooms.within(1_000) else {
+        panic!("the first face is congested");
+    };
+    assert!(rooms.skips(&dropped, 1), "the face it was dropped on");
+    assert!(!rooms.skips(&dropped, 2), "a face with room is sent it");
+    rooms.forget(1);
+    rooms.hold(3, answers.face(30, true));
+    assert!(
+        rooms.skips(&dropped, 3),
+        "the face that took the first face's place came after the drop"
+    );
+    assert!(
+        !rooms.skips(&rooms.dropped_on(2), 3),
+        "CONTROL: a set read now owes it"
+    );
+    assert!(
+        rooms.dropped_on(9).is_every(),
+        "a face with no place is every face"
+    );
 }
 
 /// The session's counters are its links': puts it sent on the link it holds are counted there and

@@ -4619,8 +4619,10 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     *actions
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") =
-        Some(wz_session_core::session_init_params::zid_bytes(&peer));
+        .expect("remote_peer_zid poisoned in test fixture") = Some(
+        wz_session_core::session_zid::SessionZid::new(&peer)
+            .expect("a 1 to 16 byte zid, not all zero"),
+    );
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -17615,8 +17617,10 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") =
-        Some(wz_session_core::session_init_params::zid_bytes(peer));
+        .expect("remote_peer_zid poisoned in test fixture") = Some(
+        wz_session_core::session_zid::SessionZid::new(peer)
+            .expect("a 1 to 16 byte zid, not all zero"),
+    );
     let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
     let writer = seen.clone();
     let listener = session

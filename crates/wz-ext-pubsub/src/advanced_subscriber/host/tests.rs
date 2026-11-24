@@ -121,6 +121,28 @@ impl Script {
     }
 }
 
+impl wz_capi_port::KeyHolds for Script {
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+}
+
+impl wz_capi_port::Tickers for Script {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        if self.no_tickers.load(Ordering::SeqCst) {
+            return Err(Refusal::NotBuilt);
+        }
+        let id = self.take_id();
+        self.event(format!("start ticker {period_ms}"));
+        self.tickers.lock().unwrap().push((id, period_ms, tick));
+        Ok(id)
+    }
+    fn stop_ticker(&self, _id: TickerId) {
+        self.event("stop ticker");
+    }
+}
+
 impl SessionEngine for Script {
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
@@ -189,10 +211,6 @@ impl SessionEngine for Script {
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
         Err(Refusal::NotBuilt)
     }
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-
-    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         _plane: FilterPlane,
@@ -311,18 +329,6 @@ impl SessionEngine for Script {
             legs,
         });
         Ok(count)
-    }
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        if self.no_tickers.load(Ordering::SeqCst) {
-            return Err(Refusal::NotBuilt);
-        }
-        let id = self.take_id();
-        self.event(format!("start ticker {period_ms}"));
-        self.tickers.lock().unwrap().push((id, period_ms, tick));
-        Ok(id)
-    }
-    fn stop_ticker(&self, _id: TickerId) {
-        self.event("stop ticker");
     }
     fn declare_queryable_on_wire(
         &self,
@@ -612,6 +618,36 @@ fn the_periodic_jobs_run_on_the_engine_and_stop_with_the_subscriber() {
     // The jobs end by themselves once what they work on is gone.
     assert!(!periodic());
     assert!(!retention());
+}
+
+/// An engine named by its own type hosts the same subscriber as the port's object does: the same
+/// entities and jobs declared, and the same retracted when it is dropped.
+#[test]
+fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
+    let options = || {
+        AdvancedSubscriberOptions::new().with_recovery(
+            RecoveryConfig::new()
+                .with_periodic_queries(Duration::from_millis(500))
+                .with_retention_period(Duration::from_secs(60)),
+        )
+    };
+    let concrete = Script::new(1);
+    let subscriber: EngineSubscriber<Script> =
+        EngineSubscriber::declare(&concrete, "demo/data", options(), |_| {})
+            .expect("the subscriber declares on the scripted engine as its own type");
+    drop(subscriber);
+    let object = Script::new(1);
+    let (subscriber, _delivered, _misses) = recording(&object, options());
+    drop(subscriber);
+    assert_eq!(concrete.events(), object.events());
+    assert_eq!(
+        concrete
+            .events()
+            .iter()
+            .filter(|e| *e == "stop ticker")
+            .count(),
+        2
+    );
 }
 
 /// A subscriber that wants a periodic job on an engine that runs none is refused, not left

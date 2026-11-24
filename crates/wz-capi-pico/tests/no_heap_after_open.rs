@@ -8,7 +8,9 @@
 //! limits, and allocates nothing after (`docs/upstream-parity.md` D12). Two sessions open over
 //! the program's own transport (an in-memory pipe, `support/pipe_pair.rs`), and once both are open
 //! and their routes are made each operation family is counted in `WINDOWS` windows, each a warm-up
-//! and then `ROUNDS` rounds with the allocator counting. One line per family is printed:
+//! and then `ROUNDS` rounds with the allocator counting. A family that needs another pair (a group,
+//! sessions opened with other settings) is counted on that pair, opened once the one before it is
+//! closed (`Stage`). One line per family is printed:
 //!
 //! ```text
 //! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
@@ -277,11 +279,18 @@ enum Round {
     AdvancedPut,
     AdvancedHistory,
     GroupReceive,
+    TransportEventsListener,
+    E2eSenderDemux,
+    E2eSupervision,
+    InstanceKey,
+    MessagePayload,
+    SharedKeyIds,
+    LinkUdp,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 25] = [
+    const ALL: [Round; 32] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -307,7 +316,24 @@ impl Round {
         Round::AdvancedPut,
         Round::AdvancedHistory,
         Round::GroupReceive,
+        Round::TransportEventsListener,
+        Round::E2eSenderDemux,
+        Round::E2eSupervision,
+        Round::InstanceKey,
+        Round::MessagePayload,
+        Round::SharedKeyIds,
+        Round::LinkUdp,
     ];
+
+    /// The stage whose pair the round calls through.
+    fn stage(self) -> Stage {
+        match self {
+            Round::GroupReceive => Stage::Group,
+            Round::SharedKeyIds => Stage::SharedKeyIds,
+            Round::LinkUdp => Stage::Udp,
+            _ => Stage::Pipe,
+        }
+    }
 
     /// Whether the build has the capability the round exercises.
     fn built(self) -> bool {
@@ -322,6 +348,21 @@ impl Round {
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::AdvancedPut | Round::AdvancedHistory => cfg!(feature = "advanced"),
             Round::GroupReceive => cfg!(feature = "multicast-transport"),
+            Round::TransportEventsListener => cfg!(feature = "connectivity"),
+            Round::E2eSenderDemux => {
+                cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
+            }
+            Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
+            Round::MessagePayload => cfg!(feature = "message-payload"),
+            Round::SharedKeyIds => cfg!(feature = "shared-key-ids"),
+            Round::LinkUdp => cfg!(all(feature = "link-udp", feature = "peer")),
+            Round::InstanceKey => {
+                cfg!(all(
+                    feature = "instance-key",
+                    feature = "e2e-sender",
+                    feature = "e2e-receiver"
+                ))
+            }
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -351,7 +392,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 29] = [
+const FAMILIES: [(&str, Round, Part); 36] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -395,6 +436,20 @@ const FAMILIES: [(&str, Round, Part); 29] = [
     // What a group member's receive takes: the datagram read where it lies and handed to the
     // subscriber, on the receiving member's threads.
     ("group-receive", Round::GroupReceive, Part::Others),
+    (
+        "transport-events-listener",
+        Round::TransportEventsListener,
+        Part::All,
+    ),
+    ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
+    ("e2e-supervision", Round::E2eSupervision, Part::All),
+    ("instance-key", Round::InstanceKey, Part::All),
+    ("message-payload", Round::MessagePayload, Part::All),
+    // A put by a key's shared id and its reading by the listener that holds the dictionary, on
+    // sessions opened with it.
+    ("shared-key-ids", Round::SharedKeyIds, Part::All),
+    // A put over a unicast UDP link of the host's sockets and its delivery to the listener.
+    ("link-udp", Round::LinkUdp, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -469,7 +524,31 @@ struct E2e {
 
 #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
 impl E2e {
+    /// The pair whose receiver keeps one stream, named by the caller.
     unsafe fn new() -> Self {
+        Self::judged_under(std::ptr::null())
+    }
+
+    /// The pair whose receiver keeps one slot per sender, taken by the first intact frame of a
+    /// sender: the profile's cell carries the sender identity the slot is keyed by.
+    #[cfg(feature = "e2e-sender-demux")]
+    unsafe fn sender_keyed() -> Self {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_options_default, wz_ext_e2e_receiver_options_t,
+            WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL,
+        };
+        let mut options: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
+        wz_ext_e2e_receiver_options_default(&mut options);
+        options.keying = WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL;
+        options.streams = 1;
+        Self::judged_under(&options)
+    }
+
+    /// A sender and a receiver of the synthetic profile, the receiver made under `options` (null:
+    /// the defaults).
+    unsafe fn judged_under(
+        options: *const wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_options_t,
+    ) -> Self {
         use wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_new;
         use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_new;
         let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
@@ -495,7 +574,7 @@ impl E2e {
                 &mut e2e.receiver,
                 profile.as_ptr(),
                 values.as_ptr(),
-                std::ptr::null(),
+                options,
                 std::ptr::null_mut(),
             ),
             Z_OK,
@@ -554,6 +633,459 @@ impl E2e {
         use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
         wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
         wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+    }
+}
+
+/// The schema of the message whose instances a keyer reads. Synthetic.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_SCHEMA: &CStr = cr#"
+syntax = "proto3";
+package syn.noheap;
+message Reading {
+  optional uint32 bay = 1;
+  sint32 tilt = 2;
+  bytes body = 3;
+}
+"#;
+
+/// Three bays and two tilts: six instances, the tilt varying fastest. Synthetic.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_DESCRIPTION: &CStr = cr#"{
+  "message": "syn.noheap.Reading",
+  "fields": [
+    {"path": "bay", "values": [12, 30, 44]},
+    {"path": "tilt", "values": [-3, 5]}
+  ],
+  "report_interval_ms": 1000
+}"#;
+
+/// How many instances `INSTANCE_DESCRIPTION` makes: the streams the sender and the receiver keep.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCES: usize = 6;
+
+/// A reading of bay 12 and tilt -3 (zigzagged to 5), with a body of one byte: instance 0, laid by
+/// hand.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_PAYLOAD: [u8; 7] = [0x08, 0x0C, 0x10, 0x05, 0x1A, 0x01, 0x61];
+
+/// A keyer at each end of a message whose instances are streams of the end-to-end doors: the
+/// sending one protects a payload on its instance's counter, the receiving one judges the frame
+/// in its instance's stream.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+struct Keyed {
+    sending: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
+    receiving: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
+    sender: wz_capi_pico::e2e_sender::wz_ext_owned_e2e_sender_t,
+    receiver: wz_capi_pico::e2e_receiver::wz_ext_owned_e2e_receiver_t,
+    now_ms: u64,
+}
+
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+impl Keyed {
+    unsafe fn new() -> Self {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_new, wz_ext_e2e_receiver_options_default,
+            wz_ext_e2e_receiver_options_t,
+        };
+        use wz_capi_pico::e2e_sender::{
+            wz_ext_e2e_sender_new, wz_ext_e2e_sender_options_default, wz_ext_e2e_sender_options_t,
+        };
+        let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
+        let values = std::ffi::CString::new(E2E_VALUES).expect("no NUL in the values");
+        let mut keyed = Self {
+            sending: Self::keyer(),
+            receiving: Self::keyer(),
+            sender: std::mem::zeroed(),
+            receiver: std::mem::zeroed(),
+            now_ms: 0,
+        };
+        let mut sending: wz_ext_e2e_sender_options_t = std::mem::zeroed();
+        wz_ext_e2e_sender_options_default(&mut sending);
+        sending.streams = INSTANCES;
+        assert_eq!(
+            wz_ext_e2e_sender_new(
+                &mut keyed.sender,
+                profile.as_ptr(),
+                values.as_ptr(),
+                &sending,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a sender of a stream per instance is made"
+        );
+        let mut receiving: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
+        wz_ext_e2e_receiver_options_default(&mut receiving);
+        receiving.streams = INSTANCES;
+        assert_eq!(
+            wz_ext_e2e_receiver_new(
+                &mut keyed.receiver,
+                profile.as_ptr(),
+                values.as_ptr(),
+                &receiving,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a receiver of a stream per instance is made"
+        );
+        keyed
+    }
+
+    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SCHEMA`, keeping no last values.
+    unsafe fn keyer() -> wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t {
+        use wz_capi_pico::instance_key::wz_ext_instance_keyer_new;
+        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
+        let files = [wz_ext_proto_file_t {
+            name: c"syn/noheap.proto".as_ptr(),
+            text: INSTANCE_SCHEMA.as_ptr(),
+        }];
+        let mut keyer: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t =
+            std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_new(
+                &mut keyer,
+                files.as_ptr(),
+                files.len(),
+                INSTANCE_DESCRIPTION.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a keyer of the synthetic schema is made"
+        );
+        keyer
+    }
+
+    /// Protect the payload on its instance's stream and judge the frame in the same instance's.
+    unsafe fn round(&mut self) {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_loan, wz_ext_e2e_verdict_t, WZ_EXT_E2E_FIRST, WZ_EXT_E2E_OK,
+        };
+        use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_loan;
+        use wz_capi_pico::instance_key::{
+            wz_ext_instance_key_t, wz_ext_instance_keyer_judge, wz_ext_instance_keyer_loan,
+            wz_ext_instance_keyer_protect, WZ_EXT_INSTANCE_KEY_INDEXED,
+        };
+        let mut frame = [0u8; E2E_FRAME_ROOM];
+        let mut written = 0usize;
+        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_protect(
+                wz_ext_instance_keyer_loan(&self.sending),
+                wz_ext_e2e_sender_loan(&self.sender),
+                INSTANCE_PAYLOAD.as_ptr(),
+                INSTANCE_PAYLOAD.len(),
+                self.now_ms,
+                frame.as_mut_ptr(),
+                frame.len(),
+                &mut written,
+                std::ptr::null_mut(),
+                &mut key,
+            ),
+            Z_OK,
+            "a payload is protected on its instance's stream"
+        );
+        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        self.now_ms += 1;
+        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_judge(
+                wz_ext_instance_keyer_loan(&self.receiving),
+                wz_ext_e2e_receiver_loan(&self.receiver),
+                frame.as_ptr(),
+                written,
+                self.now_ms,
+                &mut key,
+                &mut verdict,
+            ),
+            Z_OK,
+            "a frame is judged in its instance's stream"
+        );
+        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        assert!(
+            verdict.status == WZ_EXT_E2E_OK || verdict.status == WZ_EXT_E2E_FIRST,
+            "a frame protected in order is judged in order: {verdict:?}"
+        );
+    }
+
+    unsafe fn drop_all(mut self) {
+        use wz_capi_pico::e2e_receiver::{wz_ext_e2e_receiver_drop, wz_ext_e2e_receiver_move};
+        use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
+        use wz_capi_pico::instance_key::{wz_ext_instance_keyer_drop, wz_ext_instance_keyer_move};
+        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.sending));
+        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.receiving));
+        wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
+        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+    }
+}
+
+/// A catalog the payloads are of: the catalog reader's synthetic one, whose first message is put on
+/// `demo/catalog/pose`.
+#[cfg(feature = "message-payload")]
+const CATALOG: &str = include_str!("../../wz-app-frame/catalog/synthetic.json5");
+
+/// The schema of the catalog message's payload. Synthetic.
+#[cfg(feature = "message-payload")]
+const PAYLOAD_SCHEMA: &CStr = cr#"
+syntax = "proto3";
+package syn.noheap;
+message Point {
+  sint32 x = 1;
+  sint32 y = 2;
+}
+message Pose {
+  uint32 serial = 1;
+  int32 offset = 2;
+  string label = 5;
+  Point origin = 8;
+}
+"#;
+
+/// The room the encoded payload of a round takes, with headroom.
+#[cfg(feature = "message-payload")]
+const PAYLOAD_ROOM: usize = 64;
+
+/// Two payloads of the catalog's first message under one schema, as a sending and a receiving
+/// program hold them: one set by path and encoded, the other decoded and read back.
+#[cfg(feature = "message-payload")]
+struct MessagePayload {
+    sending: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
+    receiving: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
+    serial: u64,
+}
+
+#[cfg(feature = "message-payload")]
+impl MessagePayload {
+    /// Both payloads. The catalog and the schema are dropped once they are made: a payload keeps
+    /// its key expression and holds its schema.
+    unsafe fn new() -> Self {
+        use wz_capi_pico::message_catalog::{
+            wz_ext_message_catalog_drop, wz_ext_message_catalog_move, wz_ext_message_catalog_new,
+            wz_ext_owned_message_catalog_t,
+        };
+        use wz_capi_pico::message_payload::{
+            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop, wz_ext_payload_schema_move,
+            wz_ext_payload_schema_new,
+        };
+        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
+        let text = std::ffi::CString::new(CATALOG).expect("no NUL in the catalog");
+        let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut()),
+            Z_OK,
+            "the synthetic catalog reads"
+        );
+        let files = [wz_ext_proto_file_t {
+            name: c"syn/noheap.proto".as_ptr(),
+            text: PAYLOAD_SCHEMA.as_ptr(),
+        }];
+        let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_payload_schema_new(
+                &mut schema,
+                files.as_ptr(),
+                files.len(),
+                std::ptr::null_mut()
+            ),
+            Z_OK,
+            "the synthetic schema reads"
+        );
+        let payload = Self {
+            sending: Self::payload(&catalog, &schema),
+            receiving: Self::payload(&catalog, &schema),
+            serial: 0,
+        };
+        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(&mut schema));
+        wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog));
+        payload
+    }
+
+    /// A payload of the catalog's first message, of type `syn.noheap.Pose`.
+    unsafe fn payload(
+        catalog: &wz_capi_pico::message_catalog::wz_ext_owned_message_catalog_t,
+        schema: &wz_capi_pico::message_payload::wz_ext_owned_payload_schema_t,
+    ) -> wz_capi_pico::message_payload::wz_ext_owned_message_payload_t {
+        use wz_capi_pico::message_catalog::wz_ext_message_catalog_loan;
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_new, wz_ext_owned_message_payload_t, wz_ext_payload_schema_loan,
+        };
+        let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_message_payload_new(
+                &mut payload,
+                wz_ext_message_catalog_loan(catalog),
+                0,
+                wz_ext_payload_schema_loan(schema),
+                c"syn.noheap.Pose".as_ptr(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a payload of the catalog's first message is made"
+        );
+        payload
+    }
+
+    /// Set two values by path, encode the payload, decode the bytes into the other and read the
+    /// serial back.
+    unsafe fn round(&mut self) {
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_decode, wz_ext_message_payload_encode,
+            wz_ext_message_payload_get_uint, wz_ext_message_payload_loan,
+            wz_ext_message_payload_set_int, wz_ext_message_payload_set_uint,
+        };
+        self.serial += 1;
+        let sending = wz_ext_message_payload_loan(&self.sending);
+        assert_eq!(
+            wz_ext_message_payload_set_uint(sending, c"serial".as_ptr(), self.serial),
+            Z_OK
+        );
+        assert_eq!(
+            wz_ext_message_payload_set_int(sending, c"origin.x".as_ptr(), -3),
+            Z_OK
+        );
+        let mut bytes = [0u8; PAYLOAD_ROOM];
+        let mut written = 0usize;
+        assert_eq!(
+            wz_ext_message_payload_encode(sending, bytes.as_mut_ptr(), bytes.len(), &mut written),
+            Z_OK,
+            "the payload encodes into the room"
+        );
+        let receiving = wz_ext_message_payload_loan(&self.receiving);
+        assert_eq!(
+            wz_ext_message_payload_decode(receiving, bytes.as_ptr(), written),
+            Z_OK,
+            "the bytes decode"
+        );
+        let mut serial = 0u64;
+        assert_eq!(
+            wz_ext_message_payload_get_uint(receiving, c"serial".as_ptr(), &mut serial),
+            Z_OK
+        );
+        assert_eq!(serial, self.serial, "the serial set is the serial read");
+    }
+
+    unsafe fn drop_both(mut self) {
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_drop, wz_ext_message_payload_move,
+        };
+        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.sending));
+        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.receiving));
+    }
+}
+
+/// The streams a supervisor's table has room for, and the bytes each keeps of its last payload.
+#[cfg(feature = "e2e-supervision")]
+const SUPERVISED_STREAMS: usize = 4;
+#[cfg(feature = "e2e-supervision")]
+const SUPERVISED_CELL: usize = 16;
+
+/// A reception supervisor over the program's storage with one stream added, as a receiver of a
+/// periodic message holds one: each round is a reception of the stream and a poll.
+#[cfg(feature = "e2e-supervision")]
+struct Supervision {
+    supervisor: wz_capi_pico::stream_supervision::wz_ext_owned_stream_supervisor_t,
+    /// The table and the value cells, which the supervisor owns until it is dropped.
+    slots: Vec<wz_capi_pico::stream_supervision::wz_ext_stream_slot_t>,
+    values: Vec<u8>,
+    stream: u32,
+}
+
+#[cfg(feature = "e2e-supervision")]
+impl Supervision {
+    unsafe fn new() -> Self {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_slot_t, wz_ext_stream_supervisor_add, wz_ext_stream_supervisor_loan,
+            wz_ext_stream_supervisor_new,
+        };
+        let mut supervision = Self {
+            supervisor: std::mem::zeroed(),
+            slots: vec![std::mem::zeroed::<wz_ext_stream_slot_t>(); SUPERVISED_STREAMS],
+            values: vec![0u8; SUPERVISED_STREAMS * SUPERVISED_CELL],
+            stream: 0,
+        };
+        assert_eq!(
+            wz_ext_stream_supervisor_new(
+                &mut supervision.supervisor,
+                supervision.slots.as_mut_ptr(),
+                supervision.slots.len(),
+                supervision.values.as_mut_ptr(),
+                SUPERVISED_CELL,
+                0,
+                None,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "the supervisor is made over the program's storage"
+        );
+        // A deadline far past a window, so a round's poll judges the stream and tells no loss.
+        assert_eq!(
+            wz_ext_stream_supervisor_add(
+                wz_ext_stream_supervisor_loan(&supervision.supervisor),
+                1_000,
+                2,
+                1,
+                false,
+                &mut supervision.stream,
+            ),
+            Z_OK,
+            "a stream is supervised"
+        );
+        supervision
+    }
+
+    /// Say the stream was received, with its payload, and poll.
+    unsafe fn round(&self) {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_supervisor_loan, wz_ext_stream_supervisor_poll,
+            wz_ext_stream_supervisor_received,
+        };
+        let supervisor = wz_ext_stream_supervisor_loan(&self.supervisor);
+        let payload = [0xC3u8; 8];
+        assert_eq!(
+            wz_ext_stream_supervisor_received(
+                supervisor,
+                self.stream,
+                payload.as_ptr(),
+                payload.len()
+            ),
+            Z_OK,
+            "a reception is recorded"
+        );
+        let mut told = usize::MAX;
+        assert_eq!(wz_ext_stream_supervisor_poll(supervisor, &mut told), Z_OK);
+        assert_eq!(told, 0, "a stream received within its deadline is not lost");
+    }
+
+    unsafe fn drop_all(mut self) {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_supervisor_drop, wz_ext_stream_supervisor_move,
+        };
+        wz_ext_stream_supervisor_drop(wz_ext_stream_supervisor_move(&mut self.supervisor));
+        drop(self.slots);
+        drop(self.values);
     }
 }
 
@@ -798,13 +1330,23 @@ struct Bench {
     alive: wz_capi_pico::liveliness::z_owned_liveliness_token_t,
     #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
     e2e: E2e,
+    /// A sender and a receiver that keeps its streams per sender.
+    #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+    e2e_demux: E2e,
+    #[cfg(feature = "e2e-supervision")]
+    supervision: Supervision,
+    #[cfg(all(
+        feature = "instance-key",
+        feature = "e2e-sender",
+        feature = "e2e-receiver"
+    ))]
+    keyed: Keyed,
+    #[cfg(feature = "message-payload")]
+    message_payload: MessagePayload,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
     #[cfg(feature = "advanced")]
     advanced: Advanced,
-    /// Two members of one group over the program's transport.
-    #[cfg(feature = "multicast-transport")]
-    group: GroupPair,
 }
 
 impl Bench {
@@ -834,6 +1376,18 @@ impl Bench {
         };
         #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
         let e2e = E2e::new();
+        #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+        let e2e_demux = E2e::sender_keyed();
+        #[cfg(feature = "e2e-supervision")]
+        let supervision = Supervision::new();
+        #[cfg(all(
+            feature = "instance-key",
+            feature = "e2e-sender",
+            feature = "e2e-receiver"
+        ))]
+        let keyed = Keyed::new();
+        #[cfg(feature = "message-payload")]
+        let message_payload = MessagePayload::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
         #[cfg(feature = "advanced")]
@@ -876,12 +1430,22 @@ impl Bench {
             alive,
             #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
             e2e,
+            #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+            e2e_demux,
+            #[cfg(feature = "e2e-supervision")]
+            supervision,
+            #[cfg(all(
+                feature = "instance-key",
+                feature = "e2e-sender",
+                feature = "e2e-receiver"
+            ))]
+            keyed,
+            #[cfg(feature = "message-payload")]
+            message_payload,
             #[cfg(feature = "replay-cache")]
             replay,
             #[cfg(feature = "advanced")]
             advanced,
-            #[cfg(feature = "multicast-transport")]
-            group: GroupPair::open(),
         }
     }
 
@@ -903,9 +1467,8 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
-            Round::GroupReceive => {
-                #[cfg(feature = "multicast-transport")]
-                self.group_put_and_hear();
+            Round::GroupReceive | Round::SharedKeyIds | Round::LinkUdp => {
+                unreachable!("{round:?} runs on its own stage's pair")
             }
             Round::KeyexprDeclare => self.keyexpr_declare(),
             Round::LivelinessToken => {
@@ -959,6 +1522,30 @@ impl Bench {
                 #[cfg(feature = "advanced")]
                 self.advanced.history(&self.pair);
             }
+            Round::TransportEventsListener => {
+                #[cfg(feature = "connectivity")]
+                self.transport_events_listener();
+            }
+            Round::E2eSenderDemux => {
+                #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+                self.e2e_demux.round();
+            }
+            Round::E2eSupervision => {
+                #[cfg(feature = "e2e-supervision")]
+                self.supervision.round();
+            }
+            Round::InstanceKey => {
+                #[cfg(all(
+                    feature = "instance-key",
+                    feature = "e2e-sender",
+                    feature = "e2e-receiver"
+                ))]
+                self.keyed.round();
+            }
+            Round::MessagePayload => {
+                #[cfg(feature = "message-payload")]
+                self.message_payload.round();
+            }
         }
     }
 
@@ -1000,6 +1587,44 @@ impl Bench {
             wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(&mut queryable)),
             Z_OK,
             "a queryable is undeclared"
+        );
+    }
+
+    /// Declare a transport events listener on the dialling session and retract it: the
+    /// connectivity door a program reaches after open.
+    #[cfg(feature = "connectivity")]
+    unsafe fn transport_events_listener(&self) {
+        use wz_capi_pico::connectivity::{
+            z_closure_transport_event, z_closure_transport_event_move,
+            z_declare_transport_events_listener, z_owned_closure_transport_event_t,
+            z_owned_transport_events_listener_t, z_transport_events_listener_move,
+            z_undeclare_transport_events_listener,
+        };
+        let mut closure: z_owned_closure_transport_event_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_transport_event(
+                &mut closure,
+                None,
+                Some(counted_drop),
+                pipe_pair::context(&self.pair.counts),
+            ),
+            Z_OK
+        );
+        let mut listener: z_owned_transport_events_listener_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_transport_events_listener(
+                z_session_loan(self.pair.dialler()),
+                &mut listener,
+                z_closure_transport_event_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a transport events listener is declared"
+        );
+        assert_eq!(
+            z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener)),
+            Z_OK,
+            "a transport events listener is undeclared"
         );
     }
 
@@ -1245,24 +1870,6 @@ impl Bench {
         );
     }
 
-    /// Put on the group from its sending member and wait until the receiving member's subscriber
-    /// hears it: the round's control, so a round that heard nothing fails whatever it allocated.
-    #[cfg(feature = "multicast-transport")]
-    unsafe fn group_put_and_hear(&self) {
-        let counts = &self.group.counts;
-        let heard = counts.heard.load(Ordering::SeqCst);
-        let mut bytes = payload();
-        assert_eq!(
-            put(self.group.sender(), &mut bytes),
-            Z_OK,
-            "a put on the group is taken"
-        );
-        assert!(
-            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
-            "a put on the group was not heard within {WAIT_BOUND:?}"
-        );
-    }
-
     /// Ask the listener's queryable from the dialler and wait for the answer and the get's end.
     unsafe fn get_and_reply(&self) {
         let counts = &self.pair.counts;
@@ -1374,6 +1981,18 @@ impl Bench {
         }
         #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
         self.e2e.drop_both();
+        #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+        self.e2e_demux.drop_both();
+        #[cfg(feature = "e2e-supervision")]
+        self.supervision.drop_all();
+        #[cfg(all(
+            feature = "instance-key",
+            feature = "e2e-sender",
+            feature = "e2e-receiver"
+        ))]
+        self.keyed.drop_all();
+        #[cfg(feature = "message-payload")]
+        self.message_payload.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
         #[cfg(feature = "advanced")]
@@ -1442,10 +2061,292 @@ unsafe fn config_document() {
     z_config_drop(z_config_move(&mut config));
 }
 
+/// The open session pair a stage's rounds call through.
+///
+/// The measured build holds two sessions open at once: the release profile is merged onto
+/// zenoh-pico's defconfig, which turns on `WZ_LIMITS_ZENOH_PICO`, and under it `HELD_SESSIONS` is 2
+/// (`deploy/Kconfig.limits:204-207`). Each pair a family needs is therefore opened only after the
+/// one before it is closed, and its windows open only once it is open and its route is made, so
+/// what one pair's open or close leaves running is never counted in another pair's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Two sessions over the program's pipe, and every capability set up beside them.
+    Pipe,
+    /// Two members of one group over the program's transport.
+    Group,
+    /// Two sessions over the program's pipe that hold one dictionary of key ids and name their
+    /// keys by it.
+    SharedKeyIds,
+    /// Two sessions over the host's UDP sockets on the loopback.
+    Udp,
+}
+
+impl Stage {
+    /// Every stage, in the order its pair is opened.
+    const ALL: [Stage; 4] = [Stage::Pipe, Stage::Group, Stage::SharedKeyIds, Stage::Udp];
+
+    /// The stage's pair, open; `None` in a build without the stage's capability, whose rounds are
+    /// then all unbuilt.
+    unsafe fn open(self) -> Option<Open> {
+        match self {
+            Stage::Pipe => Some(Open::Pipe(Bench::open())),
+            Stage::Group => {
+                #[cfg(feature = "multicast-transport")]
+                {
+                    Some(Open::Group(GroupPair::open()))
+                }
+                #[cfg(not(feature = "multicast-transport"))]
+                {
+                    None
+                }
+            }
+            Stage::SharedKeyIds => {
+                #[cfg(feature = "shared-key-ids")]
+                {
+                    Some(Open::SharedKeyIds(Pair::open_shaped(true, state_key_ids)))
+                }
+                #[cfg(not(feature = "shared-key-ids"))]
+                {
+                    None
+                }
+            }
+            Stage::Udp => {
+                #[cfg(all(feature = "link-udp", feature = "peer"))]
+                {
+                    Some(Open::Udp(UdpPair::open()))
+                }
+                #[cfg(not(all(feature = "link-udp", feature = "peer")))]
+                {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// A stage's pair, open.
+enum Open {
+    Pipe(Bench),
+    #[cfg(feature = "multicast-transport")]
+    Group(GroupPair),
+    #[cfg(feature = "shared-key-ids")]
+    SharedKeyIds(Pair),
+    #[cfg(all(feature = "link-udp", feature = "peer"))]
+    Udp(UdpPair),
+}
+
+impl Open {
+    /// Run one round of `round`, which is a round of this pair's stage.
+    unsafe fn run(&mut self, round: Round) {
+        match self {
+            Open::Pipe(bench) => bench.run(round),
+            #[cfg(feature = "multicast-transport")]
+            Open::Group(group) => group_put_and_hear(group),
+            #[cfg(feature = "shared-key-ids")]
+            Open::SharedKeyIds(pair) => pair_put_and_hear(pair),
+            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            Open::Udp(pair) => pair.put_and_hear(),
+        }
+    }
+
+    /// Close the pair: whether every closure the library was handed is dropped, and whether the
+    /// transports the pair let go were dropped.
+    unsafe fn close(self) -> (bool, bool) {
+        match self {
+            Open::Pipe(bench) => bench.close(),
+            #[cfg(feature = "multicast-transport")]
+            Open::Group(group) => {
+                let counts = std::sync::Arc::clone(&group.counts);
+                drop(group);
+                // The group's transports are released by its drop, which counts none.
+                (closures_dropped(&counts), true)
+            }
+            #[cfg(feature = "shared-key-ids")]
+            Open::SharedKeyIds(pair) => pair.close(),
+            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            Open::Udp(pair) => pair.close(),
+        }
+    }
+}
+
+/// Whether every closure made with a context of `counts` was dropped within the bound.
+#[cfg(any(
+    feature = "multicast-transport",
+    all(feature = "link-udp", feature = "peer")
+))]
+fn closures_dropped(counts: &pipe_pair::Counts) -> bool {
+    wait_for(WAIT_BOUND, || {
+        counts.made.load(Ordering::SeqCst) == counts.dropped.load(Ordering::SeqCst)
+    })
+}
+
+/// Put on the group from its sending member and wait until the receiving member's subscriber hears
+/// it: the round's control, so a round that heard nothing fails whatever it allocated.
+#[cfg(feature = "multicast-transport")]
+unsafe fn group_put_and_hear(group: &GroupPair) {
+    let counts = &group.counts;
+    let heard = counts.heard.load(Ordering::SeqCst);
+    let mut bytes = payload();
+    assert_eq!(
+        put(group.sender(), &mut bytes),
+        Z_OK,
+        "a put on the group is taken"
+    );
+    assert!(
+        wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+        "a put on the group was not heard within {WAIT_BOUND:?}"
+    );
+}
+
+/// The id every node of the shared pair's deployment names `DATA_KEY` by. Synthetic.
+#[cfg(feature = "shared-key-ids")]
+const SHARED_ID: u16 = 40;
+
+/// Hand a config of the shared pair the dictionary and state the pipe's endpoint `shared`, so
+/// what either session sends over it names `DATA_KEY` by its id, with no declaration first.
+#[cfg(feature = "shared-key-ids")]
+unsafe fn state_key_ids(config: &mut wz_capi_pico::z_owned_config_t) {
+    use wz_capi_pico::key_ids::{wz_ext_config_key_ids, wz_ext_config_key_wire_form_for};
+    let ids = [SHARED_ID];
+    let keys = [DATA_KEY.as_ptr()];
+    assert_eq!(
+        wz_ext_config_key_ids(
+            wz_capi_pico::z_config_loan_mut(config),
+            ids.as_ptr(),
+            keys.as_ptr(),
+            ids.len()
+        ),
+        Z_OK,
+        "the config holds the dictionary"
+    );
+    assert_eq!(
+        wz_ext_config_key_wire_form_for(
+            wz_capi_pico::z_config_loan_mut(config),
+            pipe_pair::LISTEN.as_ptr(),
+            c"shared".as_ptr()
+        ),
+        Z_OK,
+        "the pipe's endpoint names its keys by the dictionary"
+    );
+}
+
+/// Put from `pair`'s dialler on the key its listener hears and wait for the listener to hear it.
+#[cfg(feature = "shared-key-ids")]
+unsafe fn pair_put_and_hear(pair: &Pair) {
+    let counts = &pair.counts;
+    let heard = counts.heard.load(Ordering::SeqCst);
+    let mut bytes = payload();
+    assert_eq!(put(pair.dialler(), &mut bytes), Z_OK, "a put is taken");
+    assert!(
+        wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+        "a put did not cross within {WAIT_BOUND:?}"
+    );
+}
+
+/// Two sessions over the host's UDP sockets on the loopback, the listening one's subscriber counting
+/// what it hears: a unicast UDP link carried by the system's sockets, where the pipe pair's links
+/// are the program's transport.
+#[cfg(all(feature = "link-udp", feature = "peer"))]
+struct UdpPair {
+    counts: std::sync::Arc<pipe_pair::Counts>,
+    listener: wz_capi_pico::z_owned_session_t,
+    subscriber: wz_capi_pico::z_owned_subscriber_t,
+    dialler: wz_capi_pico::z_owned_session_t,
+}
+
+#[cfg(all(feature = "link-udp", feature = "peer"))]
+impl UdpPair {
+    /// The listener on a free loopback port, its subscriber declared, and the dialler, opened
+    /// until a put of the dialler's is heard: the route is made before any round.
+    unsafe fn open() -> Self {
+        let endpoint = std::ffi::CString::new(format!(
+            "udp/127.0.0.1:{}",
+            wz_runtime_tokio_test_support::free_port()
+        ))
+        .expect("no NUL in an endpoint");
+        let counts = std::sync::Arc::new(pipe_pair::Counts::default());
+        let listener = Self::session(wz_capi_pico::Z_CONFIG_LISTEN_KEY, &endpoint);
+        let mut closure = pipe_pair::sample_closure(&counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_subscriber(&listener, DATA_KEY, &mut closure, &mut subscriber),
+            Z_OK,
+            "the listener over UDP declares its subscriber"
+        );
+        let dialler = Self::session(wz_capi_pico::Z_CONFIG_CONNECT_KEY, &endpoint);
+        let pair = Self {
+            counts,
+            listener,
+            subscriber,
+            dialler,
+        };
+        let deadline = std::time::Instant::now() + WAIT_BOUND;
+        let heard = pair.counts.heard.load(Ordering::SeqCst);
+        while pair.counts.heard.load(Ordering::SeqCst) == heard {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no put crossed the UDP link within {WAIT_BOUND:?}"
+            );
+            let mut bytes = payload();
+            let _ = put(&pair.dialler, &mut bytes);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pair
+    }
+
+    /// A session whose config states `endpoint` under `key` and nothing else.
+    unsafe fn session(key: u8, endpoint: &CStr) -> wz_capi_pico::z_owned_session_t {
+        use wz_capi_pico::{
+            z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
+            z_owned_session_t, zp_config_insert,
+        };
+        let mut config: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut config), Z_OK);
+        assert_eq!(
+            zp_config_insert(z_config_loan_mut(&mut config), key, endpoint.as_ptr()),
+            Z_OK
+        );
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut config), std::ptr::null()),
+            Z_OK,
+            "a session opens over UDP on {endpoint:?}"
+        );
+        session
+    }
+
+    /// Put from the dialler and wait for the listener to hear it.
+    unsafe fn put_and_hear(&self) {
+        let counts = &self.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(put(&self.dialler, &mut bytes), Z_OK, "a put is taken");
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put over UDP did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Close both sessions: whether every closure was dropped. The sockets are the system's, so
+    /// no transport of the program's is let go.
+    unsafe fn close(self) -> (bool, bool) {
+        let Self {
+            counts,
+            listener,
+            mut subscriber,
+            dialler,
+        } = self;
+        pipe_pair::close(dialler);
+        wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        pipe_pair::close(listener);
+        (closures_dropped(&counts), true)
+    }
+}
+
 /// One window of `round`: the warm-up and the counted rounds.
-unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
+unsafe fn window(open: &mut Open, round: Round) -> Seen {
     for _ in 0..WARM_UP {
-        bench.run(round);
+        open.run(round);
     }
     std::thread::sleep(SETTLE);
     let place = Round::ALL
@@ -1455,7 +2356,7 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
     open_window(0);
     SITE_ROUND.store(place, Ordering::SeqCst);
     for _ in 0..rounds() {
-        bench.run(round);
+        open.run(round);
     }
     std::thread::sleep(SETTLE);
     SITE_ROUND.store(NO_ROUND, Ordering::SeqCst);
@@ -1468,10 +2369,10 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
 }
 
 /// Every window of `round`.
-unsafe fn measure(bench: &mut Bench, round: Round) -> Vec<Seen> {
+unsafe fn measure(open: &mut Open, round: Round) -> Vec<Seen> {
     let mut seen = Vec::with_capacity(windows());
     for _ in 0..windows() {
-        seen.push(window(bench, round));
+        seen.push(window(open, round));
     }
     seen
 }
@@ -1501,13 +2402,26 @@ fn allocations_after_open_are_counted_per_operation_family() {
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
-        let mut bench = Bench::open();
-        let seen: Vec<(Round, Vec<Seen>)> = Round::ALL
-            .into_iter()
-            .filter(|round| round.built())
-            .map(|round| (round, measure(&mut bench, round)))
-            .collect();
-        let (balanced, dropped) = bench.close();
+        let mut seen: Vec<(Round, Vec<Seen>)> = Vec::new();
+        let (mut balanced, mut dropped) = (true, true);
+        for stage in Stage::ALL {
+            let rounds: Vec<Round> = Round::ALL
+                .into_iter()
+                .filter(|round| round.built() && round.stage() == stage)
+                .collect();
+            if rounds.is_empty() {
+                continue;
+            }
+            let Some(mut open) = stage.open() else {
+                continue;
+            };
+            for round in rounds {
+                seen.push((round, measure(&mut open, round)));
+            }
+            let (closures, transports) = open.close();
+            balanced &= closures;
+            dropped &= transports;
+        }
         (seen, balanced, dropped)
     };
     assert!(balanced, "every closure the library was handed is dropped");

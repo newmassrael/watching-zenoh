@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    FilterId, FilterPlane, KeyHolds, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;

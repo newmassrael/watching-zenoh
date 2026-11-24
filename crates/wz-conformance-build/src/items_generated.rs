@@ -198,11 +198,10 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_TIMERS", "WZ_LIMIT_MAX_TIMERS", 16),
     ("MAX_TICKERS", "WZ_LIMIT_MAX_TICKERS", 16),
     (
-        "ADVANCED_CACHE_SAMPLE_BYTES",
-        "WZ_LIMIT_ADVANCED_CACHE_SAMPLE_BYTES",
-        4096,
+        "ADVANCED_CACHE_BYTES",
+        "WZ_LIMIT_ADVANCED_CACHE_BYTES",
+        1712,
     ),
-    ("ADVANCED_CACHE_ROWS", "WZ_LIMIT_ADVANCED_CACHE_ROWS", 16),
     ("MAX_LOCATOR_LEN", "WZ_LIMIT_MAX_LOCATOR_LEN", 64),
     ("MAX_STATIC_CONNECT", "WZ_LIMIT_MAX_STATIC_CONNECT", 8),
     ("MAX_PEER_NODES", "WZ_LIMIT_MAX_PEER_NODES", 0),
@@ -334,6 +333,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS",
         0,
     ),
+    ("HANDED_LEG_BYTES", "WZ_LIMIT_HANDED_LEG_BYTES", 4096),
     (
         "PICO_UNICAST_BATCH_BYTES",
         "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES",
@@ -562,5 +562,11 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_KEY_WIRE_FORM",
         &["declared", "shared", "literal"],
         "declared",
+    ),
+    (
+        "held-publish-drop",
+        "WZ_POLICY_HELD_PUBLISH_DROP",
+        &["held-faces", "every-face"],
+        "held-faces",
     ),
 ];

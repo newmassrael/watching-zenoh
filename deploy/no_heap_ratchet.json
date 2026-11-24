@@ -1,5 +1,5 @@
 {
-  "about": "The allocations the pico C ABI on the cooperative engine makes after a session opens, one row per operation family (docs/upstream-parity.md D12, owner decision 2026-11-21: every byte a session needs is reserved at open from the configured limits, and none is taken after). Layer C1nh runs crates/wz-capi-pico/tests/no_heap_after_open.rs and `scripts/lib/no_heap_ratchet_gate.py --check` judges its reading against these rows. A row holds the allocations of one round of the family, `allocs_per_round` (the least window's allocations over its rounds (a locked row grades the worst window), rounded up to three places), to that figure times one plus `tolerance`: a reading above it fails, a reading below it passes and prints the tighter row to commit, and a reading of 0 prints the row locked. `locked` is true once a family reads 0, and a locked row fails on any allocation. A null `allocs_per_round` is not measured yet and reads NOT-MEASURED, never a pass; `--fill <reading>` prints the rows a reading writes. A row above 0 names the store inventory entry it is registered under (`debt-<id>`); `debt-TBD` stands only on a row not measured yet. A row is written from the gate's own output for a reading, never by hand.",
+  "about": "The allocations the pico C ABI on the cooperative engine makes after a session opens, one row per operation family (docs/upstream-parity.md D12, owner decision 2026-11-21: every byte a session needs is reserved at open from the configured limits, and none is taken after). Layer C1nh runs crates/wz-capi-pico/tests/no_heap_after_open.rs and `scripts/lib/no_heap_ratchet_gate.py --check` judges its reading against these rows. A row holds the allocations of one round of the family, `allocs_per_round` (the least window's allocations over its rounds (a locked row grades the worst window), rounded up to three places), to that figure times one plus `tolerance`: a reading above it fails, a reading below it passes and prints the tighter row to commit, and a reading of 0 prints the row locked. `locked` is true once a family reads 0, and a locked row fails on any allocation. A null `allocs_per_round` is not measured yet and reads NOT-MEASURED, never a pass; `--fill <reading>` prints the rows a reading writes. A row above 0 names the store inventory entry it is registered under (`debt-<id>`); `debt-TBD` stands only on a row not measured yet. A row is written from the gate's own output for a reading, never by hand. `capabilities` holds each capability the measured profile (configs/profiles/host-peer-ext.conf) turns on: the families that measure it, or the reason it has no path after a session opens, naming the code read; `--check --profile` reads a capability with neither, or whose family was not built, as NOT-MEASURED.",
   "schema": "wz-no-heap-ratchet/1",
   "tolerance": 0.05,
   "families": {
@@ -38,6 +38,16 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "e2e-sender-demux": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "e2e-supervision": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "get": {
       "allocs_per_round": 17,
       "locked": false,
@@ -53,8 +63,18 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "instance-key": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "keyexpr-declare": {
       "allocs_per_round": 8.01,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "link-udp": {
+      "allocs_per_round": null,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
@@ -75,6 +95,11 @@
     },
     "matching-listener": {
       "allocs_per_round": 4,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "message-payload": {
+      "allocs_per_round": null,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
@@ -133,6 +158,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "shared-key-ids": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "subscriber-declare": {
       "allocs_per_round": 18.01,
       "locked": false,
@@ -147,6 +177,140 @@
       "allocs_per_round": 0,
       "locked": true,
       "debt": null
+    },
+    "transport-events-listener": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    }
+  },
+  "capabilities": {
+    "advanced": {
+      "families": [
+        "advanced-put",
+        "advanced-subscriber-receive",
+        "advanced-subscriber-history"
+      ]
+    },
+    "app-transport": {
+      "families": [
+        "put-small",
+        "subscriber-receive-small"
+      ]
+    },
+    "config-document": {
+      "families": [
+        "config-document"
+      ]
+    },
+    "config-policy": {
+      "reason": "a policy and a profile are stated on a config before it opens (crates/wz-capi-pico/src/config_policy.rs:616 and :639 take a z_loaned_config_t); the session reads them in its open and has no door for them after"
+    },
+    "conformance-digest": {
+      "reason": "the digest is a static string of the build (crates/wz-capi-pico/src/conformance.rs:21), which no session holds and no call allocates"
+    },
+    "connectivity": {
+      "families": [
+        "transport-events-listener"
+      ]
+    },
+    "e2e-receiver": {
+      "families": [
+        "e2e"
+      ]
+    },
+    "e2e-sender": {
+      "families": [
+        "e2e"
+      ]
+    },
+    "e2e-sender-demux": {
+      "families": [
+        "e2e-sender-demux"
+      ]
+    },
+    "e2e-supervision": {
+      "families": [
+        "e2e-supervision"
+      ]
+    },
+    "instance-key": {
+      "families": [
+        "instance-key"
+      ]
+    },
+    "link-udp": {
+      "families": [
+        "link-udp"
+      ]
+    },
+    "liveliness": {
+      "families": [
+        "liveliness-token",
+        "liveliness-subscriber"
+      ]
+    },
+    "liveliness-get": {
+      "families": [
+        "liveliness-get"
+      ]
+    },
+    "message-catalog": {
+      "reason": "a catalog is made from its text and read with no session (crates/wz-capi-pico/src/message_catalog.rs:184 and :271); what a session does with one goes through the e2e and supervision doors, which their own rows hold"
+    },
+    "message-payload": {
+      "families": [
+        "message-payload"
+      ]
+    },
+    "multi-thread": {
+      "families": [
+        "subscriber-receive-small",
+        "queryable-reply"
+      ]
+    },
+    "multicast-transport": {
+      "families": [
+        "group-receive"
+      ]
+    },
+    "peer": {
+      "families": [
+        "subscriber-receive-small"
+      ]
+    },
+    "query": {
+      "families": [
+        "get",
+        "querier-declare",
+        "querier-get"
+      ]
+    },
+    "queryable": {
+      "families": [
+        "queryable-declare",
+        "queryable-reply"
+      ]
+    },
+    "replay-cache": {
+      "families": [
+        "replay"
+      ]
+    },
+    "scout": {
+      "reason": "z_scout takes a config and opens no session (crates/wz-capi-pico/src/scout.rs:1167); a session's own scout runs inside its open"
+    },
+    "shared-key-ids": {
+      "families": [
+        "shared-key-ids"
+      ]
+    },
+    "unstable-api": {
+      "families": [
+        "querier-declare",
+        "querier-get",
+        "matching-listener"
+      ]
     }
   }
 }

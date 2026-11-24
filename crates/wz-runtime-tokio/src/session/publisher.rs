@@ -669,6 +669,9 @@ pub enum PublishAliasError {
     /// at once; projected from the underlying [`PublishError::HeldConduit`]. No wire bytes were
     /// emitted.
     HeldConduit,
+    /// The sample's record is longer than its session's cache ring; projected from the
+    /// underlying [`PublishError::ExceedsCacheRoom`]. No wire bytes were emitted.
+    ExceedsCacheRoom,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -719,6 +722,11 @@ impl std::fmt::Display for PublishAliasError {
                  conduit and the queue profile drops it at once; the Push was not \
                  emitted"
             ),
+            PublishAliasError::ExceedsCacheRoom => write!(
+                f,
+                "PublishAliasError: the sample's record is longer than its \
+                 session's cache ring; the Push was not emitted"
+            ),
         }
     }
 }
@@ -735,6 +743,7 @@ impl From<PublishError> for PublishAliasError {
             PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
             PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
             PublishError::HeldConduit => PublishAliasError::HeldConduit,
+            PublishError::ExceedsCacheRoom => PublishAliasError::ExceedsCacheRoom,
         }
     }
 }

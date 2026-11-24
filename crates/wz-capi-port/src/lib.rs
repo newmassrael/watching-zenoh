@@ -77,8 +77,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
-// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;
@@ -86,8 +84,6 @@ mod engine;
 pub mod entity_place;
 pub mod group;
 pub mod held_key;
-// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -111,8 +107,8 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
-pub use engine::{RedeclareRefusal, SessionEngine};
-pub use entity_place::{EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
+pub use engine::{KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
+pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
@@ -229,7 +225,7 @@ impl Drop for SubscriberSink {
 /// entity id the token is declared under, of the width [`SubId`] has for the same reason.
 pub type TokenId = wz_session_core::wire_id::EntityId;
 
-/// The id of one periodic job an engine runs ([`SessionEngine::start_ticker`]).
+/// The id of one periodic job an engine runs ([`Tickers::start_ticker`]).
 pub type TickerId = u64;
 
 /// What a periodic job does each time it is due, and whether it goes on: `false` ends it.
@@ -240,24 +236,31 @@ pub type Tick = Arc<dyn Fn() -> bool + Send + Sync>;
 /// A periodic job running on an engine, ended when this is dropped.
 ///
 /// It holds the engine, so the engine lives as long as the job can be asked to stop; a job whose
-/// owner is gone does not outlive it.
-pub struct Ticker {
+/// owner is gone does not outlive it. It names the engine by its periodic jobs alone
+/// ([`Tickers`]), so a build that reaches its engine as its own type makes no table of every
+/// operation of the session for it. `T` is the engine as its holder names it: the port's object
+/// by default, or an engine's own type, which a holder generic over its engine keeps, since an
+/// engine it names only as `?Sized` cannot be turned into the object.
+pub struct Ticker<T: Tickers + ?Sized = dyn Tickers> {
     /// `None` once [`Self::detach`] let the job go on without this handle.
-    engine: Option<Arc<dyn SessionEngine>>,
+    engine: Option<Arc<T>>,
     id: TickerId,
 }
 
 impl Ticker {
-    /// Start `tick` on `engine` every `period_ms` ([`SessionEngine::start_ticker`]), refused as
-    /// the engine refuses it.
-    pub fn start(
-        engine: &Arc<dyn SessionEngine>,
-        period_ms: u64,
-        tick: Tick,
-    ) -> Result<Self, Refusal> {
+    /// Start `tick` on `engine` every `period_ms` ([`Tickers::start_ticker`]), refused as the
+    /// engine refuses it. The handle keeps `engine`.
+    pub fn start(engine: Arc<dyn Tickers>, period_ms: u64, tick: Tick) -> Result<Self, Refusal> {
+        Self::start_on(engine, period_ms, tick)
+    }
+}
+
+impl<T: Tickers + ?Sized> Ticker<T> {
+    /// [`Ticker::start`] on an engine of the holder's own type `T`.
+    pub fn start_on(engine: Arc<T>, period_ms: u64, tick: Tick) -> Result<Self, Refusal> {
         let id = engine.start_ticker(period_ms, tick)?;
         Ok(Self {
-            engine: Some(Arc::clone(engine)),
+            engine: Some(engine),
             id,
         })
     }
@@ -269,7 +272,7 @@ impl Ticker {
     }
 }
 
-impl Drop for Ticker {
+impl<T: Tickers + ?Sized> Drop for Ticker<T> {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
             engine.stop_ticker(self.id);
@@ -629,12 +632,13 @@ impl core::fmt::Debug for WireKey {
 }
 
 /// One hold on a keyexpr declaration of a session, taken from and given back to the engine's own
-/// count of the declaration's holders ([`SessionEngine::retain_keyexpr`],
-/// [`SessionEngine::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
+/// count of the declaration's holders ([`KeyHolds::retain_keyexpr`],
+/// [`KeyHolds::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
 /// keeps nothing of its own on the heap, and once the session is gone a copy and a drop do
 /// nothing.
 pub struct KeyHold {
-    engine: alloc::sync::Weak<dyn SessionEngine>,
+    /// The session, named by its count of holders alone ([`KeyHolds`]).
+    engine: alloc::sync::Weak<dyn KeyHolds>,
     mapping_id: wz_session_core::wire_id::ExprId,
 }
 
@@ -642,7 +646,7 @@ impl KeyHold {
     /// The hold on `mapping_id` that the caller took through `engine`
     /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
     pub fn taken(
-        engine: alloc::sync::Weak<dyn SessionEngine>,
+        engine: alloc::sync::Weak<dyn KeyHolds>,
         mapping_id: wz_session_core::wire_id::ExprId,
     ) -> Self {
         Self { engine, mapping_id }
@@ -919,5 +923,67 @@ mod tests {
         drop(key);
         drop(copy);
         assert_eq!(Arc::strong_count(&anchor), 1);
+    }
+
+    /// An engine's periodic jobs as a test counts them: the ids it gave and the jobs it stopped.
+    #[derive(Default)]
+    struct CountedJobs {
+        started: core::sync::atomic::AtomicU64,
+        stopped: core::sync::atomic::AtomicU64,
+        refuses: bool,
+    }
+
+    impl Tickers for CountedJobs {
+        fn start_ticker(&self, _period_ms: u64, _tick: Tick) -> Result<TickerId, Refusal> {
+            if self.refuses {
+                return Err(Refusal::NotBuilt);
+            }
+            Ok(self
+                .started
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn stop_ticker(&self, _id: TickerId) {
+            self.stopped
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A holder that names its engine by its own type keeps it as that type, and its handle stops
+    /// the job on drop as the port's object's does; a detached one leaves it running.
+    #[test]
+    fn a_job_on_an_engine_of_its_own_type_stops_with_its_handle() {
+        use core::sync::atomic::Ordering;
+        let jobs = Arc::new(CountedJobs::default());
+        let tick: Tick = Arc::new(|| true);
+        let held: Ticker<CountedJobs> =
+            Ticker::start_on(Arc::clone(&jobs), 5, Arc::clone(&tick)).expect("started");
+        assert_eq!(Arc::strong_count(&jobs), 2, "the handle keeps the engine");
+        drop(held);
+        assert_eq!(jobs.stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&jobs), 1);
+
+        Ticker::start_on(Arc::clone(&jobs), 5, Arc::clone(&tick))
+            .expect("started")
+            .detach();
+        assert_eq!(jobs.started.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            jobs.stopped.load(Ordering::SeqCst),
+            1,
+            "a detached job is not stopped"
+        );
+
+        let object: Arc<dyn Tickers> = jobs.clone();
+        drop(Ticker::start(object, 5, Arc::clone(&tick)).expect("started"));
+        assert_eq!(jobs.stopped.load(Ordering::SeqCst), 2);
+
+        let refusing = Arc::new(CountedJobs {
+            refuses: true,
+            ..CountedJobs::default()
+        });
+        assert!(matches!(
+            Ticker::start_on(refusing, 5, tick),
+            Err(Refusal::NotBuilt)
+        ));
     }
 }

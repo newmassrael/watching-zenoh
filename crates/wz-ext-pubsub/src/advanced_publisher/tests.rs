@@ -18,6 +18,8 @@ struct RecordingPlane {
     stamped: std::sync::Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// The node clock the plane answers with; `NodeHlc::disabled()` unless a test gives one.
     node: NodeHlc,
+    /// The bytes of the ring the session keeps its caches in; `None` keeps them on the heap.
+    ring: Option<usize>,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -44,6 +46,15 @@ impl RecordingPlane {
             order_from: None,
             stamped: std::sync::Mutex::new(Vec::new()),
             node: NodeHlc::disabled(),
+            ring: None,
+        }
+    }
+
+    /// A plane whose session keeps its caches in a ring of `span` bytes.
+    fn with_ring(span: usize) -> Self {
+        Self {
+            ring: Some(span),
+            ..Self::new(true)
         }
     }
 
@@ -195,6 +206,17 @@ impl AdvancedPublisherPlane for RecordingPlane {
             .push(format!("beacon {payload:02x?} sporadic={sporadic}"));
     }
 
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        match self.ring {
+            None => Ok(CacheStore::new(config)),
+            Some(span) => CacheStore::in_ring(
+                config,
+                Box::new(crate::advanced_cache::test_ring::HeapRing::new(span)),
+            )
+            .ok_or(AdvancedPublisherError::CacheRingUnavailable),
+        }
+    }
+
     fn retained_key(&self, _publisher: &Named) -> Option<Retained> {
         Some(Retained::new(Arc::new(Named {
             events: Arc::clone(&self.events),
@@ -285,6 +307,8 @@ fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_befo
             "declare beacon",
             "declare timer",
             "drop publisher",
+            // No sample was cached, so the cache never took the key: it goes with the publisher.
+            "drop retained key",
             "drop token",
             "drop timer",
             "drop beacon",
@@ -658,4 +682,102 @@ fn the_publisher_knobs_reach_the_publish_options_and_default_changes_nothing() {
          that includes not ATTACHING one where a bare put() has none, \
          which is the way this could regress silently"
     );
+}
+
+/// A cache in a ring refuses a sample whose record is longer than the whole ring before the sample
+/// takes a time or a sequence number, and nothing is sent; a record of the ring's length is sent
+/// and kept, numbered as if the refusal had not been.
+#[test]
+fn a_cache_in_a_ring_refuses_a_record_past_the_ring_before_anything_is_sent() {
+    // Room for 256 bytes of records: a header of 88, the key's 9 and a payload of 159.
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 256));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig {
+            max_samples: 2,
+            ..CacheConfig::default()
+        }),
+        sequencing: Sequencing::SequenceNumber,
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/ring",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the ring holds a record");
+
+    assert_eq!(
+        publisher.put(&[0u8; 160]),
+        Err(PublishError::ExceedsCacheRoom)
+    );
+    assert!(plane.stamped().is_empty(), "nothing was sent");
+
+    assert_eq!(publisher.put(&[0u8; 159]), Ok(159));
+    assert_eq!(
+        plane.stamped().first().map(|(_, sn)| *sn),
+        Some(Some(0)),
+        "the refused sample took no sequence number"
+    );
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(1));
+}
+
+/// A session whose ring holds no record refuses the cache before anything is declared.
+#[test]
+fn a_cache_in_a_ring_that_holds_no_record_is_refused_before_anything_is_declared() {
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 80));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig::default()),
+        ..AdvancedPublisherOptions::default()
+    };
+    let refused = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/ring",
+        options,
+        SessionZid::from([0x01]),
+    );
+    assert!(matches!(
+        refused,
+        Err(AdvancedPublisherError::CacheRingUnavailable)
+    ));
+    assert!(plane.events().is_empty(), "nothing was declared");
+}
+
+/// Put options lending an attachment and an encoding of `text/plain`, as a C program's put lends
+/// them.
+fn lent_options(attachment: &[u8]) -> AdvancedPutOptions<'_> {
+    AdvancedPutOptions::default()
+        .with_attachment_lent(attachment)
+        .with_encoding_ref(EncodingRef {
+            packed_id: 3,
+            schema: Some(b"text/plain"),
+        })
+}
+
+/// A lent attachment and a lent schema count in a record as owned ones do: beside a payload of
+/// one byte they pass the ring, and alone they fill it.
+#[test]
+fn a_lent_attachment_and_schema_count_in_the_record() {
+    // 256 bytes of records: a header of 88, the key's 9, the schema's 10 and an attachment of 149.
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 256));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig::default()),
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/ring",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the ring holds a record");
+
+    let attachment = [7u8; 149];
+    assert_eq!(
+        publisher.put_with(b"x", lent_options(&attachment)),
+        Err(PublishError::ExceedsCacheRoom)
+    );
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(0));
+    assert_eq!(publisher.put_with(b"", lent_options(&attachment)), Ok(0));
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(1));
 }

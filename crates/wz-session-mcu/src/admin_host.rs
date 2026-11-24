@@ -274,32 +274,35 @@ fn push_connect_endpoints(
     // and Layer C1m failed it under `-D warnings` (hosted run 35989144794).
     use wz_session_core::json::{escape_into, push_str_array};
     out.push('[');
-    let mut i = 0;
-    while i < list.len() {
-        if i > 0 {
+    let mut rest = list;
+    let mut first = true;
+    while let Some((entry, after_entry)) = rest.split_first() {
+        if !first {
             out.push(',');
         }
-        match list[i].group {
+        first = false;
+        match entry.group {
             None => {
-                escape_into(list[i].as_str(), out);
-                i += 1;
+                escape_into(entry.as_str(), out);
+                rest = after_entry;
             }
             Some(group) => {
                 out.push_str(r#"{"strategy":"#);
                 escape_into(group.strategy.as_str(), out);
                 out.push_str(r#","locators":"#);
-                let start = i;
-                while i < list.len() && list[i].group.map(|g| g.index) == Some(group.index) {
-                    i += 1;
-                }
+                // The group is the run of entries that name it, this one first, so the run is
+                // never empty and never longer than what is left.
+                let run = rest
+                    .iter()
+                    .take_while(|e| e.group.map(|g| g.index) == Some(group.index))
+                    .count();
+                let (members, after_group) = rest.split_at_checked(run).unwrap_or((rest, &[]));
                 push_str_array(
-                    list[start..i]
-                        .iter()
-                        .map(|e| e.as_str())
-                        .filter(|s| !s.is_empty()),
+                    members.iter().map(|e| e.as_str()).filter(|s| !s.is_empty()),
                     out,
                 );
                 out.push('}');
+                rest = after_group;
             }
         }
     }

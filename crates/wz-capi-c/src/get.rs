@@ -1857,9 +1857,10 @@ mod tests {
         opts.encoding = &mut moved as *mut crate::abi::z_moved_encoding_t;
         // SAFETY: a live local.
         let resolved = unsafe { get_options(&mut opts) }.0;
-        let hint = resolved
+        let carried = resolved
             .encoding
             .expect("a set encoding reaches QueryOptions");
+        let hint = carried.view();
         // `text/plain` is zenoh wire id 4, so the packed word is `4 << 1`. The
         // NUMBER is asserted rather than the label, because the number is what
         // goes on the wire.

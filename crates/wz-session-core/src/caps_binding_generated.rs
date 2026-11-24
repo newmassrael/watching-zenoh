@@ -610,20 +610,8 @@ pub const MAX_TICKERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
-/// Where [`super::ADVANCED_CACHE_SAMPLE_BYTES`] is bound.
-pub const ADVANCED_CACHE_SAMPLE_BYTES: LimitBinding = LimitBinding {
-    kind: LimitKind::Bound,
-    driven: Some(Driven::Local),
-    range: None,
-    storage: Storage::Capacity,
-    scope: &[Scope::Session],
-    binding_heap: Some(Binding::Build),
-    binding_fixed: Some(Binding::Build),
-    wire: Wire::None,
-};
-
-/// Where [`super::ADVANCED_CACHE_ROWS`] is bound.
-pub const ADVANCED_CACHE_ROWS: LimitBinding = LimitBinding {
+/// Where [`super::ADVANCED_CACHE_BYTES`] is bound.
+pub const ADVANCED_CACHE_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Local),
     range: None,
@@ -1096,6 +1084,18 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
     driven: None,
     range: Some((0, 4294967295)),
     storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::HANDED_LEG_BYTES`] is bound.
+pub const HANDED_LEG_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
     binding_fixed: Some(Binding::Open),

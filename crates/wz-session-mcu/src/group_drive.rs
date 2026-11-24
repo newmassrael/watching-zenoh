@@ -2610,9 +2610,7 @@ mod tests {
     use wz_session_core::driver_loop::IterationEvent;
     use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
     use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
-    use wz_session_core::multicast_params::{
-        zid_vec, GroupJoinRule, MulticastDriveConfig, MulticastParams,
-    };
+    use wz_session_core::multicast_params::{GroupJoinRule, MulticastDriveConfig, MulticastParams};
     use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
@@ -2700,7 +2698,7 @@ mod tests {
     fn params() -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid_vec(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            zid: wz_session_core::session_zid::SessionZid::from_array([0xAA, 0xBB, 0xCC, 0xDD]),
             lease_ms: 5_000,
             join_interval_ms: 0,
             seq_num_res: 0x02,
@@ -2921,7 +2919,7 @@ mod tests {
 
         // A member's JOIN admits it, and the tick sweeps its lease.
         let mut theirs = params.clone();
-        theirs.zid = zid_vec(&[0x01, 0x02, 0x03, 0x04]);
+        theirs.zid = wz_session_core::session_zid::SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
         let mut join = [0u8; JOIN_MAX_BYTES];
         let len = encode_join_into_slice(
             &theirs,

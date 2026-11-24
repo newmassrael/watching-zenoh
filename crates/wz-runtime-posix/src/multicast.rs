@@ -23,8 +23,9 @@ use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use core::str::FromStr;
 
-use wz_runtime_coop::group_transport::{GroupInterface, GroupSend, GroupTransport};
+use wz_runtime_coop::group_transport::{GroupInterface, GroupRx, GroupSend, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
+use wz_session_core::byte_cells::ByteBuf;
 
 use crate::group::MulticastSocket;
 use crate::interfaces::{self, IfaceResolveError};
@@ -708,7 +709,8 @@ pub struct HostGroupTransport<S: MulticastSocket> {
     write: Option<S>,
     /// The group and its port, where every datagram is sent.
     group: SocketAddr,
-    rx: Vec<u8>,
+    /// What each datagram is read into: a buffer the session lent, or the transport's own.
+    rx: GroupRx,
     /// The length and source of the datagram the last receive lent, which lies in `rx` until the
     /// next receive reads into it.
     lent: Option<(usize, SocketAddr)>,
@@ -721,14 +723,16 @@ pub struct HostGroupTransport<S: MulticastSocket> {
 
 impl<S: MulticastSocket> HostGroupTransport<S> {
     /// The transport of the group `group` (its address and port), read on `read` and written
-    /// from `write`, each made by [`bind_joined`] and [`bind_sender`]. A datagram up to the
-    /// largest UDP payload is read whole.
-    pub fn new(read: S, write: S, group: SocketAddr) -> Self {
+    /// from `write`, each made by [`bind_joined`] and [`bind_sender`], receiving into `rx` when
+    /// its session lent a buffer, which is then as long as the group's batch, and otherwise into
+    /// one of its own that reads a datagram up to the largest UDP payload whole. A datagram longer
+    /// than the buffer is cut by the stack, which the session reads as a bad frame.
+    pub fn new(read: S, write: S, group: SocketAddr, rx: Option<ByteBuf>) -> Self {
         Self {
             read: Some(read),
             write: Some(write),
             group,
-            rx: alloc::vec![0; UDP_RX_CAPACITY],
+            rx: GroupRx::lent_or_own(rx, UDP_RX_CAPACITY),
             lent: None,
             kept: None,
             failed: false,
@@ -750,6 +754,17 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
 
     fn keep(&mut self) {
         self.kept = self.lent.take();
+    }
+
+    // A lent buffer is the session's, which holds what it reads there until it asks for the next
+    // datagram; a buffer of the transport's own is lent for the call, as the trait provides.
+    fn lends_until_next_receive(&self) -> bool {
+        self.rx.is_lent()
+    }
+
+    // Asked once the group is left, when no receive reads into the buffer again.
+    fn give_back_rx(&mut self) -> Option<ByteBuf> {
+        self.rx.give_back()
     }
 
     fn open(&mut self) -> bool {
@@ -818,16 +833,16 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         // A datagram kept lies in the receive buffer still: it is lent again from there.
         if let Some((len, from)) = self.kept.take() {
-            f(&self.rx[..len], from);
+            f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
             self.lent = Some((len, from));
             return true;
         }
         let Some(socket) = &self.read else {
             return false;
         };
-        match socket.try_recv(&mut self.rx) {
+        match socket.try_recv(self.rx.as_mut_slice()) {
             Ok(Some((len, from))) => {
-                f(&self.rx[..len], from);
+                f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
                 self.lent = Some((len, from));
                 true
             }
@@ -854,6 +869,57 @@ mod tests {
 
     const GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 9);
     const GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0x7a, 0x7709);
+
+    /// A group lent a buffer receives into it where it lies, says the bytes stay there until its
+    /// next receive, and gives the buffer back once as it is left. The CONTROL is a group that made
+    /// its own: it lends a datagram for the call only and gives nothing back.
+    #[test]
+    fn a_group_lent_a_buffer_receives_into_it_and_gives_it_back_once() {
+        use wz_session_core::byte_cells::{ByteCells, ByteSource};
+
+        static CELLS: ByteCells<64, 1> = ByteCells::new();
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let open = |rx: Option<ByteBuf>| {
+            let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
+            let write = PosixUdpSocket::bind(loopback).expect("a sending socket");
+            let to = read.local();
+            HostGroupTransport::new(read, write, to, rx)
+        };
+
+        let mut own = open(None);
+        assert!(
+            !own.lends_until_next_receive(),
+            "CONTROL: its own buffer is lent for the call"
+        );
+        own.close();
+        assert!(
+            own.give_back_rx().is_none(),
+            "CONTROL: its own buffer stays"
+        );
+
+        let buf = CELLS.claim().expect("the cell");
+        let base = buf.raw().0 as usize;
+        let mut lent = open(Some(buf));
+        assert!(lent.lends_until_next_receive());
+        lent.send_to_group(b"hello");
+        let mut seen = None;
+        for _ in 0..100_000 {
+            if lent
+                .recv_with(&mut |bytes, _| seen = Some((bytes.to_vec(), bytes.as_ptr() as usize)))
+            {
+                break;
+            }
+        }
+        let (bytes, at) = seen.expect("the datagram");
+        assert_eq!(bytes, b"hello");
+        assert_eq!(at, base, "read where the lent buffer lies");
+        lent.close();
+        let back = lent.give_back_rx().expect("the lent buffer");
+        assert!(lent.give_back_rx().is_none(), "given back once");
+        assert_eq!(CELLS.in_use(), 1, "the session holds it until it lets go");
+        drop(back);
+        assert_eq!(CELLS.in_use(), 0);
+    }
 
     /// A socket option of `socket`, read back into a value of the type it is kept as.
     fn option<T: Copy>(socket: &PosixUdpSocket, level: c_int, name: c_int, mut value: T) -> T {

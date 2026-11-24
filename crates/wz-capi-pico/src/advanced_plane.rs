@@ -23,8 +23,8 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use wz_capi_port::{QueryHolder, QueryableSink, Ticker, WireKey};
-use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
+use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine, Ticker, WireKey};
+use wz_ext_pubsub::advanced_cache::{CacheBytes, CacheConfig, CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
@@ -74,6 +74,21 @@ impl PicoPlane {
     }
 }
 
+/// The ring a session's caches keep their samples in, holding the session's engine so the ring
+/// stands for as long as a cache in it does.
+struct SessionCacheBytes(Arc<crate::session::Engine>);
+
+impl CacheBytes for SessionCacheBytes {
+    fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+        match SessionEngine::cache_bytes(&*self.0) {
+            Some(ring) => ring.with_cache_bytes(with),
+            // An engine that keeps no ring is never asked for one: its caches keep their samples
+            // on the heap (`PicoPlane::cache_store`).
+            None => with(&mut []),
+        }
+    }
+}
+
 /// The options every plain publish of this ABI carries: reliable, and the
 /// destination a pico put takes by default.
 ///
@@ -111,12 +126,8 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Option<Ticker> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start(
-            &crate::session::port_engine(&self.session.engine),
-            period_ms,
-            tick,
-        )
-        .ok()
+        // The engine as it is, named by its periodic jobs alone ([`wz_capi_port::Tickers`]).
+        Ticker::start(self.session.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -178,6 +189,20 @@ impl AdvancedPublisherPlane for PicoPlane {
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
+    }
+
+    /// In the session's ring of cached samples when the session keeps one (the cooperative engine,
+    /// which reserved it at its open), so a put takes no memory; a ring that holds no record
+    /// refuses the cache. On the heap on an engine that keeps none.
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
+            return Ok(CacheStore::new(config));
+        }
+        CacheStore::in_ring(
+            config,
+            Box::new(SessionCacheBytes(Arc::clone(&self.session.engine))),
+        )
+        .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {

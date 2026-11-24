@@ -2562,7 +2562,7 @@ mod qos_emit_tests {
     fn params(is_qos: bool) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
+            zid: crate::session_zid::SessionZid::from_array([1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,
@@ -2663,7 +2663,7 @@ mod push_tests {
     fn params(batch_size: u16) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
+            zid: crate::session_zid::SessionZid::from_array([1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,
@@ -3355,7 +3355,7 @@ mod lend_tests {
     fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
+            zid: crate::session_zid::SessionZid::from_array([1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,
@@ -3651,7 +3651,7 @@ mod lent_emit_tests {
     fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
+            zid: crate::session_zid::SessionZid::from_array([1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,

@@ -1287,9 +1287,7 @@ mod tests {
     use wz_session_core::driver_loop::IterationEvent;
     use wz_session_core::join_decode::decode_join;
     use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-    use wz_session_core::multicast_params::{
-        zid_vec, GroupJoinRule, MulticastDriveConfig, MulticastParams,
-    };
+    use wz_session_core::multicast_params::{GroupJoinRule, MulticastDriveConfig, MulticastParams};
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
         multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxEncoded,
@@ -1365,7 +1363,7 @@ mod tests {
     fn params() -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid_vec(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            zid: wz_session_core::session_zid::SessionZid::from_array([0xAA, 0xBB, 0xCC, 0xDD]),
             lease_ms: 5_000,
             join_interval_ms: 0,
             seq_num_res: 0x02,

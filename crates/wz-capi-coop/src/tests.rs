@@ -2080,6 +2080,46 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
 }
 
+/// A session of the `advanced-cache` build keeps a ring of `ADVANCED_CACHE_BYTES` for its caches,
+/// zeroed at its open and its own: what one call writes the next reads, and another session's
+/// ring is another span.
+#[cfg(feature = "advanced-cache")]
+#[test]
+fn an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches() {
+    use wz_session_core::caps::ADVANCED_CACHE_BYTES;
+
+    let (router, other_router) = (Router::start(CatchAll::None), Router::start(CatchAll::None));
+    let (one, other) = (open(&router), open(&other_router));
+    let ring = one.cache_bytes().expect("the session keeps a ring");
+    let mut seen = (0, false);
+    ring.with_cache_bytes(&mut |bytes| {
+        seen = (bytes.len(), bytes.iter().all(|byte| *byte == 0));
+        if let Some(first) = bytes.first_mut() {
+            *first = 7;
+        }
+    });
+    assert_eq!(
+        seen,
+        (ADVANCED_CACHE_BYTES, true),
+        "the ring is the limit's, zeroed"
+    );
+    other
+        .cache_bytes()
+        .expect("the other session keeps a ring")
+        .with_cache_bytes(&mut |bytes| {
+            if let Some(first) = bytes.first_mut() {
+                *first = 9;
+            }
+        });
+    let mut first = None;
+    ring.with_cache_bytes(&mut |bytes| first = bytes.first().copied());
+    assert_eq!(
+        first,
+        Some(7),
+        "a session's ring is its own and keeps what was written"
+    );
+}
+
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
 /// the one it holds, and letting go of it closes the session while the engine itself lives on in
 /// the other holders, as an entity declared on a session that is dropped finds it closed.

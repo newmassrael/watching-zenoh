@@ -91,3 +91,15 @@ pub trait PlaceLender {
     /// session lent. What the ABI kept at the place it lets go of first.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
 }
+
+/// An engine that keeps, in memory its session reserved at its open, the ring its advanced
+/// publishers' caches keep their samples in (`ADVANCED_CACHE_BYTES`): one span of bytes, zeroed at
+/// the open, lent to one caller at a time under a lock of its own, so a cache's put copies its
+/// sample into the session's memory and takes none of its own
+/// ([`crate::SessionEngine::cache_bytes`]). The engine reads none of what the caches write there.
+pub trait CacheBytes {
+    /// Call `with` with the ring's bytes, closed or not: the span is the session's memory and not
+    /// its state, and stands until the engine is let go. `with` runs under a lock no other
+    /// operation of the session takes, and calls into nothing that takes the bytes again.
+    fn with_cache_bytes(&self, with: &mut dyn FnMut(&mut [u8]));
+}

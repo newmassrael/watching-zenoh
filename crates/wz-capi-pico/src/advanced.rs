@@ -75,8 +75,8 @@ use crate::pubsub::{
     z_owned_subscriber_t, CClosure, SubscriberState,
 };
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_TIMESTAMP_GENERATION_FAILED,
-    Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
+    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
@@ -600,6 +600,9 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
+            // A session whose ring of cached samples holds no record has no room for a cache, as
+            // every fixed room of this ABI answers it.
+            Err(AdvancedPublisherError::CacheRingUnavailable) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
         let mut boxed = Box::new(AdvPubState {
@@ -706,15 +709,14 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         // Consume the moved payload, attachment and encoding FIRST, so every
         // early return below still honours the C side's ownership transfer.
         let buf = crate::pubsub::take_moved_bytes(payload);
-        let mut put_options = AdvancedPutOptions::default();
+        // The moved attachment and encoding are held here for as long as the put reads them and
+        // lent to it, as a plain put's are: the put copies them only into its cache's record.
+        let mut attachment = None;
+        let mut encoding = None;
         if !options.is_null() {
             let embedded = &(*options).put_options;
-            if let Some(attachment) = crate::pubsub::take_moved_bytes_to_vec(embedded.attachment) {
-                put_options = put_options.with_attachment(attachment);
-            }
-            if let Some(encoding) = crate::encoding::take_moved_encoding_copy(embedded.encoding) {
-                put_options = put_options.with_encoding(encoding);
-            }
+            attachment = crate::pubsub::read_moved_bytes(embedded.attachment);
+            encoding = crate::encoding::take_moved_encoding(embedded.encoding);
             // The timestamp and the source info are NOT read: pico overwrites
             // both with the publisher's own sequencing before it sends
             // (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
@@ -729,6 +731,13 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;
         };
+        let mut put_options = AdvancedPutOptions::default();
+        if let Some(attachment) = &attachment {
+            put_options = put_options.with_attachment_lent(attachment.as_slice());
+        }
+        if let Some(encoding) = &encoding {
+            put_options = put_options.with_encoding_ref(encoding.view());
+        }
         advanced_publish_code(state.publisher.put_with(&buf, put_options))
     })
 }
@@ -742,7 +751,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
 /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
 /// a session with no time left, and the `trusted-only` policy withholding an untrusted clock's
 /// stamp, which pico has no policy for and whose sample is as unmade. A sample the queue profile
-/// dropped behind a held conduit answers pico's failed send, as a plain put does.
+/// dropped behind a held conduit answers pico's failed send, as a plain put does. A sample whose
+/// record is longer than the session's ring of cached samples answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`,
+/// as every fixed room of this ABI does when it is full: pico's cache would have copied it to the
+/// heap, and the ring has no room for it.
 fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
@@ -750,6 +762,7 @@ fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
             Z_ERR_TIMESTAMP_GENERATION_FAILED
         }
         Err(PublishError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
+        Err(PublishError::ExceedsCacheRoom) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -903,8 +916,9 @@ pub(crate) struct AdvSubState {
     engine: Arc<Engine>,
     /// The subscriber the engine hosts. Dropping it retracts everything it declared, in the
     /// order the runtime's own subscriber does, so an implicit `z_drop` and an explicit
-    /// `ze_undeclare_advanced_subscriber` take the identical path.
-    subscriber: EngineSubscriber,
+    /// `ze_undeclare_advanced_subscriber` take the identical path. Hosted on the engine as the
+    /// build names it, so a build of one engine makes no table of the session's operations for it.
+    subscriber: EngineSubscriber<Engine>,
     /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`.
     keyexpr: String,
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -1072,7 +1086,7 @@ unsafe fn declare_subscriber_state(
         let miss = miss.clone();
         let mut inner = crate::pubsub::make_subscriber_callback(cclosure);
         EngineSubscriber::declare_with_miss_listener(
-            &crate::session::port_engine(&engine),
+            &engine,
             ke.clone(),
             opts,
             // The advanced subscriber hands an OWNED `Sample`; the existing marshal
@@ -1884,6 +1898,11 @@ mod tests {
             advanced_publish_code(Err(PublishError::HeldConduit)),
             crate::result::Z_ERR_TRANSPORT_TX_FAILED,
             "a sample dropped behind a held conduit answers pico's failed send"
+        );
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::ExceedsCacheRoom)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            "a sample longer than the cache ring answers the full room's code"
         );
     }
 

@@ -44,6 +44,9 @@
 //!   with the flags that say which buffers are lent (`TransportRows::links_from`). The batch is
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
 //!   the rows lent when the session opens, first;
+//! - with `group`, a receive buffer for each group the session may join, of the largest batch a
+//!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
+//!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
 //!   state's tables (`SessionRows::lane_bytes`); none in a build that reads every record where it
@@ -56,6 +59,10 @@
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
 //!   with the links' tables;
+//! - with `listen` or `group`, the places of the droppable publishes the session keeps for the
+//!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
+//!   each a link's batch long, with their flags and a row beside each for the rest of the
+//!   publish (`wz_runtime_coop::handed`), lent with the links' tables;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
@@ -119,6 +126,8 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(any(feature = "listen", feature = "group"))]
+use wz_session_core::policy::HeldPublishDrop;
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
@@ -127,12 +136,14 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-#[cfg(feature = "query")]
-use crate::engine::LegSink;
 use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(feature = "query")]
+use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReplies;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,12 +187,17 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 const LANE_ROWS: usize = 3 + 2 * cfg!(not(feature = "rx-lent-only")) as usize;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
+/// The receive buffers of the groups the session may join and their flags (`group`).
+const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
+/// The places of the publishes the session keeps for its other faces, their flags and the rows
+/// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
+const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
 /// The application's tables apart from the session's one table set: liveliness tokens
 /// (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
-/// nothing holds no table of gets.
-const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
+/// a build that asks (`query`): one that asks nothing holds no table of gets.
+const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -213,6 +229,8 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LINK_ROWS
     + LANE_ROWS
     + REASSEMBLY_ROWS
+    + GROUP_RX_ROWS
+    + HANDED_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
     + FACE_ROWS
@@ -221,7 +239,12 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + ENTITY_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
-    + ENTITY_PLACE_ROWS;
+    + ENTITY_PLACE_ROWS
+    + CACHE_RING_ROWS;
+
+/// The flag and the span of the ring the advanced publishers' caches keep their samples in
+/// (`advanced-cache`).
+const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -395,7 +418,7 @@ impl GetTables {
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
 #[cfg(feature = "query")]
-type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -537,6 +560,13 @@ pub struct TransportRows {
     /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
     /// for a table the plan does not hold ([`ArenaPlan::holding_cells`]).
     cell_bytes: LinkCells<usize>,
+    /// How many publishes the session keeps for its other faces at once, each in a place of a
+    /// link's batch (`HANDED_LEG_BYTES`).
+    #[cfg(any(feature = "listen", feature = "group"))]
+    handed_legs: usize,
+    /// The receive buffers of the groups the session may join: how many, and the bytes of each.
+    #[cfg(feature = "group")]
+    group_rx: (usize, usize),
 }
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
@@ -550,6 +580,9 @@ pub(crate) struct TransportTables {
     pub(crate) reassembly: LentByteCells,
     /// The rows of the endpoints' texts, none written.
     pub(crate) endpoints: EndpointTexts,
+    /// The places of the publishes the session keeps for its other faces.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(crate) handed: HandedTable,
 }
 
 impl TransportRows {
@@ -572,6 +605,11 @@ impl TransportRows {
             cells: LinkCells::from_array(cells),
             reassembly,
             endpoints,
+            #[cfg(any(feature = "listen", feature = "group"))]
+            handed: HandedTable::over(
+                lend.byte_cells(self.link_bytes, self.handed_legs),
+                lend.table(self.handed_legs),
+            ),
         }
     }
 
@@ -584,12 +622,26 @@ impl TransportRows {
         let rx = lend.byte_cells(self.link_bytes, self.rx_buffers);
         let tx = lend.byte_cells(self.link_bytes, self.tx_slots);
         #[cfg(feature = "listen")]
-        {
-            let places = lend.byte_cells(0, self.links);
-            LinkTables::pooled(rx, tx, places)
-        }
+        let tables = LinkTables::pooled(rx, tx, lend.byte_cells(0, self.links));
         #[cfg(not(feature = "listen"))]
-        LinkTables::new(rx, tx, self.link_bytes)
+        let tables = LinkTables::new(rx, tx, self.link_bytes);
+        self.group_rx_from(tables, lend)
+    }
+
+    /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
+    /// after the links' own: a buffer of the groups' batch for each group the plan counts, which a
+    /// group claims when it is joined, so a joined group's datagram is read where the session's
+    /// memory holds it.
+    #[cfg(feature = "group")]
+    fn group_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+        let (buffers, bytes) = self.group_rx;
+        tables.with_group_rx(lend.byte_cells(bytes, buffers))
+    }
+
+    /// A build that joins no group lends no group a buffer.
+    #[cfg(not(feature = "group"))]
+    fn group_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+        tables
     }
 }
 
@@ -614,6 +666,14 @@ pub struct SessionRows {
     held_queries: usize,
     /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
     key_bytes: usize,
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`), none for no ring.
+    #[cfg(feature = "advanced-cache")]
+    cache_bytes: usize,
+    /// The replies the gets that consolidate hold to their Finals, a row each, shared by every get
+    /// of the session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: usize,
 }
 
 impl SessionRows {
@@ -638,6 +698,21 @@ impl SessionRows {
     /// (`KEY_ARENA_BYTES`).
     pub fn key_bytes(&self) -> usize {
         self.key_bytes
+    }
+
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
+    /// ([`CacheSpan::claimed`]).
+    #[cfg(feature = "advanced-cache")]
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
+    }
+
+    /// How many replies the gets that consolidate hold to their Finals at once, of every get of the
+    /// session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    pub fn held_replies(&self) -> usize {
+        self.held_replies
     }
 }
 
@@ -743,6 +818,10 @@ impl ArenaPlan {
                 reassembly_chains: SESSION_CHAIN_BUFFERS,
                 endpoint_rows: (config.endpoints.count(), config.listen.count()),
                 cell_bytes: LinkCells::default(),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                handed_legs: 0,
+                #[cfg(feature = "group")]
+                group_rx: (0, 0),
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -847,6 +926,28 @@ impl ArenaPlan {
             links,
             LentByteCells::FLAG_BYTES,
         );
+        // A receive buffer for each group the session may join, lent with the links' tables
+        // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
+        // batch a group the config names sends, held to the build's multicast batch. A group's
+        // datagram longer than it is dropped and counted by its transport.
+        #[cfg(feature = "group")]
+        {
+            let buffers = config.groups.len().min(caps::MAX_TASKS);
+            let bytes = config
+                .groups
+                .iter()
+                .map(|join| usize::from(join.profile.batch_size))
+                .max()
+                .unwrap_or(0)
+                .min(limits.pico_multicast_batch_bytes());
+            plan.transport.group_rx = (buffers, bytes);
+            plan.put_table(
+                ["link group receive flags", "link group receive buffers"],
+                "PICO_MULTICAST_BATCH_BYTES",
+                buffers,
+                bytes,
+            );
+        }
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
         #[cfg(not(feature = "rx-lent-only"))]
         plan.put_table(
@@ -881,6 +982,37 @@ impl ArenaPlan {
             plan.transport.reassembly_chains,
             plan.transport.reassembly_bytes,
         );
+        // The publishes the session keeps for its other faces while a send holds it, each in a
+        // place of a link's batch: a publish longer than one is dropped on every face, as one
+        // that finds every place held is.
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            let bytes = plan.lent(
+                "HANDED_LEG_BYTES",
+                Quota::at_most(limits.handed_leg_bytes()),
+                caps::HANDED_LEG_BYTES,
+            );
+            // Under `every-face` a publish that finds the session held is dropped on every face,
+            // and the session reserves no place for one.
+            let keeps = matches!(
+                crate::engine::resolve_policy(config).held_publish_drop(),
+                HeldPublishDrop::HeldFaces
+            );
+            let legs = if keeps {
+                bytes.checked_div(link_bytes).unwrap_or(0)
+            } else {
+                0
+            };
+            plan.transport.handed_legs = legs;
+            plan.put_table(
+                ["handed leg flags", "handed leg places"],
+                "HANDED_LEG_BYTES",
+                legs,
+                link_bytes,
+            );
+            let rows = plan.sized(Arena::table_bytes::<Handed>(legs));
+            plan.put("handed legs", "HANDED_LEG_BYTES", 1, rows);
+        }
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
         plan.session.entities = plan.kept(entity_rows(limits));
@@ -957,6 +1089,20 @@ impl ArenaPlan {
                 core::mem::size_of::<crate::engine::Ended>(),
             );
         }
+        // The replies the gets that consolidate hold to their Finals: one table of rows shared by
+        // every get, tagged with its leg (`engine::get::LegHold`).
+        #[cfg(feature = "query")]
+        {
+            plan.session.held_replies = plan.lent(
+                "MAX_PENDING_REPLIES",
+                limits.max_pending_replies(),
+                caps::MAX_PENDING_REPLIES,
+            );
+            let held = plan.sized(HeldReplies::<u64, Lent>::arena_bytes(
+                plan.session.held_replies,
+            ));
+            plan.put("held replies", "MAX_PENDING_REPLIES", 1, held);
+        }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
         plan.session.peers = FacePeers {
@@ -1026,6 +1172,22 @@ impl ArenaPlan {
         } else {
             0
         };
+        #[cfg(feature = "advanced-cache")]
+        {
+            plan.session.cache_bytes = plan.lent(
+                "ADVANCED_CACHE_BYTES",
+                Quota::at_most(caps::ADVANCED_CACHE_BYTES),
+                caps::ADVANCED_CACHE_BYTES,
+            );
+            if plan.session.cache_bytes != 0 {
+                plan.put_table(
+                    ["cache ring flag", "cache ring"],
+                    "ADVANCED_CACHE_BYTES",
+                    1,
+                    plan.session.cache_bytes,
+                );
+            }
+        }
         plan.put_entities();
         plan.settled()
     }
@@ -1660,6 +1822,21 @@ pub(crate) fn dials_of(endpoints: usize, listens: usize, groups: usize) -> bool 
 /// ([`FacePeers::sets`]), so the bound is the same.
 pub(crate) const MAX_FACE_SETS: usize = 1 + caps::MAX_FACES + GROUP_FACES;
 
+/// The words of a set of the places of a session's rooms, a bit for each face a session holds at
+/// most ([`MAX_FACE_SETS`]).
+pub(crate) const FACE_SLOT_WORDS: usize = MAX_FACE_SETS.div_ceil(u64::BITS as usize);
+
+/// The faces a droppable publish that found the session held was dropped on.
+pub(crate) type DroppedOn = wz_runtime_coop::handed::FaceSlots<FACE_SLOT_WORDS>;
+
+/// The publishes a session keeps for the faces they were not dropped on.
+#[cfg(any(feature = "listen", feature = "group"))]
+pub(crate) type HandedTable = wz_runtime_coop::handed::HandedLegs<FACE_SLOT_WORDS>;
+
+/// One publish a session keeps for its other faces.
+#[cfg(any(feature = "listen", feature = "group"))]
+pub(crate) type Handed = wz_runtime_coop::handed::HandedLeg<FACE_SLOT_WORDS>;
+
 /// The groups a session's plan counts at most: as many as its task cells hold in a build that
 /// joins groups, none in one that does not.
 const GROUP_FACES: usize = if cfg!(feature = "group") {
@@ -1837,6 +2014,47 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
     let (base, len) = buffer.raw();
     core::mem::forget(buffer);
     Some((NonNull::new(base)?, len))
+}
+
+/// The span of a session's arena its advanced publishers' caches keep their ring in
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
+/// it holds an empty ring, and lent under the engine's lock of its own
+/// (`wz_capi_port::CacheBytes`).
+#[cfg(feature = "advanced-cache")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CacheSpan {
+    base: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a span is an address in a session's arena and its length; its bytes are reached only
+// through the engine's lock of the span, so handing the span to another thread shares nothing.
+#[cfg(feature = "advanced-cache")]
+unsafe impl Send for CacheSpan {}
+
+#[cfg(feature = "advanced-cache")]
+impl CacheSpan {
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
+    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
+        let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(bytes),
+            left: 0,
+        }))?;
+        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
+        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
+        Ok(Self { base, len })
+    }
+
+    /// The span's bytes.
+    ///
+    /// # Safety
+    /// The caller holds the span alone for as long as the bytes are borrowed, and the arena the
+    /// span lies in stands that long.
+    pub(crate) unsafe fn bytes<'a>(self) -> &'a mut [u8] {
+        // SAFETY: the caller's; the span is `len` bytes of the arena.
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    }
 }
 
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let

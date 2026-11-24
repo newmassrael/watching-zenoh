@@ -645,7 +645,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
     key: *mut wz_ext_instance_key_t,
 ) -> ZResult {
     use wz_app_frame::e2e_stream_sender::StreamSender;
-    use wz_app_frame::instance_key::{protect, KeyedFrame, ProtectError};
+    use wz_app_frame::instance_key::{protect_into, KeyedWritten, ProtectError};
 
     guarded(|| {
         if key.is_null() || written.is_null() {
@@ -669,10 +669,15 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
         if capacity < tx.frame_bytes(len) {
             return Z_ERR_OVERFLOW;
         }
-        match protect(&mut held.keyer, &mut tx, payload, now_ms) {
-            Ok(KeyedFrame::Built { instance, frame }) => {
-                core::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), out, frame.bytes.len());
-                *written = frame.bytes.len();
+        // The frame is written where the program asked for it, by the sender itself: nothing is
+        // built apart and copied.
+        let out = core::slice::from_raw_parts_mut(out, capacity);
+        match protect_into(&mut held.keyer, &mut tx, payload, now_ms, out) {
+            Ok(KeyedWritten::Built {
+                instance,
+                written: frame,
+            }) => {
+                *written = frame.len;
                 if !counter.is_null() {
                     *counter = frame.counter;
                 }
@@ -686,7 +691,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
                 *key = indexed(instance, last);
                 Z_OK
             }
-            Ok(KeyedFrame::Dropped(drop)) => {
+            Ok(KeyedWritten::Dropped(drop)) => {
                 *key = dropped(drop);
                 Z_EINVAL
             }

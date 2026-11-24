@@ -704,3 +704,273 @@ fn a_sample_keeps_what_it_retains_until_the_ring_lets_it_go() {
         "dropping the store releases the sample still in it"
     );
 }
+
+/// A put of `payload` under `sn`, carrying an encoding with a schema and an attachment, as a
+/// publisher hands it to its cache.
+fn keep_numbered(store: &CacheStore, sn: u32, payload: &[u8]) {
+    store.retain(
+        SampleBody {
+            keyexpr: "demo/k",
+            payload,
+            kind: SampleKind::Put,
+            encoding: Some(EncodingRef {
+                packed_id: 0x0B,
+                schema: Some(b"utf8"),
+            }),
+            attachment: Some(b"side-band"),
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        },
+        Some(SourceInfo::new(&[0x07], 9, sn)),
+        TimestampHint::new(100 + u64::from(sn), &[1]).unwrap(),
+    );
+}
+
+/// A put of eight bytes under `sn` and nothing else: a record of 104 bytes, a header of 88, the
+/// key's 6 and the payload's 8, padded to 104.
+fn keep_plain(store: &CacheStore, sn: u32) {
+    store.retain(
+        SampleBody {
+            keyexpr: "demo/k",
+            payload: &[sn as u8; 8],
+            kind: SampleKind::Put,
+            encoding: None,
+            attachment: None,
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        },
+        Some(SourceInfo::new(&[0x07], 9, sn)),
+        TimestampHint::new(100 + u64::from(sn), &[1]).unwrap(),
+    );
+}
+
+/// The bytes of a ring holding three plain records exactly.
+const THREE_PLAIN: usize = ring::RING_HEAD_BYTES + 3 * 104;
+
+/// A cache of `depth` samples in `ring`.
+fn ring_store(ring: &test_ring::HeapRing, depth: usize) -> CacheStore {
+    CacheStore::in_ring(
+        CacheConfig {
+            max_samples: depth,
+            ..CacheConfig::default()
+        },
+        Box::new(ring.clone()),
+    )
+    .expect("the ring holds a record")
+}
+
+/// The sequence numbers `store` answers a query of `params` with, in the order it replies.
+fn answered(store: &CacheStore, params: Option<&'static [u8]>) -> Vec<u32> {
+    let mut replies = Rec::default();
+    store.query_handler(|| 0)(&query(params), &mut replies);
+    replies
+        .sourced
+        .iter()
+        .map(|source| source.as_ref().map_or(u32::MAX, |(_, _, sn)| *sn))
+        .collect()
+}
+
+/// A record is its header of 88 bytes and its parts, padded to eight, and the ring keeps 32 bytes
+/// of its own: the arithmetic the reasons of `ADVANCED_CACHE_BYTES` state, ten records of the
+/// longest key zenoh-pico's advanced tests publish on (58 bytes) and a payload of one byte for
+/// the pico preset, of fifteen for the default.
+#[test]
+fn a_record_is_its_header_and_its_parts_padded_to_eight() {
+    assert_eq!(ring::RECORD_HEAD_BYTES, 88);
+    assert_eq!(ring::RING_HEAD_BYTES, 32);
+    let key = "zenoh-pico/advanced-pubsub/test/retransmission_sample_miss";
+    assert_eq!(key.len(), 58);
+    let record = |payload: &[u8]| {
+        ring::record_bytes(&SampleBody {
+            keyexpr: key,
+            payload,
+            kind: SampleKind::Put,
+            encoding: None,
+            attachment: None,
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        })
+    };
+    assert_eq!(record(b"1"), Some(152));
+    assert_eq!(record(&[b'9'; 15]), Some(168));
+    assert_eq!(10 * 152 + ring::RING_HEAD_BYTES, 1552);
+    assert_eq!(10 * 168 + ring::RING_HEAD_BYTES, 1712);
+}
+
+/// A cache in the ring answers as one on the heap does: its newest samples of its depth, oldest
+/// first, each with its key, payload, number, encoding and attachment.
+#[test]
+fn a_cache_in_the_ring_replies_its_newest_samples_oldest_first() {
+    let ring = test_ring::HeapRing::new(1024);
+    let store = ring_store(&ring, 2);
+    for sn in 0..3u32 {
+        keep_numbered(&store, sn, &[sn as u8; 3]);
+    }
+    assert_eq!(store.len(), 2, "the oldest went for the third");
+
+    let mut replies = Rec::default();
+    store.query_handler(|| 0)(&query(None), &mut replies);
+    assert_eq!(
+        replies.keyed,
+        vec![
+            ("demo/k".to_string(), vec![1u8; 3]),
+            ("demo/k".to_string(), vec![2u8; 3]),
+        ]
+    );
+    assert_eq!(
+        replies.sourced,
+        vec![Some((vec![0x07], 9, 1)), Some((vec![0x07], 9, 2))]
+    );
+    assert_eq!(
+        replies.metas,
+        vec![
+            (
+                Some((0x0B, Some(b"utf8".to_vec()))),
+                Some(b"side-band".to_vec())
+            );
+            2
+        ]
+    );
+    assert_eq!(answered(&store, Some(b"_max=1")), vec![2]);
+}
+
+/// Two caches keep their records in one ring, each its own depth, and each answers only its own.
+#[test]
+fn two_caches_share_the_ring_and_each_answers_its_own() {
+    let ring = test_ring::HeapRing::new(2048);
+    let (first, second) = (ring_store(&ring, 2), ring_store(&ring, 3));
+    for sn in 0..4u32 {
+        keep_plain(&first, sn);
+        keep_plain(&second, 10 + sn);
+    }
+    assert_eq!(answered(&first, None), vec![2, 3]);
+    assert_eq!(answered(&second, None), vec![11, 12, 13]);
+}
+
+/// A record that finds no room lets the ring's oldest records go, whichever cache kept them.
+#[test]
+fn a_record_that_finds_no_room_lets_the_oldest_go_whoever_kept_it() {
+    let ring = test_ring::HeapRing::new(THREE_PLAIN);
+    let (first, second) = (ring_store(&ring, 5), ring_store(&ring, 5));
+    keep_plain(&first, 0);
+    keep_plain(&first, 1);
+    keep_plain(&second, 10);
+    keep_plain(&second, 11);
+    assert_eq!(answered(&first, None), vec![1], "the ring's oldest went");
+    assert_eq!(answered(&second, None), vec![10, 11]);
+}
+
+/// The ring writes a record that does not fit before its end at its start, and answers oldest
+/// first across the end.
+#[test]
+fn the_ring_wraps_and_answers_oldest_first_across_its_end() {
+    let ring = test_ring::HeapRing::new(THREE_PLAIN);
+    let store = ring_store(&ring, 10);
+    for sn in 0..5u32 {
+        keep_plain(&store, sn);
+    }
+    assert_eq!(answered(&store, None), vec![2, 3, 4]);
+    assert_eq!(answered(&store, Some(b"_max=2")), vec![3, 4]);
+}
+
+/// A cache past its depth lets its own oldest record go and no other cache's; a cache that goes
+/// lets all of its records go, and their bytes come back to the others.
+#[test]
+fn a_cache_lets_its_own_records_go_past_its_depth_and_when_it_goes() {
+    let ring = test_ring::HeapRing::new(THREE_PLAIN);
+    let (first, second) = (ring_store(&ring, 1), ring_store(&ring, 5));
+    keep_plain(&first, 0);
+    keep_plain(&first, 1);
+    keep_plain(&second, 10);
+    assert_eq!(answered(&first, None), vec![1], "its own oldest went");
+    assert_eq!(answered(&second, None), vec![10], "the other's stayed");
+
+    drop(first);
+    keep_plain(&second, 11);
+    keep_plain(&second, 12);
+    assert_eq!(
+        answered(&second, None),
+        vec![10, 11, 12],
+        "the records of the cache that went made room before any of this one's"
+    );
+}
+
+/// A record longer than the whole ring is refused and kept nowhere; a ring too short for one
+/// record makes no cache; the heap keeps a sample of any size.
+#[test]
+fn a_record_past_the_ring_is_refused_and_a_ring_too_short_makes_no_cache() {
+    let ring = test_ring::HeapRing::new(THREE_PLAIN);
+    let store = ring_store(&ring, 5);
+    let heap = CacheStore::new(CacheConfig::default());
+    let body = |payload: &'static [u8]| SampleBody {
+        keyexpr: "demo/k",
+        payload,
+        kind: SampleKind::Put,
+        encoding: None,
+        attachment: None,
+        #[cfg(feature = "transport-shm")]
+        shared: None,
+    };
+    static FILLS: [u8; 3 * 104 - 88 - 6] = [0; 3 * 104 - 88 - 6];
+    static PAST: [u8; 3 * 104 - 88 - 6 + 1] = [0; 3 * 104 - 88 - 6 + 1];
+    assert_eq!(
+        store.check_room(&body(&FILLS)),
+        Ok(()),
+        "the whole ring fits"
+    );
+    assert_eq!(
+        store.check_room(&body(&PAST)),
+        Err(PublishError::ExceedsCacheRoom),
+        "a byte past it does not"
+    );
+    assert_eq!(heap.check_room(&body(&PAST)), Ok(()));
+    store.retain(body(&PAST), None, TimestampHint::default());
+    assert!(store.is_empty(), "a record past the ring is not kept");
+    store.retain(body(&FILLS), None, TimestampHint::default());
+    assert_eq!(store.len(), 1);
+
+    let short = test_ring::HeapRing::new(ring::RING_HEAD_BYTES + 80);
+    assert!(CacheStore::in_ring(CacheConfig::default(), Box::new(short)).is_none());
+}
+
+/// A cache holds the publisher's key for as long as it is and lets a second one go at once.
+#[test]
+fn a_cache_holds_one_key_until_it_goes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Key(Arc<AtomicUsize>);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let released = Arc::new(AtomicUsize::new(0));
+    let ring = test_ring::HeapRing::new(1024);
+    let store = ring_store(&ring, 1);
+    store.hold_key(Retained::new(Arc::new(Key(Arc::clone(&released)))));
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        0,
+        "the cache holds the key"
+    );
+    store.hold_key(Retained::new(Arc::new(Key(Arc::clone(&released)))));
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        1,
+        "a second key goes at once"
+    );
+    keep_plain(&store, 0);
+    keep_plain(&store, 1);
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        1,
+        "an eviction keeps the key"
+    );
+    drop(store);
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        2,
+        "the key goes with the cache"
+    );
+}

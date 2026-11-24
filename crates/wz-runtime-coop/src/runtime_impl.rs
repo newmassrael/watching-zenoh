@@ -102,6 +102,8 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 #[cfg(feature = "session-slot")]
 use critical_section::Mutex;
 use wz_runtime_core::Runtime;
+#[cfg(not(feature = "session-slot"))]
+use wz_runtime_core::RuntimeError;
 
 #[cfg(feature = "session-slot")]
 use crate::executor::TaskTable;
@@ -364,12 +366,11 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// so the polling loop can re-enter `poll` repeatedly without
     /// requiring `F: Unpin`.
     ///
-    /// Panics if the outer future returns `Pending` while the
-    /// executor reports no ready tasks AND no live tasks AND no
-    /// pending timers — that shape indicates a deadlocked future
-    /// with no external wake source (caller bug). On real MCU
-    /// deploys the equivalent situation would be `wfi()` blocking
-    /// forever; the panic here surfaces the bug at test time.
+    /// Answers `Err(RuntimeError::Stalled)` if the outer future returns
+    /// `Pending` while the executor reports no ready tasks AND no live
+    /// tasks AND no pending timers: a future with no wake source left,
+    /// which on a real MCU deploy would be `wfi()` blocking forever.
+    /// [`crate::CoopLocalSet::block_on_local`] answers the same.
     ///
     /// R311bc extension: the pending-timer check distinguishes
     /// "legitimately waiting for a deadline" from "permanently
@@ -383,7 +384,7 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// local task is run to completion with
     /// [`crate::CoopLocalSet::block_on_local`], which allocates nothing.
     #[cfg(not(feature = "session-slot"))]
-    pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
+    pub fn block_on<F: Future>(&self, fut: F) -> Result<F::Output, RuntimeError> {
         let mut fut = core::pin::pin!(fut);
         let flag = Arc::new(AtomicBool::new(true));
         let waker = owned_flag_waker(flag.clone());
@@ -394,7 +395,7 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
             let outer_was_ready = flag.swap(false, Ordering::AcqRel);
             if outer_was_ready {
                 if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
-                    return out;
+                    return Ok(out);
                 }
             }
             // Give spawned tasks a chance to make progress (and let
@@ -404,19 +405,13 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
             // Deadlock detection. If the outer flag is unset, no
             // task is ready, no live spawned tasks exist, AND no
             // timer is pending — there is no possible future wake
-            // source. Panic surfaces the bug at test time. On a
-            // real MCU deploy `wfi()` outside this loop would block
-            // forever in the same situation.
+            // source, and the caller is told so.
             if !flag.load(Ordering::Acquire)
                 && !self.inner.executor.any_ready()
                 && self.inner.executor.live_task_count() == 0
                 && self.inner.timers.pending_count() == 0
             {
-                panic!(
-                    "CoopRuntime::block_on: outer future Pending with no \
-                     live tasks, no wakers, and no pending timers — \
-                     deadlocked future?"
-                );
+                return Err(RuntimeError::Stalled);
             }
         }
     }
@@ -852,7 +847,7 @@ mod tests {
     fn spawn_resolves_to_future_output() {
         let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async { 42_u32 });
-        let result = rt.block_on(h);
+        let result = rt.block_on(h).expect("not stalled");
         assert_eq!(result.expect("spawn ok"), 42);
     }
 
@@ -860,14 +855,16 @@ mod tests {
     fn spawn_unit_output_resolves_to_ok_unit() {
         let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async {});
-        rt.block_on(h).expect("spawn returns Ok(())");
+        rt.block_on(h)
+            .expect("not stalled")
+            .expect("spawn returns Ok(())");
     }
 
     #[test]
     fn spawn_string_output_round_trips() {
         let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async { alloc::string::String::from("payload") });
-        let s = rt.block_on(h).expect("spawn ok");
+        let s = rt.block_on(h).expect("not stalled").expect("spawn ok");
         assert_eq!(s, "payload");
     }
 
@@ -883,7 +880,7 @@ mod tests {
             let inner = rt2.spawn(async { 100_u32 });
             inner.await.expect("inner ok") + 1
         });
-        assert_eq!(rt.block_on(h).expect("outer ok"), 101);
+        assert_eq!(rt.block_on(h).expect("not stalled").expect("outer ok"), 101);
     }
 
     #[test]
@@ -940,7 +937,7 @@ mod tests {
             time.sleep(5).await; // 5ms; clock bumps 10ms per pass
             7_u32
         });
-        assert_eq!(rt.block_on(h).expect("ok"), 7);
+        assert_eq!(rt.block_on(h).expect("not stalled").expect("ok"), 7);
     }
 
     #[test]
@@ -955,7 +952,7 @@ mod tests {
             time.sleep(0).await;
             123_u32
         });
-        assert_eq!(rt.block_on(h).expect("ok"), 123);
+        assert_eq!(rt.block_on(h).expect("not stalled").expect("ok"), 123);
     }
 
     #[test]
@@ -1012,7 +1009,7 @@ mod tests {
         let rt = CoopRuntime::new(TestClock::new());
         let time = CoopTime::new(&rt);
         let h = rt.spawn(async move { time.timeout(1000, async { 99_u32 }).await });
-        let result = rt.block_on(h).expect("spawn ok");
+        let result = rt.block_on(h).expect("not stalled").expect("spawn ok");
         assert_eq!(result.expect("inner ok"), 99);
     }
 
@@ -1040,7 +1037,7 @@ mod tests {
             // will see clock > deadline → Err(TimeoutElapsed).
             time.timeout(1, NeverReady).await
         });
-        let result = rt.block_on(h).expect("spawn ok");
+        let result = rt.block_on(h).expect("not stalled").expect("spawn ok");
         assert!(
             result.is_err(),
             "timeout should resolve to Err(TimeoutElapsed) but got Ok"
@@ -1078,7 +1075,7 @@ mod tests {
         // sweep the slot and drop the task body; the handle itself
         // already resolved synchronously inside abort. block_on
         // polls the handle once, sees JoinCancelled, returns.
-        let result = rt.block_on(h);
+        let result = rt.block_on(h).expect("not stalled");
         assert!(
             matches!(result, Err(RuntimeError::JoinCancelled)),
             "expected JoinCancelled, got {result:?}"
@@ -1103,7 +1100,7 @@ mod tests {
         // Now abort — the wrapper has already stored Ok(17), so
         // abort's is_none() guard short-circuits.
         h.abort();
-        let result = rt.block_on(h);
+        let result = rt.block_on(h).expect("not stalled");
         assert_eq!(result.expect("ok preserved"), 17);
     }
 
@@ -1123,7 +1120,17 @@ mod tests {
         h.abort();
         h.abort();
         h.abort();
-        let result = rt.block_on(h);
+        let result = rt.block_on(h).expect("not stalled");
         assert!(matches!(result, Err(RuntimeError::JoinCancelled)));
+    }
+
+    /// A future that nothing can wake, with no task and no timer beside it, is answered as a
+    /// stall rather than waited on forever or panicked over.
+    #[test]
+    fn a_future_nothing_can_wake_is_refused_as_stalled() {
+        use wz_runtime_core::RuntimeError;
+        let rt = CoopRuntime::new(NopClock);
+        let result = rt.block_on(core::future::pending::<()>());
+        assert!(matches!(result, Err(RuntimeError::Stalled)), "{result:?}");
     }
 }

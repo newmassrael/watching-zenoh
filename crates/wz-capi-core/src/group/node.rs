@@ -227,7 +227,7 @@ impl NodeGroup {
                 let sender = Arc::clone(&engine);
                 let (key, options) = (event_key.clone(), options.clone());
                 Ticker::start(
-                    &engine,
+                    engine.clone(),
                     keepalive_period_ms(member.lease, member.refresh_ratio),
                     Arc::new(move || {
                         // A beacon that cannot be sent is transient: the next tick sends again,
@@ -246,7 +246,7 @@ impl NodeGroup {
             .flatten();
         held.watchdog = Some(
             Ticker::start(
-                &engine,
+                engine.clone(),
                 WATCHDOG_PERIOD_MS,
                 Arc::new(move || {
                     copy.sweep();

@@ -23,10 +23,10 @@ use wz_codecs::whatami::WhatAmI;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 use super::SessionLinkActions;
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime};
+use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, ShareValues};
 use crate::reliability::Reliability;
 use crate::session_init_params::{
-    cookie_bytes, zid_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 
 /// A runtime whose locks are std's and that runs no task: the bundle's tests call it from the
@@ -94,16 +94,18 @@ impl crate::entropy::EntropySource for NoEntropy {
     }
 }
 
+impl ShareValues for PlainRuntime {
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Arc::new(value)
+    }
+}
+
 impl SessionRuntime for PlainRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
     type Driver = dyn BoxedLinkDriver;
     type Shared<U> = Arc<U>;
     type IterationWork = ();
     type EntropyDraw = NoEntropy;
-
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
-    }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
@@ -178,14 +180,14 @@ impl BoxedLinkDriver for CountingLink {
 fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[0x51; 4]),
+        zid: crate::session_zid::SessionZid::from_array([0x51; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::default(),
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,

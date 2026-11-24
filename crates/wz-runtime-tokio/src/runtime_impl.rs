@@ -54,7 +54,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
-use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
 // `SessionLinkActions` lives behind wz-session-core's `session-unicast` gate,
 // which `transport-unicast` forwards (the only AP path that enables it); the
 // `ActionsHandle` GAT binding below is gated to match.
@@ -176,6 +176,12 @@ impl Runtime for TokioRuntime {
 /// the `BoxedLinkDriver` trait itself, so the lwIP MCU profile is free
 /// to bind a `!Send` `Rc<dyn BoxedLinkDriver>` without an `unsafe impl
 /// Send` hack (see [`wz_session_core::link::BoxedLinkDriver`] doc).
+impl ShareValues for TokioRuntime {
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Arc::new(value)
+    }
+}
+
 impl SessionRuntime for TokioRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
 
@@ -202,10 +208,6 @@ impl SessionRuntime for TokioRuntime {
     // work is empty BY CONSTRUCTION rather than by a runtime check.
     #[cfg(not(feature = "transport-unicast"))]
     type IterationWork = ();
-
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
-    }
 
     // R311ja — the AP action handle is `Arc`: the multi-thread runtime
     // clones it into spawned query / reply tasks that may move across

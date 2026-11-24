@@ -684,12 +684,6 @@ pub mod peer_init_caps;
 // AP-only as a free fn in the tokio crate (getrandom has no MCU
 // backend, and the orphan rule forbids a cross-crate inherent method).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-073 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod signing_key;
 
 /// R2760 — the accept cookie that CARRIES the acceptor's state, so the
@@ -751,8 +745,6 @@ pub mod locator_directory;
 /// R311ei moving SigningKey here. No codec coupling — drives the session
 /// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-086 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
 pub mod session_init_params;
 
 // Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
@@ -1360,8 +1352,6 @@ pub mod wireexpr_build;
 /// not exist. Widening costs nothing: the items are `pub`, so no configuration
 /// gains a dead-code finding.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-117 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod ext_nodeid;
 
 /// A list a message holds, kept within its bound as a type: how this crate reads, makes and edits
@@ -1739,8 +1729,6 @@ pub mod extpatch;
 /// `extqos`, which sends and negotiates: the passive observer folds both Inits
 /// of a handshake in a build that selects no QoS feature, and `extqos` reads
 /// through this module so that the two cannot disagree.
-// Totality debt TD-119 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos_offer;
 
 /// SSOT for the `0x8` REGION-NAME establishment ext — a node's region
@@ -1775,8 +1763,6 @@ pub mod extlowlatency;
 // half — the packed priority-range + reliability body and the DIRECTIONAL
 // containment that negotiates it (acceptor: subset; initiator: superset).
 #[cfg(feature = "transport-qos")]
-// Totality debt TD-118 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos;
 
 // SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
@@ -2054,8 +2040,6 @@ pub mod session_memory;
 /// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
 /// that holds several peers in one session (`tests/it/files/slot_observer_heap.rs`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-095 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
@@ -2223,12 +2207,6 @@ pub mod session_slot;
 // signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types across feature states (R311g1).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-// Totality debt TD-076 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod reconnect;
 
 /// What a session still waits for from its peer before its declarations are SYNCED:
@@ -2282,7 +2260,7 @@ pub mod lifecycle_node;
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-109 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::unreachable)]
+#[allow(clippy::unreachable)]
 pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of

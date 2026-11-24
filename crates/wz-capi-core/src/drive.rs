@@ -6736,7 +6736,7 @@ mod multicast_face_tests {
                 .is_ok();
             let group = ResolvedGroup::resolve(
                 &join,
-                wz_session_core::multicast_params::zid_vec(&[0x0A]),
+                wz_session_core::session_zid::SessionZid::from_array([0x0A]),
                 WhatAmI::Peer,
                 TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD),
                 LinkRxConf::default(),
@@ -6794,7 +6794,7 @@ mod multicast_face_tests {
         };
         let group = ResolvedGroup::resolve(
             &join,
-            wz_session_core::multicast_params::zid_vec(&[0x0A]),
+            wz_session_core::session_zid::SessionZid::from_array([0x0A]),
             WhatAmI::Peer,
             TxQueueConf::of_snapshot(&policy, &limits),
             LinkRxConf::default(),
@@ -6841,7 +6841,8 @@ mod multicast_face_tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: wz_session_core::multicast_params::zid_vec(zid),
+            zid: wz_session_core::session_zid::SessionZid::new(zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
             lease_ms: 10_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,

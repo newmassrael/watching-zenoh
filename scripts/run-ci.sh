@@ -13293,15 +13293,32 @@ _c1p32_pico_profile_tests() {
 # prints the row to commit, a family at 0 is locked there, and a row not filled yet reads
 # NOT-MEASURED, which fails the lane as a rise does: a ratchet with no number holds nothing.
 #
-# The build is the cooperative engine's with every capability a family exercises. A family the
-# build lacks prints `not-built` and is not judged, so this feature list is the population: a
-# capability left out of it is a family the lane stops holding. One test, `#[ignore]`d so that no
-# default sweep counts a process it shares, guarded at exactly 1 passed. A leg ledger: the gate's
-# own fixtures do not wait on the build, and the reading is judged only after both passed.
+# The build measured is the release library's: the cargo arguments and the limits of the profile
+# the Windows package is built from (configs/profiles/host-peer-ext.conf), resolved as the packager
+# resolves them (`wz_config.py --resolve-features`, `--resolve-env`), so the lane holds what is
+# shipped and no list here can drift from it. A family whose capability the build lacks prints
+# `not-built`, which the gate reads as NOT-MEASURED and the lane fails on: a family the release has
+# is always measured, and one it has not is a failure to look at, never a quiet pass. One test,
+# `#[ignore]`d so that no default sweep counts a process it shares, guarded at exactly 1 passed. A
+# leg ledger: the gate's own fixtures do not wait on the build, and the reading is judged only after
+# both passed.
 layer_c1nh_no_heap_after_open() {
-    local features="engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness"
-    features+=",liveliness-get,unstable-api,app-transport,e2e-sender,e2e-receiver"
-    features+=",replay-cache,config-document,multicast-transport"
+    local profile="configs/profiles/host-peer-ext.conf" resolved limits
+    local -a args=() limit_env=()
+    # The profile is read by the one pinned Kconfig interpreter, provisioned as Layer C1p32 does.
+    bash scripts/provision-kconfiglib.sh || return 1
+    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico "$profile")"; then
+        echo "  C1nh FAIL: profile $profile did not resolve" >&2
+        return 1
+    fi
+    read -r -a args <<<"$resolved"
+    if ! limits="$(python3 scripts/lib/wz_config.py --resolve-env "$profile")"; then
+        echo "  C1nh FAIL: the limits of profile $profile did not resolve" >&2
+        return 1
+    fi
+    if [[ -n "$limits" ]]; then
+        mapfile -t limit_env <<<"$limits"
+    fi
     local reading="$WZ_ARTIFACTS/target/no-heap/reading.txt"
     mkdir -p "${reading%/*}" || return 1
     rm -f "$reading"
@@ -13310,9 +13327,9 @@ layer_c1nh_no_heap_after_open() {
     _runci_legs_open C1nh || return 1
     _runci_leg no_heap_ratchet_gate.selftest -- python3 scripts/lib/no_heap_ratchet_gate.py --selftest
     _runci_leg measure -- _runci_guarded_test "C1nh no heap after open" 1 \
-        cargo test -p wz-capi-pico --no-default-features --features "$features" \
+        env "${limit_env[@]}" cargo test -p wz-capi-pico "${args[@]}" \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1
-    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading"
+    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading" --profile "$profile"
     _runci_legs_close
 }
 

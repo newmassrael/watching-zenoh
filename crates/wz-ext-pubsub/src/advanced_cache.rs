@@ -49,9 +49,12 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
+use wz_session_core::publish_options::PublishError;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
-use wz_session_core::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::sample::{
+    EncodingHint, EncodingRef, QosLevel, SampleKind, SourceInfo, TimestampHint,
+};
 
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex};
@@ -301,8 +304,246 @@ impl Default for CacheConfig {
 /// What a ring's lock panics with when a panic of its holder poisoned it.
 const RING_POISONED: &str = "advanced cache ring mutex poisoned";
 
-/// The shared ring an advanced publisher feeds and the cache queryable answers from.
-type CacheRing = Arc<Mutex<VecDeque<CachedSample>>>;
+mod ring;
+
+use ring::RecordRing;
+
+/// A sample as a put hands it to its cache, borrowed where the put holds it: a session's ring
+/// copies it into a record of its own length ([`CacheBytes`]), a cache on the heap into a
+/// [`CachedSample`]. The stamps a put takes only once the sample is known to fit go to
+/// [`CacheStore::retain`] beside it.
+pub struct SampleBody<'a> {
+    /// The key the sample was published on.
+    pub keyexpr: &'a str,
+    /// The payload's bytes; empty for a Del and for a buffer of shared memory.
+    pub payload: &'a [u8],
+    /// A Put or a Del.
+    pub kind: SampleKind,
+    /// The value's encoding, a Put's.
+    pub encoding: Option<EncodingRef<'a>>,
+    /// The attachment, a Put's.
+    pub attachment: Option<&'a [u8]>,
+    /// The payload when it is a buffer of shared memory, kept as the buffer
+    /// ([`CachedSample::shared`]).
+    #[cfg(feature = "transport-shm")]
+    pub shared: Option<wz_session_core::extshm::ShmSendHandle>,
+}
+
+impl SampleBody<'_> {
+    /// A sample of its own on the heap, these parts copied.
+    fn to_cached(&self, source_info: Option<SourceInfo>, timestamp: TimestampHint) -> CachedSample {
+        self.keeping_shared(
+            CachedSample::new(
+                self.keyexpr,
+                self.payload.to_vec(),
+                source_info,
+                timestamp,
+                self.kind,
+            )
+            .with_encoding(self.encoding.map(EncodingRef::to_hint))
+            .with_attachment(self.attachment.map(<[u8]>::to_vec)),
+        )
+    }
+
+    /// `sample`, holding the buffer of shared memory this sample's payload is.
+    #[cfg(feature = "transport-shm")]
+    fn keeping_shared(&self, sample: CachedSample) -> CachedSample {
+        sample.with_shared(self.shared.clone())
+    }
+
+    /// `sample`: a build without shared memory has no buffer to hold.
+    #[cfg(not(feature = "transport-shm"))]
+    fn keeping_shared(&self, sample: CachedSample) -> CachedSample {
+        sample
+    }
+}
+
+impl CachedSample {
+    /// The sample's parts as a put hands them to a cache, read where this sample holds them.
+    fn body(&self) -> SampleBody<'_> {
+        SampleBody {
+            keyexpr: &self.keyexpr,
+            payload: &self.payload,
+            kind: self.kind,
+            encoding: self.encoding.as_ref().map(EncodingHint::view),
+            attachment: self.attachment.as_deref(),
+            #[cfg(feature = "transport-shm")]
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+/// The bytes of a session's ring of cached samples (`ADVANCED_CACHE_BYTES`), which every cache of
+/// the session keeps its records in: memory the session reserved at its open, zeroed then, and
+/// lent to one caller at a time under a lock of its own.
+pub trait CacheBytes: Send + Sync {
+    /// Call `with` with the ring's bytes, alone. `with` calls into nothing that takes the bytes
+    /// again.
+    fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8]));
+}
+
+/// A cache's records in its session's ring: the ring, the cache's owner id there, and how many
+/// records it keeps at most.
+struct RingCache {
+    bytes: Box<dyn CacheBytes>,
+    owner: u32,
+    max_samples: usize,
+}
+
+impl RingCache {
+    /// Run `with` over the session's ring, which every ring cache was made over
+    /// ([`CacheStore::in_ring`]).
+    fn with_ring(&self, with: &mut dyn FnMut(&mut RecordRing<'_>)) {
+        self.bytes.with_bytes(&mut |span| {
+            if let Some(mut ring) = RecordRing::over(span) {
+                with(&mut ring);
+            }
+        });
+    }
+}
+
+impl Drop for RingCache {
+    /// The cache's records go with it, so their bytes come back to the session's other caches.
+    fn drop(&mut self) {
+        let owner = self.owner;
+        self.with_ring(&mut |ring| ring.forget(owner));
+    }
+}
+
+/// One retained sample as an answer reads it, wherever its cache keeps it.
+struct Held<'a> {
+    keyexpr: &'a str,
+    bytes: &'a [u8],
+    source_info: Option<SourceInfo>,
+    timestamp: TimestampHint,
+    kind: SampleKind,
+    encoding: Option<EncodingRef<'a>>,
+    attachment: Option<&'a [u8]>,
+    #[cfg(feature = "transport-shm")]
+    shared: Option<&'a wz_session_core::extshm::ShmSendHandle>,
+}
+
+impl<'a> Held<'a> {
+    /// `sample`, read where it lies.
+    fn of(sample: &'a CachedSample) -> Self {
+        Self {
+            keyexpr: &sample.keyexpr,
+            bytes: sample.bytes(),
+            source_info: sample.source_info.clone(),
+            timestamp: sample.timestamp.clone(),
+            kind: sample.kind,
+            encoding: sample.encoding.as_ref().map(EncodingHint::view),
+            attachment: sample.attachment.as_deref(),
+            #[cfg(feature = "transport-shm")]
+            shared: sample.shared.as_ref(),
+        }
+    }
+}
+
+/// The samples a cache holds, oldest first, as an answer walks them.
+trait HeldSamples {
+    /// Call `each` with every sample held, oldest first.
+    fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>));
+}
+
+impl HeldSamples for VecDeque<CachedSample> {
+    fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
+        self.iter().for_each(|sample| each(Held::of(sample)));
+    }
+}
+
+/// Where a cache keeps its samples: on the heap, each a [`CachedSample`] of its own, or as records
+/// of its session's ring.
+enum Samples {
+    /// On the heap, at most `max_samples` of them.
+    Heap {
+        samples: VecDeque<CachedSample>,
+        max_samples: usize,
+    },
+    /// In the session's ring.
+    Ring(RingCache),
+}
+
+impl HeldSamples for Samples {
+    fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
+        match self {
+            Self::Heap { samples, .. } => samples.for_each_held(each),
+            Self::Ring(cache) => {
+                let owner = cache.owner;
+                cache.with_ring(&mut |ring| ring.each_of(owner, &mut *each));
+            }
+        }
+    }
+}
+
+/// A cache's samples and what they keep alive together.
+struct Ring {
+    samples: Samples,
+    /// The publisher's key, kept declared for as long as the cache is ([`CacheStore::hold_key`]).
+    key: Option<Retained>,
+}
+
+impl Ring {
+    /// Keep a new sample, and hand back what the heap let go of to make room. A ring lets go of
+    /// what its records held as it writes over them, and holds nothing that reaches the session.
+    fn keep(
+        &mut self,
+        body: SampleBody<'_>,
+        source_info: Option<SourceInfo>,
+        timestamp: TimestampHint,
+    ) -> Option<CachedSample> {
+        match &mut self.samples {
+            Samples::Heap {
+                samples,
+                max_samples,
+            } => {
+                let evicted = evict_for_one(samples, *max_samples);
+                samples.push_back(body.to_cached(source_info, timestamp));
+                evicted
+            }
+            Samples::Ring(cache) => {
+                let (owner, max_samples) = (cache.owner, cache.max_samples);
+                let mut body = Some(body);
+                let mut stamps = Some(source_info);
+                cache.with_ring(&mut |ring| {
+                    if let (Some(body), Some(source_info)) = (body.take(), stamps.take()) {
+                        ring.keep(owner, max_samples, body, source_info, &timestamp);
+                    }
+                });
+                None
+            }
+        }
+    }
+
+    /// How many samples the cache holds.
+    fn len(&self) -> usize {
+        match &self.samples {
+            Samples::Heap { samples, .. } => samples.len(),
+            Samples::Ring(cache) => {
+                let (owner, mut live) = (cache.owner, 0);
+                cache.with_ring(&mut |ring| live = ring.live(owner));
+                live
+            }
+        }
+    }
+}
+
+/// Make room on the heap for one more sample, evicting the oldest when the depth bound is
+/// reached (zenoh advanced_cache.rs:368-377).
+///
+/// Uses `if` (evict at most one) rather than `while` (evict until under
+/// budget): each push adds exactly one, so for any `max_samples >= 1` the
+/// two are equivalent — but `while` infinite-loops on the degenerate
+/// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
+/// ring never reduces `len`), hanging the thread WITH the ring mutex held.
+/// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
+fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Option<CachedSample> {
+    if samples.len() >= max_samples {
+        samples.pop_front()
+    } else {
+        None
+    }
+}
 
 /// The retained samples and the answer a cache queryable gives out of them —
 /// everything an advanced cache is except the queryable that carries the answer
@@ -315,24 +556,65 @@ type CacheRing = Arc<Mutex<VecDeque<CachedSample>>>;
 /// the same on both, so they are one type and the host brings only the
 /// declaration (`AdvancedPublisherPlane::declare_cache_queryable` of the runtime).
 ///
+/// The samples lie on the heap ([`Self::new`]) or as records of the session's ring
+/// ([`Self::in_ring`]), memory the session reserved at its open and shares among its caches: a put
+/// into the ring takes no memory, and is refused when its record is longer than the whole ring
+/// ([`Self::check_room`]).
+///
 /// Cloning shares the ring: the publisher feeds it and the queryable's handler
 /// reads it, and both hold one of these.
 #[derive(Clone)]
 pub struct CacheStore {
-    ring: CacheRing,
-    max_samples: usize,
+    ring: Arc<Mutex<Ring>>,
+    /// The bytes of records the session's ring holds, for a cache in one, read without the lock:
+    /// what the ring has room for is fixed at its open.
+    ring_bytes: Option<usize>,
     /// R2596 — copied into the answering handler beside the ring: the reply QoS
     /// is a property of the CACHE, so it is fixed at construction exactly as
-    /// `max_samples` is, not read per query.
+    /// the depth is, not read per query.
     replies_config: RepliesConfig,
 }
 
 impl CacheStore {
-    /// An empty ring of `config`'s depth.
+    /// An empty cache of `config`'s depth on the heap.
     pub fn new(config: CacheConfig) -> Self {
+        Self::over(
+            Samples::Heap {
+                samples: VecDeque::new(),
+                max_samples: config.max_samples,
+            },
+            None,
+            config,
+        )
+    }
+
+    /// An empty cache of `config`'s depth (one sample at least, as a depth of none keeps one on
+    /// the heap too) in the session's ring `bytes` lends. `None` when the bytes hold no ring: too
+    /// few for one record, or not laid on a record's alignment.
+    pub fn in_ring(config: CacheConfig, bytes: Box<dyn CacheBytes>) -> Option<Self> {
+        let mut made = None;
+        bytes.with_bytes(&mut |span| {
+            if let Some(mut ring) = RecordRing::over(span) {
+                made = Some((ring.register(), ring.capacity()));
+            }
+        });
+        let (owner, ring_bytes) = made?;
+        Some(Self::over(
+            Samples::Ring(RingCache {
+                bytes,
+                owner,
+                max_samples: config.max_samples.max(1),
+            }),
+            Some(ring_bytes),
+            config,
+        ))
+    }
+
+    /// A store of `samples`, answering with `config`'s QoS.
+    fn over(samples: Samples, ring_bytes: Option<usize>, config: CacheConfig) -> Self {
         Self {
-            ring: Arc::new(Mutex::new(VecDeque::new())),
-            max_samples: config.max_samples,
+            ring: Arc::new(Mutex::new(Ring { samples, key: None })),
+            ring_bytes,
             replies_config: config.replies_config,
         }
     }
@@ -355,35 +637,92 @@ impl CacheStore {
         let replies_config = self.replies_config;
         move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let guard = lock_or_panic(&ring, RING_POISONED);
-            answer_from_ring(&guard, view, out, now(), replies_config);
+            answer_from_ring(&guard.samples, view, out, now(), replies_config);
         }
     }
 
-    /// Push a freshly published sample into the ring, evicting the oldest
-    /// when the depth bound is reached (zenoh advanced_cache.rs:368-377).
+    /// Whether the cache can keep `body`: always on the heap; in the session's ring, when its
+    /// record is no longer than the whole ring (`ADVANCED_CACHE_BYTES`), which room the oldest
+    /// records make for it. A put asks before it takes a time or a sequence number and refuses a
+    /// sample the cache cannot keep, sending nothing: a sample sent and not kept would leave empty
+    /// a recovering subscriber's `get` that upstream's cache answers.
+    pub fn check_room(&self, body: &SampleBody<'_>) -> Result<(), PublishError> {
+        match self.ring_bytes {
+            Some(ring_bytes)
+                if !ring::record_bytes(body).is_some_and(|bytes| bytes <= ring_bytes) =>
+            {
+                Err(PublishError::ExceedsCacheRoom)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Keep a sample a put published, with the stamps it went out with, letting the oldest go
+    /// when the cache is full. A sample [`Self::check_room`] refuses is not kept.
     ///
-    /// Uses `if` (evict at most one) rather than `while` (evict until under
-    /// budget): each push adds exactly one, so for any `max_samples >= 1` the
-    /// two are equivalent — but `while` infinite-loops on the degenerate
-    /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
-    /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
-    /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
-    ///
-    /// The evicted sample is dropped AFTER the ring's lock is released: what it
+    /// What the heap let go of is dropped AFTER the cache's lock is released: what it
     /// [retains](Retained) may re-enter the session as it goes (a key's
     /// retraction does), and this mutex is not reentrant.
+    pub fn retain(
+        &self,
+        body: SampleBody<'_>,
+        source_info: Option<SourceInfo>,
+        timestamp: TimestampHint,
+    ) {
+        if self.check_room(&body).is_err() {
+            log::warn!("AdvancedCache{{}} a sample longer than the ring is not kept");
+            return;
+        }
+        let evicted = lock_or_panic(&self.ring, RING_POISONED).keep(body, source_info, timestamp);
+        drop(evicted);
+    }
+
+    /// Push a sample made on the heap into the cache, letting the oldest go when it is full
+    /// (zenoh advanced_cache.rs:368-377); a cache in the ring copies it into a record, as
+    /// [`Self::retain`] does. What was let go of is dropped after the lock is released, as there.
     pub fn cache_sample(&self, sample: CachedSample) {
+        if self.ring_bytes.is_some() {
+            self.retain(
+                sample.body(),
+                sample.source_info.clone(),
+                sample.timestamp.clone(),
+            );
+            return;
+        }
         let evicted = {
             let mut ring = lock_or_panic(&self.ring, RING_POISONED);
-            let evicted = if ring.len() >= self.max_samples {
-                ring.pop_front()
-            } else {
-                None
-            };
-            ring.push_back(sample);
-            evicted
+            match &mut ring.samples {
+                Samples::Heap {
+                    samples,
+                    max_samples,
+                } => {
+                    let evicted = evict_for_one(samples, *max_samples);
+                    samples.push_back(sample);
+                    evicted
+                }
+                // A store is made over a ring or over the heap once, and `ring_bytes` says which.
+                Samples::Ring(_) => None,
+            }
         };
         drop(evicted);
+    }
+
+    /// Keep `key` declared for as long as the cache is: zenoh-pico's cached sample holds a
+    /// reference to the key it was published on, so the key goes when the last cached sample
+    /// does, and a cache lets its samples go when it goes. A cache holds one, as every sample of a
+    /// publisher is published on its one key; a second is let go of at once.
+    pub fn hold_key(&self, key: Retained) {
+        let refused = {
+            let mut ring = lock_or_panic(&self.ring, RING_POISONED);
+            match ring.key {
+                Some(_) => Some(key),
+                None => {
+                    ring.key = Some(key);
+                    None
+                }
+            }
+        };
+        drop(refused);
     }
 
     /// Number of samples currently retained (test / introspection seam).
@@ -391,7 +730,7 @@ impl CacheStore {
         lock_or_panic(&self.ring, RING_POISONED).len()
     }
 
-    /// True when the ring holds no samples.
+    /// True when the cache holds no samples.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -400,8 +739,8 @@ impl CacheStore {
 /// Answer one inbound query from the ring: filter by the `_sn` range +
 /// `_max` cap, reply matching samples oldest-first (each under its own
 /// concrete keyexpr + timestamp).
-fn answer_from_ring(
-    ring: &VecDeque<CachedSample>,
+fn answer_from_ring<R: HeldSamples + ?Sized>(
+    ring: &R,
     view: &dyn QueryView,
     out: &mut dyn ReplyOut,
     now_ntp64: u64,
@@ -418,21 +757,29 @@ fn answer_from_ring(
     let time_range = param_value(params, "_time")
         .and_then(time_range::parse)
         .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
+    let matches = |s: &Held<'_>| {
+        sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range)
+            && sample_matches_time(s.timestamp.time, time_range)
+    };
 
-    let mut matched: Vec<&CachedSample> = ring
-        .iter()
-        .filter(|s| sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range))
-        .filter(|s| sample_matches_time(s.timestamp.time, time_range))
-        .collect();
-
-    // `_max`: keep the newest `m` (the ring tail), still replied oldest-first.
-    if let Some(m) = max {
-        if matched.len() > m {
-            matched = matched.split_off(matched.len() - m);
+    // `_max`: keep the newest `m` (the ring tail), still replied oldest-first. The ring is walked
+    // twice, counting and then replying, so an answer keeps no list of its own.
+    let mut matched = 0usize;
+    ring.for_each_held(&mut |s| {
+        if matches(&s) {
+            matched += 1;
         }
-    }
+    });
+    let mut skip = max.map_or(0, |m| matched.saturating_sub(m));
 
-    for s in matched {
+    ring.for_each_held(&mut |s| {
+        if !matches(&s) {
+            return;
+        }
+        if skip > 0 {
+            skip -= 1;
+            return;
+        }
         // Both arms carry the sample's source_info (the inner-body ext id 0x01)
         // so a recovery subscriber re-keys / reorders it. The emission is gated
         // `reply-source-info` at the codec (default OFF = the recovery reply is
@@ -467,15 +814,14 @@ fn answer_from_ring(
         // upstream's cache replies the sample it holds. The bytes argument is the buffer's own
         // either way, for a sink that cannot stage one.
         #[cfg(feature = "transport-shm")]
-        let meta = meta.with_shared(s.shared.as_ref());
+        let meta = meta.with_shared(s.shared);
         let staged = match s.kind {
             SampleKind::Put => out.reply_keyed_meta(
-                &s.keyexpr,
-                s.bytes(),
-                meta.with_encoding(s.encoding.as_ref().map(EncodingHint::view))
-                    .with_attachment(s.attachment.as_deref()),
+                s.keyexpr,
+                s.bytes,
+                meta.with_encoding(s.encoding).with_attachment(s.attachment),
             ),
-            SampleKind::Del => out.reply_keyed_del_meta(&s.keyexpr, meta),
+            SampleKind::Del => out.reply_keyed_del_meta(s.keyexpr, meta),
         };
         // A refused sample is warned about and the replay goes on to the
         // next, as upstream's does (`zenoh-ext/src/advanced_cache.rs`
@@ -483,7 +829,7 @@ fn answer_from_ring(
         if let Err(e) = staged {
             log::warn!("AdvancedCache{{}} Error replying to query: {}", e);
         }
-    }
+    });
 }
 
 /// Extract a `key=value` selector value from the raw query parameter bytes
@@ -541,6 +887,36 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
 /// No range (absent, or a value zenoh's parser rejects) matches every sample.
 fn sample_matches_time(sample_time: u64, range: Option<TimeRange<WallTime>>) -> bool {
     range.map_or(true, |r| contains_ntp64(&r, sample_time))
+}
+
+/// A ring of cached samples over bytes of the heap for the tests, laid on a record's alignment, and
+/// lent under a lock as a session's are.
+#[cfg(test)]
+pub(crate) mod test_ring {
+    use super::*;
+
+    /// `span` bytes, shared by every cache made over a clone.
+    #[derive(Clone)]
+    pub(crate) struct HeapRing(Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl HeapRing {
+        /// A ring of `span` bytes, rounded down to words.
+        pub(crate) fn new(span: usize) -> Self {
+            Self(Arc::new(std::sync::Mutex::new(vec![0u64; span / 8])))
+        }
+    }
+
+    impl CacheBytes for HeapRing {
+        fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+            let mut words = self.0.lock().unwrap();
+            let len = words.len() * 8;
+            // SAFETY: the words are this ring's, borrowed mutably under its lock for the call, and
+            // any bytes are a valid `u8`.
+            let bytes =
+                unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), len) };
+            with(bytes);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -291,13 +291,10 @@ pub const HELD_ENCODINGS: usize = generated::HELD_ENCODINGS;
 /// short; one a peer sends is read where it lies.
 pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTES;
 
-/// The bytes one sample an advanced publisher's cache keeps may carry, payload and attachment
-/// together: the room of each row of a session's cache table. A put past it is refused.
-pub const ADVANCED_CACHE_SAMPLE_BYTES: usize = generated::ADVANCED_CACHE_SAMPLE_BYTES;
-
-/// The rows of a session's cache table, which the caches of its advanced publishers share. A
-/// cache asking for more rows than are free is refused at its declaration.
-pub const ADVANCED_CACHE_ROWS: usize = generated::ADVANCED_CACHE_ROWS;
+/// The bytes of a session's ring of cached samples, which the caches of its advanced publishers
+/// keep their records in together, each as long as its sample. A put whose record is longer than
+/// the ring is refused; one that finds no room lets the oldest records go.
+pub const ADVANCED_CACHE_BYTES: usize = generated::ADVANCED_CACHE_BYTES;
 
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
@@ -603,6 +600,12 @@ const _: () = assert!(
     RX_POOL_BUFFERS >= 1,
     "a pool of no receive buffer reads nothing"
 );
+
+/// The bytes a session whose engine holds every face under one lock keeps of the droppable
+/// publishes it owes its other faces while one send holds it, in places of the batch it advertises,
+/// one publish to a place; a publish it has no place for is dropped on every face. Reserved only
+/// under the `held-faces` value of the `held-publish-drop` policy. At least `1`.
+pub const HANDED_LEG_BYTES: usize = generated::HANDED_LEG_BYTES;
 
 /// How many outbound slots the links of a session whose engine lends them from its arena share at
 /// most: a link holds one from a frame's encode to its write, a frame its stream took in part

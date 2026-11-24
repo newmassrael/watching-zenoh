@@ -23,6 +23,7 @@
 //! runtime), a C session another (its entities on one shared key table), and the cooperative
 //! engine a third. Nothing here spawns a task, reads a clock or holds a socket.
 
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
@@ -33,15 +34,21 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::sample::{
+    CarriedEncoding, EncodingHint, EncodingRef, SampleKind, SourceInfo, TimestampHint,
+};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
 use wz_session_core::serde_codec::z_serialize;
 
-use crate::advanced_cache::{CacheConfig, CacheStore, CachedSample, Retained};
+use crate::advanced_cache::{CacheConfig, CacheStore, Retained, SampleBody};
 use crate::prelude::*;
+use crate::sync::{lock_or_panic, Mutex};
+
+/// What the lock of a publisher's unheld key panics with when a panic of its holder poisoned it.
+const KEY_POISONED: &str = "advanced publisher key mutex poisoned";
 
 /// How an advanced publisher tags its samples for downstream detection /
 /// recovery. Mirror of zenoh-ext `Sequencing` (advanced_publisher.rs:55-59).
@@ -101,26 +108,43 @@ impl MissDetectionConfig {
 /// `#[non_exhaustive]`, matching [`AdvancedPublisherOptions`]: the QoS trio
 /// (priority / congestion control / express) also rides upstream's struct and
 /// is a later round's wiring, which must not break a struct literal here.
+///
+/// Each value is the options' own or lent by its holder for as long as the put runs, as a plain
+/// publish's options take them ([`PublishOptions`]): a C program's encoding and attachment are
+/// read where the program keeps them, and the put copies them only into its cache's record.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct AdvancedPutOptions {
+pub struct AdvancedPutOptions<'a> {
     /// The value's encoding — the inner `MsgPut` E-flag. Rides both the wire
     /// publish and the cache entry, so a recovered sample renders identically.
-    pub encoding: Option<wz_session_core::sample::EncodingHint>,
+    pub encoding: Option<CarriedEncoding<'a>>,
     /// An opaque attachment side-band — the inner body ext id 0x03. Put-only
     /// on the wire, so there is no delete-side counterpart.
-    pub attachment: Option<Vec<u8>>,
+    pub attachment: Option<Cow<'a, [u8]>>,
 }
 
-impl AdvancedPutOptions {
-    /// Set the value encoding.
-    pub fn with_encoding(mut self, encoding: wz_session_core::sample::EncodingHint) -> Self {
-        self.encoding = Some(encoding);
+impl<'a> AdvancedPutOptions<'a> {
+    /// Set the value encoding, the options' own.
+    pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
+        self.encoding = Some(CarriedEncoding::Owned(encoding));
         self
     }
-    /// Set the attachment side-band.
+
+    /// Set the value encoding, read where its holder keeps it for as long as the put runs.
+    pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
+        self.encoding = Some(CarriedEncoding::Lent(encoding));
+        self
+    }
+
+    /// Set the attachment side-band, the options' own.
     pub fn with_attachment(mut self, attachment: impl Into<Vec<u8>>) -> Self {
-        self.attachment = Some(attachment.into());
+        self.attachment = Some(Cow::Owned(attachment.into()));
+        self
+    }
+
+    /// Set the attachment side-band, read where its holder keeps it for as long as the put runs.
+    pub fn with_attachment_lent(mut self, attachment: &'a [u8]) -> Self {
+        self.attachment = Some(Cow::Borrowed(attachment));
         self
     }
 }
@@ -391,6 +415,11 @@ pub enum AdvancedPublisherError {
     /// `pub type EntityId = u32;`). Upstream's counter wraps onto ids a live
     /// entity may still hold; wz refuses the declaration instead.
     EntityIdsExhausted,
+    /// The session keeps its caches' samples in a ring it reserved at its open
+    /// (`ADVANCED_CACHE_BYTES`), and its ring holds no record: too few bytes
+    /// for one. Refused before anything is declared; upstream's cache takes the
+    /// heap instead.
+    CacheRingUnavailable,
 }
 
 /// A plain publisher a plane declared for an advanced one, with the entity id it
@@ -500,6 +529,14 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
         store: &CacheStore,
     ) -> Result<Self::Queryable, AdvancedPublisherError>;
 
+    /// The store a cache of `config` keeps its samples in, made before anything is declared. On
+    /// the heap by default ([`CacheStore::new`]); a host whose session keeps a ring of cached
+    /// samples in the memory it reserved at its open answers a store in it
+    /// ([`CacheStore::in_ring`]), and refuses the cache when the ring holds no record.
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        Ok(CacheStore::new(config))
+    }
+
     /// Declare the `@adv` liveliness token.
     fn declare_token(&self, keyexpr: &str) -> Result<Self::Token, AdvancedPublisherError>;
 
@@ -566,9 +603,9 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
         sporadic: bool,
     );
 
-    /// What a cached sample keeps alive so the publisher's key stays declared
-    /// while the ring holds it — [`Retained`]. `None` for a plane whose key is
-    /// not a declaration.
+    /// What a cache keeps alive so the publisher's key stays declared while the
+    /// cache holds a sample — [`Retained`], asked once when the publisher is
+    /// declared with a cache. `None` for a plane whose key is not a declaration.
     fn retained_key(&self, publisher: &Self::Publisher) -> Option<Retained>;
 }
 
@@ -635,6 +672,12 @@ pub struct AdvancedPublisherOn<P: AdvancedPublisherPlane> {
     /// poll gates on the publisher's own `locality`, so a delegate carrying
     /// different options would answer about a publisher that does not exist.
     publisher: P::Publisher,
+    /// The publisher's key as its cache holds it ([`AdvancedPublisherPlane::retained_key`]),
+    /// until the cache keeps its first sample and takes it ([`CacheStore::hold_key`]). Listed
+    /// right after the publisher, so a publisher whose cache kept no sample lets its key go with
+    /// the publisher, as zenoh-pico's does, whose cache holds a reference to the key only with a
+    /// sample. Asked once at the declaration, so a put makes nothing to hold the key with.
+    unheld_key: Mutex<Option<Retained>>,
     _token: Option<P::Token>,
     /// R311y85 — the heartbeat beacon (the plane's timer plus the publisher it
     /// sends on), `Some` only when `MissDetectionConfig` set a
@@ -837,6 +880,14 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr_for(0))
             .map_err(AdvancedPublisherError::InvalidAdvKeyexpr)?;
 
+        // The cache's store, before any declaration: a host whose session keeps its caches in a
+        // ring of its own memory refuses a cache when the ring holds no record, and that is
+        // refused like the checks above, with nothing on the wire.
+        let store = options
+            .cache
+            .map(|config| plane.cache_store(config))
+            .transpose()?;
+
         // R2619 — the wrapped publisher, FIRST, with the same folded options the
         // sends carry. Its entity id is this publisher's identity.
         let qos = WireQos::from_options(&options);
@@ -846,9 +897,8 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         } = plane.declare_publisher(&keyexpr, qos.apply(PublishOptions::put()))?;
         let adv_keyexpr = adv_keyexpr_for(eid);
 
-        let cache = match options.cache {
-            Some(config) => {
-                let store = CacheStore::new(config);
+        let cache = match store {
+            Some(store) => {
                 let queryable = plane.declare_cache_queryable(&adv_keyexpr, &store)?;
                 Some(DeclaredCache {
                     _queryable: queryable,
@@ -928,8 +978,14 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
         let _ = adv_keyexpr;
 
+        let unheld_key = Mutex::new(match &cache {
+            Some(_) => plane.retained_key(&publisher),
+            None => None,
+        });
+
         Ok(Self {
             publisher,
+            unheld_key,
             _token: token,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             beacon,
@@ -974,7 +1030,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     pub fn put_with(
         &self,
         payload: &[u8],
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         self.put_sample(SamplePayload::Bytes(payload), options)
     }
@@ -987,7 +1043,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     pub fn put_shm_with(
         &self,
         payload: &Arc<dyn ShmChunk>,
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         self.put_sample(SamplePayload::Chunk(payload), options)
     }
@@ -1019,8 +1075,34 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     fn put_sample(
         &self,
         payload: SamplePayload<'_>,
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
+        // What the cache keeps of the sample, read where the put holds it. A cache that cannot
+        // keep it refuses the put first, before it takes a time or a sequence number, so no
+        // subscriber is told of a miss for a sample that was never sent.
+        let kept = match &self.cache {
+            Some(cache) => {
+                let body = SampleBody {
+                    keyexpr: &self.keyexpr,
+                    payload: match &payload {
+                        SamplePayload::Bytes(bytes) => *bytes,
+                        #[cfg(feature = "transport-shm")]
+                        SamplePayload::Chunk(_) => &[],
+                    },
+                    kind: SampleKind::Put,
+                    encoding: options.encoding.as_ref().map(CarriedEncoding::view),
+                    attachment: options.attachment.as_deref(),
+                    #[cfg(feature = "transport-shm")]
+                    shared: match &payload {
+                        SamplePayload::Bytes(_) => None,
+                        SamplePayload::Chunk(chunk) => Some(Arc::clone(chunk).send_handle()),
+                    },
+                };
+                cache.store.check_room(&body)?;
+                Some((&cache.store, body))
+            }
+            None => None,
+        };
         // The time before the sequence number: a sample refused for want of a time takes no
         // number, so a subscriber is not told of a miss for a sample that was never sent.
         let timestamp = self.next_timestamp()?;
@@ -1064,7 +1146,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         // `advanced_cache`'s source_info already follows.
         #[cfg(feature = "pubsub-encoding")]
         if let Some(enc) = &options.encoding {
-            opts = opts.with_encoding(enc.clone());
+            opts = opts.with_encoding_ref(enc.view());
         }
         #[cfg(feature = "pubsub-attachment")]
         if let Some(att) = &options.attachment {
@@ -1082,31 +1164,9 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             }
         };
 
-        if let Some(cache) = &self.cache {
-            let sample = match &payload {
-                SamplePayload::Bytes(bytes) => CachedSample::new(
-                    self.keyexpr.clone(),
-                    bytes.to_vec(),
-                    source_info,
-                    timestamp,
-                    SampleKind::Put,
-                ),
-                #[cfg(feature = "transport-shm")]
-                SamplePayload::Chunk(chunk) => CachedSample::new(
-                    self.keyexpr.clone(),
-                    Vec::new(),
-                    source_info,
-                    timestamp,
-                    SampleKind::Put,
-                )
-                .with_shared(Some(Arc::clone(chunk).send_handle())),
-            };
-            cache.store.cache_sample(
-                sample
-                    .with_encoding(options.encoding)
-                    .with_attachment(options.attachment)
-                    .keeping(self.plane.retained_key(&self.publisher)),
-            );
+        if let Some((store, body)) = kept {
+            self.hold_cache_key(store);
+            store.retain(body, source_info, timestamp);
         }
         Ok(written)
     }
@@ -1119,7 +1179,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// a Del that skipped the counter would leave a permanent apparent gap.
     ///
     /// R311y561 — the Del IS cached now, closing the divergence R311y559
-    /// shipped. [`CachedSample`] carries the sample KIND, so the ring retains
+    /// shipped. [`crate::advanced_cache::CachedSample`] carries the sample KIND, so the ring retains
     /// the retraction and the cache's answer (`crate::advanced_cache`) replays it
     /// on the Del arm (`ReplyOut::reply_keyed_del_sourced`).
     /// The old behaviour — skip the cache — was the right call only while a
@@ -1127,6 +1187,27 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// on a recovering subscriber; with the kind stored that failure mode is
     /// gone, and a recovering subscriber now sees the retraction it missed.
     pub fn delete(&self) -> Result<usize, PublishError> {
+        // No encoding and no attachment: a Del body carries neither ext on the wire
+        // (`has_attachment` is `_is_put && ..`, and the encoding is read only in the `_is_put`
+        // branch — `message.c:263,269-276`), and upstream's
+        // `ze_advanced_publisher_delete_options_t` has no slot for either. The absence is
+        // structural, not an omission. Refused first when the cache cannot keep it, as a put is.
+        let kept = match &self.cache {
+            Some(cache) => {
+                let body = SampleBody {
+                    keyexpr: &self.keyexpr,
+                    payload: &[],
+                    kind: SampleKind::Del,
+                    encoding: None,
+                    attachment: None,
+                    #[cfg(feature = "transport-shm")]
+                    shared: None,
+                };
+                cache.store.check_room(&body)?;
+                Some((&cache.store, body))
+            }
+            None => None,
+        };
         // The time first, as a put takes it: a refused delete takes no sequence number.
         let timestamp = self.next_timestamp()?;
         let sn = self
@@ -1151,25 +1232,20 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             .plane
             .publish(&self.publisher, &self.keyexpr, &[], opts)?;
 
-        if let Some(cache) = &self.cache {
-            // No `with_encoding` / `with_attachment` chain: a Del body carries
-            // neither ext on the wire (`has_attachment` is `_is_put && ..`, and
-            // the encoding is read only in the `_is_put` branch —
-            // `message.c:263,269-276`), and upstream's
-            // `ze_advanced_publisher_delete_options_t` has no slot for either.
-            // The absence is structural, not an omission.
-            cache.store.cache_sample(
-                CachedSample::new(
-                    self.keyexpr.clone(),
-                    Vec::new(),
-                    source_info,
-                    timestamp,
-                    SampleKind::Del,
-                )
-                .keeping(self.plane.retained_key(&self.publisher)),
-            );
+        if let Some((store, body)) = kept {
+            self.hold_cache_key(store);
+            store.retain(body, source_info, timestamp);
         }
         Ok(written)
+    }
+
+    /// Hand the publisher's key to its cache with the first sample the cache keeps
+    /// ([`Self::unheld_key`]); later samples find it handed.
+    fn hold_cache_key(&self, store: &CacheStore) {
+        let key = lock_or_panic(&self.unheld_key, KEY_POISONED).take();
+        if let Some(key) = key {
+            store.hold_key(key);
+        }
     }
 
     /// The publisher's allocated entity id (test / introspection seam).
