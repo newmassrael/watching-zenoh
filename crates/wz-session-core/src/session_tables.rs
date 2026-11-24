@@ -2026,8 +2026,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             matching: SlotMap::lent_from(&mut lend, rows.matching_listeners),
             pending_gets: SlotMap::lent_from(&mut lend, rows.pending_gets),
             #[cfg(feature = "storage-profile")]
-            held: lend
-                .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
+            held: crate::reply_hold::HeldReplies::lent_from(&mut lend, rows.held_replies),
         };
         lend.finish()?;
         Ok(tables)

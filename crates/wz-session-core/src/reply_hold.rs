@@ -12,7 +12,7 @@
 //! one table of held replies ([`HeldReplies`]), each row tagged with the get it belongs to, its
 //! bytes in the row, so holding a reply takes no allocation.
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage, TableLender};
 use crate::caps;
 use crate::query_mode::ConsolidationMode;
 use crate::reply_sink::{ReplyKind, ReplyView};
@@ -360,6 +360,15 @@ impl<O> HeldReplies<O, Lent> {
             rows: arena.lend(rows)?,
             refused: 0,
         })
+    }
+
+    /// A hold of `rows` rows lent by `lend`, as [`Self::lent`] lends one; a hold of no rows, which
+    /// refuses every reply and counts it, once a table is refused, this one among them.
+    pub fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
+        Self {
+            rows: lend.table(rows),
+            refused: 0,
+        }
     }
 
     /// The bytes of an arena [`Self::lent`] takes for `rows`. `None` past the address space.

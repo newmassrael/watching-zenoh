@@ -1420,19 +1420,20 @@ impl<'a> TableLender<'a> {
         (self.arena.next_span(), 0)
     }
 
-    /// The table `lend` lends from the arena; the table of no rows when it is refused or a table
-    /// before it was.
-    pub fn lend_with<T: Default>(
-        &mut self,
-        lend: impl FnOnce(&mut Arena) -> Result<T, LendRefused>,
-    ) -> T {
-        if self.refused.is_none() {
-            match lend(&mut *self.arena) {
-                Ok(table) => return table,
-                Err(why) => self.refused = Some(why),
-            }
-        }
-        T::default()
+    /// A table of `rows` rows of `T`, at most the build's ceiling `N`, as [`Arena::lend`] lends
+    /// one; a table of no rows, which takes no value, once a table is refused, this one among them.
+    pub fn table<T, const N: usize>(&mut self, rows: usize) -> BoundedVec<T, N, Lent> {
+        const {
+            assert!(
+                core::mem::align_of::<T>() <= ARENA_ALIGN,
+                "a row of a lent table asks for more alignment than an arena's spans start on"
+            )
+        };
+        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
+        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
+        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        // (asserted above).
+        unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
     }
 
     /// The first refusal, if a table was refused.
