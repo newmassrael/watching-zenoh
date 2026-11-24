@@ -1759,24 +1759,18 @@ fn sleep_ms(ms: u32) {
 }
 
 /// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// the pattern the subscriber matches and the declaration its key is named by, and this everything
-/// else the session knows of it, its callback among it. The subscriber is that one row
-/// (`docs/c-abi-architecture.md`, P1), and so is its callback's life (P11): a call is begun on the
-/// row's latch with the session held and made after it, and an undeclared row is let go of by
+/// the pattern the subscriber matches and the declaration its key is named by, which it holds, and
+/// this everything else the session knows of it, its callback among it. The subscriber is that one
+/// row (`docs/c-abi-architecture.md`, P1), and so is its callback's life (P11): a call is begun on
+/// the row's latch with the session held and made after it, and an undeclared row is let go of by
 /// whoever sees its last call end.
 pub(crate) struct SubscriberRow {
     id: SubId,
     retraction: Option<RetractionKey>,
-    /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
-    /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
-    /// session held.
-    #[cfg(feature = "group")]
-    wire: WireKey,
-    /// The key as the ABI named it, held for what it keeps alive alone (the declaration the ABI
-    /// made it on): a build without groups tells no one the key, and the declaration goes with
-    /// the row, let go of with no lock of the session held.
-    #[cfg(not(feature = "group"))]
-    keeps: WireKey,
+    /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
+    /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
+    /// of the session held.
+    holds: WireHolds,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: SubscriberSink,
@@ -1798,33 +1792,26 @@ pub(crate) trait RowHolds {
 
 impl RowHolds for SubscriberRow {
     fn into_holds(self) -> WireHolds {
-        #[cfg(feature = "group")]
-        let wire = self.wire;
-        #[cfg(not(feature = "group"))]
-        let wire = self.keeps;
-        wire.into_holds()
+        self.holds
     }
 }
 
 impl SubscriberRow {
-    /// Subscriber `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
-    /// handing what it hears to `sink`, the timestamp shown when `expose`.
+    /// Subscriber `id`, retracted as `retraction` names it, keeping `holds`, handing what it
+    /// hears to `sink`, the timestamp shown when `expose`.
     // Out of line: measured smaller apart from the declaration that builds the row.
     #[inline(never)]
     pub(crate) fn new(
         id: SubId,
         retraction: Option<RetractionKey>,
-        wire: WireKey,
+        holds: WireHolds,
         sink: SubscriberSink,
         expose: bool,
     ) -> Self {
         Self {
             id,
             retraction,
-            #[cfg(feature = "group")]
-            wire,
-            #[cfg(not(feature = "group"))]
-            keeps: wire,
+            holds,
             sink,
             expose,
             latch: CallLatch::new(),
@@ -6147,9 +6134,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(wire.mapping_id, retraction.is_some());
+        // The tables' row holds the declaration the key is named by, so the key's own hold of it
+        // is given back once the row stands, and the entity holds it once; the row keeps what
+        // else the key held.
+        let mut holds = wire.into_holds();
+        let named = holds.take_named();
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(id, retraction, wire, sink, exposed_by(&core.policy));
+        let row = SubscriberRow::new(id, retraction, holds, sink, exposed_by(&core.policy));
         let declared = tables_mut(&core.session.registry).declare_subscriber(
             keyexpr,
             allowed_origin,
@@ -6163,6 +6155,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // what the key held goes back.
                 drop(guard);
                 let why = Declined::from(refused.why);
+                if let Some(named) = named {
+                    named.release(self);
+                }
                 self.give_back(refused.callback.into_holds());
                 return Err(why);
             }
@@ -6173,15 +6168,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         );
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce_subscriber(declared.handle);
+        // So is each group.
         #[cfg(feature = "group")]
         {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.subscribers().get(declared.handle) {
+                let wire = group::wire_key_of(tables.wire_of(row.key()));
                 core.transport.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Subscriber,
                     entity: id,
                     keyexpr: row.key().as_str(),
-                    wire: &row.callback().wire,
+                    wire: &wire,
                     retraction: row.callback().retraction.as_ref(),
                     allowed_origin,
                 });
@@ -6190,11 +6187,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
-        {
-            self.read_matching(core);
-            drop(guard);
-            self.deliver();
+        self.read_matching(core);
+        drop(guard);
+        if let Some(named) = named {
+            named.release(self);
         }
+        #[cfg(feature = "local-subscriber")]
+        self.deliver();
         Ok(id)
     }
 
