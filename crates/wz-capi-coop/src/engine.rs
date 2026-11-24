@@ -2676,6 +2676,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .min()
     }
 
+    /// The group of the least id past `after` (any, for none) the session asks queries of
+    /// (`GroupDeclarations::asks_queries`), when `remote`: how a get walks its groups as it walks
+    /// its faces ([`Self::next_up_face`]).
+    #[cfg(all(feature = "query", feature = "group"))]
+    fn next_group_to_ask(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
+        self.groups
+            .iter()
+            .filter(|group| group.declarations().asks_queries())
+            .map(GroupFace::id)
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
+    }
+
     /// The actions of face `id` while its link is up.
     #[cfg(feature = "query")]
     fn up_actions(&self, id: FaceId) -> Option<&SessionHandle<C>> {
@@ -7149,23 +7168,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // before its Final is not taken off the count, there as here: the leg ends at its
         // deadline.
         #[cfg(feature = "group")]
-        let groups: Vec<FaceId> = match self.live() {
-            Some(guard) if opts.allowed_destination.allows_remote() => guard
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.declarations().asks_queries())
-                .map(GroupFace::id)
-                .collect(),
-            _ => Vec::new(),
-        };
+        let mut asked = None;
         #[cfg(feature = "group")]
-        for face in groups {
-            let leg_id = self.next_local_id();
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_group_to_ask(remote, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(group) = core.groups.iter().find(|group| group.id() == face) else {
                 continue;
             };
