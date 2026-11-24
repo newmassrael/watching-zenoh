@@ -5,13 +5,13 @@
 //!
 //! The port's sets ([`ListenerSet`](crate::listeners::ListenerSet), the pending legs of a
 //! [`CancellableFan`](crate::cancellation::CancellableFan)) are reached from any thread a C
-//! program calls in from, so each sits behind a lock. On a host the lock is the process's
-//! (`std::sync::Mutex`). An MCU image has no `std`; there the lock is a critical section, which the
-//! image provides by linking a `critical-section` implementation, as the cooperative runtime's
-//! cells do (`wz-runtime-coop`'s `cs`). Which one is chosen is the `std` feature: it adds the host
-//! lock, and without it the critical section is the lock. A host library built without `std`
-//! (`os-sys`) links no `critical-section` implementation, which a C library would export: its
-//! lock is the host's own, the port's [`crate::os::Mutex`].
+//! program calls in from, so each sits behind a lock. On a host the lock is the port's
+//! [`crate::os::Mutex`], which takes no memory on any host. An MCU image has no `std`; there the
+//! lock is a critical section, which the image provides by linking a `critical-section`
+//! implementation, as the cooperative runtime's cells do (`wz-runtime-coop`'s `cs`). Which one is
+//! chosen is the `std` feature: it adds the host lock, and without it the critical section is the
+//! lock. A host library built without `std` (`os-sys`) links no `critical-section` implementation,
+//! which a C library would export: its lock is the port's too.
 //!
 //! The API is a closure ([`Lock::with`]) and not a guard, because a critical section cannot hand
 //! out a guard that outlives the call that entered it. The closure form also says at every call
@@ -24,9 +24,7 @@
 
 /// A value reached from any thread, one closure at a time.
 pub struct Lock<T> {
-    #[cfg(feature = "std")]
-    inner: std::sync::Mutex<T>,
-    #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+    #[cfg(any(feature = "std", feature = "os-sys"))]
     inner: crate::os::Mutex<T>,
     #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
     inner: critical_section::Mutex<core::cell::RefCell<T>>,
@@ -36,9 +34,7 @@ impl<T> Lock<T> {
     /// `value`, behind the lock.
     pub const fn new(value: T) -> Self {
         Self {
-            #[cfg(feature = "std")]
-            inner: std::sync::Mutex::new(value),
-            #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+            #[cfg(any(feature = "std", feature = "os-sys"))]
             inner: crate::os::Mutex::new(value),
             #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
             inner: critical_section::Mutex::new(core::cell::RefCell::new(value)),
@@ -48,15 +44,7 @@ impl<T> Lock<T> {
     /// Run `f` on the value with the lock held, and hand back what it returns, which is released
     /// after the lock is.
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        #[cfg(feature = "std")]
-        {
-            let mut guard = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            f(&mut guard)
-        }
-        #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+        #[cfg(any(feature = "std", feature = "os-sys"))]
         {
             f(&mut self.inner.lock())
         }

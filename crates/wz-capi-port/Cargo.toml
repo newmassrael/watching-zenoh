@@ -37,8 +37,10 @@ crate-type = ["rlib"]
 # The host: the port's lock is the process's, and the cancellation token (whose cancel blocks on a
 # condition variable) is built. Without it the port is `no_std` with `alloc`, its lock is the
 # critical section an MCU image links (src/sync.rs), and the token waits for the MCU host layer.
+# `wz-host-sync` is the lock of a host whose `std` lock would box a pthread object the first time it
+# is taken (macOS, src/os.rs), and the in-place lock every host's test build tests.
 default = ["std"]
-std = []
+std = ["dep:wz-host-sync"]
 # A publish that takes a buffer of shared memory some owner of a segment holds
 # (`Engine::publish_shm_on_wire_all`): the buffer's type is the session core's, behind its own
 # feature. An engine that has no shared memory answers the method with the bytes.
@@ -84,7 +86,8 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # The node's clock registry and event ring, which the observation plane's doors act on, and the
 # time base a program supplies. Optional: only `clock-source`, `event-ring` and `time-base` name it.
 wz-node-time = { path = "../wz-node-time", optional = true }
-# The host's lock, condition variable and threads without `std` (`os-sys`).
+# The host's lock, condition variable and threads without `std` (`os-sys`), and the lock of a `std`
+# build on macOS.
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 
 [lints]
