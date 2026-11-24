@@ -1124,7 +1124,9 @@ impl ExecutorState {
 
     /// Look at `cell` inside the section `cs`, the pass that holds it: a live task that was
     /// aborted is to be swept and one whose wake flag is raised polled, either taken by the pass
-    /// (`Polling`); anything else is left as it is.
+    /// (`Polling`); anything else is left as it is. Out of line: a pass looks at a cell in its
+    /// section and again after a wake it gave, and the two looks are one body.
+    #[inline(never)]
     fn classify(cell: &'static TaskCell, cs: CriticalSection<'_>) -> Act {
         cell.meta_in(cs, |meta| {
             if meta.state != State::Live {
@@ -1147,7 +1149,9 @@ impl ExecutorState {
 
     /// Write how the pass left `cell` into its bookkeeping, inside the section `cs`: a task that
     /// waits is live again; a task that is over is `Done` for its handle, or, with no handle,
-    /// free, once an output that needs dropping is dropped ([`Settled::carry_out`]).
+    /// free, once an output that needs dropping is dropped ([`Settled::carry_out`]). Out of line:
+    /// a pass and a sweep of a set's tasks settle cells, and the settling is one body.
+    #[inline(never)]
     fn settle(cell: &'static TaskCell, left: Left, cs: CriticalSection<'_>) -> Settled {
         cell.meta_in(cs, |meta| {
             let mut settled = Settled::default();
