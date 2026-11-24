@@ -43,7 +43,7 @@ use wz_session_core::handshake_encode::{
     InitCaps,
 };
 use wz_session_core::session_init_params::{
-    cookie_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
+    session_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
@@ -60,7 +60,7 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
         lease_ms: 10_000,
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::default(),
         initial_sn: 77,
-        cookie: cookie_bytes(cookie),
+        cookie: session_bytes(cookie).expect("a test cookie fits COOKIE_MAX"),
         tx_queue: TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,

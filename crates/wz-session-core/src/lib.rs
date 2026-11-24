@@ -745,8 +745,6 @@ pub mod locator_directory;
 /// R311ei moving SigningKey here. No codec coupling — drives the session
 /// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-086 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic)]
 pub mod session_init_params;
 
 // Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).

@@ -247,7 +247,7 @@ fn params() -> SessionInitParams {
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: TxQueueConf::of_snapshot(&SessionPolicy::defaults(), &SessionLimits::BUILD),
         link_rx: LinkRxConf::default(),
         policy: SessionPolicy::defaults(),

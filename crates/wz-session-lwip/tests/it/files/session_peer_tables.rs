@@ -93,7 +93,7 @@ fn params(zid: u8) -> SessionInitParams {
         lease_ms: 10_000,
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,

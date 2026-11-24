@@ -794,7 +794,7 @@ pub(crate) fn acceptor_params(
         lease_ms: 10_000,
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
-        cookie: cookie_bytes(&[0u8; 16]),
+        cookie: cookie_bytes([0u8; 16]),
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.

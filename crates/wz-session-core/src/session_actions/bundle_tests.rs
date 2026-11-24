@@ -184,7 +184,7 @@ fn params() -> SessionInitParams {
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::default(),
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,

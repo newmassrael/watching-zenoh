@@ -82,10 +82,18 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
-/// A cookie for [`SessionInitParams::cookie`], written the same way on every
-/// profile. Panics when `src` is longer than [`COOKIE_MAX`].
-pub fn cookie_bytes(src: &[u8]) -> SessionBytes<COOKIE_MAX> {
-    session_bytes::<COOKIE_MAX>(src).expect("a cookie the node sets is at most COOKIE_MAX bytes")
+/// A cookie for [`SessionInitParams::cookie`] from an array the caller wrote, written the
+/// same way on every profile. An array longer than [`COOKIE_MAX`] does not build; a cookie
+/// read at run time is copied with [`session_bytes`], whose refusal the caller reports.
+pub fn cookie_bytes<const N: usize>(src: [u8; N]) -> SessionBytes<COOKIE_MAX> {
+    const {
+        assert!(
+            N <= COOKIE_MAX,
+            "a cookie the node sets is at most COOKIE_MAX bytes"
+        );
+    }
+    // The assertion above holds the array to the capacity, so the copy always has room.
+    session_bytes::<COOKIE_MAX>(&src).unwrap_or_default()
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -746,6 +754,23 @@ mod shape_tests {
         let shaped = configured.shape(true, 65535, 65535).pipeline;
         assert_eq!(shaped.batching_time_limit_us, 3_000);
         assert_eq!(shaped.allocation, crate::link::QueueAllocation::Init);
+    }
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::{cookie_bytes, COOKIE_MAX};
+
+    /// A cookie written from an array is that array, byte for byte, from none up to the
+    /// capacity itself.
+    #[test]
+    fn a_cookie_is_the_array_it_was_written_from() {
+        assert_eq!(
+            cookie_bytes([0xC0, 0xC1, 0xC2]).as_slice(),
+            &[0xC0u8, 0xC1, 0xC2][..]
+        );
+        assert!(cookie_bytes([]).is_empty());
+        assert_eq!(cookie_bytes([7u8; COOKIE_MAX]).len(), COOKIE_MAX);
     }
 }
 
