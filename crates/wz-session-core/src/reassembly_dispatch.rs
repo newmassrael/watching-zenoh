@@ -140,12 +140,18 @@ use crate::driver_loop::IterationEvent;
 ///   it is a range of it, and it goes home when the last range drops. An arena
 ///   answers it when it can ([`ChainStaging::lend`]); the pooled arena lends
 ///   its slot, the heap arena moves its buffer, so neither copies the chain.
+/// - [`ChainBytes::Kept`] is the chain's buffer taken out of the staging and
+///   handed to the delivery, which holds it for as long as it reads what was
+///   decoded out of it: no chain stages into it until the delivery drops it.
+///   An arena answers it when it can ([`ChainStaging::keep`]).
 pub enum ChainBytes<'a> {
     /// Borrowed from the staging for the delivery call only.
     Borrowed(&'a [u8]),
     /// The staging itself, shared; it outlives the call.
     #[cfg(feature = "rx-shared-bytes")]
     Lent(crate::link::RxBytes),
+    /// The chain's buffer, the delivery's until it drops it.
+    Kept(crate::byte_cells::KeptBytes),
 }
 
 impl ChainBytes<'_> {
@@ -155,8 +161,21 @@ impl ChainBytes<'_> {
             ChainBytes::Borrowed(bytes) => bytes,
             #[cfg(feature = "rx-shared-bytes")]
             ChainBytes::Lent(bytes) => bytes.as_slice(),
+            ChainBytes::Kept(bytes) => bytes.as_slice(),
         }
     }
+}
+
+/// How a completed chain is handed to its delivery ([`ChainBytes`]): what the ingest asks of the
+/// arena, which answers borrowed when it cannot do what is asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hand {
+    /// Borrowed for the call.
+    Borrow,
+    /// Lent as shared storage ([`ChainStaging::lend`]); borrowed where frames are not shared.
+    Lend,
+    /// Kept by the delivery ([`ChainStaging::keep`]).
+    Keep,
 }
 
 /// Maximum peer-key byte length: sized to the widest key a transport
@@ -994,7 +1013,7 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, ring, now_ms, false, |chain: ChainBytes<'_>| {
+        self.ingest_delivering(frag, ring, now_ms, Hand::Borrow, |chain: ChainBytes<'_>| {
             deliver(chain.as_slice())
         })
     }
@@ -1012,17 +1031,32 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, true, deliver)
+        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Lend, deliver)
     }
 
-    /// The one ingest walk. `lend` asks the arena to hand a completed chain up
-    /// as shared storage; without it the chain is always delivered borrowed.
+    /// [`Self::ingest`], delivering the completed chain KEPT when the arena can give its buffer
+    /// away ([`ChainStaging::keep`]): the delivery holds the buffer for as long as it reads what
+    /// was decoded out of it, and the Router's slot is free for the next chain at once. Borrowed
+    /// for the call when the arena cannot. What a host that reads a rejoined message's records
+    /// after the call calls.
+    pub fn ingest_keeping<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        frag: Fragment<'_>,
+        sn_mask: u64,
+        now_ms: u64,
+        deliver: F,
+    ) -> IngestOutcome {
+        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Keep, deliver)
+    }
+
+    /// The one ingest walk. `hand` is what the arena is asked to hand a
+    /// completed chain up as; it is delivered borrowed when the arena cannot.
     fn ingest_delivering<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
-        lend: bool,
+        hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
         self.displaced = None;
@@ -1032,8 +1066,8 @@ where
             }
         }
         match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.ingest_continuation(idx, frag, ring, now_ms, lend, deliver),
-            None => self.ingest_chain_start(frag, now_ms, lend, deliver),
+            Some(idx) => self.ingest_continuation(idx, frag, ring, now_ms, hand, deliver),
+            None => self.ingest_chain_start(frag, now_ms, hand, deliver),
         }
     }
 
@@ -1041,10 +1075,10 @@ where
     /// `idx`, hand the completed chain to `deliver` and raise `slot.release`,
     /// whose `reset_slot` reclaims the slot.
     ///
-    /// Lent when `lend` and the arena can: the Router slot is released first
-    /// (the chain's staging is no longer the Router's), then the shared bytes
-    /// are delivered. Otherwise borrowed: delivered while the staging is still
-    /// held, and released after, which is the only order a borrow allows.
+    /// Lent or kept when `hand` asks it and the arena can: the Router slot is
+    /// released first (the chain's staging is no longer the Router's), then the
+    /// bytes are delivered. Otherwise borrowed: delivered while the staging is
+    /// still held, and released after, which is the only order a borrow allows.
     ///
     /// An arena that refuses the final payload ends the chain undelivered as
     /// [`AbortReason::CapacityOverflow`]; the release is raised all the same,
@@ -1054,7 +1088,7 @@ where
         idx: usize,
         sn: u64,
         payload: &[u8],
-        lend: bool,
+        hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
         let staged = self.stage(idx, sn, payload);
@@ -1064,8 +1098,7 @@ where
             slot.release_or_replace(staging);
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
-        #[cfg(feature = "rx-shared-bytes")]
-        if lend {
+        if hand != Hand::Borrow {
             if let Some(OpenChain {
                 key,
                 last_sn,
@@ -1074,10 +1107,10 @@ where
                 chain,
             }) = slot.open.take()
             {
-                match staging.lend(chain) {
+                match Self::hand_up(staging, chain, hand) {
                     Ok(bytes) => {
                         slot.release_or_replace(staging);
-                        deliver(ChainBytes::Lent(bytes));
+                        deliver(bytes);
                         return IngestOutcome::Reassembled;
                     }
                     Err(chain) => {
@@ -1092,13 +1125,26 @@ where
                 }
             }
         }
-        #[cfg(not(feature = "rx-shared-bytes"))]
-        let _ = lend;
         if let Some(open) = slot.open.as_ref() {
             deliver(ChainBytes::Borrowed(staging.bytes(&open.chain)));
         }
         slot.release_or_replace(staging);
         IngestOutcome::Reassembled
+    }
+
+    /// The completed `chain` handed up from `staging` as `hand` asks, or given back when the
+    /// arena cannot hand it up so, or `hand` asks it be borrowed.
+    fn hand_up(
+        staging: &mut S,
+        chain: <S as ChainStaging<SLOTS, CAP>>::Chain,
+        hand: Hand,
+    ) -> Result<ChainBytes<'static>, <S as ChainStaging<SLOTS, CAP>>::Chain> {
+        match hand {
+            Hand::Keep => staging.keep(chain).map(ChainBytes::Kept),
+            #[cfg(feature = "rx-shared-bytes")]
+            Hand::Lend => staging.lend(chain).map(ChainBytes::Lent),
+            _ => Err(chain),
+        }
     }
 
     /// R311y578 — the `0x2 First` / `0x3 Drop` chain-boundary rules, run
@@ -1302,7 +1348,7 @@ where
         &mut self,
         frag: Fragment<'_>,
         now_ms: u64,
-        lend: bool,
+        hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
         // §5.M quota-first: the per-peer cap is checked before slot
@@ -1378,7 +1424,7 @@ where
         // On `more == 0` the same transition also ran `finalize_message`,
         // which stages the one payload this chain has.
         if duties & duty::FINALIZE != 0 {
-            return self.finish(idx, frag.sn, frag.payload, lend, deliver);
+            return self.finish(idx, frag.sn, frag.payload, hand, deliver);
         }
         if !self.stage(idx, frag.sn, frag.payload) {
             return self.abort(
@@ -1443,13 +1489,13 @@ where
         frag: Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
-        lend: bool,
+        hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
         let Some(open) = self.slots[idx].open.as_ref() else {
-            return self.ingest_chain_start(frag, now_ms, lend, deliver);
+            return self.ingest_chain_start(frag, now_ms, hand, deliver);
         };
         let last_sn = open.last_sn;
         // A payload the chain cannot hold is a codec error for the machine,
@@ -1497,7 +1543,7 @@ where
             return IngestOutcome::Continued;
         }
         if duties & duty::FINALIZE != 0 {
-            return self.finish(idx, frag.sn, frag.payload, lend, deliver);
+            return self.finish(idx, frag.sn, frag.payload, hand, deliver);
         }
         // `Receiving` answers every chunk with one of the two, so this machine
         // was not in `Receiving` while the Router held its chain open: the
@@ -2207,6 +2253,58 @@ mod tests {
             IngestOutcome::Begun
         );
         assert_eq!(cells.in_use(), 1);
+    }
+
+    /// A chain ingested to be kept is handed up as its own buffer, read where it was staged: the
+    /// Router's slot and the staging's place are free at once, the buffer stays out of the table
+    /// until the delivery drops it, and a chain that starts meanwhile stages into another buffer.
+    /// An arena that cannot keep (the heap one) hands the chain up borrowed, as before. Turned red
+    /// by a keep that copies the chain or gives its buffer back before the delivery drops it.
+    #[test]
+    fn a_kept_chain_holds_its_buffer_until_the_delivery_drops_it() {
+        use crate::chain_staging::LentStaging;
+
+        let cells = lent_cells(8, 2);
+        let mut d: ReassemblyDispatcher<4, 64, LentStaging<4, 64>> =
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                LentStaging::over(&cells, 2),
+            );
+        d.ingest_keeping(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let mut kept = None;
+        let r = d.ingest_keeping(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |chain| {
+            kept = match chain {
+                ChainBytes::Kept(bytes) => Some(bytes),
+                _ => panic!("a lent staging keeps a completed chain"),
+            }
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        let kept = kept.expect("the chain completed");
+        assert_eq!(kept.as_slice(), b"aaaabbbb");
+        assert_eq!(d.active_chains(), 0, "the Router's slot is free");
+        assert_eq!(cells.in_use(), 1, "the delivery holds the buffer");
+        assert_eq!(
+            d.ingest_keeping(frag(PEER_A, true, 3, 1, b"cccc"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(cells.in_use(), 2, "the next chain took the other buffer");
+        drop(kept);
+        assert_eq!(
+            cells.in_use(),
+            1,
+            "dropped, the kept buffer is the table's again"
+        );
+
+        let mut heap = dispatcher::<4, 64>();
+        heap.ingest_keeping(frag(PEER_A, true, 1, 1, b"aa"), MASK, 0, |_| {});
+        let mut borrowed = false;
+        heap.ingest_keeping(frag(PEER_A, true, 2, 0, b"bb"), MASK, 0, |chain| {
+            borrowed = matches!(chain, ChainBytes::Borrowed(bytes) if bytes == b"aabb");
+        });
+        assert!(
+            borrowed,
+            "CONTROL: an arena that cannot keep lends for the call"
+        );
     }
 
     /// A reservation is staged as far as it was filled, and a commit past it is refused.

@@ -2324,11 +2324,16 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         registry.settle_decl_events(|| actions.peer_zid());
     }
 
-    /// A rejoined message's records are read where its chain lies for as long as the round holds
-    /// them: the gate reads no link meanwhile, so no fragment is staged over it.
-    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+    /// A rejoined message's records are read where its chain's buffer lies, which the round keeps
+    /// for as long as it holds them.
+    fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
         // SAFETY: a link's records are dispatched by the session's step, under the session's lock.
         unsafe { self.lane.lend_rejoined(message) };
+    }
+
+    fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
+        // SAFETY: as `lend_rejoined`.
+        unsafe { self.lane.end_rejoined(message) };
     }
 }
 
