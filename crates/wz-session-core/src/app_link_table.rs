@@ -2465,8 +2465,18 @@ mod tests {
             let _ = table.received(handle, &[0u8; 1024], None).unwrap();
         }
         assert_eq!(table.queued_bytes(handle), 4096);
-        table.hold_remainder(handle, &[0u8; 4096]).unwrap();
-        assert_eq!(held(&table, handle).len(), 4096);
+        #[cfg(not(feature = "bounded-heapless"))]
+        {
+            table.hold_remainder(handle, &[0u8; 4096]).unwrap();
+            assert_eq!(held(&table, handle).len(), 4096);
+        }
+        // A fixed build allocates nothing after open: a remainder of no bound is the row's storage,
+        // which a link of no bound takes none of, and a hold past it is refused.
+        #[cfg(feature = "bounded-heapless")]
+        assert_eq!(
+            table.hold_remainder(handle, b"x").unwrap_err(),
+            InboundRefusal::Full
+        );
     }
 
     #[test]
