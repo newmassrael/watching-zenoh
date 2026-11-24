@@ -458,6 +458,64 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
     }
 }
 
+/// A session that listens is lent the slots its udp ports share for their datagrams, each a
+/// link's batch long, with the links' tables; one that listens on nothing is lent none. Turned
+/// red by slots of anything but the links' batch, or slots reserved for a session with no port.
+#[cfg(feature = "listen")]
+#[test]
+fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
+    let listening = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["udp/127.0.0.1:0".to_owned()],
+            max_faces: 2,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let batch = row(&listening, "link receive buffers").entry_bytes;
+    let slots = row(&listening, "link port datagram slots");
+    assert_eq!(slots.count, caps::UDP_PORT_SLOTS);
+    assert_eq!(slots.entry_bytes, batch, "a slot is a batch long");
+    assert_eq!(
+        row(&listening, "link port datagram flags").count,
+        slots.count
+    );
+    let mut session =
+        SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = listening.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    let table = tables.port_rx().expect("a table for the ports");
+    assert_eq!(
+        (table.capacity(), table.size()),
+        (caps::UDP_PORT_SLOTS, batch)
+    );
+    // The ports' book: a peer row for each link the session may hold, and a queue row for each
+    // slot a waiting datagram holds.
+    let links = row(&listening, "link places").count;
+    assert_eq!(
+        Some(row(&listening, "udp port peers").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(
+            links
+        )
+    );
+    assert_eq!(
+        Some(row(&listening, "udp port queue").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::QueuedDatagram>(
+            caps::UDP_PORT_SLOTS
+        )
+    );
+
+    let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(row(&dialling, "link port datagram slots").count, 0);
+    assert_eq!(
+        Some(row(&dialling, "udp port peers").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
+        "a session that listens on nothing keeps no peer row"
+    );
+}
+
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
 /// batch a group it names sends, under the build's multicast batch, with the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the
@@ -1090,8 +1148,9 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     }
 }
 
-/// The ends of the session's legs are lent a row for each get every table of pending gets holds,
-/// the only place an end waits for its delivery.
+/// The ends of the session's legs, the rows of their callbacks and the session's note of each leg
+/// pending are lent a row for each get every table of pending gets holds: a leg takes one of
+/// each, and none is held anywhere else.
 #[cfg(feature = "query")]
 #[test]
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
@@ -1110,6 +1169,16 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     assert_eq!(
         row(&plan, "ended legs").entry_bytes,
         core::mem::size_of::<crate::engine::Ended>()
+    );
+    assert_eq!(row(&plan, "leg callbacks").count, legs);
+    assert_eq!(
+        row(&plan, "leg callbacks").entry_bytes,
+        core::mem::size_of::<Option<crate::engine::LegRow>>()
+    );
+    assert_eq!(row(&plan, "pending legs").count, legs);
+    assert_eq!(
+        row(&plan, "pending legs").entry_bytes,
+        core::mem::size_of::<crate::engine::PendingGet>()
     );
 }
 
@@ -1547,11 +1616,15 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
-        // pool's one area of the rows its faces share, the watchers' one row of the spans of
-        // their lists, and the session's table set one area of its tables, not a row of each.
+        // The lane's row is one buffer of the limit's bytes, the key arena's and the advanced
+        // cache's ring one area of them, a pool's one area of the rows its faces share, the
+        // watchers' one row of the spans of their lists, and the session's table set one area of
+        // its tables, not a row of each. The udp ports' slots and their queue are a listening
+        // session's, which the preset's client is not: it holds none whatever the limit.
         if row.basis == "DELIVERY_LANE_BYTES"
             || row.basis == "KEY_ARENA_BYTES"
+            || row.basis == "ADVANCED_CACHE_BYTES"
+            || row.basis == "UDP_PORT_SLOTS"
             || row.basis == "MAX_DECL_OBSERVERS"
             || row.part == "session tables"
             || POOL_PARTS.contains(&row.part)
@@ -1704,8 +1777,15 @@ fn the_pico_presets_lane_holds_one_record() {
 }
 
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
-/// its table of pending gets and the ends of their legs.
-const FACE_PARTS: [&str; 3] = ["peer tables", "pending gets", "ended legs"];
+/// its table of pending gets, and the ends of their legs, their callbacks and the session's note
+/// of each.
+const FACE_PARTS: [&str; 5] = [
+    "peer tables",
+    "pending gets",
+    "ended legs",
+    "leg callbacks",
+    "pending legs",
+];
 
 /// The parts of an arena held once for the session whose size follows its faces: the pools of what
 /// the faces' peers write, each one area.
@@ -2114,6 +2194,40 @@ fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<Sessio
         .select(&mut limits, LimitValue::Integer(value))?
         .ok()?;
     Some(limits)
+}
+
+/// The ABI's places of pending gets are as many as the rows of a table of pending gets, and those
+/// of pending liveliness gets as many as its liveliness gets', each kind under its own limit; a
+/// build that asks no get, or no liveliness get, lays none of the kind. Turned red by places
+/// counted by another limit, or a kind laid out in a build that cannot ask for it.
+#[test]
+fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default()
+        .with_entity(EntityKind::PendingGet, place)
+        .with_entity(EntityKind::PendingLivelinessGet, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let count = |part: &str| {
+        plan.rows()
+            .iter()
+            .find(|row| row.part == part)
+            .map(|row| row.count)
+    };
+    assert_eq!(
+        count("pending get places"),
+        cfg!(feature = "query").then(|| plan.gets().rows.queries)
+    );
+    assert_eq!(
+        count("pending liveliness get places"),
+        cfg!(feature = "liveliness-get").then(|| plan.gets().rows.liveliness_gets)
+    );
+    assert_eq!(
+        plan.entities().of_kind(EntityKind::PendingGet),
+        plan.gets().rows.queries
+    );
 }
 
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's

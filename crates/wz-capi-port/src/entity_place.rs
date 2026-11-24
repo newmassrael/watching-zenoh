@@ -8,7 +8,7 @@
 use core::ptr::NonNull;
 
 /// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
-pub const ENTITY_KINDS: usize = 6;
+pub const ENTITY_KINDS: usize = 8;
 
 /// A kind of the session's own entities whose rows an ABI may hold a place of its own beside, one
 /// for each the session's limit of the kind admits.
@@ -26,6 +26,11 @@ pub enum EntityKind {
     LivelinessSubscriber,
     /// A querier (`MAX_QUERIERS`).
     Querier,
+    /// A get the ABI holds pending until its last leg ends (`MAX_PENDING_QUERIES`).
+    PendingGet,
+    /// A liveliness get the ABI holds pending until its last leg ends
+    /// (`MAX_PENDING_LIVELINESS_GETS`).
+    PendingLivelinessGet,
 }
 
 impl EntityKind {
@@ -37,6 +42,8 @@ impl EntityKind {
         Self::Token,
         Self::LivelinessSubscriber,
         Self::Querier,
+        Self::PendingGet,
+        Self::PendingLivelinessGet,
     ];
 }
 

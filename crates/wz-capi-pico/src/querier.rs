@@ -57,7 +57,6 @@ use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
 };
-use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
@@ -590,8 +589,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         };
         let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
-            Arc::as_ref(&state.shared),
-            state.key.literal().to_owned(),
+            &state.shared,
+            state.key.literal(),
             state.key.wire(Arc::as_ref(&state.shared)),
             params_in,
             state.target,
@@ -602,7 +601,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             attachment,
             state.qos,
             value_meta,
-            Arc::new(closure),
+            closure,
             token,
             None,
         )

@@ -47,6 +47,9 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
+//! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
+//!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
+//!   build's), each a link's batch long, which the ports share, lent with the links' tables;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
 //!   state's tables (`SessionRows::lane_bytes`); none in a build that reads every record where it
@@ -118,6 +121,8 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
+#[cfg(feature = "listen")]
+use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -189,14 +194,18 @@ const LANE_ROWS: usize = 3 + 2 * cfg!(not(feature = "rx-lent-only")) as usize;
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
+/// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
+/// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
+const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
 /// The application's tables apart from the session's one table set: the declaration watchers.
 const OBSERVER_ROWS: usize = 1;
-/// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
-/// a build that asks (`query`): one that asks nothing holds no table of gets.
-const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of their legs, the legs' callbacks, the session's note of each leg
+/// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
+/// that asks nothing holds no table of gets.
+const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -217,10 +226,14 @@ const CELL_ROWS: usize = 6;
 const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
-/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), as many as the ABI
-/// asks places of, at most these.
-const ENTITY_PLACE_ROWS: usize =
-    2 * (3 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize);
+/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
+/// (`query`) and pending liveliness gets (`liveliness-get`), as many as the ABI asks places of,
+/// at most these.
+const ENTITY_PLACE_ROWS: usize = 2
+    * (3 + cfg!(feature = "queryable") as usize
+        + 2 * cfg!(feature = "liveliness") as usize
+        + cfg!(feature = "query") as usize
+        + cfg!(feature = "liveliness-get") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -229,6 +242,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LANE_ROWS
     + REASSEMBLY_ROWS
     + GROUP_RX_ROWS
+    + PORT_RX_ROWS
     + HANDED_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
@@ -273,6 +287,16 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "MAX_LIVELINESS_SUBSCRIPTIONS",
         ),
         EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
+        EntityKind::PendingGet => (
+            "pending get place flags",
+            "pending get places",
+            "MAX_PENDING_QUERIES",
+        ),
+        EntityKind::PendingLivelinessGet => (
+            "pending liveliness get place flags",
+            "pending liveliness get places",
+            "MAX_PENDING_LIVELINESS_GETS",
+        ),
     }
 }
 
@@ -390,6 +414,12 @@ pub struct EntityRows {
     pub queriers: usize,
     /// The matching listeners (`MAX_MATCHING_LISTENERS`).
     pub matching_listeners: usize,
+    /// The gets pending at once (`MAX_PENDING_QUERIES`), each a row of every table of pending
+    /// gets; none in a build without `query`.
+    pub pending_gets: usize,
+    /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
+    /// without `liveliness-get`.
+    pub pending_liveliness_gets: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -404,8 +434,10 @@ pub struct GetTables {
 }
 
 impl GetTables {
-    /// How many gets every table together holds pending at once: the rows of the table of the ends
-    /// of the legs (`crate::engine`'s `EndedLegs`). `None` past the address space.
+    /// How many gets every table together holds pending at once: the rows of the tables of the
+    /// ends of the legs, of their callbacks and of the session's note of each leg pending
+    /// (`crate::engine`'s `EndedLegs`, `LegRows` and `PendingGet`). `None` past the address
+    /// space.
     pub const fn legs(&self) -> Option<usize> {
         match self.rows.queries.checked_add(self.rows.liveliness_gets) {
             Some(each) => each.checked_mul(self.tables),
@@ -476,6 +508,8 @@ impl EntityRows {
             EntityKind::Token => self.tokens,
             EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
             EntityKind::Querier => self.queriers,
+            EntityKind::PendingGet => self.pending_gets,
+            EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
         }
     }
 
@@ -566,6 +600,12 @@ pub struct TransportRows {
     /// The receive buffers of the groups the session may join: how many, and the bytes of each.
     #[cfg(feature = "group")]
     group_rx: (usize, usize),
+    /// The slots of the datagrams the session's udp ports hold: how many, and the bytes of each.
+    #[cfg(feature = "listen")]
+    port_rx: (usize, usize),
+    /// The rows of the peers the session's udp ports take, one for each link it may hold.
+    #[cfg(feature = "listen")]
+    port_peers: usize,
 }
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
@@ -582,6 +622,9 @@ pub(crate) struct TransportTables {
     /// The places of the publishes the session keeps for its other faces.
     #[cfg(any(feature = "listen", feature = "group"))]
     pub(crate) handed: HandedTable,
+    /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
+    #[cfg(feature = "listen")]
+    pub(crate) port_rows: PortRows,
 }
 
 impl TransportRows {
@@ -609,6 +652,8 @@ impl TransportRows {
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
+            #[cfg(feature = "listen")]
+            port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
     }
 
@@ -624,7 +669,23 @@ impl TransportRows {
         let tables = LinkTables::pooled(rx, tx, lend.byte_cells(0, self.links));
         #[cfg(not(feature = "listen"))]
         let tables = LinkTables::new(rx, tx, self.link_bytes);
-        self.group_rx_from(tables, lend)
+        let tables = self.group_rx_from(tables, lend);
+        self.port_rx_from(tables, lend)
+    }
+
+    /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
+    /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
+    /// ports share them, a slot of the links' batch each.
+    #[cfg(feature = "listen")]
+    fn port_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+        let (slots, bytes) = self.port_rx;
+        tables.with_port_rx(lend.byte_cells(bytes, slots))
+    }
+
+    /// A build that listens on no port lends no port a slot.
+    #[cfg(not(feature = "listen"))]
+    fn port_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+        tables
     }
 
     /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
@@ -821,6 +882,10 @@ impl ArenaPlan {
                 handed_legs: 0,
                 #[cfg(feature = "group")]
                 group_rx: (0, 0),
+                #[cfg(feature = "listen")]
+                port_rx: (0, 0),
+                #[cfg(feature = "listen")]
+                port_peers: 0,
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -947,6 +1012,41 @@ impl ArenaPlan {
                 bytes,
             );
         }
+        // The slots the udp ports of a session that listens read their datagrams into and hold
+        // them in until the links of their peers take them, lent with the links' tables
+        // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
+        // session that listens on nothing holds none.
+        #[cfg(feature = "listen")]
+        {
+            let slots = plan.lent(
+                "UDP_PORT_SLOTS",
+                Quota::at_most(limits.udp_port_slots()),
+                caps::UDP_PORT_SLOTS,
+            );
+            let listens = config.listen.count() > 0;
+            let slots = if listens { slots } else { 0 };
+            plan.transport.port_rx = (slots, link_bytes);
+            plan.put_table(
+                ["link port datagram flags", "link port datagram slots"],
+                "UDP_PORT_SLOTS",
+                slots,
+                link_bytes,
+            );
+            // The ports' book of their peers, a row for each link the session may hold, and of
+            // the datagrams sorted for them, a row for each slot a datagram holds while it waits
+            // (`TransportRows::lent_from`).
+            let peers = if listens { links } else { 0 };
+            plan.transport.port_peers = peers;
+            let peer_rows = plan.sized(Arena::table_bytes::<PortPeerRow>(peers));
+            plan.put(
+                "udp port peers",
+                "MAX_FACES + MAX_ACCEPT_PENDING",
+                1,
+                peer_rows,
+            );
+            let queue_rows = plan.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+            plan.put("udp port queue", "UDP_PORT_SLOTS", 1, queue_rows);
+        }
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
         #[cfg(not(feature = "rx-lent-only"))]
         plan.put_table(
@@ -1070,15 +1170,29 @@ impl ArenaPlan {
                 get_bytes,
             );
         }
-        // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
+        // The ends of the legs, the rows of their callbacks and the session's note of each leg
+        // pending, a row of each for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
+            const BASIS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
             let legs = plan.sized(plan.session.gets.legs());
             plan.put(
                 "ended legs",
-                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                BASIS,
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
+            );
+            plan.put(
+                "leg callbacks",
+                BASIS,
+                legs,
+                core::mem::size_of::<Option<crate::engine::LegRow>>(),
+            );
+            plan.put(
+                "pending legs",
+                BASIS,
+                legs,
+                core::mem::size_of::<crate::engine::PendingGet>(),
             );
         }
         // The replies the gets that consolidate hold to their Finals: one table of rows shared by
@@ -1605,6 +1719,24 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             "MAX_MATCHING_LISTENERS",
             limits.max_matching_listeners(),
         )?,
+        // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
+        // holds pending takes one row of every face's table, so no more are pending at once.
+        pending_gets: if cfg!(feature = "query") {
+            lent::<{ caps::MAX_PENDING_QUERIES }>(
+                "MAX_PENDING_QUERIES",
+                limits.max_pending_queries(),
+            )?
+        } else {
+            0
+        },
+        pending_liveliness_gets: if cfg!(feature = "liveliness-get") {
+            lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+                "MAX_PENDING_LIVELINESS_GETS",
+                limits.max_pending_liveliness_gets(),
+            )?
+        } else {
+            0
+        },
     })
 }
 
