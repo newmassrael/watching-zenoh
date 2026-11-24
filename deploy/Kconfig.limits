@@ -535,6 +535,26 @@ config WZ_LIMIT_ADVANCED_CACHE_BYTES
 	  no room lets the oldest records go first. A put whose record is longer than the
 	  whole ring is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent.
 
+config WZ_LIMIT_MAX_ADVANCED_PUBLISHERS
+	int "MAX_ADVANCED_PUBLISHERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced publishers a session holds at once, each the C object over
+	  the publisher, its cache and its detection token, which are counted in
+	  their own tables. Declaring one more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+
+config WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS
+	int "MAX_ADVANCED_SUBSCRIBERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced subscribers a session holds at once, owned or background,
+	  each the C object over the subscriber, its history and recovery and its
+	  detection token, which are counted in their own tables. Declaring one more
+	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
 	default 64

@@ -957,6 +957,44 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "MAX_ADVANCED_PUBLISHERS": {
+              "description": "The advanced publishers a session holds at once, each the C object over the publisher, its cache and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_ADVANCED_SUBSCRIBERS": {
+              "description": "The advanced subscribers a session holds at once, owned or background, each the C object over the subscriber, its history and recovery and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_LOCATOR_LEN": {
               "description": "The longest locator, in bytes, a node stores: one it is told to connect to, or one it listens on (for example udp/192.168.1.10:7447).",
               "oneOf": [

@@ -87,6 +87,10 @@ pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 1
 pub(super) const MAX_TICKERS: usize = limit(option_env!("WZ_LIMIT_MAX_TICKERS"), 16);
 pub(super) const ADVANCED_CACHE_BYTES: usize =
     limit(option_env!("WZ_LIMIT_ADVANCED_CACHE_BYTES"), 1712);
+pub(super) const MAX_ADVANCED_PUBLISHERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_PUBLISHERS"), 8);
+pub(super) const MAX_ADVANCED_SUBSCRIBERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS"), 8);
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
 pub(super) const MAX_PEER_NODES: usize = limit(option_env!("WZ_LIMIT_MAX_PEER_NODES"), 0);
