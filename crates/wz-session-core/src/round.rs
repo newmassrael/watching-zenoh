@@ -1456,70 +1456,74 @@ impl<C: RoundCalls> Round<C> {
             return;
         }
         let sample = Offered::of(sample);
-        let holds_sender = holds_its_sender(sample.reliability, sample.qos);
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
-        // SAFETY: the caller's contract.
-        let Some(table) = (unsafe { self.writable() }) else {
-            self.refuse(holds_sender);
-            self.released.end(call);
-            return;
-        };
-        // A record is joined by the later rows of its own fan-out alone: a sample of the same
-        // bytes in another fan-out is a record of its own.
-        let call = if first {
-            table.fan = false;
-            call
-        } else {
-            match self.join_sample(table, call) {
-                Ok(()) => {
-                    // SAFETY: the caller's contract: the session's lock is held.
-                    unsafe { self.filled(table) };
-                    return;
+        // The call of a sample the round keeps no record of, and whether a part of it found no
+        // place rather than the table no room: refused after this block, in one place.
+        let (call, unplaced) = 'refused: {
+            // SAFETY: the caller's contract.
+            let Some(table) = (unsafe { self.writable() }) else {
+                break 'refused (call, false);
+            };
+            // A record is joined by the later rows of its own fan-out alone: a sample of the same
+            // bytes in another fan-out is a record of its own.
+            let call = if first {
+                table.fan = false;
+                call
+            } else {
+                match self.join_sample(table, call) {
+                    Ok(()) => {
+                        // SAFETY: the caller's contract: the session's lock is held.
+                        unsafe { self.filled(table) };
+                        return;
+                    }
+                    Err(call) => call,
                 }
-                Err(call) => call,
+            };
+            if !Self::takes(table, 1) {
+                break 'refused (call, false);
             }
-        };
-        if !Self::takes(table, 1) {
-            self.refuse(holds_sender);
-            self.released.end(call);
-            return;
-        }
-        let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
-            self.refuse_unplaced(holds_sender);
-            self.released.end(call);
-            return;
-        };
-        let first = table.callbacks.len();
-        let entry = table.entries.push(Entry::owing_one(
-            Held::Sample {
-                head: Head {
-                    kind: sample.kind,
-                    reliability: sample.reliability,
-                    qos: sample.qos,
-                    key,
-                    payload,
+            let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
+                break 'refused (call, true);
+            };
+            let first = table.callbacks.len();
+            let entry = table.entries.push(Entry::owing_one(
+                Held::Sample {
+                    head: Head {
+                        kind: sample.kind,
+                        reliability: sample.reliability,
+                        qos: sample.qos,
+                        key,
+                        payload,
+                    },
+                    rest,
                 },
-                rest,
-            },
-            first,
-        ));
-        let kept = match entry {
-            Ok(()) => {
-                if let Some(held) = sample.held {
-                    table.hold_key(key, held);
+                first,
+            ));
+            let kept = match entry {
+                Ok(()) => {
+                    if let Some(held) = sample.held {
+                        table.hold_key(key, held);
+                    }
+                    table.fan = true;
+                    self.owe_call(table, call)
                 }
-                table.fan = true;
-                self.owe_call(table, call)
-            }
-            Err(_) => {
-                self.released.end(call);
-                false
-            }
+                Err(_) => {
+                    self.released.end(call);
+                    false
+                }
+            };
+            debug_assert!(kept, "the table had the room its checks found");
+            // SAFETY: the caller's contract: the session's lock is held.
+            unsafe { self.filled(table) };
+            return;
         };
-        debug_assert!(kept, "the table had the room its checks found");
-        // SAFETY: the caller's contract: the session's lock is held.
-        unsafe { self.filled(table) };
+        // A part that found no place is counted apart too (`Self::refuse_unplaced`).
+        if unplaced {
+            self.unplaced.fetch_add(1, Ordering::Relaxed);
+        }
+        self.refuse(holds_its_sender(sample.reliability, sample.qos));
+        self.released.end(call);
     }
 
     /// Owe `call` in `table`, which has the room for it: `false`, the call ended, when it had

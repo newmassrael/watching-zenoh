@@ -396,6 +396,60 @@ fn a_round_handed_out_is_told_to_its_tally() {
     );
 }
 
+/// A sample the round keeps no record of is refused, counted and its call ended, in each way it
+/// can be: a key longer than the round's keys hold is counted unplaced as well, a sample past the
+/// records the table holds and one offered to a sealed round are counted dropped alone, and the
+/// samples the table took are handed out all the same. Turned red by a refusal that ends no call,
+/// counts none, or counts a sample past the room as unplaced.
+#[test]
+fn a_sample_with_no_room_or_no_place_is_refused_and_its_call_ended() {
+    let log = Arc::new(Log::default());
+    let call = |row| Call {
+        row,
+        log: log.clone(),
+    };
+    let unplaced = round::<Lean>();
+    let long: &'static str = "k".repeat(2 * caps::MAX_KEYEXPR_BYTES + 1).leak();
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe { unplaced.offer_sample(call(1), &Sample(long), true) };
+    assert_eq!(
+        unplaced.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1
+        }
+    );
+    assert_eq!(log.ended(), 1);
+
+    let full = round::<Lean>();
+    let room = caps::DELIVERY_LANE_EVENTS
+        .min(caps::DELIVERY_LANE_CALLBACKS)
+        .min(4);
+    // SAFETY: as above.
+    unsafe {
+        for row in 0..room {
+            let key: &'static str = format!("k/{row}").leak();
+            full.offer_sample(call(2), &Sample(key), true);
+        }
+        full.offer_sample(call(3), &Sample("k/past"), true);
+        full.seal();
+        full.offer_sample(call(4), &Sample("k/sealed"), true);
+    }
+    assert_eq!(
+        full.counts(),
+        RoundCounts {
+            dropped: 2,
+            held_over: 0,
+            unplaced: 0
+        }
+    );
+    assert_eq!(log.ended(), 3, "the refused calls are ended at once");
+    assert!(full.deliver());
+    assert_eq!(log.handed().len(), room);
+    assert_eq!(log.ended(), 3 + room);
+}
+
 /// A reply is held for its leg's callback where the round keeps replies, and the record's count of
 /// the leg given back once it was handed; where it keeps none it is refused, the legs it was told
 /// of held by none.
