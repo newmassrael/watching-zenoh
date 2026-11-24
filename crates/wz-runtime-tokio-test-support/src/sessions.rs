@@ -61,7 +61,8 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
         region: None,
     }
 }
@@ -111,7 +112,8 @@ pub fn zenoh_interop_session_init_params(
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
         region: None,
     }
 }

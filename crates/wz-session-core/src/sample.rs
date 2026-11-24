@@ -754,6 +754,18 @@ impl SourceInfo {
         }
     }
 
+    /// The `SourceInfo` of a zid held in the sixteen bytes a zenoh id has, as pico's `_z_id_t`
+    /// holds one, zero tail included: every byte is kept, so the length is the array's and there
+    /// is no length to refuse.
+    pub fn of_padded(zid: [u8; 16], eid: u32, sn: u32) -> Self {
+        Self {
+            zid,
+            zid_len: 16,
+            eid,
+            sn,
+        }
+    }
+
     /// Borrow the meaningful zid prefix (the first `zid_len` bytes of
     /// the padded buffer). Returns an empty slice when `zid_len` is
     /// outside the valid `1..=16` range (i.e. the `Default::default()`
@@ -1522,6 +1534,17 @@ mod tests {
             sn: 0,
         };
         assert!(info.zid_prefix().is_empty());
+    }
+
+    /// Turned red by a padded constructor that keeps a length other than the sixteen bytes it
+    /// is given, which `new` keeps for the same bytes.
+    #[test]
+    fn a_padded_zid_is_kept_as_its_sixteen_bytes() {
+        let mut zid = [0u8; 16];
+        zid[..3].copy_from_slice(&[0xA1, 0xA2, 0xA3]);
+        let padded = SourceInfo::of_padded(zid, 7, 42);
+        assert_eq!(padded, SourceInfo::new(&zid, 7, 42));
+        assert_eq!(padded.zid_prefix(), &zid[..]);
     }
 
     #[test]

@@ -54,9 +54,10 @@
 //! the lent sink), which the session counts; a keyexpr longer than the
 //! session's `MAX_KEYEXPR_BYTES` is refused by the constructor of
 //! `NamedKeyexpr` (`CodecError::BufferOverflow`). The writers that mirror a
-//! builder with an `assert!` on a zero mapping id keep it, for the same reason the
-//! builder has it (id `0` is the literal-keyexpr sentinel, and a declaration of it
-//! has no meaning), and say so.
+//! builder with an `assert!` on a zero mapping id take an id that is not zero by its
+//! type instead, for the same reason the builder refuses it (id `0` is the
+//! literal-keyexpr sentinel, and a declaration of it
+//! has no meaning).
 
 use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(feature = "codec-declare")]
@@ -428,11 +429,11 @@ const fn n_flag(suffix: Option<&str>) -> u8 {
 /// `Declare(DeclKexpr)`: bind `mapping_id` to `suffix` in the peer's table.
 /// [`crate::declare_build::build_declare_kexpr`], written in place.
 ///
-/// Panics if `mapping_id == 0`, as the builder does: id zero is the
-/// literal-keyexpr sentinel and a declaration of it has no table semantics.
+/// The id is not zero by its type: id zero is the literal-keyexpr sentinel and a declaration of
+/// it has no table semantics, which the owned builder refuses at run time.
 #[cfg(feature = "codec-declare")]
 pub fn declare_kexpr(
-    mapping_id: crate::wire_id::ExprId,
+    mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
     suffix: &str,
 ) -> Result<Declare<'_>, CodecError> {
     Ok(envelope(
@@ -441,11 +442,10 @@ pub fn declare_kexpr(
     ))
 }
 
-/// [`declare_kexpr`] as a declaration of that one kind ([`DeclarationOf`]); panics on a zero
-/// mapping id as it does.
+/// [`declare_kexpr`] as a declaration of that one kind ([`DeclarationOf`]).
 #[cfg(feature = "codec-declare")]
 pub fn kexpr_declaration(
-    mapping_id: crate::wire_id::ExprId,
+    mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
     suffix: &str,
 ) -> Result<DeclarationOf<'_, DeclKexpr<'_>>, CodecError> {
     Ok(DeclarationOf::new(None, kexpr_body(mapping_id, suffix)?))
@@ -454,16 +454,12 @@ pub fn kexpr_declaration(
 /// The body of [`declare_kexpr`].
 #[cfg(feature = "codec-declare")]
 fn kexpr_body(
-    mapping_id: crate::wire_id::ExprId,
+    mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
     suffix: &str,
 ) -> Result<DeclKexpr<'_>, CodecError> {
-    assert!(
-        mapping_id != 0,
-        "declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
-    );
     Ok(DeclKexpr {
         header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N,
-        id: u64::from(mapping_id),
+        id: u64::from(mapping_id.get()),
         keyexpr: local(0, Some(suffix))?,
         extensions: None,
     })
@@ -1044,10 +1040,10 @@ pub fn interest<'a>(
     keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&'a str>,
 ) -> Result<Interest<'a>, CodecError> {
-    assert!(
-        current || future,
-        "an Interest with neither CURRENT nor FUTURE is a Final, which asks for nothing",
-    );
+    // Neither CURRENT nor FUTURE is the Final form, which asks for nothing and holds no body.
+    if !(current || future) {
+        return Err(CodecError::PresentIfMismatch);
+    }
     Ok(Interest {
         header: interest_header(current, future),
         interest_id,
@@ -1373,9 +1369,9 @@ mod tests {
         ];
         let mut compared = 0usize;
         for (mapping, suffix) in named {
-            if mapping != 0 {
+            if let Some(id) = core::num::NonZero::new(mapping) {
                 assert_eq!(
-                    one_kind(&kexpr_declaration(mapping, suffix).unwrap()),
+                    one_kind(&kexpr_declaration(id, suffix).unwrap()),
                     owned_of(&owned::build_declare_kexpr(mapping, suffix).unwrap()),
                     "keyexpr {mapping} {suffix:?}"
                 );
@@ -1482,7 +1478,7 @@ mod tests {
         );
         let past = "k".repeat(usize::from(u16::MAX) + 1);
         assert_eq!(
-            kexpr_declaration(1, &past).err(),
+            kexpr_declaration(core::num::NonZero::<crate::wire_id::ExprId>::MIN, &past).err(),
             Some(CodecError::LengthOutOfRange)
         );
         assert_eq!(
@@ -1571,7 +1567,9 @@ mod tests {
                     crate::wire_id::ExprId::try_from(id).unwrap_or(crate::wire_id::ExprId::MAX);
                 for suffix in ["a/b", "", "x/y/z/w"] {
                     assert_eq!(
-                        declare_kexpr(kexpr, suffix).unwrap().encode_to_vec(),
+                        declare_kexpr(core::num::NonZero::new(kexpr).unwrap(), suffix)
+                            .unwrap()
+                            .encode_to_vec(),
                         owned_declare(&owned::build_declare_kexpr(kexpr, suffix).unwrap()),
                         "kexpr {kexpr} {suffix:?}"
                     );
@@ -1728,10 +1726,10 @@ mod tests {
         );
     }
 
+    /// Turned red by a writer that writes the Final form as an interest with a body.
     #[test]
-    #[should_panic(expected = "neither CURRENT nor FUTURE")]
     fn a_lent_interest_that_asks_for_nothing_is_refused() {
-        let _ = interest(
+        let refused = interest(
             1,
             crate::interest_build::InterestKinds::SUBSCRIBERS,
             false,
@@ -1740,6 +1738,7 @@ mod tests {
             0,
             Some("demo/key"),
         );
+        assert_eq!(refused.err(), Some(CodecError::PresentIfMismatch));
     }
 
     /// An interest asking for its kinds exactly is written as `build_interest_exact` builds it, with
@@ -2044,7 +2043,14 @@ mod tests {
             refused
         );
         assert_eq!(declare_token(1, 0, Some(&past_bound)).err(), refused);
-        assert_eq!(declare_kexpr(1, &past_bound).err(), refused);
+        assert_eq!(
+            declare_kexpr(
+                core::num::NonZero::<crate::wire_id::ExprId>::MIN,
+                &past_bound
+            )
+            .err(),
+            refused
+        );
         assert_eq!(
             declare_token_nonlocal(1, 3, Some(&past_bound)).err(),
             refused
@@ -2065,11 +2071,5 @@ mod tests {
         );
         // No suffix at all is not a refusal.
         assert!(declare_subscriber(1, 5, None).is_ok());
-    }
-
-    #[test]
-    #[should_panic(expected = "non-zero mapping id")]
-    fn a_zero_mapping_id_is_refused_as_the_builder_refuses_it() {
-        let _ = declare_kexpr(0, "a");
     }
 }

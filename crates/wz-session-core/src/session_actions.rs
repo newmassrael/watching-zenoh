@@ -3628,7 +3628,7 @@ enum LentDeclaration<'a> {
     },
     #[cfg(feature = "declare-keyexpr")]
     Keyexpr {
-        mapping_id: crate::wire_id::ExprId,
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
         suffix: &'a str,
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
@@ -8795,7 +8795,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
             self.accept_cookie_members();
         crate::accept_cookie::encode_accept_cookie_into(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &crate::accept_cookie::AcceptCookieView {
                 peer_zid,
                 peer_whatami,
@@ -9033,7 +9033,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => return false,
         };
         let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &echoed,
         ) {
             Ok(c) => c,
@@ -16109,9 +16109,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R300 — pre-emit gate. Both checks run BEFORE any wire
         // bytes leave or any mapping-table side effect; on Err
         // the session-link state is unchanged.
-        if mapping_id == 0 {
+        let Some(declared) = core::num::NonZero::new(mapping_id) else {
             return Err(SendDeclareError::ReservedMappingIdZero);
-        }
+        };
         // The upper end of the id space is the type: a mapping id is an
         // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
         // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
@@ -16121,10 +16121,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "tx-lend-only")]
         if !self.rewrites_originated_keys() {
             return self
-                .dispatch_declare_lent(&LentDeclaration::Keyexpr { mapping_id, suffix })
+                .dispatch_declare_lent(&LentDeclaration::Keyexpr {
+                    mapping_id: declared,
+                    suffix,
+                })
                 .map_err(SendDeclareError::from);
         }
-        let declare = build_declare_kexpr(mapping_id, suffix)?;
+        let declare = build_declare_kexpr(declared.get(), suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
         // DEFINITION (this is a direct `dispatch_declare`, below the egress
         // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
@@ -18074,11 +18077,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // so does this.
         #[cfg(all(feature = "declare-interest", feature = "tx-lend-only"))]
         {
-            if !current && !future {
-                return Err(SendWireError::from(
-                    sce_forge_runtime::codec::CodecError::PresentIfMismatch,
-                ));
-            }
             let interest = crate::lent_control::interest(
                 interest_id,
                 kinds,
@@ -20213,7 +20211,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
-                        &a.params.cookie_signing_key,
+                        a.params.cookie_signing_key.signing_key(),
                         &a.accept_cookie_state(zid, n),
                     ),
                     _ => None,
@@ -20573,12 +20571,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // while a decode takes the state OFF the wire. `decode_accept_cookie`
         // verifies the MAC over the whole payload before it parses a field,
         // so anything past this point is bytes this node minted.
-        let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
-            &echoed,
-        ) {
-            Ok(c) => c,
-            Err(_) => return false,
+        let Some(carried) = self.params.cookie_signing_key.decode(&echoed) else {
+            return false;
         };
         // Upstream's rule, and the reason ONE value still crosses the
         // InitAck/OpenSyn boundary in memory: the MAC says "this node minted

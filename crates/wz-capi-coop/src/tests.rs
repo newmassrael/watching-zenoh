@@ -74,7 +74,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         link_rx: LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key").into(),
         region: None,
     }
 }
@@ -169,6 +169,8 @@ enum Command {
 #[derive(Default)]
 struct Seen {
     declares: usize,
+    /// The id of each subscriber the router was declared, in the order the declarations arrived.
+    subscribers: Vec<u64>,
     interests: usize,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -459,7 +461,15 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 for m in messages {
                     match m {
-                        NetworkMessage::Declare(_) => seen.declares += 1,
+                        NetworkMessage::Declare(declare) => {
+                            seen.declares += 1;
+                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                subscriber,
+                            ) = &declare.body
+                            {
+                                seen.subscribers.push(subscriber.id);
+                            }
+                        }
                         NetworkMessage::Interest(_interest) => {
                             seen.interests += 1;
                             #[cfg(all(
@@ -514,8 +524,13 @@ fn run_router(
             // Counted as their owned forms are, and dropped on the same rules.
             if let IterationEvent::InPlace(record) = event {
                 let mut seen = counted.lock().unwrap();
-                if record.declare().is_some() {
+                if let Some(declare) = record.declare() {
                     seen.declares += 1;
+                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
+                        &declare.body
+                    {
+                        seen.subscribers.push(subscriber.id);
+                    }
                 }
                 if let Some(_interest) = record.interest() {
                     seen.interests += 1;
