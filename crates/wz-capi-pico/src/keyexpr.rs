@@ -33,8 +33,10 @@ use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, 
 
 /// Whether `key` is no longer than the longest key a row of a session's tables stores: the
 /// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
-/// past it is a value this build cannot take, refused with `Z_EINVAL`, never cut short; a session
-/// that states a lower bound refuses the key again when it is declared on it.
+/// past it is one this build has no room for, refused as zenoh-pico refuses a key its heap cannot
+/// hold (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `return _z_string_check(&dst->_keyexpr) ? _Z_RES_OK : _Z_ERR_SYSTEM_OUT_OF_MEMORY;`), never cut
+/// short; a session that states a lower bound refuses the key again when it is declared on it.
 fn fits(key: &str) -> bool {
     key.len() <= row_capacity::<{ wz_session_core::caps::MAX_KEYEXPR_BYTES }>()
 }
@@ -243,7 +245,7 @@ impl KeyText {
 
     /// `text` kept for an object of `shared`'s session: in its key arena when it keeps one, and
     /// refused as zenoh-pico refuses what its heap cannot hold (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`) when
-    /// the arena has no room, or with `Z_EINVAL` when it is longer than the session's
+    /// the arena has no room or the key is longer than the session's
     /// `MAX_KEYEXPR_BYTES`; a copy of its own for a session with no key arena or a closed one,
     /// which keeps nothing more.
     #[inline(never)]
@@ -342,8 +344,8 @@ fn key_arena(engine: &Arc<Engine>) -> Option<&dyn SessionKeys> {
 /// nothing more.
 fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
     match why {
-        KeyNotHeld::TooLong => Some(Z_EINVAL),
-        KeyNotHeld::NoRoom => Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
+        // A key past the bound is one the arena has no room for, as a key past pico's heap is.
+        KeyNotHeld::TooLong | KeyNotHeld::NoRoom => Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
         KeyNotHeld::Closed => None,
     }
 }
@@ -560,7 +562,7 @@ impl DeclaredKeyexpr {
         let prefix_len = prefix.len();
         // A key the session's tables cannot hold is refused before anything is declared.
         if !fits(literal) {
-            return Err(Z_EINVAL);
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         }
         // Already optimized on THIS session to exactly this prefix: share it
         // (pico's `_z_declared_keyexpr_is_fully_optimized` /
@@ -1088,7 +1090,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
             return Z_ERR_INVALID;
         }
         if !fits(text) {
-            return Z_EINVAL;
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         }
         store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
         Z_OK
@@ -1309,7 +1311,8 @@ unsafe fn extended_from(
 /// canonized into a buffer of the bound and stored in `key` keeping `left`'s declaration
 /// ([`extended_from`]), a literal for a null `left`. The bound every key of this build is held to
 /// is held to the form and not to the text, as pico keeps only the form: a long text whose form is
-/// short is a key, and a form past the bound is refused with `Z_EINVAL`. A text no canonizing makes
+/// short is a key, and a form past the bound is refused as a key past pico's heap is
+/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, [`fits`]). A text no canonizing makes
 /// a key of is answered as `refusal` says. The form's length on success; `key` is left as it was
 /// on a refusal. The join takes no allocation and no copy of its
 /// text.
@@ -1330,7 +1333,9 @@ unsafe fn store_canonized(
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     ) {
         Ok(written) => written,
-        Err(KeyexprCanonError::ExceedsCapacity) => return Err(Z_EINVAL),
+        Err(KeyexprCanonError::ExceedsCapacity) => {
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        }
         Err(err) => {
             return Err(match refusal {
                 CanonRefusal::Status => pico_canon_status(&err),
@@ -1951,8 +1956,10 @@ mod prefix_tests {
 #[cfg(test)]
 mod bound_tests {
     //! The longest key a session's tables hold bounds every key this ABI makes: one past it is a
-    //! value the build cannot take, refused with `Z_EINVAL` and nothing left behind.
+    //! key the build has no room for, refused as pico's heap refuses one
+    //! (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`), with nothing left behind.
     use super::*;
+    use crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
     use wz_session_core::caps::MAX_KEYEXPR_BYTES;
 
     /// A canon key of exactly `len` bytes: chunks of `a` under `/`, never ending in one.
@@ -1984,7 +1991,7 @@ mod bound_tests {
             assert_eq!(at, Z_OK, "a key of the bound itself is taken");
             z_keyexpr_drop(z_keyexpr_move(&mut key));
             let (past, refused) = owned(&key_of(MAX_KEYEXPR_BYTES + 1));
-            assert_eq!(past, Z_EINVAL);
+            assert_eq!(past, Z_ERR_SYSTEM_OUT_OF_MEMORY);
             assert!(
                 !z_internal_keyexpr_check(&refused),
                 "nothing is left behind"
@@ -2014,7 +2021,7 @@ mod bound_tests {
             let mut past = z_owned_keyexpr_t::null_value();
             assert_eq!(
                 z_keyexpr_join(&mut past, z_keyexpr_loan(&left), z_keyexpr_loan(&wider)),
-                Z_EINVAL
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
             );
             assert!(!z_internal_keyexpr_check(&past), "nothing is left behind");
 
@@ -2029,7 +2036,7 @@ mod bound_tests {
                     tail.as_ptr() as *const c_char,
                     tail.len(),
                 ),
-                Z_EINVAL
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
             );
             assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
 
@@ -2092,7 +2099,7 @@ mod bound_tests {
                     past.as_ptr() as *const c_char,
                     past.len(),
                 ),
-                Z_EINVAL
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
             );
             assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
             z_keyexpr_drop(z_keyexpr_move(&mut full));
@@ -2103,8 +2110,8 @@ mod bound_tests {
     /// The canonizing doors read a text of any length and hold only its form to the bound, as
     /// pico keeps only the form: a text past the bound whose form is under it is a key, its
     /// form's length written back, and is canonized over itself; a form past the bound is refused
-    /// by the owned constructor with `Z_EINVAL`, the destination null and no length written back,
-    /// and canonized in place, which bounds nothing. Turned red by a bound judged on the text.
+    /// by the owned constructor with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, the destination null and no
+    /// length written back, and canonized in place, which bounds nothing. Turned red by a bound judged on the text.
     #[test]
     fn the_canonizing_doors_hold_the_form_to_the_bound_and_not_the_text() {
         let stem = key_of(MAX_KEYEXPR_BYTES - 10);
@@ -2141,7 +2148,7 @@ mod bound_tests {
                     past.as_ptr() as *const c_char,
                     &mut len
                 ),
-                Z_EINVAL
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
             );
             assert!(!z_internal_keyexpr_check(&key), "nothing is left behind");
             assert_eq!(len, past.len(), "no length is written back");
@@ -2336,11 +2343,14 @@ mod key_text_tests {
     //! How a key the session's key arena kept no room for is refused.
     use super::*;
 
-    /// A key past the session's bound is a value it cannot take, one the arena has no room for is
-    /// out of memory, and a closed session's object keeps a copy of its own.
+    /// A key past the session's bound and one the arena has no room for are both out of memory, as
+    /// a key past pico's heap is, and a closed session's object keeps a copy of its own.
     #[test]
     fn a_key_the_arena_refuses_answers_picos_code() {
-        assert_eq!(refusal_of(KeyNotHeld::TooLong), Some(Z_EINVAL));
+        assert_eq!(
+            refusal_of(KeyNotHeld::TooLong),
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
         assert_eq!(
             refusal_of(KeyNotHeld::NoRoom),
             Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
@@ -2641,7 +2651,7 @@ mod arena_key_tests {
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
         assert_eq!(
             DeclaredKeyexpr::literal_of_session(&engine, &"k".repeat(longest + 1)).err(),
-            Some(Z_EINVAL)
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         drop((key, shared));
         close(session);
@@ -2672,21 +2682,21 @@ mod arena_key_tests {
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
         assert_eq!(
             base.extended(&"k".repeat(longest + 1)).err(),
-            Some(Z_EINVAL)
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         drop((base, extended));
         close(session);
     }
 
-    /// A key past the session's `MAX_KEYEXPR_BYTES` is a value it cannot take; after the close a
+    /// A key past the session's `MAX_KEYEXPR_BYTES` is one it has no room for; after the close a
     /// key is a copy of its own, and one held from before still reads.
     #[test]
-    fn a_key_too_long_is_invalid_and_a_closed_sessions_key_is_a_copy() {
+    fn a_key_too_long_has_no_room_and_a_closed_sessions_key_is_a_copy() {
         let (mut session, engine) = listening();
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
         assert_eq!(
             KeyText::of_session(&engine, &"k".repeat(longest + 1)).err(),
-            Some(Z_EINVAL)
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         let held = KeyText::of_session(&engine, "demo/a").expect("a short key");
         assert!(held.is_session());
