@@ -85,6 +85,9 @@ pub(crate) enum Kind {
     /// listeners and the watches take.
     #[cfg(feature = "advanced")]
     AdvancedPublisher = 20,
+    /// An advanced subscriber, owned or background (`crate::advanced::AdvSubPlace`).
+    #[cfg(feature = "advanced")]
+    AdvancedSubscriber = 21,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -330,6 +333,11 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::AdvancedPublisher,
             InSession::<crate::advanced::AdvPubState>::LAYOUT,
         )),
+        #[cfg(feature = "advanced")]
+        Kind::AdvancedSubscriber => Some((
+            EntityKind::AdvancedSubscriber,
+            InSession::<crate::advanced::AdvSubPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -374,9 +382,12 @@ const TRANSPORT_EVENTS: Option<Kind> = Some(Kind::TransportEventsListener);
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "connectivity")))]
 const TRANSPORT_EVENTS: Option<Kind> = None;
 #[cfg(all(not(feature = "engine-tokio"), feature = "advanced"))]
-const ADVANCED_PUBLISHER: Option<Kind> = Some(Kind::AdvancedPublisher);
+const ADVANCED: [Option<Kind>; 2] = [
+    Some(Kind::AdvancedPublisher),
+    Some(Kind::AdvancedSubscriber),
+];
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "advanced")))]
-const ADVANCED_PUBLISHER: Option<Kind> = None;
+const ADVANCED: [Option<Kind>; 2] = [None, None];
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
@@ -384,6 +395,7 @@ const ADVANCED_PUBLISHER: Option<Kind> = None;
 fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
     let [token, liveliness_subscriber] = LIVELINESS;
     let [querier, get] = QUERIER;
+    let [advanced_publisher, advanced_subscriber] = ADVANCED;
     [
         Some(Kind::Publisher),
         Some(Kind::Subscriber),
@@ -396,7 +408,8 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         Some(Kind::MatchingListener),
         DECL_WATCH,
         TRANSPORT_EVENTS,
-        ADVANCED_PUBLISHER,
+        advanced_publisher,
+        advanced_subscriber,
     ]
     .into_iter()
     .flatten()

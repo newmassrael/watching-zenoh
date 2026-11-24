@@ -602,7 +602,7 @@ unsafe impl Sync for CClosure {}
 /// sample closure expects.
 ///
 /// pico hands liveliness events to an ORDINARY `z_closure_sample_t`, so this is
-/// the same shape as [`make_subscriber_callback`] with two differences that are
+/// the same shape as `hand_sample` with two differences that are
 /// the whole mapping: the payload is EMPTY (a presence event carries no data)
 /// and the kind carries the discriminator — a token appearing is `PUT`, one
 /// going away is `DELETE`. Upstream's `z_sub_liveliness.c` switches on exactly
@@ -623,7 +623,7 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
     };
     marshal.bind();
     let sample_ptr = marshal.as_loaned();
-    // SAFETY + panic discipline identical to `make_subscriber_callback`:
+    // SAFETY + panic discipline identical to `hand_sample`:
     // the marshal outlives the call, the borrowed sample is valid only for
     // its duration, and an unwind out of the C callback would tear down the
     // drive thread, so it is caught here.
@@ -639,10 +639,10 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
 /// On each delivery it marshals the wz `SampleView` into a borrowed
 /// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
 /// borrowed keyexpr / payload) is valid only for the duration of that call —
-/// pico's contract, which is why the C side must copy anything it keeps. The advanced subscriber,
-/// which runs its own sink, is what calls it (a plain subscriber hands the engine its closure whole,
-/// `subscriber_sink_at`).
-#[cfg(any(test, feature = "advanced"))]
+/// pico's contract, which is why the C side must copy anything it keeps. Only the tests make one: a
+/// subscriber's row calls the closure where its place keeps it (`subscriber_sink_at`), and an
+/// advanced subscriber's sink does the same (`crate::advanced`).
+#[cfg(test)]
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
@@ -651,7 +651,7 @@ pub(crate) fn make_subscriber_callback(
 
 /// Hand `view` to the C callback of `closure`, marshalled into the borrowed `z_loaned_sample_t`
 /// it reads for the length of the call.
-fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
+pub(crate) fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
     let call = match closure.call {
         Some(f) => f,
         None => return,

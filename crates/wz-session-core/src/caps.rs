@@ -309,6 +309,14 @@ pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTE
 /// the ring is refused; one that finds no room lets the oldest records go.
 pub const ADVANCED_CACHE_BYTES: usize = generated::ADVANCED_CACHE_BYTES;
 
+/// The advanced publishers a session holds at once, each in a place of the session's own. A
+/// declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_PUBLISHERS: usize = generated::MAX_ADVANCED_PUBLISHERS;
+
+/// The advanced subscribers a session holds at once, owned and background, each in a place of the
+/// session's own. A declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_SUBSCRIBERS: usize = generated::MAX_ADVANCED_SUBSCRIBERS;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;

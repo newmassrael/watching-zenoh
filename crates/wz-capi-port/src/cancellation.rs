@@ -528,7 +528,8 @@ mod tests {
     }
 
     fn canceller_of(engine: &Arc<Seen>) -> Weak<dyn FanCanceller> {
-        Arc::downgrade(engine)
+        // Downgraded as the stand-in's own type, then unsized where it is returned.
+        Arc::<Seen>::downgrade(engine)
     }
 
     /// A registered fan is cancelled through the engine attached to it, by its key, and the
