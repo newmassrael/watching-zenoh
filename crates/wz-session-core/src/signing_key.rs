@@ -150,8 +150,12 @@ impl SigningKey {
         }
         #[cfg(feature = "session-fixed-storage")]
         {
+            let mut drawn = Zeroizing::new([0u8; SIGNING_KEY_BYTES]);
+            source.try_fill_bytes(drawn.as_mut_slice())?;
             let mut bytes = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
-            source.try_fill_bytes(&mut bytes[..SIGNING_KEY_BYTES])?;
+            for (to, from) in bytes.iter_mut().zip(drawn.iter()) {
+                *to = *from;
+            }
             Ok(Self {
                 bytes,
                 len: SIGNING_KEY_BYTES,
@@ -201,19 +205,24 @@ impl SigningKey {
         }
         #[cfg(feature = "session-fixed-storage")]
         {
-            let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
-            let len = if bytes.len() <= SIGNING_KEY_MAX {
-                out[..bytes.len()].copy_from_slice(bytes);
-                bytes.len()
+            use sha2::Digest;
+            let digest;
+            // RFC 2104: a key longer than the hash's block is the hash of that key, so the
+            // stored key makes the same MACs.
+            let key = if bytes.len() <= SIGNING_KEY_MAX {
+                bytes
             } else {
-                // RFC 2104: a key longer than the hash's block is the hash of
-                // that key, so the stored key makes the same MACs.
-                use sha2::Digest;
-                let digest = Sha256::digest(bytes);
-                out[..digest.len()].copy_from_slice(&digest);
-                digest.len()
+                digest = Sha256::digest(bytes);
+                digest.as_slice()
             };
-            Ok(Self { bytes: out, len })
+            let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
+            for (to, from) in out.iter_mut().zip(key) {
+                *to = *from;
+            }
+            Ok(Self {
+                bytes: out,
+                len: key.len(),
+            })
         }
     }
 
@@ -239,7 +248,9 @@ impl SigningKey {
         }
         #[cfg(feature = "session-fixed-storage")]
         {
-            &self.bytes[..self.len]
+            // The key's length never passes the block it is held in; were it to, the
+            // whole block, zero-padded, is the same key to HMAC (RFC 2104).
+            self.bytes.get(..self.len).unwrap_or(self.bytes.as_slice())
         }
     }
 }
@@ -300,7 +311,7 @@ pub fn generate_cookie_hmac_sha256(
     peer_zid: &[u8],
     nonce: u64,
 ) -> Vec<u8> {
-    let mut input = Vec::with_capacity(8 + peer_zid.len());
+    let mut input = Vec::with_capacity(peer_zid.len().saturating_add(8));
     input.extend_from_slice(&nonce.to_le_bytes());
     input.extend_from_slice(peer_zid);
     let full = compute_hmac_sha256_full(cookie_signing_key.as_slice(), &input);
@@ -334,8 +345,7 @@ pub fn cookie_payload_tag(key: &SigningKey, payload: &[u8]) -> [u8; 16] {
 /// peer by construction, so that is a reachable attack rather than a
 /// theoretical one.
 pub fn cookie_payload_tag_verify(key: &SigningKey, payload: &[u8], tag: &[u8]) -> bool {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_slice())
-        .expect("HMAC-SHA256 accepts any non-zero key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new(&hmac_key_block(key.as_slice()));
     mac.update(payload);
     mac.verify_truncated_left(tag).is_ok()
 }
@@ -345,10 +355,28 @@ pub fn cookie_payload_tag_verify(key: &SigningKey, payload: &[u8], tag: &[u8]) -
 /// untruncated 32-byte MAC; the cookie wire-shape truncation is
 /// owned by `generate_cookie_hmac_sha256`.
 fn compute_hmac_sha256_full(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts any non-zero key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new(&hmac_key_block(key));
     mac.update(data);
     mac.finalize().into_bytes().into()
+}
+
+/// The block HMAC-SHA256 is keyed with (RFC 2104 section 2): a key no longer than the
+/// hash's block, zero-padded, and a longer one hashed first. The keyed constructor over
+/// this block cannot refuse, where the one over a slice reports a length it never refuses.
+fn hmac_key_block(key: &[u8]) -> hmac::digest::Key<Hmac<Sha256>> {
+    use sha2::Digest;
+    let mut block = hmac::digest::Key::<Hmac<Sha256>>::default();
+    let digest;
+    let key = if key.len() <= block.len() {
+        key
+    } else {
+        digest = Sha256::digest(key);
+        digest.as_slice()
+    };
+    for (to, from) in block.iter_mut().zip(key) {
+        *to = *from;
+    }
+    block
 }
 
 #[cfg(test)]

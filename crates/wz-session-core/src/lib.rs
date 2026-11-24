@@ -684,12 +684,6 @@ pub mod peer_init_caps;
 // AP-only as a free fn in the tokio crate (getrandom has no MCU
 // backend, and the orphan rule forbids a cross-crate inherent method).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-073 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod signing_key;
 
 /// R2760 — the accept cookie that CARRIES the acceptor's state, so the
