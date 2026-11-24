@@ -16,14 +16,13 @@
 
 use core::cell::{Cell, RefCell};
 
-use wz_session_core::link::LinkKind;
+use wz_session_core::link::{LinkEnds, LinkKind};
 use wz_session_core::ws_link::{
     apply_mask, read_head, write_head, HeadRead, MaskKeys, CLOSE_NORMAL, MAX_CONTROL_PAYLOAD,
     MAX_HEAD_LEN, OP_BINARY, OP_CLOSE, OP_CONTINUATION, OP_PING, OP_PONG,
 };
 
-use crate::session_drive::LinkProto;
-use crate::stream_link::{Front, StreamFraming, StreamSocket};
+use crate::stream_link::{Front, StreamEnds, StreamFraming, StreamSocket};
 
 /// The largest batch a message carries: zenoh's WebSocket MTU
 /// (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `const WS_MAX_MTU: BatchSize = BatchSize::MAX;`).
@@ -291,12 +290,16 @@ impl StreamFraming for WsFraming {
         Some((WsPrefix { bytes, len }, mask))
     }
 
-    fn kind(_proto: LinkProto) -> LinkKind {
-        LinkKind::Ws
+    // A WebSocket's ends are those of the TCP connection it runs over, under its own scheme.
+    fn link_ends(ends: StreamEnds<'_>) -> LinkEnds<'_> {
+        match ends.ip() {
+            Some((local, peer)) => LinkEnds::ip(LinkKind::Ws, local, peer),
+            None => ends.link_ends(),
+        }
     }
 
     #[cfg(feature = "alloc")]
-    fn subject(_proto: LinkProto) -> &'static wz_session_core::link::LinkSubject {
+    fn subject(_ends: StreamEnds<'_>) -> &'static wz_session_core::link::LinkSubject {
         use wz_session_core::link::LinkSubject;
         static WS: LinkSubject = LinkSubject {
             kind: Some(LinkKind::Ws),

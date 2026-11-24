@@ -71,8 +71,6 @@ use crate::stream_link::STREAM_RX_CAPACITY;
 use crate::stream_link::{stream_ends_fit, StreamLink};
 use crate::stream_link::{NoStream, StreamSocket};
 #[cfg(feature = "session-slot")]
-use crate::udp_link::ends_fit;
-#[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::udp_link::{bind_refused, datagram_ends_fit, dial_bind, UDP_RX_CAPACITY};
@@ -1097,11 +1095,11 @@ where
     }
 }
 
-/// `stream`, when the rows of the build name both its ends ([`ends_fit`]); otherwise it is closed
+/// `stream`, when the rows of the build name both its ends ([`StreamEnds::fit`](crate::stream_link::StreamEnds::fit)); otherwise it is closed
 /// and the link refused as [`LinkOpenError::Unsupported`], before a session stands on it.
 #[cfg(feature = "session-slot")]
 fn named<S: StreamSocket>(stream: S) -> Result<S, LinkOpenError> {
-    if ends_fit(S::PROTO, stream.local(), stream.peer()) {
+    if stream.ends().fit() {
         Ok(stream)
     } else {
         Err(LinkOpenError::Unsupported)
@@ -1307,6 +1305,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream_link::StreamEnds;
     use core::ffi::c_int;
     #[cfg(feature = "session-slot")]
     use wz_session_core::byte_cells::ByteCells;
@@ -1392,15 +1391,17 @@ mod tests {
         where
             Self: 'static;
 
-        /// The node's own end, of the peer's family.
-        fn local(&self) -> SocketAddr {
-            match self.0 {
+        /// The node's own end, of the peer's family, and the peer's.
+        fn ends(&self) -> StreamEnds<'_> {
+            let local = match self.0 {
                 SocketAddr::V4(_) => SocketAddr::from(([10, 0, 0, 2], 40_002)),
                 SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::LOCALHOST, 40_002)),
+            };
+            StreamEnds::Ip {
+                proto: LinkProto::Tcp,
+                local,
+                peer: self.0,
             }
-        }
-        fn peer(&self) -> SocketAddr {
-            self.0
         }
         fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
             Ok(bytes.len())
@@ -1438,12 +1439,8 @@ mod tests {
         where
             Self: 'static;
 
-        const PROTO: LinkProto = LinkProto::Tls;
-        fn local(&self) -> SocketAddr {
-            self.0.local()
-        }
-        fn peer(&self) -> SocketAddr {
-            self.0.peer()
+        fn ends(&self) -> StreamEnds<'_> {
+            self.0.ends().speaking(LinkProto::Tls)
         }
         fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
             self.0.write(bytes)
@@ -2223,12 +2220,8 @@ mod tests {
             where
                 Self: 'static;
 
-            const PROTO: LinkProto = LinkProto::Tls;
-            fn local(&self) -> SocketAddr {
-                self.channel.local()
-            }
-            fn peer(&self) -> SocketAddr {
-                self.channel.peer()
+            fn ends(&self) -> StreamEnds<'_> {
+                self.channel.ends()
             }
             fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
                 self.channel.write(bytes)

@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The grammar of a locator's text that needs no heap: the split of a locator's body into its
-//! address, metadata and config spans, and the `serial/` leaf, read into borrowed parts and
-//! written into any [`TextOut`] sink.
+//! address, metadata and config spans, and the `serial/` and `unixpipe/` leaves, read into
+//! borrowed parts and written into any [`TextOut`] sink.
 //!
 //! One grammar for every reader of a serial locator: the heap profile's `crate::locator`
 //! builds its owned endpoint out of what [`read_serial_locator`] reads and writes it back with
@@ -340,11 +340,111 @@ fn positive_u32(text: &str) -> Result<u32, SerialTextError<'_>> {
     }
 }
 
+/// The scheme of a unixpipe locator, `unixpipe/<path>`.
+pub const UNIXPIPE_SCHEME: &str = "unixpipe";
+
+/// zenoh's one unixpipe config key, the creation mode of the link's FIFOs
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @ `pub const FILE_ACCESS_MASK: &str = "file_mask";`).
+pub const UNIXPIPE_FILE_MASK_KEY: &str = "file_mask";
+
+/// A `unixpipe/...` locator read into its parts, borrowed from its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixpipeLocatorText<'a> {
+    /// The base path of the link's FIFOs, to which a link appends `_uplink` and `_downlink`.
+    pub path: &'a str,
+    /// The `#file_mask=<n>` creation mode, `None` when the locator names none and the
+    /// opener's default applies. Decimal, as upstream reads it
+    /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `val.parse().unwrap_or(*FILE_ACCESS_MASK)`),
+    /// so `file_mask=511` is `0o777`.
+    pub file_mask: Option<u32>,
+    /// The `?metadata` span, empty when there is none.
+    pub metadata: &'a str,
+}
+
+/// Why a text is not a unixpipe locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnixpipeTextError<'a> {
+    /// The text does not begin with the `unixpipe/` scheme.
+    NotUnixpipeScheme,
+    /// The path (between the scheme and the `?metadata` or `#config`) is empty.
+    EmptyPath,
+    /// The `file_mask` value is not a decimal `u32`: the text of it. Upstream falls back to its
+    /// default there; a typo in the one key that decides who else on the host may open the link is
+    /// refused here instead.
+    BadFileMask(&'a str),
+}
+
+/// Read a zenoh unixpipe locator into its parts, allocating nothing: `unixpipe/<path>`, the
+/// path taken verbatim (an absolute one keeps its `/`: `unixpipe//tmp/wz.pipe` is the path
+/// `/tmp/wz.pipe`), and the `file_mask` of the config span, never of the metadata one, the first
+/// one written when there are several, as upstream's `Parameters::get` takes it. An empty value
+/// is no mask.
+pub fn read_unixpipe_locator(
+    locator: &str,
+) -> Result<UnixpipeLocatorText<'_>, UnixpipeTextError<'_>> {
+    let (scheme, rest) = locator
+        .split_once('/')
+        .ok_or(UnixpipeTextError::NotUnixpipeScheme)?;
+    if scheme != UNIXPIPE_SCHEME {
+        return Err(UnixpipeTextError::NotUnixpipeScheme);
+    }
+    let parts = split_locator_parts(rest);
+    if parts.address.is_empty() {
+        return Err(UnixpipeTextError::EmptyPath);
+    }
+    Ok(UnixpipeLocatorText {
+        path: parts.address,
+        file_mask: unixpipe_file_mask(parts.config)?,
+        metadata: parts.metadata,
+    })
+}
+
+/// The `file_mask` a bare `key=value;...` config span names: the first one written, `None` when
+/// it is absent or empty, [`UnixpipeTextError::BadFileMask`] when it is no decimal `u32`. The one
+/// reader of the key, for a locator's config span and for the span upstream renders out of
+/// `transport/link/unixpipe/file_access_mask` alike.
+pub fn unixpipe_file_mask(config: &str) -> Result<Option<u32>, UnixpipeTextError<'_>> {
+    match first_value(config, UNIXPIPE_FILE_MASK_KEY) {
+        None | Some("") => Ok(None),
+        Some(value) => value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| UnixpipeTextError::BadFileMask(value)),
+    }
+}
+
+/// Write the path of a unixpipe locator and the `#file_mask=` it needs to be read back as it was
+/// (everything after `unixpipe/`), into `out`: what [`read_unixpipe_locator`] reads. A locator
+/// that names no mask is written without a config span.
+pub fn write_unixpipe_path_with_config<W: TextOut + ?Sized>(
+    out: &mut W,
+    path: &str,
+    file_mask: Option<u32>,
+) {
+    out.push_str(path);
+    if let Some(mask) = file_mask {
+        out.push_str("#");
+        out.push_str(UNIXPIPE_FILE_MASK_KEY);
+        out.push_str("=");
+        out.push_u64(u64::from(mask));
+    }
+}
+
+/// The first value a `key=value;...` span gives `key`, as upstream's `Parameters::get` reads it.
+fn first_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
+    config
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, value)| value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        read_serial_locator, write_serial_address_with_config, SerialAddress, SerialLocatorText,
-        SerialOptions, SerialTextError, SERIAL_DEFAULT_BAUDRATE,
+        read_serial_locator, read_unixpipe_locator, write_serial_address_with_config,
+        write_unixpipe_path_with_config, SerialAddress, SerialLocatorText, SerialOptions,
+        SerialTextError, UnixpipeLocatorText, UnixpipeTextError, SERIAL_DEFAULT_BAUDRATE,
     };
     use crate::text_out::FixedText;
 
@@ -425,6 +525,69 @@ mod tests {
         assert_eq!(
             read_serial_locator("serial//dev/ttyUSB0#tout=soon").map(|read| read.options),
             Ok(SerialOptions::UPSTREAM)
+        );
+    }
+
+    /// A unixpipe locator is read without a heap and written back as it was: the path, and the
+    /// mask when one is named. Turned red by a reader or a writer that drifts from the other.
+    #[test]
+    fn a_unixpipe_locator_is_read_without_a_heap_and_written_back_as_it_was() {
+        for text in [
+            "unixpipe//tmp/wz.pipe",
+            "unixpipe/rel.pipe",
+            "unixpipe//tmp/wz.pipe#file_mask=416",
+        ] {
+            let read = read_unixpipe_locator(text).expect(text);
+            let mut out = FixedText::<64>::new();
+            write_unixpipe_path_with_config(&mut out, read.path, read.file_mask);
+            assert_eq!(
+                out.finish(),
+                Ok(text.strip_prefix("unixpipe/").expect(text)),
+                "{text}"
+            );
+        }
+    }
+
+    /// The reader takes the path, the first `file_mask` of the config span (never of the
+    /// metadata) and the metadata apart. Turned red by a reader that reads the mask out of the
+    /// metadata, takes the last of two, or keeps a separator in the path.
+    #[test]
+    fn the_unixpipe_reader_takes_the_path_mask_and_metadata_apart() {
+        assert_eq!(
+            read_unixpipe_locator(
+                "unixpipe//tmp/wz.pipe?file_mask=1#iface=x;file_mask=416;file_mask=7"
+            ),
+            Ok(UnixpipeLocatorText {
+                path: "/tmp/wz.pipe",
+                file_mask: Some(416),
+                metadata: "file_mask=1",
+            })
+        );
+        assert_eq!(
+            read_unixpipe_locator("unixpipe//tmp/wz.pipe#file_mask=").map(|read| read.file_mask),
+            Ok(None)
+        );
+    }
+
+    /// What is not a unixpipe locator is refused with its reason. Turned red by a reader that
+    /// takes another scheme, an empty path, or a mask that is no decimal `u32`.
+    #[test]
+    fn what_is_not_a_unixpipe_locator_is_refused_with_its_reason() {
+        assert_eq!(
+            read_unixpipe_locator("unixsock//tmp/wz.sock"),
+            Err(UnixpipeTextError::NotUnixpipeScheme)
+        );
+        assert_eq!(
+            read_unixpipe_locator("unixpipe"),
+            Err(UnixpipeTextError::NotUnixpipeScheme)
+        );
+        assert_eq!(
+            read_unixpipe_locator("unixpipe/#file_mask=416"),
+            Err(UnixpipeTextError::EmptyPath)
+        );
+        assert_eq!(
+            read_unixpipe_locator("unixpipe//tmp/p#file_mask=0o600"),
+            Err(UnixpipeTextError::BadFileMask("0o600"))
         );
     }
 }

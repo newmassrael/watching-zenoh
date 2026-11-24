@@ -94,8 +94,9 @@ use core::net::SocketAddr;
 use core::str::FromStr;
 
 use crate::locator_grammar::{
-    read_serial_locator, split_locator_parts, write_serial_address_with_config, SerialAddress,
-    SerialTextError,
+    read_serial_locator, read_unixpipe_locator, split_locator_parts, unixpipe_file_mask,
+    write_serial_address_with_config, SerialAddress, SerialTextError, UnixpipeTextError,
+    UNIXPIPE_FILE_MASK_KEY,
 };
 
 /// Transport protocol of a locator. MVP set; extended as new link
@@ -1792,40 +1793,23 @@ pub enum UnixpipeLocatorError {
     BadConfigValue { key: &'static str, value: String },
 }
 
-const UNIXPIPE_SCHEME: &str = "unixpipe";
-
-/// zenoh `FILE_ACCESS_MASK` config key
-/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs`
-/// @ `pub const FILE_ACCESS_MASK: &str = "file_mask";`).
-const LOCATOR_FILE_MASK_KEY: &str = "file_mask";
-
 /// Parse a `unixpipe/...` locator into a [`UnixpipeEndpoint`] — the FIFO-pair
-/// sibling of [`parse_unixsock_locator`]. The scheme is the substring before
-/// the first `/`; the remainder is the FIFO-pair base path, taken verbatim (an
-/// absolute path keeps its leading `/`: `unixpipe//tmp/wz.pipe` -> path
-/// `/tmp/wz.pipe`). An empty path is rejected ([`UnixpipeLocatorError::EmptyPath`]).
+/// sibling of [`parse_unixsock_locator`]. The text is read by the grammar every engine reads it
+/// with ([`read_unixpipe_locator`]): the scheme is the substring before the first `/`, the
+/// remainder the FIFO-pair base path, taken verbatim (an absolute path keeps its leading `/`:
+/// `unixpipe//tmp/wz.pipe` -> path `/tmp/wz.pipe`). An empty path is rejected
+/// ([`UnixpipeLocatorError::EmptyPath`]).
 pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, UnixpipeLocatorError> {
-    let (scheme, body) = locator
-        .split_once('/')
-        .ok_or(UnixpipeLocatorError::NotUnixpipeScheme)?;
-    if scheme != UNIXPIPE_SCHEME {
-        return Err(UnixpipeLocatorError::NotUnixpipeScheme);
-    }
-    // R311y469 — the FIFO-pair base path is the ADDRESS span, exactly as for
-    // the unixsock sibling above.
-    let parts = split_locator_parts(body);
-    let path = parts.address;
-    if path.is_empty() {
-        return Err(UnixpipeLocatorError::EmptyPath);
-    }
+    let read = read_unixpipe_locator(locator).map_err(UnixpipeLocatorError::from)?;
     Ok(UnixpipeEndpoint {
-        path: path.to_string(),
-        file_mask: parse_file_mask(parts.config)?,
-        qos: parse_qos_metadata(parts.metadata),
+        path: read.path.to_string(),
+        file_mask: read.file_mask,
+        qos: parse_qos_metadata(read.metadata),
     })
 }
 
-/// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span.
+/// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span, read by the grammar's
+/// one reader of the key ([`unixpipe_file_mask`]).
 ///
 /// Absent or empty yields `Ok(None)`, leaving the backend's own default; a
 /// value that is not a `u32` is REFUSED. See [`UnixpipeEndpoint::file_mask`]
@@ -1836,16 +1820,18 @@ pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, Unixpip
 /// rule `iface` / `ttl` / `join` follow, and upstream reads this key off
 /// `endpoint.config()`.
 fn parse_file_mask(config: &str) -> Result<Option<u32>, UnixpipeLocatorError> {
-    match lookup_param(config, LOCATOR_FILE_MASK_KEY).filter(|v| !v.is_empty()) {
-        None => Ok(None),
-        Some(value) => {
-            value
-                .parse::<u32>()
-                .map(Some)
-                .map_err(|_| UnixpipeLocatorError::BadConfigValue {
-                    key: LOCATOR_FILE_MASK_KEY,
-                    value: value.to_string(),
-                })
+    unixpipe_file_mask(config).map_err(UnixpipeLocatorError::from)
+}
+
+impl From<UnixpipeTextError<'_>> for UnixpipeLocatorError {
+    fn from(error: UnixpipeTextError<'_>) -> Self {
+        match error {
+            UnixpipeTextError::NotUnixpipeScheme => UnixpipeLocatorError::NotUnixpipeScheme,
+            UnixpipeTextError::EmptyPath => UnixpipeLocatorError::EmptyPath,
+            UnixpipeTextError::BadFileMask(value) => UnixpipeLocatorError::BadConfigValue {
+                key: UNIXPIPE_FILE_MASK_KEY,
+                value: value.to_string(),
+            },
         }
     }
 }

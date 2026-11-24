@@ -25,8 +25,8 @@ use core::ffi::{c_int, c_void};
 use core::mem::size_of;
 use core::net::SocketAddr;
 
-use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use zephyr_sys::socket::{
     accept, bind, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
     shutdown, PollFd, SockLen, IPPROTO_TCP, POLLIN, SHUT_RDWR, SOCK_STREAM, SOL_SOCKET,
@@ -177,12 +177,12 @@ impl StreamSocket for ZephyrTcpSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     // The socket blocks, so the write returns once the stack has taken every byte.
