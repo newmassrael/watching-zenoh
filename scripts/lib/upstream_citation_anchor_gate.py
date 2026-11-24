@@ -530,7 +530,10 @@ BASENAME_LINE_CITE = re.compile(r"(?<![\w/.-])([\w-]+\.(?:rs|c|h)):(\d+)")
 #: 282 -> 281. The transport-OAM count in the codec gate's doc was retaken at the
 #: 1.10.2 pin, and its line citation of the link-state network's OAM sender became
 #: a needle.
-LINE_BUDGET = 281
+#: 281 -> 280. The session observer's note dropped a line citation of the session API,
+#: and the compression and handshake-cookie notes that arrived with line citations
+#: carry them as needles.
+LINE_BUDGET = 280
 #: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
 #: POSIX shm implementation file with no anchor; the rewrite that mirrors the
 #: metadata segment cites the files it follows by needle instead.
@@ -622,7 +625,9 @@ ROOTLESS_LINE_BUDGET = 74
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
 # R2934 — 35 -> 27, the same `c867f7b8` module deletion as ROOTLESS_LINE_BUDGET.
-ROOTLESS_BARE_BUDGET = 26
+# 26 -> 25: the reply sink's two root-less mentions of the session API went with the
+# sink's rework, and the reply hold that took its place names it once.
+ROOTLESS_BARE_BUDGET = 25
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
@@ -756,7 +761,8 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     # 48 -> 47: the router forwarder's note on its forward-path stamp, rewritten when the
     # stamp moved to the first route with a destination, cites the dispatcher's
     # `if !route.is_empty()` with its root in place of a root-less line citation.
-    "dispatcher": 47,
+    # 47 -> 46: a root-less mention of the dispatcher went with the code it described.
+    "dispatcher": 46,
     "establishment": 33,
     "ext": 13,
     "lowlatency": 3,
@@ -905,7 +911,8 @@ def rootless_undeclared_budget() -> int:
 # the dispatcher's empty-route test with its root and a needle.
 # 474 -> 472, the `routing` row 2 -> 1 and the `zenoh-protocol` row 42 -> 41: the
 # codec gate's transport-OAM count, retaken at the 1.10.2 pin, cites both with roots.
-ROOTLESS_TOTAL_BUDGET = 472
+# 472 -> 470, the root-less bare budget 26 -> 25 and the `dispatcher` row 47 -> 46.
+ROOTLESS_TOTAL_BUDGET = 470
 
 #: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
 #: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern
@@ -918,7 +925,8 @@ ROOTLESS_TOTAL_BUDGET = 472
 #: not prose: a build or test script naming a pico source file is a bare token
 #: too, and is held by the same ratchet, since a path that moved breaks it the
 #: same way.
-PICO_LINE_BUDGET = 311
+#: 311 -> 309: two line citations of pico sources went with the code they annotated.
+PICO_LINE_BUDGET = 309
 PICO_BARE_BUDGET = 126
 #: The basename axis, held both ways. MEASURED with the same grep: 2079
 #: `BASENAME_LINE_CITE` tokens over `tracked_files()`, of which 1187 name a file
@@ -928,7 +936,8 @@ PICO_BARE_BUDGET = 126
 #: 1187 -> 1186: the interest body codec's note that bits 5 and 6 were pico's
 #: CURRENT and FUTURE went with the claim, which was wrong, and its line
 #: citation of pico's network header with it.
-BASENAME_LINE_BUDGET = 1186
+#: 1186 -> 1184: two basename line citations went with the code they annotated.
+BASENAME_LINE_BUDGET = 1184
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
