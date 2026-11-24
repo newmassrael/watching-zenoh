@@ -1077,3 +1077,101 @@ mod facts_lock {
         assert_eq!(patch, Some(0), "the patch is capped at the peer's level");
     }
 }
+
+/// A link's time stamps are one row under one lock: what a door writes is what the row reads, the
+/// deadlines read the two stamps they compare in one hold, and a reopen clears all three.
+mod link_stamps {
+    use super::{bundle, holds_in};
+    use crate::session_actions::LinkStamps;
+
+    /// Turned red by a door that writes another stamp than it names, or by a read of the row
+    /// that holds the lock once per stamp.
+    #[test]
+    fn a_stamp_written_through_its_door_is_read_in_the_one_row() {
+        let (actions, _link) = bundle();
+        actions.link.fact_established_at(|slot| *slot = Some(1));
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
+        actions.link.fact_last_outbound_at(|slot| *slot = Some(3));
+        let mut stamps = LinkStamps::default();
+        let holds = holds_in(|| stamps = actions.link.stamps());
+        assert_eq!(holds, 1, "the row is read in one hold");
+        assert_eq!(
+            stamps,
+            LinkStamps {
+                established_at: Some(1),
+                last_inbound_at: Some(2),
+                last_outbound_at: Some(3),
+            }
+        );
+    }
+
+    /// The lease deadline counts from the later of the establishment and the last receipt, and
+    /// reads the two in one hold; the other hold is the peer's lease. Turned red by a deadline
+    /// that reads each stamp in a hold of its own.
+    #[test]
+    fn the_lease_deadline_reads_its_two_stamps_in_one_hold() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(250));
+        let lease = actions.adopted_lease_ms();
+        let mut deadline = None;
+        let holds = holds_in(|| deadline = crate::drive::lease_wake_deadline(&*actions));
+        assert_eq!(
+            deadline,
+            Some(250 + lease),
+            "the later stamp is the baseline"
+        );
+        assert_eq!(
+            holds, 2,
+            "the stamps in one hold, the peer's lease in another"
+        );
+    }
+
+    /// The keepalive deadline counts from the later of the establishment and the last emit, and
+    /// reads the two in one hold. Turned red by a deadline that reads each stamp in a hold of its
+    /// own.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn the_keepalive_deadline_reads_its_two_stamps_in_one_hold() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .keepalive_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(300));
+        actions.link.fact_last_outbound_at(|slot| *slot = Some(200));
+        let interval = actions.keepalive_interval_ms();
+        let mut deadline = None;
+        let holds = holds_in(|| deadline = crate::drive::keepalive_wake_deadline(&*actions));
+        assert_eq!(
+            deadline,
+            Some(300 + interval),
+            "the later stamp is the baseline"
+        );
+        assert_eq!(
+            holds, 2,
+            "the stamps in one hold, the peer's lease in another"
+        );
+    }
+
+    /// Every stamp is the closed transport's: a reopen clears the three in one hold of the row.
+    /// Turned red by a reopen that leaves one of them standing.
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_clears_every_stamp() {
+        let (actions, _link) = bundle();
+        actions.link.with_stamps(|stamps| {
+            *stamps = LinkStamps {
+                established_at: Some(1),
+                last_inbound_at: Some(2),
+                last_outbound_at: Some(3),
+            }
+        });
+        actions.reset_for_reopen();
+        assert_eq!(actions.link.stamps(), LinkStamps::default());
+    }
+}
