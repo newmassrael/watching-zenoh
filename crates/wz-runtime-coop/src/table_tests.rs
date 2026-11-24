@@ -32,6 +32,23 @@ struct Counting;
 std::thread_local! {
     /// The allocations this thread made since it began counting, while it counts.
     static COUNTED: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Whether every allocation this thread asks for is refused, as a heap that is full would.
+    static REFUSING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f`'s answer, every allocation this thread asks for while it runs refused: what a caller of
+/// the heap does when the heap is full, with nothing taken from it.
+#[cfg(feature = "session-unicast")]
+pub(crate) fn refused<R>(f: impl FnOnce() -> R) -> R {
+    REFUSING.with(|refusing| refusing.set(true));
+    let answer = f();
+    REFUSING.with(|refusing| refusing.set(false));
+    answer
+}
+
+/// Whether this thread's allocations are refused now (`refused`).
+fn refusing() -> bool {
+    REFUSING.try_with(Cell::get).unwrap_or(false)
 }
 
 fn note() {
@@ -42,22 +59,32 @@ fn note() {
     });
 }
 
-// SAFETY: every call is the system allocator's, with the arguments it was given.
+// SAFETY: every call is the system allocator's, with the arguments it was given, or a refusal
+// (null), which hands out no memory.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note();
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: the caller's contract, passed on.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         note();
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: as above.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         note();
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: as above.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
