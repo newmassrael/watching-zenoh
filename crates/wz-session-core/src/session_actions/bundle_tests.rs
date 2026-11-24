@@ -770,7 +770,7 @@ mod lent_handshake {
     ))]
     #[test]
     fn a_lent_open_syn_carries_the_bound_the_session_decided() {
-        use crate::extbound::{peer_remote_bound_in, Bound};
+        use crate::extbound::Bound;
         use crate::inbound::{read_control, ExtChainRead};
         let link = LendingLink::of_width(512);
         let (actions, mut binding) = opener(&link);
@@ -783,7 +783,7 @@ mod lent_handshake {
         assert_eq!(sent.len(), 2, "both OpenSyns were sent");
         let bound_of = |bytes: &[u8]| {
             let (read, _) = read_control(bytes).expect("an Open the reader reads");
-            peer_remote_bound_in(read.chain().entries()).ok()
+            read.chain().remote_bound().ok()
         };
         assert_eq!(
             bound_of(sent[0].as_slice()),
@@ -904,13 +904,13 @@ mod facts_lock {
     #[cfg(feature = "codec-open-body")]
     #[test]
     fn an_admitted_open_ack_ends_the_wait_and_takes_the_lease() {
-        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::extbound::{encode_remote_bound_ext, peer_remote_bound, Bound};
         use crate::session_actions::OpenAckAdmission;
         let (actions, _link) = bundle();
         actions.fact_awaiting_open_ack(|slot| *slot = true);
-        let chain = [encode_remote_bound_ext(Bound::South)];
+        let bound = peer_remote_bound(&[encode_remote_bound_ext(Bound::South)]);
         let mut admitted = None;
-        let holds = holds_in(|| admitted = Some(actions.admit_open_ack_in(5, 10, &chain)));
+        let holds = holds_in(|| admitted = Some(actions.admit_open_ack(5, 10, bound)));
         assert_eq!(admitted, Some(OpenAckAdmission::Taken));
         assert_eq!(
             holds, 1,
@@ -933,12 +933,12 @@ mod facts_lock {
     #[cfg(feature = "codec-open-body")]
     #[test]
     fn an_open_ack_no_one_awaits_takes_nothing() {
-        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::extbound::{encode_remote_bound_ext, peer_remote_bound, Bound};
         use crate::session_actions::OpenAckAdmission;
         let (actions, _link) = bundle();
-        let chain = [encode_remote_bound_ext(Bound::South)];
+        let bound = peer_remote_bound(&[encode_remote_bound_ext(Bound::South)]);
         assert_eq!(
-            actions.admit_open_ack_in(5, 10, &chain),
+            actions.admit_open_ack(5, 10, bound),
             OpenAckAdmission::NotAwaited
         );
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
@@ -958,7 +958,7 @@ mod facts_lock {
     #[cfg(feature = "codec-open-body")]
     #[test]
     fn an_awaited_open_ack_with_an_invalid_bound_takes_nothing() {
-        use crate::extbound::REMOTE_BOUND_EXT_HEADER;
+        use crate::extbound::{peer_remote_bound, InvalidBound, REMOTE_BOUND_EXT_HEADER};
         use crate::session_actions::OpenAckAdmission;
         use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
         let (actions, _link) = bundle();
@@ -969,8 +969,10 @@ mod facts_lock {
                 value: 2,
             }),
         }];
+        let bound = peer_remote_bound(&invalid);
+        assert_eq!(bound, Err(InvalidBound(2)), "a bound of 2 is neither bound");
         assert_eq!(
-            actions.admit_open_ack_in(5, 10, &invalid),
+            actions.admit_open_ack(5, 10, bound),
             OpenAckAdmission::BoundRefused
         );
         let (awaiting, lease, bound) = actions.with_facts(|facts| {

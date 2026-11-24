@@ -108,17 +108,21 @@ pub fn peer_remote_bound(extensions: &[ExtEntryOwned]) -> Result<Option<Bound>, 
 pub fn peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<Bound>, InvalidBound> {
-    let want = crate::ext_header::ext_eid(REMOTE_BOUND_EXT_HEADER);
-    for ext in extensions {
-        if ext.eid() != want {
-            continue;
-        }
-        let Some(value) = ext.zint() else {
-            continue;
-        };
-        return Bound::from_wire(value).map(Some);
+    extensions
+        .into_iter()
+        .find_map(|ext| bound_of_entry(&ext))
+        .transpose()
+}
+
+/// One entry's part in [`peer_remote_bound_in`]: the bound or its refusal when the entry is the
+/// remote-bound extension with its z64 body, `None` otherwise (and the scan goes on).
+pub fn bound_of_entry<E: crate::ext_view::ExtEntryView>(
+    ext: &E,
+) -> Option<Result<Bound, InvalidBound>> {
+    if ext.eid() != crate::ext_header::ext_eid(REMOTE_BOUND_EXT_HEADER) {
+        return None;
     }
-    Ok(None)
+    ext.zint().map(Bound::from_wire)
 }
 
 /// Item 751 — the entry a node puts on its Open when it announces a bound for
