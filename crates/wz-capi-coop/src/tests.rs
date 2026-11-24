@@ -2771,7 +2771,7 @@ mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
-mod redial_heap;
+pub(crate) mod redial_heap;
 mod redial_wait;
 mod replay;
 mod round;

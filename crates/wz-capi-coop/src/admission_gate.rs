@@ -15,7 +15,6 @@
 //! The handshake itself is read through: the gate shuts when the session is established, which is
 //! after the frame that completed the handshake was dispatched, and not before.
 
-use alloc::rc::Rc;
 use core::cell::Cell;
 
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
@@ -23,43 +22,34 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
 
-/// Whether the engine has admitted a link: shared between the gate the link's task reads through
-/// and the engine's wire for that link, which opens it.
-#[derive(Clone, Default)]
-pub(crate) struct Admitted(Rc<Cell<bool>>);
-
-impl Admitted {
-    /// The link is admitted: its input reaches the session from here on.
-    pub(crate) fn grant(&self) {
-        self.0.set(true);
-    }
-
-    fn granted(&self) -> bool {
-        self.0.get()
-    }
-}
-
-/// `pump`, which gives the session nothing from the moment `actions` is established until
-/// `admitted` is granted.
+/// `pump`, which gives the session nothing from the moment `actions` is established until the
+/// gate is granted ([`Self::grant`]). The gate keeps whether it was granted itself: it lies in the
+/// link's cell of the session's table, and the engine's wire for the link holds a handle on that
+/// cell, so a link made after the open takes no memory of the heap for its admission.
 pub(crate) struct AdmissionGate<P, C: ClockSource + 'static> {
     pump: P,
     actions: SessionHandle<C>,
-    admitted: Admitted,
+    admitted: Cell<bool>,
 }
 
 impl<P, C: ClockSource + 'static> AdmissionGate<P, C> {
-    pub(crate) fn new(pump: P, actions: SessionHandle<C>, admitted: Admitted) -> Self {
+    pub(crate) fn new(pump: P, actions: SessionHandle<C>) -> Self {
         Self {
             pump,
             actions,
-            admitted,
+            admitted: Cell::new(false),
         }
+    }
+
+    /// The link is admitted: its input reaches the session from here on.
+    pub(crate) fn grant(&self) {
+        self.admitted.set(true);
     }
 
     /// Whether the link's input is held back: its handshake is complete and the engine has not
     /// admitted it.
     fn shut(&self) -> bool {
-        !self.admitted.granted() && self.actions.is_established()
+        !self.admitted.get() && self.actions.is_established()
     }
 }
 
@@ -150,6 +140,7 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
     use wz_runtime_coop::session_drive::{
@@ -203,7 +194,6 @@ mod tests {
             .expect("bind the acceptor's end");
         let acceptor =
             new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
-        let admitted = Admitted::default();
         let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let into = heard.clone();
@@ -217,9 +207,10 @@ mod tests {
                 }),
             )
             .expect("the acceptor's subscriber");
+        let gate = Rc::new(AdmissionGate::new(pump, acceptor.clone()));
         let _acceptor_task = spawn_session(
             &local,
-            Rc::new(AdmissionGate::new(pump, acceptor.clone(), admitted.clone())),
+            gate.clone(),
             acceptor.clone(),
             wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
             CoopTime::new(&runtime),
@@ -267,7 +258,7 @@ mod tests {
             "the acceptor's link gave the session a put before it was admitted"
         );
 
-        admitted.grant();
+        gate.grant();
         for _ in 0..16 {
             local.run_until_idle();
         }
@@ -275,6 +266,34 @@ mod tests {
             *heard.lock().unwrap(),
             [b"first".to_vec()],
             "the put waited in the link and is delivered once, in order, after the admission"
+        );
+    }
+
+    /// Making a link's gate and admitting it allocates nothing: the gate keeps its admission in
+    /// itself, which lies where the gate does (the link's cell of the session's table), so a link
+    /// a listening session takes after its open takes no memory of the heap for it. Turned red by
+    /// an admission kept in a cell of the heap that the gate and the engine's wire share.
+    #[test]
+    fn a_gate_and_its_admission_take_no_memory_of_the_heap() {
+        let runtime = CoopRuntime::new(Frozen);
+        let OpenedLink { sink, pump } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
+            .open_acceptor(7447)
+            .expect("bind the acceptor's end");
+        let acceptor =
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+        let mut made = None;
+        let allocations = crate::tests::redial_heap::counted(|| {
+            let gate = AdmissionGate::new(pump, acceptor.clone());
+            gate.grant();
+            made = Some(gate);
+        });
+        assert_eq!(
+            allocations, 0,
+            "the gate and its admission allocate nothing"
+        );
+        assert!(
+            made.is_some_and(|gate| gate.admitted.get()),
+            "CONTROL: the gate made is admitted"
         );
     }
 }
