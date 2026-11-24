@@ -1077,10 +1077,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
         E::InitSynReceived => actions.half_open_cap_available() && actions.accept_rate_token(),
         #[cfg(feature = "session-unicast-accept")]
         E::OpenSynReceived => actions.cookie_valid(),
-        // R2782 — the initiator's twin: an OpenAck is admitted
-        // only while one is awaited. A replay after
-        // `Established` was measured to reset the RX baseline.
-        E::OpenAckReceived => actions.open_ack_awaited(),
+        // R2782 — the initiator's twin, an OpenAck admitted only while one is awaited, is
+        // judged below with the rest of what the OpenAck takes, in one hold of the facts.
         _ => true,
     };
     if !admit {
@@ -1148,11 +1146,36 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // an extension failure and leaves through `ext_rejected` like
     // the region name below. Placed BEFORE the admissions so a
     // refused Open seeds no SN and adopts no lease.
-    #[cfg(feature = "codec-open-body")]
-    if let crate::inbound::ControlFacts::Open(_) = facts {
+    //
+    // An OpenAck is admitted, its bound refused or taken and the rest of it taken in one hold of
+    // the facts (`admit_open_ack_in`); it is dropped silently, as any frame not admitted is, when
+    // none is awaited (R2782: a replay after `Established` was measured to reset the RX
+    // baseline).
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { is_ack: false, .. }) =
+        facts
+    {
         if !actions.admit_peer_remote_bound_in(chain.entries()) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::OpenRemoteBoundRejected;
+        }
+    }
+    #[cfg(feature = "codec-open-body")]
+    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
+        is_ack: true,
+        lease,
+        initial_sn,
+        ..
+    }) = facts
+    {
+        use crate::session_actions::OpenAckAdmission as A;
+        match actions.admit_open_ack_in(*lease, *initial_sn, chain.entries()) {
+            A::Taken => {}
+            A::NotAwaited => return DriverLoopOutcome::SideEffectOnly,
+            A::BoundRefused => {
+                *to_engine = Some(E::EstablishmentExtRejected);
+                return DriverLoopOutcome::OpenRemoteBoundRejected;
+            }
         }
     }
     // A build without the accepting role reaches this function with no OpenSyn: the frame
@@ -1167,16 +1190,6 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     }) = facts
     {
         actions.admit_open_syn(*lease, *initial_sn);
-    }
-    #[cfg(feature = "codec-open-body")]
-    if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
-        is_ack: true,
-        lease,
-        initial_sn,
-        ..
-    }) = facts
-    {
-        actions.admit_open_ack(*lease, *initial_sn);
     }
     // R311y578 — take the `min(local, peer)` protocol PATCH
     // level off every admitted Init frame (zenoh-pico
@@ -1725,17 +1738,8 @@ fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
     // The mode is the session's, from the snapshot its creator handed it. A build whose domain
     // holds only `off` (upstream's) reads it as a constant, and the gap test below folds away.
     let mode = actions.params.policy.reliable_gap_reconnect();
-    if !reliable || matches!(mode, Mode::Off) {
-        return if actions.admit_rx_frame_sn(priority, reliable, sn) {
-            None
-        } else {
-            Some(DriverLoopOutcome::RxSnRejected {
-                priority,
-                reliable,
-                sn,
-            })
-        };
-    }
+    // One judgement of the gate whatever the mode: a gap passes unless the mode reacts to it on
+    // the reliable channel.
     match actions.admit_rx_frame_sn_judged(priority, reliable, sn) {
         RxAdmit::Accept => None,
         RxAdmit::Stale => Some(DriverLoopOutcome::RxSnRejected {
@@ -1744,7 +1748,9 @@ fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
             sn,
         }),
         RxAdmit::Gap { .. }
-            if crate::sn::reacts_to_gap(mode, actions.peer_declarations_settled()) =>
+            if reliable
+                && !matches!(mode, Mode::Off)
+                && crate::sn::reacts_to_gap(mode, actions.peer_declarations_settled()) =>
         {
             *to_engine = Some(E::LinkLost);
             Some(DriverLoopOutcome::LinkLost(
@@ -3077,18 +3083,14 @@ where
     on_event.event(IterationEvent::InPlaceFragment(
         crate::driver_loop::InPlaceFragment::of_head(unit, payload_at, &head),
     ));
-    // Armed from the negotiated patch level, as the copying hand-off arms it,
-    // and bounded by the session's configuration the same way.
-    reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
-    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
-    // The peer's caps (for the SN ring) and the chain key's peer half, read in
-    // one hold of the facts and copied out first: the Router delivers a
-    // completed chain from inside the ingest, and what the delivery dispatches
-    // must not run under the facts' lock. The Router keys a chain on at most
-    // this many bytes of the zid.
+    // The negotiated patch level (whether the Router enforces the chain markers), the peer's
+    // caps (for the SN ring) and the chain key's peer half, read in one hold of the facts and
+    // copied out first: the Router delivers a completed chain from inside the ingest, and what
+    // the delivery dispatches must not run under the facts' lock. The Router keys a chain on at
+    // most this many bytes of the zid.
     // A Router whose key keeps no peer reads none.
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
-    let (caps, peer_len) = actions.with_facts(|facts| {
+    let (markers_negotiated, caps, peer_len) = actions.with_facts(|facts| {
         let zid: &[u8] = if P::KEYED {
             facts.handshake.inbound_peer_zid.as_deref().unwrap_or(&[])
         } else {
@@ -3098,10 +3100,15 @@ where
             *to = *from;
         }
         (
+            facts.handshake.fragmentation_markers(),
             facts.handshake.inbound_peer_init_caps,
             zid.len().min(peer.len()),
         )
     });
+    // Armed from the negotiated patch level, as the copying hand-off arms it,
+    // and bounded by the session's configuration the same way.
+    reasm.set_fragmentation_markers(markers_negotiated);
+    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
     let sn_mask = actions.sn_mask_for(caps);
     let mut dropped_by_decode = None;
     let ingest_outcome = reasm.ingest_keeping(
@@ -4305,18 +4312,13 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, P, F, 
     // `config.patch.has_fragmentation_markers()` per fragment
     // (`unicast/universal/rx.rs:155`); wz reads the settled session value,
     // which is why this is a bool write and not a negotiation.
-    reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
-    // The session's `transport/link/rx/max_message_size`, from its own
-    // configuration rather than the host's Router construction, so every host
-    // that drives a unicast session applies it.
-    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
-    // The peer's caps (for the SN ring) and its zid (the chain key's peer half),
-    // read in one hold of the facts and copied out: the ingest drives the slot's
-    // machine and decodes a completed chain, neither of which runs under the
-    // facts' lock.
+    // The negotiated patch level, the peer's caps (for the SN ring) and its zid (the chain key's
+    // peer half), read in one hold of the facts and copied out: the ingest drives the slot's
+    // machine and decodes a completed chain, neither of which runs under the facts' lock.
     // A Router whose key keeps no peer reads none.
-    let (caps, peer) = actions.with_facts(|facts| {
+    let (markers_negotiated, caps, peer) = actions.with_facts(|facts| {
         (
+            facts.handshake.fragmentation_markers(),
             facts.handshake.inbound_peer_init_caps,
             if P::KEYED {
                 facts.handshake.inbound_peer_zid
@@ -4325,6 +4327,11 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, P, F, 
             },
         )
     });
+    reasm.set_fragmentation_markers(markers_negotiated);
+    // The session's `transport/link/rx/max_message_size`, from its own
+    // configuration rather than the host's Router construction, so every host
+    // that drives a unicast session applies it.
+    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
     let sn_mask = actions.sn_mask_for(caps);
     let mut completed: Option<DriverLoopOutcome> = None;
     // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
