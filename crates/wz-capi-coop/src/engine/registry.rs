@@ -525,7 +525,7 @@ impl Registry {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            decl_watches: alloc::sync::Arc::default(),
+            decl_watches: alloc::sync::Arc::new(DeclWatches::under(limits)?),
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
