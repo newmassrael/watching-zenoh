@@ -768,11 +768,15 @@ impl Registry {
     /// registered after the peer's interest is owed, and the retraction of an aggregate
     /// declaration the last matching subscription stood for. An observer that held the peer's
     /// side beside the table staged both as it was told; the table that serves one peer or many
-    /// leaves each peer to read the table's epoch, and nothing else reads it.
+    /// leaves each peer to read the table's epoch, and nothing else reads it. A build that answers
+    /// no Interest has nothing to stage.
     fn reconcile_subscribers(&mut self, id: FaceId) {
+        #[cfg(feature = "interest-answer")]
         if let Some(Split { app, face, .. }) = self.split(id) {
             face.peer.subscribers.reconcile(&app.subscribers);
         }
+        #[cfg(not(feature = "interest-answer"))]
+        let _ = id;
     }
 
     /// Drain what the last [`Self::dispatch_event`] of face `id` staged, EXCEPT the `Final`s the
@@ -831,6 +835,7 @@ impl Registry {
                     delivery,
                     event,
                 );
+                #[cfg(feature = "interest-answer")]
                 face.peer.subscribers.reconcile(&app.subscribers);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
@@ -880,6 +885,7 @@ impl Registry {
             face.peer
                 .subscribers
                 .dispatch_iteration_event(&mut app.subscribers, delivery, event);
+            #[cfg(feature = "interest-answer")]
             face.peer.subscribers.reconcile(&app.subscribers);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
@@ -1458,6 +1464,7 @@ mod tests {
     /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
     /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
     /// after it was handed the key arena keeps it.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
         use wz_session_core::key_arena::block_bytes;

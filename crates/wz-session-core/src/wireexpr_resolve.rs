@@ -811,7 +811,6 @@ pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
 /// holds none: an `M=0` key is copied out of `own` into `out`, so the answer borrows the
 /// frame, the peer's table and `out` alone, and the table `own` was read from may be written as
 /// soon as this returns (the session's table set, which the delivery of the key then writes).
-#[inline(never)]
 pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
     spaces: MappingSpaces<'k>,
@@ -932,7 +931,6 @@ pub fn resolve_plain_parts_over<'k>(
 /// ours or answers `None` when no own space was given, and an id the space does
 /// not hold is `None`. A keyexpr that has to be composed lies in `out`. `own`, when given,
 /// stands for the pair's own space.
-#[inline(never)]
 fn resolve_parts<'k>(
     arm: Space,
     id: crate::wire_id::ExprId,

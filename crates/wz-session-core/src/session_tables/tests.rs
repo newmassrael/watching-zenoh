@@ -1538,7 +1538,7 @@ fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
     assert_eq!(tables.epoch(), 0);
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 #[test]
 fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
     use crate::pubsub::{SubInterestReply, SubscriberPeer};

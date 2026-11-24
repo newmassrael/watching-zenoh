@@ -156,7 +156,8 @@ pub struct ApplicationLayerObserver {
         feature = "alloc",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     pending_queryable_replies: alloc::vec::Vec<crate::query::QueryableInterestReply>,
     /// The observers told, once, that the peer ended its initial declarations
@@ -533,7 +534,8 @@ impl ApplicationLayerObserver {
                 feature = "alloc",
                 feature = "query-queryable",
                 feature = "declare-queryable",
-                any(feature = "liveliness-token", feature = "declare-subscriber")
+                any(feature = "liveliness-token", feature = "declare-subscriber"),
+                feature = "interest-answer"
             ))]
             pending_queryable_replies: alloc::vec::Vec::new(),
             #[cfg(feature = "declarations-synced-event")]
@@ -553,7 +555,8 @@ impl ApplicationLayerObserver {
         feature = "alloc",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     fn stage_queryable_interest(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
@@ -593,7 +596,8 @@ impl ApplicationLayerObserver {
         feature = "rx-lent-control",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     fn stage_queryable_interest_view(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
@@ -660,7 +664,8 @@ impl ApplicationLayerObserver {
             feature = "alloc",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         if let IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
             messages,
@@ -683,7 +688,8 @@ impl ApplicationLayerObserver {
             feature = "rx-lent-control",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         if let IterationEvent::InPlace(record) = event {
             if let Some(interest) = record.interest() {
@@ -918,7 +924,8 @@ impl ApplicationLayerObserver {
             feature = "alloc",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         for item in core::mem::take(&mut self.pending_queryable_replies) {
             match item {
@@ -1924,7 +1931,12 @@ mod tests {
 // subscription BETWEEN them. What a reply announces therefore has to be true
 // when it is SENT, and until this round the AGGREGATE arm checked only that
 // the peer's INTEREST row still existed — a row an undeclare never touches.
-#[cfg(all(test, feature = "declare-subscriber", feature = "alloc"))]
+#[cfg(all(
+    test,
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "alloc"
+))]
 mod sub_interest_reply_tests {
     use super::*;
     use crate::pubsub::SubInterestReply;
@@ -2473,6 +2485,93 @@ mod sub_interest_reply_tests {
     }
 }
 
+/// A build that answers no peer's Interest (`interest-answer` off), asked as one that does: the
+/// subscriber Interest reaches the subscriber plane, and neither a drain after it nor one after a
+/// subscription the Interest's FUTURE half reaches sends the peer anything, no declaration and no
+/// `Final`. The build that answers is held by `a_member_interest_on_its_own_alias_is_answered`.
+#[cfg(all(
+    test,
+    feature = "declare-subscriber",
+    not(feature = "interest-answer"),
+    feature = "alloc"
+))]
+mod unanswered_interest_tests {
+    use super::*;
+    use crate::response_sink::DeclareReplySink;
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    /// The interest id of every reply a drain sends, of any kind.
+    #[derive(Default)]
+    struct RecordingSink {
+        sent: Mutex<Vec<u64>>,
+    }
+
+    impl DeclareReplySink for RecordingSink {
+        #[cfg(feature = "liveliness-token")]
+        fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, interest_id: u64) {
+            self.sent.lock().unwrap().push(interest_id);
+        }
+
+        fn send_declare_final_reply(&self, interest_id: u64) {
+            self.sent.lock().unwrap().push(interest_id);
+        }
+
+        fn send_declare_subscriber_reply(
+            &self,
+            _subscriber_id: u64,
+            _keyexpr: &str,
+            interest_id: u64,
+        ) {
+            self.sent.lock().unwrap().push(interest_id);
+        }
+
+        #[cfg(feature = "declare-undeclare")]
+        fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+            self.sent.lock().unwrap().push(subscriber_id);
+        }
+    }
+
+    #[test]
+    fn a_peers_subscriber_interest_is_not_answered() {
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .subscribe("demo/unasked/a", |_| {})
+            .expect("no quota is stated on this table");
+        let interest = crate::interest_build::build_interest_subscribers(
+            3,
+            /*current=*/ true,
+            /*future=*/ true,
+            0,
+            Some("demo/unasked/**"),
+        )
+        .expect("a literal key builds");
+        let frame = crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![crate::network_message::NetworkMessage::Interest(interest)],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        crate::driver_loop::deliver_frame(&frame, |event| observer.dispatch_event(event));
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        assert!(
+            sink.sent.lock().unwrap().is_empty(),
+            "the CURRENT half is not answered, not even by a Final"
+        );
+        observer
+            .subscribe("demo/unasked/b", |_| {})
+            .expect("no quota is stated on this table");
+        observer.flush_declare_replies(&sink);
+        assert!(
+            sink.sent.lock().unwrap().is_empty(),
+            "and the FUTURE half is not told of a later subscription"
+        );
+    }
+}
+
 /// R2349 (`liveliness-history`) — the HISTORY replay covers the peer's
 /// tokens and NOT this session's own, and that exclusion is a PARITY
 /// DECISION rather than a gap.
@@ -2613,7 +2712,8 @@ mod history_replay_is_peer_scoped {
     feature = "alloc",
     feature = "query-queryable",
     feature = "declare-queryable",
-    any(feature = "liveliness-token", feature = "declare-subscriber")
+    any(feature = "liveliness-token", feature = "declare-subscriber"),
+    feature = "interest-answer"
 ))]
 mod queryable_interest_reply_tests {
     use super::*;

@@ -1287,8 +1287,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
         self.liveliness.dispatch_iteration_event(event, peer_table);
         // R283 -- stage an interest-response for each inbound non-final liveliness
-        // Interest, whole chains or none, into THIS session's staging.
-        #[cfg(feature = "liveliness-token")]
+        // Interest, whole chains or none, into THIS session's staging. A build that answers no
+        // peer's Interest (`interest-answer` off) stages none, as the subscriber plane does
+        // (`SubscriberPeer`'s `ignore_subscriber_interest`).
+        #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
         {
             let refused = self.local_tokens.dispatch_iteration_event(
                 event,
@@ -1562,7 +1564,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers: &mut PeerTables<T>,
         sink: &S,
     ) {
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         for item in peers.subscribers.take_staged_sub_interest_replies() {
             match &item {
                 crate::pubsub::SubInterestReply::Final { interest_id } => {
@@ -1659,7 +1661,7 @@ fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
     {
         staged |= !peers.replies.is_empty();
     }
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     {
         staged |= peers.subscribers.has_staged_sub_interest_replies();
     }
@@ -2395,6 +2397,7 @@ mod tests {
     /// A drain with nothing staged opens no burst, whose close takes the lock of every conduit to
     /// send what it gathered: what follows every received Push, eight here, each burst-free. The
     /// CONTROL is a drain with an answer to the peer's interest staged, which opens one.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn a_drain_with_nothing_staged_opens_no_burst() {
         let mut f = fixture(false);
@@ -2923,7 +2926,7 @@ mod lent_tests {
 
     /// A lent table answers a peer side of the build's profile: a subscription registered after
     /// the peer's FUTURE interest is staged for that peer when it reconciles.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     #[test]
     fn a_lent_table_stages_a_future_push_for_a_peer_of_another_policy() {
         let mut observer = lent_with(2);

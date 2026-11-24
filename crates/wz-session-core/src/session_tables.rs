@@ -2161,7 +2161,6 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         any_local_match(&self.subscribers, key)
     }
 
-    #[inline(never)]
     fn fire_matching<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
@@ -2182,7 +2181,6 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
 
     /// The table set holds no key gate yet: a peer's message on any key is matched against
     /// every subscription that hears peers.
-    #[inline(never)]
     fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,

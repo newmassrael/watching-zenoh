@@ -780,7 +780,7 @@ mod enforcement {
     /// One FUTURE interest of the peer, the `index`th, answered through the subscriber registry
     /// the creator held to its limits. An interest the side cannot remember is counted, not
     /// returned as an error; the count moving is what reads here as a refusal.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     fn future_interest(
         observer: &mut ApplicationLayerObserver,
         index: usize,
@@ -815,7 +815,7 @@ mod enforcement {
     }
 
     /// `MAX_INBOUND_SUB_INTERESTS` with nothing stated.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     #[test]
     fn max_inbound_sub_interests_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_INBOUND_SUB_INTERESTS, future_interest, |o| {
@@ -826,7 +826,7 @@ mod enforcement {
     /// `MAX_INBOUND_SUB_INTERESTS` stated as two: the third FUTURE interest is not remembered,
     /// is counted, and takes no declaration id; the two rows are kept, and a row the peer
     /// cancels frees its place.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     #[test]
     fn max_inbound_sub_interests_stated_refuses_the_next_and_takes_no_id() {
         held_to_two(
@@ -869,7 +869,7 @@ mod enforcement {
     /// A subscriber interest of the session's peer, `interest_id`, asking for the subscribers that
     /// stand now (`current`) and those to come (`future`), answered by the observer: how many
     /// declarations it staged.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     fn sub_interest(
         observer: &mut ApplicationLayerObserver,
         interest_id: u64,
@@ -1044,7 +1044,10 @@ mod enforcement {
     /// `MAX_PENDING_DECLARES` with nothing stated, on both tables it bounds: the answers to
     /// the peer's subscriber interests and to its token interests. Each CURRENT interest that
     /// nothing matches is answered by its `Final` alone, one item.
-    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[cfg(any(
+        all(feature = "declare-subscriber", feature = "interest-answer"),
+        feature = "liveliness-token"
+    ))]
     #[test]
     fn max_pending_declares_with_nothing_stated_admits_what_the_build_admitted() {
         let admitted = if crate::bounded::ENFORCES_CAPACITY {
@@ -1052,7 +1055,7 @@ mod enforcement {
         } else {
             caps::MAX_PENDING_DECLARES + 1
         };
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         {
             let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
             for interest in 0..admitted as u64 {
@@ -1108,14 +1111,17 @@ mod enforcement {
     /// `MAX_PENDING_DECLARES` stated as two, on both tables it bounds: a chain of one match and
     /// its `Final` takes both places, the next chain is refused whole and stages nothing, and
     /// the drain frees the places for the chain after it.
-    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[cfg(any(
+        all(feature = "declare-subscriber", feature = "interest-answer"),
+        feature = "liveliness-token"
+    ))]
     #[test]
     fn max_pending_declares_stated_refuses_the_next_chain_whole() {
         held_to_two(
             SessionLimits::select_max_pending_declares,
             MaxPendingDeclares::DOMAIN.is_singleton(),
             |limits| {
-                #[cfg(feature = "declare-subscriber")]
+                #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
                 {
                     let mut observer = ApplicationLayerObserver::with_limits(limits);
                     observer

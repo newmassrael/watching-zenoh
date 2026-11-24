@@ -242,7 +242,6 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ///
     /// This is the sending peer's side, whose aliases the keyexpr resolves through and whose
     /// zid names a self-echo; `subs` are the subscriptions the Push is delivered to.
-    #[inline(never)]
     pub(super) fn dispatch_in_place<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
@@ -281,7 +280,6 @@ impl<Q: Storage> SubscriberPeer<Q> {
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
-    #[inline(never)]
     fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &self,
         subs: &mut L,

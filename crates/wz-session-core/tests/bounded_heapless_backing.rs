@@ -558,7 +558,7 @@ mod peer_tables {
         }
     }
 
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     mod interests {
         use super::*;
         use wz_session_core::pubsub::{SubscriberPeer, SubscriberTable};

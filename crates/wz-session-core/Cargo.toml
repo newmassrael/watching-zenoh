@@ -55,6 +55,7 @@ default = [
     "request-put-del",
     "log",
     "south-subregions",
+    "interest-answer",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -672,7 +673,7 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 # A node that takes the sessions a peer opens is asked and written to by that peer: it receives
 # whatever the peer sends.
-session-unicast-accept = ["rx-push", "rx-response", "rx-control"]
+session-unicast-accept = ["rx-push", "rx-response", "rx-control", "interest-answer"]
 
 # clock-quality (the observation plane's clock with a quality) — the clock-quality statechart
 # (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with
@@ -805,7 +806,7 @@ transport-multilink = ["session-extauth"]
 # agnostic FSM + Router core, host-testable with no I/O. The
 # wz-runtime-tokio side forwards a `transport-multicast` foundational
 # feature here when the glue lands.
-session-multicast = ["dep:sce-rust-runtime", "rx-push", "rx-response", "rx-control"]
+session-multicast = ["dep:sce-rust-runtime", "rx-push", "rx-response", "rx-control", "interest-answer"]
 
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
@@ -956,6 +957,14 @@ query-reply = ["codec-response"]
 # `codec-declare`-gated and this feature pulls `codec-declare`, so the
 # dependency held without ever being declared. Now it is declared.
 declare-subscriber = ["codec-declare", "declare-final", "rx-push", "rx-control"]
+# The answering end of a peer's Interest: the declarations of this session that the Interest
+# reaches (subscribers, queryables, tokens) and its `DeclareFinal`, and for a FUTURE Interest the
+# ones declared later. A node a peer asks is one that takes the sessions others open
+# (`session-unicast-accept`) or joins a group (`session-multicast`), so both turn it on, and so
+# does `default`. A node that only dials leaves it out, as zenoh-pico's unicast session does
+# (`vendor/zenoh-pico/src/session/interest.c` @ `// Nothing to do on unicast`): it keeps no row
+# of a peer's Interest, stages no answer and owes no `DeclareFinal`. Gate-only.
+interest-answer = []
 declare-queryable = ["codec-declare"]
 # R311jf — keyexpr matching composition toggles (§5.6). Gate-only (no
 # dep): each strips a branch in `keyexpr_match.rs` (an always-compiled
