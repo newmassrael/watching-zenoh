@@ -169,8 +169,10 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    `wz-runtime-coop` in non-test code, debt rows for the sites that remain, paid largest first.
    The lints are denied at each crate root; the modules that remain are the register of
    section 7, held by `scripts/lib/totality_debt_gate.py`.
-3. **Transport views (L2).** Landed on size-handshake; the remaining owned paths (OAM with zbuf
-   extensions, JOIN) move to views.
+3. **Transport views (L2).** Landed. Every participant's receive reads a JOIN and a transport OAM
+   (a ZBuf body and ZBuf extensions included) by its view and keeps nothing of it: in place, into
+   the receive's slot (`InboundFrame::Refused`), and on a group's walk. The decode that keeps
+   them whole is the observer's (`parse_inbound`).
 4. **One table set (L3).** The cooperative engine's registry, targets and key table fold into
    the session core's rows; the delivery lane is removed (callback in the row). The largest phase:
    one entity kind at a time (subscribers, then queryables, then tokens, then queries/replies).

@@ -332,6 +332,13 @@ pub enum InboundFrame {
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
     },
+    /// A JOIN or a transport OAM (`mid` says which) as a participant's receive reads it: read
+    /// to its end by its document's view, with the refusals the observer's decode answers, and
+    /// refused whatever it says, so nothing of it is copied out of the unit
+    /// ([`parse_inbound_consuming_into`]). The observer's read keeps the message whole
+    /// ([`Self::Join`], [`Self::Oam`]).
+    #[cfg(feature = "alloc")]
+    Refused { mid: u8 },
     /// A network body on a negotiated lowlatency link, without a Frame or SN.
     /// Only the passive observer constructs this envelope; the universal
     /// participant decoder does not accept it. The carried network decoder
@@ -406,6 +413,9 @@ impl InboundFrame {
             ),
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => ExtAdmission::Unjudged,
+            // Refused whatever its chain says, as the in-place reader's refusal is.
+            #[cfg(feature = "alloc")]
+            InboundFrame::Refused { .. } => ExtAdmission::Unjudged,
             InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
@@ -456,6 +466,8 @@ impl InboundFrame {
             // in would make two frames with different MIDs two different kinds.
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => "Network",
+            #[cfg(feature = "alloc")]
+            InboundFrame::Refused { .. } => "Refused",
             InboundFrame::Unknown { .. } => "Unknown",
         }
     }
@@ -530,6 +542,16 @@ impl InboundFrame {
             // added without a consumer's switch falling through to this one.
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => 9,
+            // The kind of the message it is: a participant's read keeps less of it, and it is
+            // the same JOIN or OAM.
+            #[cfg(feature = "alloc")]
+            InboundFrame::Refused { mid } => {
+                if *mid == wire_const::T_MID_JOIN {
+                    Self::KIND_JOIN
+                } else {
+                    8
+                }
+            }
             // 10 and 11 are TAKEN, by the scouting namespace's
             // Scout and Hello (`ScoutingFrame::kind_code`): the two share one
             // published kind space, so the next transport arm here is 12.
@@ -1064,6 +1086,8 @@ impl InboundFrame {
             InboundFrame::Join { .. } => ControlFacts::Refused,
             #[cfg(feature = "alloc")]
             InboundFrame::Oam { .. } => ControlFacts::Refused,
+            #[cfg(feature = "alloc")]
+            InboundFrame::Refused { .. } => ControlFacts::Refused,
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => ControlFacts::Refused,
             InboundFrame::Unknown { .. } => ControlFacts::Unread(core::marker::PhantomData),
@@ -1864,22 +1888,22 @@ fn parse_unit_into(
         }
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(bytes, out),
-        // R311y605 — the MULTICAST peer announcement, read by [`decode_join_message`] as the
-        // transport OAM is read by [`decode_oam`].
+        // R311y605 — the MULTICAST peer announcement, and the transport OAM: a participant
+        // refuses both whatever they say, so its receive reads each to its end where it lies and
+        // keeps nothing of it. The observer's read decodes them whole (`parse_unit`).
         #[cfg(all(feature = "alloc", feature = "codec-join"))]
         wire_const::T_MID_JOIN => {
-            let (frame, used) = decode_join_message(bytes)?;
-            *out = frame;
-            Ok(used)
+            let mut cursor = SceCursor::new(bytes);
+            refuse_join(&mut cursor)?;
+            *out = InboundFrame::Refused { mid };
+            Ok(bytes.len().saturating_sub(cursor.remaining()))
         }
-        // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
-        // out here — see [`decode_oam`] for the second, measured reason. A heap
-        // profile's message, so it is handed back by value and written to `out`.
         #[cfg(feature = "alloc")]
         wire_const::T_MID_OAM => {
-            let (frame, used) = decode_oam(bytes)?;
-            *out = frame;
-            Ok(used)
+            let mut cursor = SceCursor::new(bytes);
+            refuse_oam(&mut cursor)?;
+            *out = InboundFrame::Refused { mid };
+            Ok(bytes.len().saturating_sub(cursor.remaining()))
         }
         // Zero: see the `# What `0` means` section on this function.
         other => {
@@ -1897,6 +1921,19 @@ fn parse_unit(
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
 ) -> Result<(InboundFrame, usize), InboundParseError> {
+    // A JOIN and a transport OAM are decoded whole here, for the reader that shows them; the
+    // session's receive reads them where they lie (`parse_unit_into`).
+    #[cfg(feature = "alloc")]
+    {
+        let mid = bytes.first().map(|header| header & 0x1F);
+        #[cfg(feature = "codec-join")]
+        if mid == Some(wire_const::T_MID_JOIN) {
+            return decode_join_message(bytes);
+        }
+        if mid == Some(wire_const::T_MID_OAM) {
+            return decode_oam(bytes);
+        }
+    }
     let mut frame = InboundFrame::Unknown { mid: 0 };
     #[cfg(feature = "alloc")]
     let used = parse_unit_into(bytes, origin, &mut frame)?;
@@ -2335,27 +2372,44 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         // judged where it lies and the chain by the verdict alone.
         #[cfg(feature = "codec-join")]
         wire_const::T_MID_JOIN => {
-            let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor)?;
-            crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
-            if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.into_inner()) {
-                return Err(InboundParseError::InvalidZid(refused));
-            }
+            refuse_join(&mut cursor)?;
             ControlRead::Refused
         }
         // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
         // them, and nothing of it is kept.
         wire_const::T_MID_OAM => {
-            use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
-            let view = TransportOamView::decode(&mut cursor)?;
-            if matches!(view.body, TransportOamViewVariant::Default { .. }) {
-                return Err(InboundParseError::ReservedEncoding);
-            }
-            crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+            refuse_oam(&mut cursor)?;
             ControlRead::Refused
         }
         _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
     };
     Ok((read, bytes.len().saturating_sub(cursor.remaining())))
+}
+
+/// Read the JOIN at `cursor` to its end with the refusals its decode answers, in the decode's
+/// order (the message, its chain, its zid), keeping nothing: a participant refuses a JOIN whatever
+/// it says, so the zid is judged where it lies and the chain by the verdict alone.
+#[cfg(all(feature = "alloc", feature = "codec-join"))]
+fn refuse_join(cursor: &mut SceCursor<'_>) -> Result<(), InboundParseError> {
+    let view = wz_codecs::transport_join::TransportJoinView::decode(cursor)?;
+    crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+    if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.into_inner()) {
+        return Err(InboundParseError::InvalidZid(refused));
+    }
+    Ok(())
+}
+
+/// Read the transport OAM at `cursor` to its end with the refusals its decode answers (the
+/// reserved encoding, its chain), keeping nothing: neither its body nor a ZBuf extension of its
+/// chain is copied.
+#[cfg(feature = "alloc")]
+fn refuse_oam(cursor: &mut SceCursor<'_>) -> Result<(), InboundParseError> {
+    use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
+    let view = TransportOamView::decode(cursor)?;
+    if matches!(view.body, TransportOamViewVariant::Default { .. }) {
+        return Err(InboundParseError::ReservedEncoding);
+    }
+    crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))
 }
 
 /// The refusal of a handshake cookie longer than the session keeps
@@ -3546,6 +3600,7 @@ mod control_read_tests {
 
     /// The reader against the decoder on one wire.
     fn agree_on(wire: &[u8]) {
+        slot_agrees_on(wire);
         let mid = wire.first().map(|header| header & 0x1F);
         let read = read_control(wire);
         // A Frame or a Fragment is the in-place receive's to read; handed here it is a message
@@ -3603,6 +3658,72 @@ mod control_read_tests {
                 read.map(|(message, used)| (format!("{:?}", message.facts()), used)),
                 decoded.map(|(frame, used)| (frame.kind_name(), used))
             ),
+        }
+    }
+
+    /// The receive's read into its slot against the decoder on one wire: the same extent, facts
+    /// and event, or the same refusal, a JOIN and an OAM included, of which it keeps nothing.
+    fn slot_agrees_on(wire: &[u8]) {
+        let mut slot = InboundFrame::Unknown { mid: 0 };
+        let into = parse_inbound_consuming_into(wire, &mut slot);
+        match (into, parse_inbound_consuming(wire)) {
+            (Ok(used), Ok((frame, decoded_used))) => {
+                assert_eq!(used, decoded_used, "{wire:02x?}");
+                assert_eq!(
+                    format!("{:?}", slot.control_facts().unchained()),
+                    format!("{:?}", frame.control_facts().unchained()),
+                    "{wire:02x?}"
+                );
+                assert_eq!(
+                    format!("{:?}", inbound_to_fsm_event(&slot)),
+                    format!("{:?}", inbound_to_fsm_event(&frame)),
+                    "{wire:02x?}"
+                );
+            }
+            (Err(into), Err(decoded)) => {
+                assert_eq!(format!("{into:?}"), format!("{decoded:?}"), "{wire:02x?}");
+            }
+            (into, decoded) => panic!(
+                "{wire:02x?}: into the slot {into:?}, decoded {:?}",
+                decoded.map(|(frame, used)| (frame.kind_name(), used))
+            ),
+        }
+    }
+
+    /// A transport OAM with a ZBuf extension and a ZBuf body is read into the receive's slot to
+    /// its end and kept as nothing but its id; the observer's read keeps the body and the chain.
+    #[test]
+    fn the_receive_keeps_nothing_of_an_oam_the_observer_reads_whole() {
+        let wire = [
+            wire_const::T_MID_OAM | wire_const::FLAG_T_Z | 0x40,
+            0x01,
+            0x42,
+            0x02,
+            0xAB,
+            0xCD,
+            0x02,
+            0xEE,
+            0xFF,
+        ];
+        let mut slot = InboundFrame::Unknown { mid: 0 };
+        let used = parse_inbound_consuming_into(&wire, &mut slot).expect("an OAM");
+        assert_eq!(used, wire.len());
+        assert!(matches!(
+            slot,
+            InboundFrame::Refused {
+                mid: wire_const::T_MID_OAM
+            }
+        ));
+        assert!(matches!(slot.control_facts(), ControlFacts::Refused));
+        assert_eq!(slot.kind_code(), 8);
+        match parse_inbound(&wire).expect("an OAM") {
+            InboundFrame::Oam {
+                body, extensions, ..
+            } => {
+                assert_eq!(body, [0xEE, 0xFF]);
+                assert_eq!(extensions.len(), 1);
+            }
+            other => panic!("{other:?}"),
         }
     }
 
