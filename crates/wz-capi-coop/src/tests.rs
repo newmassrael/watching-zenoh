@@ -224,11 +224,7 @@ impl Router {
 
     /// A router that is the node `zid` (four bytes of it).
     fn start_as(zid: u8, catch_all: CatchAll) -> Self {
-        let port = UdpSocket::bind("127.0.0.1:0")
-            .and_then(|s| s.local_addr())
-            .expect("a free port")
-            .port();
-        Self::start_on_as(port, zid, catch_all)
+        Self::start_on_as(router_port(), zid, catch_all)
     }
 
     /// A router on `port`, which a router before it may have held.
@@ -244,11 +240,7 @@ impl Router {
     /// key ids names its keys to a peer by them, and to a router by its declarations.
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
     fn start_peer() -> Self {
-        let port = UdpSocket::bind("127.0.0.1:0")
-            .and_then(|s| s.local_addr())
-            .expect("a free port")
-            .port();
-        Self::start_announcing(port, ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
+        Self::start_announcing(router_port(), ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
     }
 
     /// A stand-in that announces itself as `whatami`: a peer is told what a router is not (the
@@ -291,6 +283,46 @@ impl Drop for Router {
             let _ = thread.join();
         }
     }
+}
+
+/// The lowest port the host gives a bind of port 0: Linux states its range
+/// (`ip_local_port_range`), and the other hosts these tests run on start theirs at the dynamic
+/// range.
+fn ephemeral_floor() -> u16 {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|range| range.split_whitespace().next()?.parse().ok())
+        .unwrap_or(49_152)
+}
+
+/// A free port for a router stand-in, below the ports the host gives a bind of port 0: a test
+/// lets the stand-in go and starts one again on its port, and in between no socket another test
+/// binds on port 0 can be given it, as it could a port the host handed out. Within the process
+/// each port is handed once (a counter from an offset of the process's own, so another process
+/// starts elsewhere), and a port some socket holds is passed over.
+fn router_port() -> u16 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    const FLOOR: u32 = 10_000;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let span = u32::from(ephemeral_floor()).saturating_sub(FLOOR).max(1);
+    let offset = std::process::id().wrapping_mul(7_919) % span;
+    for _ in 0..span {
+        let at = FLOOR + (offset + NEXT.fetch_add(1, Ordering::Relaxed)) % span;
+        let port = u16::try_from(at).expect("below the host's ephemeral ports");
+        if UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port below the host's ephemeral ports");
+}
+
+/// A stand-in's port lies below the ports the host gives a bind of port 0 and is handed once in
+/// the process. Turned red by a port the host could give another socket, or one handed twice.
+#[test]
+fn a_router_port_is_below_the_ephemeral_ports_and_handed_once() {
+    let (first, second) = (router_port(), router_port());
+    assert!(first < ephemeral_floor() && second < ephemeral_floor());
+    assert_ne!(first, second, "each port is handed once");
 }
 
 /// How `response` named its key on the wire: its id, the rest and the mapping bit (`true` is the

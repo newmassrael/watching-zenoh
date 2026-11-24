@@ -676,6 +676,9 @@ pub enum LinkOpenError {
     /// The stack tried and the other end did not take the link (a TCP
     /// connection refused or unreachable). Worth trying again later.
     Refused,
+    /// The local address the link binds is held by another socket (a port
+    /// listened on that another holds). Worth trying again once it is let go.
+    AddressInUse,
 }
 
 /// The two halves of one session link, as a stack opens them: the outbound half

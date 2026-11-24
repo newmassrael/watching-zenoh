@@ -183,13 +183,25 @@ pub trait DatagramSocket: Sized {
         let _ = error;
         false
     }
+
+    /// Whether `error`, from a [`Self::bind`], says another socket holds the address: the open
+    /// is `LinkOpenError::AddressInUse`, kept apart from a stack with no socket to give. The
+    /// provided answer is that it never says so, for a platform whose error does not tell.
+    fn address_in_use(error: &Self::Error) -> bool {
+        let _ = error;
+        false
+    }
 }
 
 /// A failed [`DatagramSocket::bind`] as the stack's refusal to open the link: permanent for an
-/// address the socket can never have ([`DatagramSocket::refuses_address`]), retried otherwise.
+/// address the socket can never have ([`DatagramSocket::refuses_address`]), an address another
+/// socket holds ([`DatagramSocket::address_in_use`]), and otherwise a stack with no socket to
+/// give; the last two are retried.
 pub fn bind_refused<S: DatagramSocket>(error: S::Error) -> crate::session_drive::LinkOpenError {
     if S::refuses_address(&error) {
         crate::session_drive::LinkOpenError::Unsupported
+    } else if S::address_in_use(&error) {
+        crate::session_drive::LinkOpenError::AddressInUse
     } else {
         crate::session_drive::LinkOpenError::Exhausted
     }
