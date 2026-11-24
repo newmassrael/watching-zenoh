@@ -107,7 +107,7 @@ impl<C: ClockSource> CoopTime<C> {
     /// Build a new `CoopTime` sharing the runtime's clock + timer
     /// queue. Snapshots the clock's current `now_us()` as the
     /// epoch for this instance.
-    pub fn new<D: ?Sized, L: LockKind>(rt: &CoopRuntime<C, D, L>) -> Self {
+    pub fn new<D: ?Sized, K: LockKind>(rt: &CoopRuntime<C, D, K>) -> Self {
         let epoch_us = rt.clock().now_us();
         Self {
             inner: share_inner(&rt.inner),

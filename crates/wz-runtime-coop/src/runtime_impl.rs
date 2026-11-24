@@ -12,8 +12,8 @@
 //!   and call nested `spawn` (R311av-pre Decision 5).
 //! - `impl Runtime for CoopRuntime<C>`:
 //!   - `type JoinHandle<T> = CoopJoinHandle<T>`
-//!   - `type Mutex<T> = L::Mutex<T>` (`crate::sync::LockKind`)
-//!   - `type RwLock<T> = L::Mutex<T>`
+//!   - `type Mutex<T> = K::Mutex<T>` (`crate::sync::LockKind`)
+//!   - `type RwLock<T> = K::Mutex<T>`
 //!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: writes the
 //!     future into a cell of the runtime's task table, where its output
 //!     is written too when it ends ([`crate::executor`]).
@@ -177,16 +177,16 @@ pub type DefaultDriver = ();
 /// profile that picks its driver at run time. A build with no session tier has no driver trait
 /// to name and its default is `()`, which nothing reads.
 ///
-/// `L` is how the values the runtime lends a session are locked (`Runtime::Mutex`): the
+/// `K` is how the values the runtime lends a session are locked (`Runtime::Mutex`): the
 /// profile's lock ([`Shared`], the default), or none under an engine that keeps each of its
 /// sessions behind one lock of its own ([`Confined`], [`Self::confined`]). The runtime holds no
 /// such value itself, so the choice is a type and costs the runtime nothing.
-pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver, L: LockKind = Shared> {
+pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver, K: LockKind = Shared> {
     pub(crate) inner: InnerRef<C>,
-    driver: PhantomData<fn() -> (L, *const D)>,
+    driver: PhantomData<fn() -> (K, *const D)>,
 }
 
-impl<C: ClockSource, D: ?Sized, L: LockKind> Clone for CoopRuntime<C, D, L> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> Clone for CoopRuntime<C, D, K> {
     fn clone(&self) -> Self {
         Self {
             inner: share_inner(&self.inner),
@@ -296,11 +296,11 @@ impl RuntimeRows {
     }
 }
 
-impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The same runtime read as one whose sessions send through `D2`. The driver is only a type
     /// the session tier reads back; the runtime holds none, so a handle to the runtime serves for
     /// any driver and the tables and the executor stay the one pair.
-    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2, L> {
+    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2, K> {
         self.retyped()
     }
 
@@ -313,7 +313,7 @@ impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
 
     /// The same runtime state under another driver and lock type: both are types the session
     /// tier reads back, and the runtime holds a value of neither.
-    pub(crate) fn retyped<D2: ?Sized, L2: LockKind>(&self) -> CoopRuntime<C, D2, L2> {
+    pub(crate) fn retyped<D2: ?Sized, K2: LockKind>(&self) -> CoopRuntime<C, D2, K2> {
         CoopRuntime {
             inner: share_inner(&self.inner),
             driver: PhantomData,
@@ -477,7 +477,7 @@ impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     }
 }
 
-impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
         self.inner.executor.refusals()
@@ -505,8 +505,8 @@ impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
 /// The runtime's task table as a pool (`pool-monitor`): see
 /// [`crate::executor::ExecutorState`].
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, D: ?Sized, L: LockKind> wz_session_core::pool_gauge::PoolGauge
-    for CoopRuntime<C, D, L>
+impl<C: ClockSource, D: ?Sized, K: LockKind> wz_session_core::pool_gauge::PoolGauge
+    for CoopRuntime<C, D, K>
 {
     fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
         wz_session_core::pool_gauge::PoolGauge::pool_stat(&self.inner.executor, name)
@@ -606,21 +606,21 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     }
 }
 
-impl<C: ClockSource, D: ?Sized + 'static, L: LockKind> Runtime for CoopRuntime<C, D, L> {
+impl<C: ClockSource, D: ?Sized + 'static, K: LockKind> Runtime for CoopRuntime<C, D, K> {
     type JoinHandle<T>
         = CoopJoinHandle<T>
     where
         T: Send + 'static;
 
     type Mutex<T>
-        = L::Mutex<T>
+        = K::Mutex<T>
     where
         T: Send + 'static;
 
     // One kind of hold for both: a reader is exclusive on a single core and under an owner's
     // lock alike (`crate::sync`).
     type RwLock<T>
-        = L::Mutex<T>
+        = K::Mutex<T>
     where
         T: Send + Sync + 'static;
 
@@ -639,7 +639,7 @@ impl<C: ClockSource, D: ?Sized + 'static, L: LockKind> Runtime for CoopRuntime<C
         }
     }
 
-    // Closure-scoped access, as `L` holds the value (`crate::sync::LockKind`). No poison concept
+    // Closure-scoped access, as `K` holds the value (`crate::sync::LockKind`). No poison concept
     // on this profile: a panicking observer task would abort the whole executor under
     // `panic = "abort"` (MCU default), so the only observable lock-failure mode is the runtime
     // never resuming, and recovery is not meaningful.
@@ -647,7 +647,7 @@ impl<C: ClockSource, D: ?Sized + 'static, L: LockKind> Runtime for CoopRuntime<C
     where
         T: Send + 'static,
     {
-        L::with(mutex, f)
+        K::with(mutex, f)
     }
 
     // The non-waiting twin. On a host (`host-lock`) a held value answers `None`, as the tokio
@@ -658,24 +658,24 @@ impl<C: ClockSource, D: ?Sized + 'static, L: LockKind> Runtime for CoopRuntime<C
     where
         T: Send + 'static,
     {
-        L::try_with(mutex, f)
+        K::try_with(mutex, f)
     }
 
-    // Both constructors are infallible: `L` wraps the value with no allocator or syscall
+    // Both constructors are infallible: `K` wraps the value with no allocator or syscall
     // dependency, matching the no_std + alloc constraint of this profile. RwLock is the same
     // form per the single-core IRQ-safe model (crate::sync module doc).
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,
     {
-        L::wrap(value)
+        K::wrap(value)
     }
 
     fn new_rwlock<T>(value: T) -> Self::RwLock<T>
     where
         T: Send + Sync + 'static,
     {
-        L::wrap(value)
+        K::wrap(value)
     }
 }
 

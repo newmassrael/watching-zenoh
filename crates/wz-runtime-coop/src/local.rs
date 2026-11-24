@@ -166,7 +166,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is copied, so the
     /// local set and any other holder of the same runtime share one task table and
     /// one timer table.
-    pub fn new<D: ?Sized, L: LockKind>(runtime: &CoopRuntime<C, D, L>) -> Self {
+    pub fn new<D: ?Sized, K: LockKind>(runtime: &CoopRuntime<C, D, K>) -> Self {
         let runtime: CoopRuntime<C> = runtime.retyped();
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         let owner = Rc::new(SetOwner {

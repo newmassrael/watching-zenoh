@@ -2610,6 +2610,7 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
         RouterLend<SessionReassembly>,
         RouterLend<SessionReassembly>,
         FaceDispatch<C>,
+        wz_runtime_coop::sync::Shared,
     >()
 }
 

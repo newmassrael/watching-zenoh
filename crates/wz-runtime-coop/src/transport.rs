@@ -15,6 +15,7 @@ use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::EventSink;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::response_sink::ResponseSink;
@@ -25,6 +26,7 @@ use crate::link_cells::CellRc;
 use crate::locator_text::DialRefused;
 use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
+use crate::sync::LockKind;
 use crate::ClockSource;
 
 // The transport's state over the session's one reassembly Router, which the engine's builds keep.
@@ -162,10 +164,12 @@ pub enum TransportRefusal {
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks
 /// ([`FaceSession`]): the actions the session sends over the link through, and whether a query
-/// the link carried is answered over it.
-pub trait TransportSession<C: ClockSource + 'static>: FaceSession {
+/// the link carried is answered over it. `K` is how the session's runtime locks what it lends.
+pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>:
+    FaceSession
+{
     /// The actions of the link's session.
-    fn actions(&self) -> &SessionHandle<C>;
+    fn actions(&self) -> &SessionHandle<C, dyn BoxedLinkDriver, K>;
 
     /// Whether a query that came in under `generation` came over this link, so that its answer
     /// goes back over it. A session that answers no query names no link for one.
@@ -179,7 +183,7 @@ pub trait TransportSession<C: ClockSource + 'static>: FaceSession {
 /// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
 /// the link's task hands its reads to and what its face keeps of the link.
-pub trait LinkCalls<C: ClockSource + 'static> {
+pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
     /// The gates the session puts a link's pump behind, placed in the link's cell of its table.
     type Gate: SessionDatagramLink + 'static;
     /// What a link's task hands what its session reads to.
@@ -190,19 +194,27 @@ pub trait LinkCalls<C: ClockSource + 'static> {
     /// The link of face `face`, sending through `actions`, made: the session's tables are told of
     /// it before it carries anything. `key_form` is the key-wire form stated for the endpoint the
     /// link was dialled to or taken on, `None` in a build whose nodes share no key ids.
-    fn link_made(&self, face: FaceId, actions: &SessionHandle<C>, key_form: Option<KeyWireForm>);
+    fn link_made(
+        &self,
+        face: FaceId,
+        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+        key_form: Option<KeyWireForm>,
+    );
 
     /// The gates over `pump`, the link's one shared handle, whose session sends through
     /// `actions`.
-    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, actions: &SessionHandle<C>)
-        -> Self::Gate;
+    fn gate(
+        &self,
+        pump: CellRc<dyn SessionDatagramLink>,
+        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+    ) -> Self::Gate;
 
     /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
     /// link: its actions and its gates, placed in their cell.
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
         gate: &CellRc<Self::Gate>,
     ) -> (Self::Dispatch, Self::Session);
 }

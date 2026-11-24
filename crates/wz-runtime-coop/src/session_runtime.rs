@@ -58,6 +58,7 @@ use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_slot::{SlotClaim, SlotRef, SlotSink};
 
 use crate::runtime_impl::CoopRuntime;
+use crate::sync::LockKind;
 use crate::time::{ClockSource, CoopTime};
 
 /// What [`SessionRuntime::Shared`] is on the slot profile: a pointer that cannot
@@ -96,13 +97,17 @@ impl<U> core::ops::Deref for NoShared<U> {
 // The slot profile has no pointer to share a value behind (its `Shared` has no value): the
 // bundle owns its kernel and its link, so the profile shares nothing and does not implement this.
 #[cfg(not(feature = "session-slot"))]
-impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> ShareValues for CoopRuntime<C, D> {
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareValues
+    for CoopRuntime<C, D, K>
+{
     fn share<U>(value: U) -> Self::Shared<U> {
         crate::link_cells::CellRc::boxed(value)
     }
 }
 
-impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for CoopRuntime<C, D> {
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> SessionRuntime
+    for CoopRuntime<C, D, K>
+{
     // The driver is the runtime's own `D`: the trait object for the profile that picks its link at
     // run time (the default), the driver's own type where the build names it, which makes every
     // call the session makes through the link a direct one.
@@ -184,9 +189,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
 /// The handle to a session, as this profile holds it: a counted handle on the bundle, or
 /// under `session-slot` a counted reference to the slot that holds it. The type
 /// the drive loop, the FSM's action binding and the application layer each take,
-/// written once so the two spellings are one name.
-pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
-    <CoopRuntime<C, D> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
+/// written once so the two spellings are one name. `K` is how the runtime locks what it lends the
+/// session ([`LockKind`]).
+pub type SessionHandle<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
+    <CoopRuntime<C, D, K> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
 /// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
 /// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
