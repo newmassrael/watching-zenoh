@@ -10,7 +10,7 @@
 //! instead of projecting it into
 //! a boxed owned message. This module is the subscriber side of that: the
 //! keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_view_over`]), the payload, attachment and every
+//! ([`resolve_wireexpr_view_held_over`]), the payload, attachment and every
 //! extension are read where they lie, and the subscribers are handed a
 //! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
@@ -49,7 +49,7 @@ use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
 use crate::sink::{FanOut, SampleDelivery, SampleView};
 use crate::wireexpr_resolve::{
-    resolve_plain_parts_over, resolve_wireexpr_view_over, KeyexprBuf, KeyexprPastBound,
+    resolve_plain_parts_over, resolve_wireexpr_view_held_over, KeyexprBuf, KeyexprPastBound,
 };
 
 /// The sample a Push read in place is delivered as: every field a range of the
@@ -59,6 +59,8 @@ use crate::wireexpr_resolve::{
 /// which the codec's lent timestamp and encoding are invariant.
 struct LentSample<'s, 'f> {
     keyexpr: &'s str,
+    /// The key of the session's key arena `keyexpr` is the whole text of, when it is one.
+    held: Option<&'s crate::key_arena::KeyRef>,
     payload: &'s [u8],
     kind: SampleKind,
     reliability: Reliability,
@@ -76,6 +78,9 @@ struct LentSample<'s, 'f> {
 impl SampleView for LentSample<'_, '_> {
     fn keyexpr(&self) -> &str {
         self.keyexpr
+    }
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        self.held
     }
     fn payload(&self) -> &[u8] {
         self.payload
@@ -310,13 +315,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let mut composed = KeyexprBuf::new();
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into `composed` before the delivery writes it.
-        let keyexpr = match resolve_wireexpr_view_over(
+        let (keyexpr, held) = match resolve_wireexpr_view_held_over(
             &push.keyexpr.body,
             spaces,
             subs.own_space(),
             &mut composed,
         ) {
-            Ok(Some(keyexpr)) => keyexpr,
+            Ok(Some(resolved)) => resolved,
             // The empty keyexpr, or an id the space does not hold: dropped, as
             // the owned path drops it. A sliced Put never reaches here, so
             // there are no shared-memory slices to settle.
@@ -336,6 +341,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         };
         let sample = LentSample {
             keyexpr,
+            held,
             payload: body.payload,
             kind: body.kind,
             reliability,
@@ -967,6 +973,7 @@ mod tests {
         };
         let sample = LentSample {
             keyexpr: "k",
+            held: None,
             payload: &[],
             kind: SampleKind::Put,
             reliability: Reliability::Reliable,

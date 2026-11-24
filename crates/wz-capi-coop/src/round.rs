@@ -53,6 +53,7 @@ use wz_session_core::byte_cells::KeptBytes;
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
@@ -254,6 +255,11 @@ enum Place {
     Datagram,
     /// In the rejoined message the round keeps ([`Round::end_rejoined`]).
     Rejoined,
+    /// In the session's key arena, in a block the record holds from when it is written
+    /// ([`Table::hold_key`]) until the lock holder clears the table ([`Table::clear`]).
+    Held,
+    /// In the session's key arena, in a block a record written before holds.
+    Shared,
     /// In the table's keys.
     Key,
     /// In the table's area.
@@ -275,6 +281,18 @@ impl Span {
         len: 0,
         place: Place::Area,
     };
+
+    /// The span as a record that reads a block another record holds sees it: it holds none of
+    /// its own.
+    fn shared(self) -> Self {
+        match self.place {
+            Place::Held => Self {
+                place: Place::Shared,
+                ..self
+            },
+            _ => self,
+        }
+    }
 
     /// Where `part` lies in the region `lending` names; `None` when it lies elsewhere.
     fn lent(part: &[u8], lending: Lending) -> Option<Self> {
@@ -351,6 +369,8 @@ struct Offered<'s> {
     reliability: Reliability,
     qos: Option<QosLevel>,
     key: &'s [u8],
+    /// The key of the session's key arena `key` is the whole text of, when the view read it there.
+    held: Option<&'s KeyRef>,
     payload: &'s [u8],
     rest: Parts<'s>,
 }
@@ -362,6 +382,7 @@ impl<'s> Offered<'s> {
             reliability: sample.reliability(),
             qos: sample.qos(),
             key: sample.keyexpr().as_bytes(),
+            held: sample.keyexpr_held(),
             payload: sample.payload(),
             rest: Parts::of(sample),
         }
@@ -602,6 +623,12 @@ struct Table {
     /// The rejoined message a record's part lies in, whose buffer the round keeps until the table
     /// is emptied ([`Round::end_rejoined`]).
     rejoined: Option<(*const u8, usize)>,
+    /// The session's key arena, whose blocks a record's key is read in when it holds one
+    /// ([`Self::hold_key`]); none for a round that reads no key there.
+    key_space: Option<KeySpace>,
+    /// Whether a delivery handed the records out and ended their calls: what they hold is the lock
+    /// holder's to let go of before the next record is written ([`Self::clear`]).
+    spent: bool,
     /// As many records as the session's `DELIVERY_LANE_EVENTS`, rows its arena lent.
     entries: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
@@ -632,6 +659,15 @@ impl Table {
         }
         let start = match span.place {
             Place::Key => return self.keys.get(at..at.saturating_add(len)).unwrap_or(&[]),
+            Place::Held | Place::Shared => {
+                let Some(space) = self.key_space else {
+                    return &[];
+                };
+                // SAFETY: a record of the table holds the block from when it was written
+                // (`Self::hold_key`) until the lock holder clears the table (`Self::clear`),
+                // which it does only once a delivery has handed the records out.
+                return unsafe { space.held_text(span.at, span.len) }.as_bytes();
+            }
             Place::Datagram => self.datagram.map(|(start, _)| start),
             Place::Rejoined => self.rejoined.map(|(start, _)| start),
             Place::Area => Some(self.area.as_ptr().cast_const()),
@@ -642,7 +678,7 @@ impl Table {
         // SAFETY: the part lies inside its place (`Span::lent`, `Self::write`): the datagram, which
         // its link leaves where it lies while the table lends it (`Round::lends_a_datagram`); the
         // rejoined message, whose buffer the round keeps and no chain is staged into until the
-        // table no longer reads it (`Round::let_go_of_kept`); or the area, which the session's
+        // table no longer reads it (`Round::settle`); or the area, which the session's
         // arena lends the round for as long as the round lives and nothing writes again until the
         // table is emptied.
         unsafe { core::slice::from_raw_parts(start.add(at), len) }
@@ -726,7 +762,7 @@ impl Table {
         }
         if let Some(span) = self.key {
             if self.bytes(span) == key {
-                return Some(span);
+                return Some(span.shared());
             }
         }
         let span = if self.keys.free_slots() >= key.len() {
@@ -742,6 +778,48 @@ impl Table {
         };
         self.key = Some(span);
         Some(span)
+    }
+
+    /// Where a key that is the whole text of `held`, a key of the session's key arena, is read: in
+    /// its block, which the record written with it holds from then on ([`Self::hold_key`]), or
+    /// which the record before holds when that one reads the same block. `None` when the table
+    /// reads no key arena, `held` is not of it, or it is the empty key, which holds no block: the
+    /// key is then placed as any other ([`Self::place_key`]).
+    fn held_key(&self, held: &KeyRef) -> Option<Span> {
+        let space = self.key_space?;
+        if !held.is_of(&space) || held.as_str().is_empty() {
+            return None;
+        }
+        let (at, len) = held.parts();
+        let span = Span {
+            at,
+            len,
+            place: Place::Held,
+        };
+        Some(match self.key {
+            Some(last)
+                if matches!(last.place, Place::Held | Place::Shared)
+                    && (last.at, last.len) == (at, len) =>
+            {
+                span.shared()
+            }
+            _ => span,
+        })
+    }
+
+    /// The record just written reads its key at `key` ([`Self::held_key`]): one more holder of
+    /// `held`'s block when it is the first record to read it there, and the key the records after
+    /// it may share.
+    fn hold_key(&mut self, key: Span, held: &KeyRef) {
+        match key.place {
+            Place::Held => {
+                // The count is the record's, handed back by `Self::clear`.
+                let _ = held.hold_apart();
+                self.key = Some(key);
+            }
+            Place::Shared => self.key = Some(key),
+            _ => {}
+        }
     }
 
     /// `parts` placed for the table.
@@ -775,11 +853,34 @@ impl Table {
         self.callbacks.get(entry.callbacks()).unwrap_or(&[])
     }
 
-    /// Hold nothing, for the next round, each call it owes ended into `released`; the area stays
-    /// the table's.
-    fn empty(&mut self, released: &Released) {
+    /// End every call the records owe, each into `released`, as a delivery does with no lock of
+    /// the session held. What the records hold besides is let go of by the lock holder before it
+    /// writes the next record ([`Self::clear`]): a key of the session's key arena is let go of
+    /// under that lock alone.
+    fn end_calls(&mut self, released: &Released) {
         while let Some(owed) = self.callbacks.pop() {
             released.settle(owed);
+        }
+        self.spent = true;
+    }
+
+    /// Hold nothing, for the next round: the count each record holds of a block of the session's
+    /// key arena handed back, and every row and part let go of; the area stays the table's. The
+    /// lock holder's, once the calls are ended ([`Self::end_calls`]).
+    fn clear(&mut self) {
+        if let Some(space) = self.key_space {
+            for entry in self.entries.iter() {
+                let key = match &entry.what {
+                    Held::Sample { head, .. } => head.key,
+                    #[allow(unreachable_patterns)]
+                    _ => continue,
+                };
+                if key.place == Place::Held {
+                    // SAFETY: the record took one count of the block when it was written
+                    // (`Self::hold_key`), handed back here once, under the lock.
+                    drop(unsafe { space.adopt(key.at, key.len) });
+                }
+            }
         }
         self.entries.clear();
         self.keys.clear();
@@ -788,6 +889,7 @@ impl Table {
         self.datagram = None;
         self.rejoined = None;
         self.written = 0;
+        self.spent = false;
     }
 }
 
@@ -937,7 +1039,7 @@ pub(crate) struct Round {
     /// it and not in the datagram. Written under the session's lock.
     rejoining: UnsafeCell<Option<(*const u8, usize)>>,
     /// The buffer of the rejoined message the table reads, kept until the lock holder finds the
-    /// table no longer reads it ([`Self::let_go_of_kept`]). Written under the session's lock.
+    /// table no longer reads it ([`Self::settle`]). Written under the session's lock.
     kept: UnsafeCell<Option<KeptBytes>>,
     /// The calls of the subscribers the samples offered now reach, begun on their rows and handed
     /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
@@ -1016,6 +1118,8 @@ impl Round {
             let table = addr_of_mut!((*at).table).cast::<Table>();
             ptr::write(addr_of_mut!((*table).datagram), None);
             ptr::write(addr_of_mut!((*table).rejoined), None);
+            ptr::write(addr_of_mut!((*table).key_space), None);
+            ptr::write(addr_of_mut!((*table).spent), false);
             ptr::write(addr_of_mut!((*table).entries), rows.records);
             ptr::write(addr_of_mut!((*table).callbacks), rows.callbacks);
             ptr::write(addr_of_mut!((*table).keys), rows.keys);
@@ -1045,6 +1149,13 @@ impl Round {
                 ptr::write(addr_of_mut!((*at).lent_samples), AtomicUsize::new(0));
             }
         }
+    }
+
+    /// Read the key of a record in the block of `keys`, the session's key arena, that the record
+    /// holds, when the sample names one ([`SampleView::keyexpr_held`]), rather than copy it. Told
+    /// once, before the round is shared; a round never told copies every key.
+    pub(crate) fn reads_keys_in(&mut self, keys: KeySpace) {
+        self.table.get_mut().key_space = Some(keys);
     }
 
     /// A field added to [`Round`] or its table and not written by [`Self::write_in`] would be
@@ -1077,6 +1188,8 @@ impl Round {
         let Table {
             datagram: _,
             rejoined: _,
+            key_space: _,
+            spent: _,
             entries: _,
             callbacks: _,
             keys: _,
@@ -1090,15 +1203,29 @@ impl Round {
     }
 
     /// The table, to write, while it is empty or filling: `None` once it is sealed or handed out.
+    /// A table a delivery handed out is cleared first, and the rejoined buffer kept for it let go
+    /// of ([`Self::settle`]).
     ///
     /// # Safety
     /// The caller holds the session's lock, and holds no other borrow of the table.
     #[allow(clippy::mut_from_ref)]
     unsafe fn writable(&self) -> Option<&mut Table> {
         match self.state.load(Ordering::Acquire) {
-            // SAFETY: an empty or filling table is the lock holder's, and the caller holds the
-            // lock and no other borrow of it.
-            EMPTY | FILLING => Some(unsafe { &mut *self.table.get() }),
+            EMPTY => {
+                // SAFETY: an empty table is the lock holder's, and the caller holds the lock and
+                // no other borrow of it; `kept` is written under that lock alone.
+                unsafe {
+                    let table = &mut *self.table.get();
+                    if table.spent {
+                        table.clear();
+                        *self.kept.get() = None;
+                    }
+                    Some(table)
+                }
+            }
+            // SAFETY: a filling table is the lock holder's, and the caller holds the lock and no
+            // other borrow of it.
+            FILLING => Some(unsafe { &mut *self.table.get() }),
             _ => None,
         }
     }
@@ -1260,6 +1387,9 @@ impl Round {
         ));
         let kept = match entry {
             Ok(()) => {
+                if let Some(held) = sample.held {
+                    table.hold_key(key, held);
+                }
                 table.fan = true;
                 self.owe_call(table, call)
             }
@@ -1291,7 +1421,10 @@ impl Round {
         sample: &Offered<'_>,
         lending: Option<Lending>,
     ) -> Option<(Span, Span, Option<Rest>)> {
-        let key = table.place_key(sample.key, lending)?;
+        let key = match sample.held.and_then(|held| table.held_key(held)) {
+            Some(key) => key,
+            None => table.place_key(sample.key, lending)?,
+        };
         let payload = table.place(sample.payload, lending)?;
         let rest = table.place_parts(&sample.rest, lending)?;
         Some((key, payload, rest))
@@ -1552,7 +1685,7 @@ impl Round {
     }
 
     /// The records of `message` are offered: the round keeps its buffer when the table reads a
-    /// part of it, until the table no longer does ([`Self::let_go_of_kept`]), and drops it here
+    /// part of it, until the table no longer does ([`Self::settle`]), and drops it here
     /// otherwise, which gives it back to its chains at once. A buffer kept before is let go of
     /// then, as the table reads one rejoined message at most.
     ///
@@ -1574,30 +1707,17 @@ impl Round {
         }
     }
 
-    /// Let go of the kept buffer of a rejoined message ([`Self::end_rejoined`]) once the table no
-    /// longer reads it. A delivery empties the table with no lock of the session held, and a chain
-    /// claims a buffer of its table under that lock alone, so the buffer is given back here, by
-    /// the lock holder, which the gate is before it lets a link be read ([`RoundGate`]).
+    /// Let go of what the records of a round a delivery handed out still hold, once the table is
+    /// no longer read: the counts of the session's key arena they hold and the rejoined buffer kept
+    /// for them. A delivery hands the records out with no lock of the session held, and both are
+    /// let go of under that lock alone, so the lock holder does it: before it writes the next
+    /// record ([`Self::writable`]) and before the gate lets a link be read ([`RoundGate`]).
     ///
     /// # Safety
-    /// The caller holds the session's lock.
-    pub(crate) unsafe fn let_go_of_kept(&self) {
-        // SAFETY: the caller's contract: `kept` is written under the session's lock alone, and a
-        // table not sealed is the lock holder's (`Self::writable`).
-        unsafe {
-            let Some(at) = (*self.kept.get()).as_ref().map(|kept| {
-                let bytes = kept.as_slice();
-                (bytes.as_ptr(), bytes.len())
-            }) else {
-                return;
-            };
-            if self
-                .writable()
-                .is_some_and(|table| table.rejoined != Some(at))
-            {
-                *self.kept.get() = None;
-            }
-        }
+    /// The caller holds the session's lock, and holds no borrow of the table.
+    pub(crate) unsafe fn settle(&self) {
+        // SAFETY: the caller's contract.
+        let _ = unsafe { self.writable() };
     }
 
     /// Whether a record lies in the datagram a link lent: no link is read or serviced until its
@@ -1641,7 +1761,9 @@ impl Round {
     pub(crate) unsafe fn let_go(&self) {
         // SAFETY: the caller's contract: nothing else reaches the table now.
         let table = unsafe { &mut *self.table.get() };
-        table.empty(&self.released);
+        table.end_calls(&self.released);
+        // The counts of the session's key arena the records hold go back before the arena does.
+        table.clear();
         drop(core::mem::take(&mut table.entries));
         drop(core::mem::take(&mut table.callbacks));
         drop(core::mem::take(&mut table.keys));
@@ -1858,7 +1980,7 @@ struct Emptied<'r>(&'r Round);
 impl Drop for Emptied<'_> {
     fn drop(&mut self) {
         // SAFETY: the table is this delivery's until the store below gives it back.
-        unsafe { (*self.0.table.get()).empty(&self.0.released) };
+        unsafe { (*self.0.table.get()).end_calls(&self.0.released) };
         self.0.lends.store(false, Ordering::Release);
         self.0.state.store(EMPTY, Ordering::Release);
     }
@@ -2039,7 +2161,7 @@ impl<P> RoundGate<P> {
             return true;
         }
         // SAFETY: asked by the session's step alone, under the session's lock (`Self::new`).
-        unsafe { self.round.let_go_of_kept() };
+        unsafe { self.round.settle() };
         false
     }
 }

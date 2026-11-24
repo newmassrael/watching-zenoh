@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use wz_capi_port::{SubscriberSink, WireKey};
 use wz_session_core::byte_cells::{ByteCells, ByteSource, KeptBytes};
 use wz_session_core::caps;
+use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::reliability::Reliability;
@@ -289,7 +290,7 @@ fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..]), true) };
     unsafe { round.set_lending(None) };
     assert!(round.lends_a_datagram(), "the chain is held where it lies");
-    unsafe { round.let_go_of_kept() };
+    unsafe { round.settle() };
     assert_eq!(
         CHAINS.in_use(),
         1,
@@ -363,12 +364,174 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
     assert_eq!(places[1].0, 5, "the second handed whole");
     assert_ne!(places[1].1, at_two, "CONTROL: the second was copied");
     assert_eq!(round.samples_lent(), 1);
-    unsafe { round.let_go_of_kept() };
+    unsafe { round.settle() };
     assert_eq!(
         CHAINS.in_use(),
         0,
         "emptied, the lock holder let go of the first"
     );
+}
+
+/// A key arena of 256 bytes the test leaks, so it outlives every key and round of the test.
+fn key_space() -> KeySpace {
+    use crate::arena::{AllocatorMemory, SessionArena};
+
+    let bytes = KeySpace::span_bytes(256).expect("a small arena");
+    let arena: &'static mut SessionArena = Box::leak(Box::new(
+        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
+    ));
+    arena
+        .arena_mut()
+        .lend_keys(256, SessionLimits::defaults().max_keyexpr_bytes_held())
+        .expect("the arena holds the key arena")
+}
+
+/// A round as `round` makes one, that reads the keys of `keys` where their blocks lie.
+fn round_reading(keys: KeySpace) -> Arc<Round> {
+    let mut round = round(1024, 4);
+    Arc::get_mut(&mut round)
+        .expect("not shared yet")
+        .reads_keys_in(keys);
+    round
+}
+
+/// A put whose keyexpr is the whole text of `key`, as a peer's alias read where its row keeps it
+/// is.
+struct HeldSample<'k> {
+    key: &'k KeyRef,
+}
+
+impl SampleView for HeldSample<'_> {
+    fn keyexpr(&self) -> &str {
+        self.key.as_str()
+    }
+
+    fn payload(&self) -> &[u8] {
+        b"v"
+    }
+
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+
+    fn reliability(&self) -> Reliability {
+        Reliability::BestEffort
+    }
+
+    fn keyexpr_held(&self) -> Option<&KeyRef> {
+        Some(self.key)
+    }
+}
+
+/// What [`keyed`] callbacks write: each sample's keyexpr and where it lies.
+type Keyed = Arc<Mutex<Vec<(String, usize)>>>;
+
+/// A callback that notes the keyexpr of each sample it is handed and where it lies.
+fn keyed(tag: u8, seen: &Keyed) -> Row {
+    let seen = seen.clone();
+    Row::new(
+        tag,
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            let key = sample.keyexpr();
+            seen.lock()
+                .unwrap()
+                .push((key.to_owned(), key.as_ptr() as usize));
+        }),
+    )
+}
+
+/// A key a sample names by a row of the session's key arena is read where the row's block lies,
+/// after the row let go of it (the alias undeclared while the record waited): the round holds the
+/// block, one count for the records that read it in turn, until the lock holder settles the
+/// round after the delivery. Turned red by a round that copies the key, takes a count for each
+/// record or none, or hands the count back with no lock held.
+#[test]
+fn a_held_key_is_read_where_its_block_lies_after_its_row_lets_go() {
+    let keys = key_space();
+    let round = round_reading(keys);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let row = keys.key("demo/alias").expect("room");
+    let at = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    assert!(
+        keys.counts().used > 0,
+        "the round holds the block its row let go of"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [("demo/alias".to_owned(), at), ("demo/alias".to_owned(), at)],
+        "each record read where the block lies"
+    );
+    assert!(
+        keys.counts().used > 0,
+        "handed out with no lock held, the block waits for the lock holder"
+    );
+    unsafe { round.settle() };
+    assert_eq!(
+        keys.counts().used,
+        0,
+        "one count for both records, handed back once"
+    );
+}
+
+/// The row a held key was read from given another key, as a face's rows are when the face goes
+/// and the next one takes them: the record still reads the first key where its block lies, and the
+/// new key takes another block. Turned red by a block given back while the round holds it.
+#[test]
+fn a_row_given_a_new_key_does_not_move_a_held_one() {
+    let keys = key_space();
+    let round = round_reading(keys);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let mut row = keys.key("demo/a").expect("room");
+    let at_a = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    row = keys.key("demo/b").expect("room");
+    let at_b = row.as_str().as_ptr() as usize;
+    assert_ne!(at_a, at_b, "the held block is not given to the new key");
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [("demo/a".to_owned(), at_a), ("demo/b".to_owned(), at_b)]
+    );
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "both blocks back once settled");
+}
+
+/// The CONTROL of the two above: a round that reads no key arena copies the key, so the block goes
+/// back as soon as its row lets go of it, before the delivery, which reads the copy.
+#[test]
+fn a_round_that_reads_no_key_arena_copies_the_key() {
+    let keys = key_space();
+    let round = round(1024, 4);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let row = keys.key("demo/alias").expect("room");
+    let at = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    assert_eq!(
+        keys.counts().used,
+        0,
+        "nothing holds the block once its row lets go"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "demo/alias", "the copy reads the key");
+    assert_ne!(seen[0].1, at, "read from the round's copy");
 }
 
 /// A round let go of at its session's end ends the calls its records owe, before the arena that
