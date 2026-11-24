@@ -43,6 +43,18 @@ mod posix_host {
         wz_runtime_posix::stream::PosixTcpDial
     }
 
+    /// The links `S` with links over the host's ttys beside them, which `serial/` locators are
+    /// dialled and listened on with.
+    #[cfg(feature = "transport-link-serial")]
+    pub(crate) type WithSerial<S> = wz_runtime_posix::serial::PosixSerialLinks<S>;
+
+    /// `links`, and links over the host's ttys beside them, set as zenoh-pico's POSIX tty sets a
+    /// line.
+    #[cfg(feature = "transport-link-serial")]
+    pub(crate) fn with_serial<S>(links: S) -> WithSerial<S> {
+        WithSerial::<S>::new(links, wz_runtime_posix::serial::PosixSerialOpen)
+    }
+
     pub(crate) fn clock() -> Clock {
         wz_runtime_posix::PosixClock
     }

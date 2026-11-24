@@ -582,11 +582,18 @@ type SecuredLinks = crate::coop_host::Links;
 /// The links a cooperative session opens over the host's sockets, as [`open_on_coop`] composes
 /// them: the host's, over a secure channel and joining groups where the build does either.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
-pub(crate) type HostLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
+type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
     wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>,
 >;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
-pub(crate) type HostLinks = SecuredLinks;
+type SocketLinks = SecuredLinks;
+
+/// The links a cooperative session opens over the host: its sockets', and its ttys' beside them
+/// where the build has serial links (`transport-link-serial`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-serial"))]
+pub(crate) type HostLinks = crate::coop_host::WithSerial<SocketLinks>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-serial")))]
+pub(crate) type HostLinks = SocketLinks;
 
 /// The links a cooperative session opens over: the host's, or with `app-transport` whichever of
 /// the host's and the program's transport the config chose. One type either way, so the engine
@@ -2061,6 +2068,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // waiting in its own loop would hold the session through each tick of its wait, and a call
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
+    let links = links.waited_by_owner();
+    // The host's ttys are links beside its sockets, waited for as those are: a `serial/` locator
+    // is dialled and listened on over them, any other over the sockets.
+    #[cfg(feature = "transport-link-serial")]
+    let links = crate::coop_host::with_serial(links).waited_by_owner();
     #[cfg(feature = "app-transport")]
     let links = match request.app_transport {
         Some(transport) => PicoLinks::Right(app_links_on(
@@ -2071,10 +2083,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             .waited_by_owner(),
             &clock,
         )),
-        None => PicoLinks::Left(links.waited_by_owner()),
+        None => PicoLinks::Left(links),
     };
-    #[cfg(not(feature = "app-transport"))]
-    let links = links.waited_by_owner();
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
         clock,

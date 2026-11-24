@@ -213,20 +213,27 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's serial lines are the host's ttys (`wz-runtime-posix`'s `serial`), which
+// it opens on Linux and Android; a host without them, and a Zephyr image, whose UARTs no module
+// opens yet, are refused by name rather than by the missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "transport-link-serial",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(any(target_os = "linux", target_os = "android"))
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-serial` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-serial` on the cooperative engine opens the host's ttys, \
+     which `wz-runtime-posix` opens on Linux and Android only, and a Zephyr image has no serial \
+     line in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's serial lines"
 );
 #[cfg(all(
     feature = "transport-link-tls",
@@ -289,7 +296,6 @@ compile_error!(
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-serial",
         feature = "transport-link-tls",
         feature = "transport-link-unixpipe",
         feature = "transport-link-ws"

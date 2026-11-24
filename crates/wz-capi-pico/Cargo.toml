@@ -743,9 +743,11 @@ tls-mbedtls =["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 transport-link-ws = ["engine-tokio", "wz-capi-core/transport-link-ws"]
 # The `serial/<device>#baudrate=<n>` link, dial and accept: zenoh-pico's
 # `Z_FEATURE_LINK_SERIAL` (default 0). The listener serves one peer at a time, as one line
-# carries one; the dial runs the serial-link handshake before the session's. Without it the
-# open fails the way a `ws/` one does without its feature.
-transport-link-serial = ["engine-tokio", "wz-capi-core/transport-link-serial"]
+# carries one; the dial runs the serial-link handshake before the session's. It selects no
+# engine: the tokio engine's serial link, or on the cooperative one the host's ttys
+# (`wz-runtime-posix`'s `serial`, Linux and Android) beside its sockets (`src/coop_host.rs`).
+# Without it a `serial/` endpoint is a locator no link opens, and the open fails.
+transport-link-serial = ["wz-capi-core?/transport-link-serial", "wz-runtime-posix?/serial"]
 
 [[test]]
 name = "supervision_doors"

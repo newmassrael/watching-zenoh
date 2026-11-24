@@ -292,6 +292,13 @@ impl SerialOpen for PosixSerialOpen {
     }
 }
 
+wz_runtime_coop::with_heap_link_seams! {
+    /// The links of a stack `S` with links over the host's ttys beside them: what a cooperative
+    /// engine on this host dials and listens on `serial/` locators with
+    /// (`PosixSerialLinks::<S>::new(links, PosixSerialOpen)`).
+    pub type PosixSerialLinks<S> = wz_runtime_coop::serial_link::SerialLinks<S, PosixSerialOpen>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

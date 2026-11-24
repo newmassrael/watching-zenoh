@@ -52,6 +52,7 @@ mod replay_cache_doors;
 mod reply_err_options_roundtrip;
 mod reply_options_roundtrip;
 mod segment_sender_doors;
+mod serial_link_refused;
 mod serial_link_roundtrip;
 mod session_check;
 mod session_memory_door;
