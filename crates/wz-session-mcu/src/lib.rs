@@ -150,8 +150,6 @@ pub mod slot_replay;
 pub mod slot_plane;
 // A multicast group the client node is a member of, beside its sessions: the group's pump in a cell of
 // a table the image declared, its events fanned to the node's observer, its publishers put on it.
-// Totality debt TD-220 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",

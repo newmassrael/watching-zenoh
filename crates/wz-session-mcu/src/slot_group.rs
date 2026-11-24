@@ -245,10 +245,12 @@ impl<const P: usize> GroupPublisher<P> {
     ) -> Option<MulticastTxOffer<'static>> {
         loop {
             let at = self.next(now_ms, items)?;
-            let offer = match items[at].body {
-                Body::Text(text) => multicast_tx_offer_put_literal(items[at].key, text.as_bytes()),
+            // A place the round names is one of `items`; one that were not is refused as a
+            // put the wire cannot carry.
+            let offer = items.get(at).and_then(|item| match item.body {
+                Body::Text(text) => multicast_tx_offer_put_literal(item.key, text.as_bytes()),
                 Body::Made { .. } => None,
-            };
+            });
             match offer {
                 Some(offer) => {
                     self.settle(at, now_ms, Outcome::Sent, counts);
