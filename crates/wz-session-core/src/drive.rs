@@ -3055,7 +3055,7 @@ where
         n
     });
     let mut dropped_by_decode = None;
-    let ingest_outcome = reasm.ingest(
+    let ingest_outcome = reasm.ingest_keeping(
         ReassemblyFragment {
             peer_key: &peer[..peer_len],
             reliable,
@@ -3067,9 +3067,10 @@ where
         },
         sn_mask,
         now_ms,
-        |message| {
+        |chain: crate::reassembly_dispatch::ChainBytes<'_>| {
             // ARCHITECTURE section 9.3: the completed message is read in the
-            // slot its fragments were staged into, borrowed for this call.
+            // buffer its fragments were staged into, kept when the arena can
+            // give the buffer away and borrowed for this call when it cannot.
             let carrier = RecordCarrier {
                 reliable,
                 sn,
@@ -3077,11 +3078,13 @@ where
                 #[cfg(feature = "alloc")]
                 has_ext: false,
             };
-            // The message lies in its chain's buffer until the next fragment is staged: a host
-            // that holds the records it is handed may read them there.
-            on_event.lend_rejoined(Some(message));
+            // A kept message lies in its chain's buffer for as long as the buffer is held: a host
+            // that holds the records it is handed keeps the buffer with them and reads them there.
+            if let crate::reassembly_dispatch::ChainBytes::Kept(kept) = &chain {
+                on_event.lend_rejoined(kept);
+            }
             dropped_by_decode = walk_records_in_place(
-                message,
+                chain.as_slice(),
                 carrier,
                 #[cfg(all(
                     feature = "alloc",
@@ -3096,7 +3099,9 @@ where
                 &mut *on_event,
             )
             .err();
-            on_event.lend_rejoined(None);
+            if let crate::reassembly_dispatch::ChainBytes::Kept(kept) = chain {
+                on_event.end_rejoined(kept);
+            }
         },
     );
     // The chain this fragment ended besides its own, which the in-place

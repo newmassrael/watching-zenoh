@@ -12,12 +12,14 @@
 //! row's table keeps where it lies until the call ends (`docs/c-abi-architecture.md`, P11), and a
 //! copy of any other callback, as zenoh-pico copies its subscriptions' callbacks out of its
 //! session mutex before it calls them. A record's parts are read where they
-//! lie when they lie in the datagram a link lends the step (UDP, a stream), so a sample of it is
-//! never copied; a key the session resolved from an alias lies in a frame of the dispatch, and is
-//! written into the table's keys; every other part that lies elsewhere (a rejoined message, a
-//! frame the link handed over, a group's datagram) is written into the table's area, which the
-//! session's arena lends (`DELIVERY_LANE_BYTES`). A record offered again for one more subscriber
-//! is written once: the subscriber's callback joins the ones it owes.
+//! lie when they lie in the datagram a link lends the step (UDP, a stream), or in a message
+//! rejoined from its fragments whose buffer the round keeps until it is emptied
+//! ([`Round::end_rejoined`]), so a sample of either is never copied; a key the session resolved
+//! from an alias lies in a frame of the dispatch, and is written into the table's keys; every
+//! other part that lies elsewhere (a frame the link handed over, a group's datagram) is written
+//! into the table's area, which the session's arena lends (`DELIVERY_LANE_BYTES`). A record
+//! offered again for one more subscriber is written once: the subscriber's callback joins the
+//! ones it owes.
 //!
 //! The session writes the table under its lock while it is empty or filling; the lock's release
 //! seals it ([`Round::seal`]); one delivery takes it, hands every record to its callbacks in
@@ -47,6 +49,7 @@ use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+use wz_session_core::byte_cells::KeptBytes;
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -248,7 +251,9 @@ pub struct RoundCounts {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
     /// In the datagram a link lent the step the record was written in.
-    Lent,
+    Datagram,
+    /// In the rejoined message the round keeps ([`Round::end_rejoined`]).
+    Rejoined,
     /// In the table's keys.
     Key,
     /// In the table's area.
@@ -271,9 +276,9 @@ impl Span {
         place: Place::Area,
     };
 
-    /// Where `part` lies in `datagram`, its first byte and its length; `None` when it lies
-    /// elsewhere.
-    fn lent(part: &[u8], (start, length): (*const u8, usize)) -> Option<Self> {
+    /// Where `part` lies in the region `lending` names; `None` when it lies elsewhere.
+    fn lent(part: &[u8], lending: Lending) -> Option<Self> {
+        let (start, length) = lending.at;
         if part.is_empty() {
             return Some(Self::EMPTY);
         }
@@ -284,9 +289,17 @@ impl Span {
         Some(Self {
             at: u32::try_from(at).ok()?,
             len: u32::try_from(part.len()).ok()?,
-            place: Place::Lent,
+            place: lending.place,
         })
     }
+}
+
+/// A region a link or the reassembly lends the step, whose parts the table may read where they
+/// lie: its first byte and its length, and which of the table's lent places it is.
+#[derive(Clone, Copy)]
+struct Lending {
+    at: (*const u8, usize),
+    place: Place,
 }
 
 /// Whether `a` and `b` are the same bytes: the same place, or equal.
@@ -583,10 +596,12 @@ const DELIVERING: u8 = 3;
 
 /// What the round holds: its records, the callbacks they owe, in order, and where their parts lie.
 struct Table {
-    /// The datagram the records' lent parts lie in, its first byte and its length.
-    datagram: (*const u8, usize),
-    /// Whether a part lies in it: its link is held back from its next receive.
-    lends: bool,
+    /// The datagram a record's part lies in, its first byte and its length: its link is held back
+    /// from its next receive.
+    datagram: Option<(*const u8, usize)>,
+    /// The rejoined message a record's part lies in, whose buffer the round keeps until the table
+    /// is emptied ([`Round::end_rejoined`]).
+    rejoined: Option<(*const u8, usize)>,
     /// As many records as the session's `DELIVERY_LANE_EVENTS`, rows its arena lent.
     entries: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
@@ -615,16 +630,22 @@ impl Table {
         if len == 0 {
             return &[];
         }
-        match span.place {
-            // SAFETY: the part lies in the datagram (`Span::lent`), which its link leaves where it
-            // lies while the table lends it (`Round::lends_a_datagram`).
-            Place::Lent => unsafe { core::slice::from_raw_parts(self.datagram.0.add(at), len) },
-            Place::Key => self.keys.get(at..at.saturating_add(len)).unwrap_or(&[]),
-            // SAFETY: the part was written inside the area (`Self::write`), which the session's
-            // arena lends the round for as long as the round lives, and nothing writes it again
-            // until the table is emptied.
-            Place::Area => unsafe { core::slice::from_raw_parts(self.area.as_ptr().add(at), len) },
-        }
+        let start = match span.place {
+            Place::Key => return self.keys.get(at..at.saturating_add(len)).unwrap_or(&[]),
+            Place::Datagram => self.datagram.map(|(start, _)| start),
+            Place::Rejoined => self.rejoined.map(|(start, _)| start),
+            Place::Area => Some(self.area.as_ptr().cast_const()),
+        };
+        let Some(start) = start else {
+            return &[];
+        };
+        // SAFETY: the part lies inside its place (`Span::lent`, `Self::write`): the datagram, which
+        // its link leaves where it lies while the table lends it (`Round::lends_a_datagram`); the
+        // rejoined message, whose buffer the round keeps and no chain is staged into until the
+        // table no longer reads it (`Round::let_go_of_kept`); or the area, which the session's
+        // arena lends the round for as long as the round lives and nothing writes again until the
+        // table is emptied.
+        unsafe { core::slice::from_raw_parts(start.add(at), len) }
     }
 
     /// The text at `span`: a key, whose bytes were a `&str`'s.
@@ -634,11 +655,12 @@ impl Table {
         unsafe { core::str::from_utf8_unchecked(self.bytes(span)) }
     }
 
-    /// Where `part` is read: where it lies in `lending`, the datagram a link lends the step, when
-    /// it lies there and the table lends no other; written into the area otherwise. `None` when
-    /// the area has not the room. Out of line: every offer places its parts through this one body.
+    /// Where `part` is read: where it lies in `lending`, the datagram a link lends the step or the
+    /// rejoined message being dispatched, when it lies there and the table reads no other of that
+    /// kind; written into the area otherwise. `None` when the area has not the room. Out of line:
+    /// every offer places its parts through this one body.
     #[inline(never)]
-    fn place(&mut self, part: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
+    fn place(&mut self, part: &[u8], lending: Option<Lending>) -> Option<Span> {
         if part.is_empty() {
             return Some(Span::EMPTY);
         }
@@ -649,15 +671,25 @@ impl Table {
     }
 
     /// Where `part` lies in `lending`, when the table may read it there.
-    fn lent(&mut self, part: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
-        let datagram = lending?;
-        if self.lends && self.datagram != datagram {
+    fn lent(&mut self, part: &[u8], lending: Option<Lending>) -> Option<Span> {
+        let lending = lending?;
+        let region = match lending.place {
+            Place::Rejoined => &mut self.rejoined,
+            _ => &mut self.datagram,
+        };
+        if region.is_some_and(|lent| lent != lending.at) {
             return None;
         }
-        let span = Span::lent(part, datagram)?;
-        self.datagram = datagram;
-        self.lends = true;
+        let span = Span::lent(part, lending)?;
+        if span.len > 0 {
+            *region = Some(lending.at);
+        }
         Some(span)
+    }
+
+    /// Whether a part lies in a region a link or the reassembly lent.
+    fn lends(&self) -> bool {
+        self.datagram.is_some() || self.rejoined.is_some()
     }
 
     /// Write `part` after what the area holds.
@@ -688,7 +720,7 @@ impl Table {
     /// that key again, after the keys written before it, or in the area once the keys are full;
     /// `None` when there is no room. Out of line, as [`Self::place`] is.
     #[inline(never)]
-    fn place_key(&mut self, key: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
+    fn place_key(&mut self, key: &[u8], lending: Option<Lending>) -> Option<Span> {
         if let Some(span) = self.lent(key, lending) {
             return Some(span);
         }
@@ -713,11 +745,7 @@ impl Table {
     }
 
     /// `parts` placed for the table.
-    fn place_parts(
-        &mut self,
-        parts: &Parts<'_>,
-        lending: Option<(*const u8, usize)>,
-    ) -> Option<Option<Rest>> {
+    fn place_parts(&mut self, parts: &Parts<'_>, lending: Option<Lending>) -> Option<Option<Rest>> {
         if !parts.carries() {
             return Some(None);
         }
@@ -757,8 +785,8 @@ impl Table {
         self.keys.clear();
         self.key = None;
         self.fan = false;
-        self.datagram = (ptr::null(), 0);
-        self.lends = false;
+        self.datagram = None;
+        self.rejoined = None;
         self.written = 0;
     }
 }
@@ -892,8 +920,9 @@ impl Drop for Releasing<'_> {
 pub(crate) struct Round {
     state: AtomicU8,
     table: UnsafeCell<Table>,
-    /// Whether a record lies in the datagram a link lent ([`Self::lends_a_datagram`]): set by the
-    /// session's writes, cleared as a delivery empties the table.
+    /// Whether a record lies in the datagram a link lent or a rejoined message the round keeps
+    /// ([`Self::lends_a_datagram`]): set by the session's writes, cleared as a delivery empties
+    /// the table.
     lends: AtomicBool,
     /// Whether a source the gate does not hold back owes the round records it had no room for (a
     /// lost face's tokens, still to be retracted): no link is read until it has handed them, so
@@ -903,9 +932,13 @@ pub(crate) struct Round {
     /// where it lies until it is next asked to receive (`RoundGate::recv_with`): its first byte
     /// and its length. Written under the session's lock.
     lending: UnsafeCell<Option<(*const u8, usize)>>,
-    /// The datagram lent before a rejoined message was lent in its place ([`Self::lend_rejoined`]),
-    /// lent again once the message's records are dispatched. Written under the session's lock.
-    lent_before: UnsafeCell<Option<(*const u8, usize)>>,
+    /// Where the rejoined message lies whose records are dispatched now, between
+    /// [`Self::lend_rejoined`] and [`Self::end_rejoined`]: what is offered meanwhile is read in
+    /// it and not in the datagram. Written under the session's lock.
+    rejoining: UnsafeCell<Option<(*const u8, usize)>>,
+    /// The buffer of the rejoined message the table reads, kept until the lock holder finds the
+    /// table no longer reads it ([`Self::let_go_of_kept`]). Written under the session's lock.
+    kept: UnsafeCell<Option<KeptBytes>>,
     /// The calls of the subscribers the samples offered now reach, begun on their rows and handed
     /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
     /// Written under the session's lock.
@@ -931,12 +964,13 @@ pub(crate) struct Round {
 }
 
 // SAFETY: the table is reached by the holder of the session's lock while the state is empty or
-// filling, and by the one delivery that took it while it is delivering; `lending` and `capturing`
-// by the holder of the session's lock alone; `released` behind its own lock; every other field is
-// an atomic or never written after the round is made. A call the table owes reads a row its table
-// keeps where it lies until the call ends, through a sink that is `Send` and `Sync`; every other
-// callback it owes is `Send` and `Sync`; and the parts it reads lie where the link and the arena
-// keep them while it holds them.
+// filling, and by the one delivery that took it while it is delivering; `lending`, `rejoining`,
+// `kept` and `capturing` by the holder of the session's lock alone, so the kept buffer, whose
+// claim belongs to the session's task, is let go of on that task alone; `released` behind its own
+// lock; every other field is an atomic or never written after the round is made. A call the table
+// owes reads a row its table keeps where it lies until the call ends, through a sink that is
+// `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and the parts it reads
+// lie where the link, the kept buffer and the arena keep them while it holds them.
 unsafe impl Send for Round {}
 // SAFETY: as `Send`.
 unsafe impl Sync for Round {}
@@ -980,8 +1014,8 @@ impl Round {
         unsafe {
             ptr::write(addr_of_mut!((*at).state), AtomicU8::new(EMPTY));
             let table = addr_of_mut!((*at).table).cast::<Table>();
-            ptr::write(addr_of_mut!((*table).datagram), (ptr::null(), 0));
-            ptr::write(addr_of_mut!((*table).lends), false);
+            ptr::write(addr_of_mut!((*table).datagram), None);
+            ptr::write(addr_of_mut!((*table).rejoined), None);
             ptr::write(addr_of_mut!((*table).entries), rows.records);
             ptr::write(addr_of_mut!((*table).callbacks), rows.callbacks);
             ptr::write(addr_of_mut!((*table).keys), rows.keys);
@@ -994,7 +1028,8 @@ impl Round {
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
-            ptr::write(addr_of_mut!((*at).lent_before), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).rejoining), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).kept), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).released), Released::new());
@@ -1023,7 +1058,8 @@ impl Round {
             lends: _,
             owes: _,
             lending: _,
-            lent_before: _,
+            rejoining: _,
+            kept: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
             released: _,
@@ -1040,7 +1076,7 @@ impl Round {
         } = round;
         let Table {
             datagram: _,
-            lends: _,
+            rejoined: _,
             entries: _,
             callbacks: _,
             keys: _,
@@ -1069,19 +1105,30 @@ impl Round {
 
     /// A record was written into `table`: it is filling, and lends what it lends.
     fn filled(&self, table: &Table) {
-        if table.lends {
+        if table.lends() {
             self.lends.store(true, Ordering::Release);
         }
         self.state.store(FILLING, Ordering::Release);
     }
 
-    /// The datagram a link lends the step now.
+    /// What is lent the step now: the rejoined message whose records are dispatched, or else the
+    /// datagram a link lends.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    unsafe fn lending(&self) -> Option<(*const u8, usize)> {
-        // SAFETY: the caller's contract: written under the session's lock alone.
-        unsafe { *self.lending.get() }
+    unsafe fn lending(&self) -> Option<Lending> {
+        // SAFETY: the caller's contract: both are written under the session's lock alone.
+        let (rejoining, datagram) = unsafe { (*self.rejoining.get(), *self.lending.get()) };
+        match rejoining {
+            Some(at) => Some(Lending {
+                at,
+                place: Place::Rejoined,
+            }),
+            None => datagram.map(|at| Lending {
+                at,
+                place: Place::Datagram,
+            }),
+        }
     }
 
     /// Whether `table` takes one more record, owing `callbacks` callbacks.
@@ -1242,7 +1289,7 @@ impl Round {
     fn place_sample(
         table: &mut Table,
         sample: &Offered<'_>,
-        lending: Option<(*const u8, usize)>,
+        lending: Option<Lending>,
     ) -> Option<(Span, Span, Option<Rest>)> {
         let key = table.place_key(sample.key, lending)?;
         let payload = table.place(sample.payload, lending)?;
@@ -1413,7 +1460,7 @@ impl Round {
     fn place_reply(
         table: &mut Table,
         view: &dyn ReplyView,
-        lending: Option<(*const u8, usize)>,
+        lending: Option<Lending>,
     ) -> Option<HeldReply> {
         let key = table.place_key(view.keyexpr().as_bytes(), lending)?;
         let payload = table.place(view.payload(), lending)?;
@@ -1491,24 +1538,64 @@ impl Round {
         self.owes.load(Ordering::Acquire)
     }
 
-    /// The records offered from here on lie in `message`, a message rejoined from its fragments in
-    /// its chain's buffer, until the same call with `None`, which lends again the datagram lent
-    /// before it. A part is read there only while the round lends nothing else
-    /// (`Table::lent`); otherwise it is copied, as one from any source but the lent one is. The
-    /// buffer is written again only when a fragment is staged into it, which needs a link read,
-    /// and the gate reads none while the round lends.
+    /// The records offered from here on lie in `message`, a message rejoined from its fragments and
+    /// kept in its chain's buffer, until [`Self::end_rejoined`]; the datagram a link lends is lent
+    /// again after it. A part is read there while the table reads no other rejoined message
+    /// (`Table::lent`), and copied otherwise, as one from any source but a lent one is.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub(crate) unsafe fn lend_rejoined(&self, message: Option<&[u8]>) {
-        // SAFETY: the caller's contract: both are written under the session's lock alone.
+    pub(crate) unsafe fn lend_rejoined(&self, message: &KeptBytes) {
+        let bytes = message.as_slice();
+        // SAFETY: the caller's contract: written under the session's lock alone.
+        unsafe { *self.rejoining.get() = Some((bytes.as_ptr(), bytes.len())) };
+    }
+
+    /// The records of `message` are offered: the round keeps its buffer when the table reads a
+    /// part of it, until the table no longer does ([`Self::let_go_of_kept`]), and drops it here
+    /// otherwise, which gives it back to its chains at once. A buffer kept before is let go of
+    /// then, as the table reads one rejoined message at most.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub(crate) unsafe fn end_rejoined(&self, message: KeptBytes) {
+        let bytes = message.as_slice();
+        let at = (bytes.as_ptr(), bytes.len());
+        // SAFETY: the caller's contract: `rejoining` and `kept` are written under the session's
+        // lock alone, and a table not sealed is the lock holder's (`Self::writable`).
         unsafe {
-            match message {
-                Some(bytes) => {
-                    *self.lent_before.get() = *self.lending.get();
-                    *self.lending.get() = Some((bytes.as_ptr(), bytes.len()));
-                }
-                None => *self.lending.get() = (*self.lent_before.get()).take(),
+            *self.rejoining.get() = None;
+            if self
+                .writable()
+                .is_some_and(|table| table.rejoined == Some(at))
+            {
+                *self.kept.get() = Some(message);
+            }
+        }
+    }
+
+    /// Let go of the kept buffer of a rejoined message ([`Self::end_rejoined`]) once the table no
+    /// longer reads it. A delivery empties the table with no lock of the session held, and a chain
+    /// claims a buffer of its table under that lock alone, so the buffer is given back here, by
+    /// the lock holder, which the gate is before it lets a link be read ([`RoundGate`]).
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub(crate) unsafe fn let_go_of_kept(&self) {
+        // SAFETY: the caller's contract: `kept` is written under the session's lock alone, and a
+        // table not sealed is the lock holder's (`Self::writable`).
+        unsafe {
+            let Some(at) = (*self.kept.get()).as_ref().map(|kept| {
+                let bytes = kept.as_slice();
+                (bytes.as_ptr(), bytes.len())
+            }) else {
+                return;
+            };
+            if self
+                .writable()
+                .is_some_and(|table| table.rejoined != Some(at))
+            {
+                *self.kept.get() = None;
             }
         }
     }
@@ -1558,6 +1645,12 @@ impl Round {
         drop(core::mem::take(&mut table.entries));
         drop(core::mem::take(&mut table.callbacks));
         drop(core::mem::take(&mut table.keys));
+        // SAFETY: as above; the kept buffer is a cell of a table the session's arena lent, so it
+        // goes back before the arena does.
+        unsafe {
+            *self.rejoining.get() = None;
+            *self.kept.get() = None;
+        }
         self.lends.store(false, Ordering::Release);
         self.state.store(EMPTY, Ordering::Release);
     }
@@ -1697,7 +1790,9 @@ impl Round {
             .entries
             .iter()
             .filter(|entry| match &entry.what {
-                Held::Sample { head, .. } => head.payload.place == Place::Lent,
+                Held::Sample { head, .. } => {
+                    matches!(head.payload.place, Place::Datagram | Place::Rejoined)
+                }
                 #[allow(unreachable_patterns)]
                 _ => false,
             })
@@ -1936,9 +2031,16 @@ impl<P> RoundGate<P> {
     }
 
     /// Whether the link is held back from receiving: a record lies in the datagram it lent last
-    /// (the next receive may write where it lies), or the round has not the room of a record.
+    /// (the next receive may write where it lies), or the round has not the room of a record. A
+    /// link that is not held back may be read, so the buffer of a rejoined message the round kept
+    /// and no longer reads is given back first: the chain a fragment read now starts finds it free.
     fn shut(&self) -> bool {
-        self.round.lends_a_datagram() || !self.has_room()
+        if self.round.lends_a_datagram() || !self.has_room() {
+            return true;
+        }
+        // SAFETY: asked by the session's step alone, under the session's lock (`Self::new`).
+        unsafe { self.round.let_go_of_kept() };
+        false
     }
 }
 
