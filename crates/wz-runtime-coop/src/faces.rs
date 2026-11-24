@@ -355,6 +355,21 @@ impl<D> Dial<D> {
     pub fn new(endpoint: DialEndpoint, pending: D) -> Self {
         Self { endpoint, pending }
     }
+
+    /// The endpoint dialled.
+    pub fn endpoint(&self) -> &DialEndpoint {
+        &self.endpoint
+    }
+
+    /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
+    /// being made. What a session's driver reads of a dial at each move of its face
+    /// (`face_life::Signals::dial`).
+    pub fn answer<P>(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>>
+    where
+        D: PendingDial<P>,
+    {
+        self.pending.poll()
+    }
 }
 
 /// A port the session listens on, the wait for a connection on it, and the row of the endpoint
