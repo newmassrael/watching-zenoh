@@ -149,6 +149,7 @@ impl<'a> PublishOptions<'a> {
     /// These options without their attachment, and the attachment they borrowed: what a holder
     /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
     /// encoding they were lent is copied into what is kept.
+    #[inline(never)]
     pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
         let Self {
             allowed_destination,
@@ -492,6 +493,7 @@ impl<'a> PublishOptions<'a> {
     /// `priority_band` deliberately still reads `self.qos` ungated — that is the independent
     /// `transport-qos` conduit axis (R311y307), whose real gate is the runtime-negotiated
     /// `is_qos()`, not a compile feature.
+    #[inline(never)]
     pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.as_ref()),

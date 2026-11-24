@@ -450,6 +450,7 @@ pub enum StatementNotHonoured {
 impl StatementNotHonoured {
     /// The answer of an engine that honours none of a publish's statements: the first one
     /// `opts` makes is refused, and a publish that states none passes.
+    #[inline(never)]
     pub fn of_publish(opts: &wz_session_core::publish_options::PublishOptions) -> Result<(), Self> {
         if opts.links.is_restricted() {
             Err(Self::Links)
