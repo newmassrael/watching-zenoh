@@ -1397,6 +1397,205 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     );
 }
 
+/// A Push naming id `id` in the receiver's own space (`M=0`), or in the sender's (`M=1`) when
+/// `theirs`.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    feature = "codec-declare",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+fn push_naming(id: ExprId, theirs: bool) -> crate::wire::PushOwned {
+    use wz_codecs::lent::{Push, Wireexpr, WireexprLocal, WireexprNonlocal, WireexprVariant};
+    let body = if theirs {
+        WireexprVariant::WireexprLocal(WireexprLocal {
+            id,
+            suffix_len: None,
+            suffix: None,
+        })
+    } else {
+        WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            id,
+            suffix_len: None,
+            suffix: None,
+        })
+    };
+    Push {
+        keyexpr: Wireexpr { body },
+        ..Push::default()
+    }
+    .try_into_owned_in::<crate::wire::WireStorage>()
+    .unwrap()
+}
+
+/// The peer's declaration of `key` under id `id` in its own space.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    feature = "codec-declare",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+fn peer_declares(id: ExprId, key: &str) -> crate::network_message::NetworkMessage {
+    use wz_session_core_test_support as fx;
+    crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(
+        fx::declare_envelope_decl_kexpr(fx::decl_kexpr(u64::from(id), key)),
+    ))
+}
+
+/// The own-space witness of the table set: the peer and the session each declared the same id, the
+/// peer as `theirs/x` and the session as `ours/x`, and a peer's `M=0` alias of that id is read
+/// from the session's table and reaches the subscriber on `ours/x` alone. The CONTROL is the
+/// same id under `M=1`, read from the peer's space, which reaches `theirs/x`; its twin without
+/// an own space is what shows the fixture tells the two spaces apart.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    feature = "codec-declare",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[test]
+fn an_own_space_resolves_a_peers_alias_to_our_literal_on_a_colliding_id() {
+    use crate::pubsub::SubscriberPeer;
+    use crate::reliability::Reliability;
+
+    let mut tables = SessionTables::<Sinks>::new();
+    let ours = tables.declare_keyexpr("ours/x").unwrap();
+    let on_ours = tables
+        .declare_subscriber(
+            "ours/x",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let on_theirs = tables
+        .declare_subscriber(
+            "theirs/x",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut peer = SubscriberPeer::<crate::bounded::Heap>::default();
+    let mut cx = Handed::default();
+    peer.dispatch(
+        &mut tables,
+        &mut cx,
+        &peer_declares(ours.id, "theirs/x"),
+        Reliability::Reliable,
+    );
+    peer.dispatch(
+        &mut tables,
+        &mut cx,
+        &crate::network_message::NetworkMessage::Push(alloc::boxed::Box::new(push_naming(
+            ours.id, true,
+        ))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        (
+            heard(&tables, on_ours.handle),
+            heard(&tables, on_theirs.handle)
+        ),
+        (0, 1),
+        "CONTROL: the id in the peer's space is the peer's key"
+    );
+    peer.dispatch(
+        &mut tables,
+        &mut cx,
+        &crate::network_message::NetworkMessage::Push(alloc::boxed::Box::new(push_naming(
+            ours.id, false,
+        ))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        (
+            heard(&tables, on_ours.handle),
+            heard(&tables, on_theirs.handle)
+        ),
+        (1, 1),
+        "the same id in our space is our literal, not the peer's"
+    );
+}
+
+/// The anti-vacuity twin: the same colliding id and the same alias, read by subscriptions that
+/// hold no own space (a subscriber table, whose `own_space` is none), so the peer's space is all
+/// there is. The `M=0` alias then resolves to nothing at all, neither key: it is not read from the
+/// peer's space in place of ours. The CONTROL is the `M=1` alias, which still reaches `theirs/x`,
+/// so the fixture can deliver.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    feature = "codec-declare",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[test]
+fn without_an_own_space_a_peers_alias_resolves_to_nothing() {
+    use crate::pubsub::{SubscriberPeer, SubscriberTable};
+    use crate::reliability::Reliability;
+    use crate::sink::{BoxedSink, SampleView};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let id: ExprId = 1;
+    let mut subscribers = SubscriberTable::<BoxedSink>::default();
+    let count = |seen: &Arc<AtomicUsize>| {
+        let seen = Arc::clone(seen);
+        BoxedSink::new(move |_: &dyn SampleView| {
+            seen.fetch_add(1, Ordering::Relaxed);
+        })
+    };
+    let (ours, theirs) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    subscribers
+        .register_sink("ours/x", Locality::Any, count(&ours))
+        .unwrap();
+    subscribers
+        .register_sink("theirs/x", Locality::Any, count(&theirs))
+        .unwrap();
+    let mut peer = SubscriberPeer::<crate::bounded::Heap>::default();
+    peer.dispatch(
+        &mut subscribers,
+        &mut (),
+        &peer_declares(id, "theirs/x"),
+        Reliability::Reliable,
+    );
+    peer.dispatch(
+        &mut subscribers,
+        &mut (),
+        &crate::network_message::NetworkMessage::Push(alloc::boxed::Box::new(push_naming(
+            id, true,
+        ))),
+        Reliability::Reliable,
+    );
+    let seen = || (ours.load(Ordering::Relaxed), theirs.load(Ordering::Relaxed));
+    assert_eq!(
+        seen(),
+        (0, 1),
+        "CONTROL: the peer's own id is the peer's key"
+    );
+    peer.dispatch(
+        &mut subscribers,
+        &mut (),
+        &crate::network_message::NetworkMessage::Push(alloc::boxed::Box::new(push_naming(
+            id, false,
+        ))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        seen(),
+        (0, 1),
+        "with no own space an M=0 alias reaches no key, the peer's least of all"
+    );
+}
+
 /// How many samples the subscriber `handle` names was handed.
 fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
     tables.subscribers().get(handle).unwrap().callback().0.get()
