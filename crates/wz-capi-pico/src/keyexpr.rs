@@ -1041,7 +1041,7 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
-    owned_keyexpr_at(dst, Box::into_raw(Box::new(key)));
+    owned_keyexpr_at(dst, Box::into_raw(crate::object_slot::boxed(key)));
 }
 
 /// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot

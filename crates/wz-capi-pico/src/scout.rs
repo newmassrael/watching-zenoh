@@ -474,7 +474,7 @@ impl HelloState {
     /// A hello that owns `locators`.
     fn owning(zid: z_id_t, whatami: z_whatami_t, locators: Box<StringArrayState>) -> Box<Self> {
         let locators_loan = loan_of(&locators);
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             zid,
             whatami,
             _owned: Some(locators),

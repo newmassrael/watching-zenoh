@@ -102,7 +102,7 @@ pub unsafe extern "C" fn _z_rc_init(cnt: *mut *mut c_void) -> ZResult {
         if cnt.is_null() {
             return Z_ERR_INVALID;
         }
-        let block = Box::new(RcBlock {
+        let block = crate::object_slot::boxed(RcBlock {
             strong: AtomicUsize::new(1),
             weak: AtomicUsize::new(1),
         });
@@ -410,7 +410,7 @@ unsafe fn install(slot: *mut c_void, capacity: usize, size: usize) -> ZResult {
     // it is `memcpy`d around by pico's inline code, and leaving it as
     // uninitialised stack bytes would make that copy read indeterminate values.
     core::ptr::write_bytes(slot.cast::<u8>(), 0, size);
-    let channel = Box::new(Channel::new(capacity));
+    let channel = crate::object_slot::boxed(Channel::new(capacity));
     slot.cast::<*mut c_void>()
         .write(Box::into_raw(channel).cast::<c_void>());
     Z_OK

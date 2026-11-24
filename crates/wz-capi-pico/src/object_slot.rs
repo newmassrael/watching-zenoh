@@ -20,6 +20,7 @@
 //! still boxes. What decides is where the object lies, never which build placed it.
 
 use alloc::sync::Arc;
+use core::alloc::Layout;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
@@ -117,7 +118,7 @@ impl<T> Slot<T> {
     pub(crate) fn take(kind: Kind) -> Option<Self> {
         let _ = kind;
         Some(Self {
-            place: NonNull::from(Box::leak(Box::new(MaybeUninit::<T>::uninit()))),
+            place: heap_place(Layout::new::<T>()).cast(),
             lender: None,
         })
     }
@@ -714,6 +715,43 @@ unsafe fn give_back<T>(place: NonNull<MaybeUninit<T>>) {
     drop(Box::from_raw(place.as_ptr()));
 }
 
+/// A place of `layout` from the heap, or `None` when the heap has not the memory: the one body
+/// through which this library takes any place of the heap, whatever it is for (an object
+/// [`boxed`], a [`Slot`] of a build without the pools, a payload's block of one without them).
+/// The place is the global allocator's, of `layout`, so a `Box` of a type so laid out lets it go,
+/// as [`release`] does. A layout of no bytes takes no memory: its place is its alignment, as a
+/// `Box` of a value of no bytes holds.
+#[inline(never)]
+pub(crate) fn try_heap_place(layout: Layout) -> Option<NonNull<u8>> {
+    if layout.size() == 0 {
+        return NonNull::new(core::ptr::null_mut::<u8>().wrapping_add(layout.align()));
+    }
+    // SAFETY: the layout is of at least one byte.
+    NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+}
+
+/// [`try_heap_place`] for a place the heap must give: without the memory the process ends, as
+/// `Box::new` ends it. One body, so no caller carries the allocation and the refusal of its own.
+#[inline(never)]
+pub(crate) fn heap_place(layout: Layout) -> NonNull<u8> {
+    match try_heap_place(layout) {
+        Some(at) => at,
+        None => alloc::alloc::handle_alloc_error(layout),
+    }
+}
+
+/// `value` on the heap, in a place of [`heap_place`]: what `Box::new` makes, a `Box` whose drop,
+/// `Box::into_raw` and [`release`] read it as one of `Box::new`'s.
+pub(crate) fn boxed<T>(value: T) -> Box<T> {
+    let at = heap_place(Layout::new::<T>()).cast::<T>();
+    // SAFETY: the place is the global allocator's, of `T`'s layout, and holds nothing; written
+    // whole, it is the allocation a `Box` of `T` owns.
+    unsafe {
+        at.as_ptr().write(value);
+        Box::from_raw(at.as_ptr())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,6 +820,37 @@ mod tests {
         assert_eq!(drops.get(), 1, "the hold lets it go once");
         // SAFETY: a null handle holds nothing.
         assert!(unsafe { Placed::<Counted<'_>>::from_raw(core::ptr::null_mut()) }.is_none());
+    }
+
+    /// A value boxed through the one heap body is read back whole and let go once, by its `Box`
+    /// and by a release alike. Turned red by a heap place that hands out memory not laid out for the
+    /// value, or that a `Box` cannot let go of.
+    #[test]
+    fn a_boxed_value_reads_back_and_is_let_go_once_by_a_box_or_a_release() {
+        let drops = core::cell::Cell::new(0);
+        let boxed_one = boxed((7u64, Counted(&drops)));
+        assert_eq!(boxed_one.0, 7, "the value reads back");
+        drop(boxed_one);
+        assert_eq!(drops.get(), 1, "its box lets it go once");
+        let object = Box::into_raw(boxed(Counted(&drops)));
+        // SAFETY: a live handle of `boxed`, released once.
+        unsafe { release(object) };
+        assert_eq!(drops.get(), 2, "a release lets it go once");
+    }
+
+    /// The heap body hands out a place aligned as its layout asks, past the heap's own alignment
+    /// too, and one of no bytes is aligned and not null. Turned red by a place that ignores the
+    /// alignment, or a null for a layout of no bytes.
+    #[test]
+    fn a_heap_place_is_aligned_as_asked_and_one_of_no_bytes_is_not_null() {
+        let strict = Layout::from_size_align(64, 256).expect("a layout");
+        let at = heap_place(strict);
+        assert_eq!(at.as_ptr() as usize % 256, 0, "aligned as asked");
+        // SAFETY: the place was taken just above for this layout, and is given back once.
+        unsafe { alloc::alloc::dealloc(at.as_ptr(), strict) };
+        let none = Layout::from_size_align(0, 32).expect("a layout");
+        let empty = try_heap_place(none).expect("a place of no bytes");
+        assert_eq!(empty.as_ptr() as usize % 32, 0, "aligned as asked");
     }
 
     /// An object a `Box` made is released as one a slot made: where it lies decides.
