@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (25) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (24) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -280,13 +280,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
-| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
-
-TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
-fills a list of `N` zids from the text a build states. It reads the text by slice pattern; the row
-it fills is written by index, because a `const fn` before Rust 1.83 takes no `&mut` and every
-write that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
-(`const_mut_refs`). The workspace's MSRV is 1.83, so the row is paid with `get_mut`.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
 is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
