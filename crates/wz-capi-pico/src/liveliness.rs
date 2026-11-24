@@ -45,11 +45,12 @@ use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::prelude::*;
 use crate::pubsub::{
-    z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
+    fill_subscriber_place, settle_subscriber, z_moved_closure_sample_t, z_owned_closure_sample_t,
+    z_owned_subscriber_t, CClosure, DeclaredSubscriber, SubscriberKept, SubscriberPlace,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::result::{refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_of, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
@@ -337,67 +338,99 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         if sub.is_null() || callback.is_null() {
             return Z_ERR_NULL;
         }
-        // Consume the moved closure FIRST (consume-on-all-paths), so every
-        // early return below still runs the C `drop(context)`.
-        let owned = &mut (*callback)._this;
-        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
-        *owned = z_owned_closure_sample_t::null_value();
-
-        // A closed session takes no declaration; the closure consumed above runs its drop.
-        let handle = match crate::session::open_session_handle(zs) {
-            Ok(handle) => handle,
-            Err(code) => return code,
-        };
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
-        };
-        // A NULL options pointer is pico's "defaults", not an error.
-        let history = !options.is_null() && (*options).history;
-        // The subscriber's place is taken from its session before anything is declared, so a
-        // session with no place left refuses the declaration and declares nothing.
-        let engine = engine_of(handle);
-        let Some(slot) = crate::object_slot::Slot::take_entity(
-            &engine,
-            crate::object_slot::Kind::LivelinessSubscriber,
-        ) else {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
-        };
-        // R2959 — pico declares the WHOLE key for a liveliness subscriber and
-        // sends its interest on that declaration
-        // (`vendor/zenoh-pico/src/net/liveliness.c` @
-        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
-        // and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it).
-        let key = match DeclaredKeyexpr::declare(&engine, &ke, declared_of(keyexpr)) {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        let wire = key.wire(Arc::as_ref(&engine));
-        let released = cclosure.release_latch();
-        let id = match engine.declare_liveliness_subscriber_on_wire(
-            &ke,
-            wire,
-            history,
-            sample_sink(cclosure),
-        ) {
-            Ok(id) => id,
-            // The sink was dropped with the refusal.
-            Err(refused) => return refusal_code(refused, Door::Entity),
-        };
-        let state = slot.fill(SubscriberState {
-            shared: engine,
-            id,
-            key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            released,
-        });
-        (*state).bind();
-        *sub = z_owned_subscriber_t {
-            handle: state as *mut c_void,
-            _pad: [core::ptr::null_mut(); 3],
-        };
-        Z_OK
+        match declare_liveliness_subscriber_with(zs, keyexpr, callback, options, false) {
+            Ok(state) => {
+                *sub = z_owned_subscriber_t {
+                    handle: state as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 3],
+                };
+                Z_OK
+            }
+            Err(code) => code,
+        }
     })
+}
+
+/// The body both liveliness subscriber doors of a session share: the moved closure taken (pico's
+/// consume-on-all-paths contract, so every refusal below runs its C `drop(context)`), the session
+/// and the key read, the subscriber's place taken from its session before anything is declared,
+/// so a session with no place left declares nothing, and the subscriber declared there
+/// ([`declare_liveliness_subscriber_in`]). A `background` subscriber takes its place as an owned
+/// one does, and its closure holds its session's count open until it is let go of, which the
+/// session's close waits on.
+///
+/// # Safety
+/// `zs` and `keyexpr` null or live loans; `callback` a non-null valid moved closure; `options`
+/// null or valid.
+unsafe fn declare_liveliness_subscriber_with(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *const z_liveliness_subscriber_options_t,
+    background: bool,
+) -> Result<*mut SubscriberState, ZResult> {
+    let owned = &mut (*callback)._this;
+    let closure = CClosure::uncounted(owned.context, owned.call, owned.drop);
+    *owned = z_owned_closure_sample_t::null_value();
+
+    // A closed session takes no declaration; the closure consumed above runs its drop.
+    let handle = crate::session::open_session_handle(zs)?;
+    let ke = keyexpr_str(keyexpr).ok_or(Z_ERR_INVALID)?;
+    // A NULL options pointer is pico's "defaults", not an error.
+    let history = !options.is_null() && (*options).history;
+    let engine = engine_of(handle);
+    let slot = crate::object_slot::Slot::<SubscriberPlace>::take_entity(
+        &engine,
+        crate::object_slot::Kind::LivelinessSubscriber,
+    )
+    .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+    let session = background.then(|| crate::session::session_count(zs).hold());
+    declare_liveliness_subscriber_in(
+        &engine,
+        slot,
+        ke,
+        declared_of(keyexpr),
+        closure,
+        history,
+        session,
+    )
+}
+
+/// Declare a liveliness subscriber of `engine` on `keyexpr` in its place, `slot`, its row
+/// calling `closure` where the place keeps it, with `session` kept beside it for a background
+/// subscriber. Answers the subscriber's state, declared, which its owner lets go of; a refused
+/// declaration lets go of the row's callback, which drops the closure, and of the place.
+///
+/// R2959 — pico declares the WHOLE key for a liveliness subscriber and sends its interest on that
+/// declaration (`vendor/zenoh-pico/src/net/liveliness.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
+/// and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it); the key it is announced
+/// on holds that declaration for as long as the engine's entry stands.
+///
+/// # Safety
+/// `existing` is the caller's own key when it is already a declaration; `closure` is counted in
+/// no owner yet (`CClosure::uncounted`).
+pub(crate) unsafe fn declare_liveliness_subscriber_in(
+    engine: &Arc<Engine>,
+    slot: crate::object_slot::Slot<SubscriberPlace>,
+    keyexpr: &str,
+    existing: Option<&DeclaredKeyexpr>,
+    closure: CClosure,
+    history: bool,
+    session: Option<crate::ffi::HeldIn>,
+) -> Result<*mut SubscriberState, ZResult> {
+    let state = fill_subscriber_place(slot, engine, closure, session);
+    // The row calls the closure where the place keeps it; a refusal drops the sink, which lets
+    // the closure go.
+    let sink = sample_sink_at(state);
+    let declared = DeclaredKeyexpr::declare(engine, keyexpr, existing).and_then(|key| {
+        let wire = key.wire(Arc::as_ref(engine));
+        engine
+            .declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
+            .map(|id| DeclaredSubscriber::new(id, key))
+            .map_err(|refused| refusal_code(refused, Door::Entity))
+    });
+    settle_subscriber(state, declared)
 }
 
 // --- liveliness GET ---------------------------------------------------------
@@ -608,11 +641,46 @@ pub unsafe extern "C" fn z_liveliness_get(
 }
 
 /// A C liveliness subscriber's closure as the engine holds it, as a subscriber's is
-/// (`pubsub::subscriber_sink`): moved into one allocation at the declaration, its address the
-/// context of a raw callback, called through a shared borrow from any thread and from inside
-/// itself, and let go of once, after its last call, which runs its C `drop(context)` and opens its
-/// latch.
-pub(crate) fn sample_sink(cclosure: CClosure) -> LivelinessSink {
+/// (`pubsub::subscriber_sink_at`): kept in the subscriber's place, whose object, at `object`, is
+/// the context of a raw callback, called through a shared borrow from any thread and from inside
+/// itself, and let go of once, after its last call, which takes the closure out of the place and
+/// runs its C `drop(context)`; the place goes back if its owner let go of it first. Nothing is
+/// allocated for it.
+///
+/// # Safety
+/// `object` is the object of a live place filled for an
+/// `Answering<T, SubscriberKept>` (`crate::object_slot::Answering`), whose kept closure is
+/// counted in it and taken out by nothing but the sink made here.
+unsafe fn sample_sink_at<T>(object: *mut T) -> LivelinessSink {
+    /// # Safety
+    /// `context` is the object of a place whose kept closure the sink's release has not taken out.
+    unsafe fn call<T>(context: *mut c_void, sample: LivelinessSample<'_>) {
+        // SAFETY: the caller's contract: the closure stands in the place, read through a shared
+        // borrow.
+        let kept =
+            unsafe { &*crate::object_slot::kept_at::<T, SubscriberKept>(context.cast::<T>()) };
+        crate::pubsub::hand_liveliness(&kept.closure, sample);
+    }
+    /// # Safety
+    /// As `call`'s, and nothing calls either again.
+    unsafe fn release<T>(context: *mut c_void) {
+        // SAFETY: the caller's contract: what the place keeps is taken out once, here, and dropped
+        // out of it, as its closure's drop may give the place back.
+        drop(unsafe { crate::pubsub::take_kept::<T>(context) });
+    }
+    // SAFETY: as `pubsub::subscriber_sink_at`'s: `call` reads the closure in the place through a
+    // shared borrow, which a C closure admits from any thread and from inside itself, and
+    // `release` takes it out once, after the last call, the place standing until then.
+    unsafe { LivelinessSink::raw(call::<T>, object.cast::<c_void>(), Some(release::<T>)) }
+}
+
+/// A C liveliness subscriber's closure moved into one allocation of its own, its address the
+/// context of a raw callback, for the one liveliness subscriber no place of a session keeps (an
+/// advanced subscriber's background detection, `declare_background_liveliness_subscriber`):
+/// called through a shared borrow from any thread and from inside itself, and let go of once,
+/// after its last call, which runs its C `drop(context)`.
+#[cfg(feature = "advanced")]
+fn sample_sink(cclosure: CClosure) -> LivelinessSink {
     /// # Safety
     /// `context` is the closure `sample_sink` moved into its allocation, not yet dropped.
     unsafe fn call(context: *mut c_void, sample: LivelinessSample<'_>) {
@@ -627,9 +695,9 @@ pub(crate) fn sample_sink(cclosure: CClosure) -> LivelinessSink {
         drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
     }
     let context = Box::into_raw(Box::new(cclosure)).cast::<c_void>();
-    // SAFETY: as `pubsub::subscriber_sink`'s: `call` reads the closure through a shared borrow,
-    // which a C closure admits from any thread and from inside itself, and `release` gives the
-    // allocation back once, after the last call.
+    // SAFETY: `call` reads the closure through a shared borrow, which a C closure admits from any
+    // thread and from inside itself, and `release` gives the allocation back once, after the last
+    // call.
     unsafe { LivelinessSink::raw(call, context, Some(release)) }
 }
 
@@ -650,19 +718,16 @@ pub(crate) unsafe fn token_state<'a>(
     handle_ref::<z_loaned_liveliness_token_t, TokenState>(ptr)
 }
 
-/// Declare a liveliness subscription on `shared` that lives for the SESSION
-/// (R311y559).
+/// Declare a liveliness subscription on `engine` that lives for an advanced subscriber's session
+/// (R311y559), the body of
+/// [`crate::advanced::ze_advanced_subscriber_detect_publishers_background`]. Consumes the moved
+/// closure on every path.
 ///
-/// The shared body of [`z_liveliness_declare_background_subscriber`] and
-/// [`crate::advanced::ze_advanced_subscriber_detect_publishers_background`],
-/// which are the same operation reached from two handles — a session and an
-/// advanced subscriber. Consumes the moved closure on every path.
-///
-/// "Lives for the session" is implemented as "no `SubscriberState` is ever
-/// built", not as a leaked one: the state's `Drop` is what retracts a
-/// subscription, so never constructing it is both simpler and exactly the
-/// intent. `z_close` still tears it down, because closing ends every entity the
-/// engine holds.
+/// No handle undeclares it, and nothing waits for its closure: an advanced subscriber's state
+/// keeps the engine and not the session handle the close waits through, so the closure is moved
+/// into an allocation of its own (`sample_sink`) rather than a place of the session's, which the
+/// session's close would have to wait for. `z_close` still tears it down, because closing ends
+/// every entity the engine holds.
 ///
 /// Its key is declared whole and its Interest names that declaration, as the
 /// handle form's does; the engine's entry is the only holder a background
@@ -672,13 +737,13 @@ pub(crate) unsafe fn token_state<'a>(
 /// `keyexpr` must be a valid keyexpr string; `existing` must be the caller's own
 /// key when it is already a declaration; `callback` must be a valid moved
 /// closure; `options` must be null or valid.
+#[cfg(feature = "advanced")]
 pub(crate) unsafe fn declare_background_liveliness_subscriber(
     engine: &Arc<Engine>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
     callback: *mut z_moved_closure_sample_t,
     options: *const z_liveliness_subscriber_options_t,
-    keep_for_close: &dyn Fn(Arc<crate::ffi::ReleaseLatch>),
 ) -> ZResult {
     guarded(|| {
         if callback.is_null() {
@@ -696,7 +761,6 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
         };
         let anchor: Arc<dyn Send + Sync> = Arc::new(key.share());
         let wire = key.wire(Arc::as_ref(engine)).keeping(anchor);
-        keep_for_close(cclosure.release_latch());
         match engine.declare_liveliness_subscriber_on_wire(
             keyexpr,
             wire,
@@ -714,9 +778,10 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
 ///
 /// R311y559 — the BACKGROUND form of [`z_liveliness_declare_subscriber`]. It
 /// takes the same arguments minus the handle slot and installs the same
-/// subscription; the difference is ownership, not behaviour. See
-/// `declare_background_liveliness_subscriber` for how "lives for the
-/// session" is implemented.
+/// subscription; the difference is ownership, not behaviour. Its closure lies in
+/// a place of the session's, as an owned subscriber's does, whose owner lets go of
+/// it at once; the place goes back once the row lets go of the closure, which
+/// holds the session's count open meanwhile, so the close waits for it.
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session; `keyexpr` must be null or a live
@@ -730,19 +795,73 @@ pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
     options: *mut z_liveliness_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
-        let Some(handle) = session_handle(zs) else {
+        if callback.is_null() {
             return Z_ERR_NULL;
-        };
-        let Some(ke) = keyexpr_str(keyexpr) else {
-            return Z_ERR_INVALID;
-        };
-        declare_background_liveliness_subscriber(
-            &engine_of(handle),
-            ke,
-            declared_of(keyexpr),
-            callback,
-            options,
-            &|latch| handle.keep_background(latch),
-        )
+        }
+        match declare_liveliness_subscriber_with(zs, keyexpr, callback, options, true) {
+            Ok(state) => {
+                // No handle will undeclare it: its owner lets go of it at once, with no wait, and
+                // the place stays with the row's callback until the session's close lets it go.
+                crate::object_slot::retire_entity::<SubscriberState, SubscriberKept>(state);
+                Z_OK
+            }
+            Err(code) => code,
+        }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    /// The kind of the last sample the C callback was handed.
+    static KIND: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    unsafe extern "C" fn noted(
+        sample: *const crate::pubsub::z_loaned_sample_t,
+        context: *mut c_void,
+    ) {
+        assert_eq!(context as usize, 0x5c, "the program's context");
+        // SAFETY: the sample the sink handed, valid for this call.
+        let kind = unsafe { crate::pubsub::z_sample_kind(sample) };
+        KIND.store(kind as usize, Ordering::SeqCst);
+        CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn dropped(context: *mut c_void) {
+        assert_eq!(context as usize, 0x5c, "the program's context");
+        DROPS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The callback a liveliness subscriber's row keeps hands each change to the C callback kept
+    /// in the subscriber's place, as a sample of the change's kind, and letting it go takes the
+    /// closure out and runs the C drop once. Turned red by a sink that calls nothing, one that
+    /// hands the wrong kind, or one whose drop is not the closure's.
+    #[test]
+    fn a_liveliness_rows_callback_calls_the_c_closure_in_its_place_and_drops_it_once() {
+        let context = 0x5c_usize as *mut c_void;
+        let closure = CClosure::uncounted(context, Some(noted), Some(dropped));
+        let mut place =
+            crate::object_slot::Answering::keeping(0_u8, SubscriberKept::new(closure, None));
+        // SAFETY: `place` holds an `Answering<u8, SubscriberKept>` that outlives the sink, whose
+        // closure only the sink takes out.
+        let sink = unsafe { sample_sink_at(core::ptr::from_mut(&mut place).cast::<u8>()) };
+        sink.call(LivelinessSample {
+            kind: LivelinessSampleKind::Delete,
+            keyexpr: "demo/alive",
+            token_id: 1,
+        });
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "the change handed");
+        assert_eq!(
+            KIND.load(Ordering::SeqCst),
+            Z_SAMPLE_KIND_DELETE as usize,
+            "as a sample of its kind"
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(sink);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
+    }
 }

@@ -66,9 +66,7 @@ enum Released {
     /// A latch of the closure's own ([`CClosure::new`]).
     Latch(Arc<ReleaseLatch>),
     /// The owner it is counted in, none while it is counted in none
-    /// ([`CClosure::uncounted`], [`CClosure::count_in`]). Its closures are the gets' and the
-    /// queryables', so it exists where they do.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    /// ([`CClosure::uncounted`], [`CClosure::count_in`]).
     Counted(Option<HeldIn>),
 }
 
@@ -78,7 +76,6 @@ enum Released {
 /// comes last, so a closure let go of after its owner (an undeclare or a close made from inside the
 /// closure's own callback, which cannot wait for it) still finds its count, and nothing is
 /// allocated for any closure.
-#[cfg(any(feature = "query", feature = "queryable"))]
 #[derive(Clone, Copy)]
 pub(crate) struct CountIn {
     open: core::ptr::NonNull<OpenClosures>,
@@ -88,13 +85,10 @@ pub(crate) struct CountIn {
 
 // SAFETY: the count it names is a lock, and the place is given back once, by the one thread the
 // count tells it is last (`CountIn::new`); a closure is dropped on whatever thread lets go of it.
-#[cfg(any(feature = "query", feature = "queryable"))]
 unsafe impl Send for CountIn {}
 // SAFETY: as `Send`: a shared `CountIn` reads nothing but through the count's lock.
-#[cfg(any(feature = "query", feature = "queryable"))]
 unsafe impl Sync for CountIn {}
 
-#[cfg(any(feature = "query", feature = "queryable"))]
 impl CountIn {
     /// The owner whose closures `open` counts, its place `place`, given back by
     /// `give_back(place)`.
@@ -131,10 +125,8 @@ impl CountIn {
 
 /// One held open in an owner's count ([`CountIn::hold`]): dropped, it tells the count, and the
 /// last one let go of after the owner let go of its place gives the place back.
-#[cfg(any(feature = "query", feature = "queryable"))]
 pub(crate) struct HeldIn(CountIn);
 
-#[cfg(any(feature = "query", feature = "queryable"))]
 impl Drop for HeldIn {
     fn drop(&mut self) {
         if self.0.open().close_one() {
@@ -165,7 +157,6 @@ impl<C> CClosure<C> {
     /// Adopt a moved C closure's fields, as [`Self::new`] does, with no latch: counted in no owner
     /// until [`Self::count_in`], so a closure dropped before it (a call refused before its session
     /// is read) runs its `drop(context)` and tells nobody.
-    #[cfg(any(feature = "query", feature = "queryable"))]
     pub(crate) fn uncounted(
         context: *mut core::ffi::c_void,
         call: C,
@@ -182,7 +173,6 @@ impl<C> CClosure<C> {
     /// Count this closure in `owner` until its `drop(context)` has run, so the owner waits for it
     /// ([`OpenClosures::wait_none`]) and its place stands until then. A closure made with a latch
     /// of its own, or counted already, is left as it is.
-    #[cfg(any(feature = "query", feature = "queryable"))]
     pub(crate) fn count_in(&mut self, owner: CountIn) {
         if let Released::Counted(counted @ None) = &mut self.released {
             *counted = Some(owner.hold());
@@ -197,7 +187,6 @@ impl<C> CClosure<C> {
     pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
         match &self.released {
             Released::Latch(latch) => latch.clone(),
-            #[cfg(any(feature = "query", feature = "queryable"))]
             Released::Counted(_) => {
                 let latch = Arc::new(ReleaseLatch::default());
                 latch.open();
@@ -221,7 +210,6 @@ impl<C> Drop for CClosure<C> {
             Released::Latch(latch) => latch.open(),
             // The hold is let go of after the drop above has run, and may give back the place the
             // count lies in.
-            #[cfg(any(feature = "query", feature = "queryable"))]
             Released::Counted(held) => drop(held.take()),
         }
     }
@@ -248,7 +236,6 @@ struct Open {
 }
 
 impl OpenClosures {
-    #[cfg(any(feature = "query", feature = "queryable"))]
     fn open_one(&self) {
         let mut state = self.state.lock();
         debug_assert!(
@@ -258,7 +245,6 @@ impl OpenClosures {
         state.held = state.held.saturating_add(1);
     }
 
-    #[cfg(any(feature = "query", feature = "queryable"))]
     /// One closure let go of: `true` when it was the last one held and the owner has let go of
     /// its place, which this closure then gives back.
     fn close_one(&self) -> bool {
@@ -509,7 +495,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, any(feature = "query", feature = "queryable")))]
+#[cfg(test)]
 mod closure_tests {
     //! A closure counted in an owner is open there from its count to its drop, and the owner's
     //! place goes back with the last of the owner and its closures.

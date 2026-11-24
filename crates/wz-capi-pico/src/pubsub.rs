@@ -641,7 +641,7 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
 /// borrowed keyexpr / payload) is valid only for the duration of that call —
 /// pico's contract, which is why the C side must copy anything it keeps. The advanced subscriber,
 /// which runs its own sink, is what calls it (a plain subscriber hands the engine its closure whole,
-/// `subscriber_sink`).
+/// `subscriber_sink_at`).
 #[cfg(any(test, feature = "advanced"))]
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
@@ -675,32 +675,55 @@ fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
     });
 }
 
-/// A C subscriber's closure as the engine holds it: the closure moved into one allocation at the
-/// declaration, its address the context of a raw callback ([`SubscriberSink::raw`]). The engine
-/// calls it through a shared borrow, from any thread and from inside itself, as zenoh-pico calls a
-/// subscription's callback with no lock held (`session/subscription.c`,
-/// `_z_trigger_subscriptions_impl`); it lets go of it once, after its last call, which drops the
-/// closure: its C `drop(context)` runs and its latch opens.
-fn subscriber_sink(closure: CClosure) -> SubscriberSink {
+/// A C subscriber's closure as the engine holds it in the subscriber's row: the closure lies in
+/// the subscriber's place ([`SubscriberPlace`]), whose object, at `object`, is the context of a
+/// raw callback ([`SubscriberSink::raw`]). The engine calls it through a shared borrow, from any
+/// thread and from inside itself, as zenoh-pico calls a subscription's callback with no lock held
+/// (`session/subscription.c`, `_z_trigger_subscriptions_impl`); it lets go of it once, after its
+/// last call, which takes the closure out of the place and drops it: its C `drop(context)` runs,
+/// and the place goes back if its owner let go of it first. Nothing is allocated for it.
+///
+/// # Safety
+/// `object` is the object of a live place filled for an `Answering<T, SubscriberKept>`
+/// (`crate::object_slot::Answering`), whose kept closure is counted in it and taken out by
+/// nothing but the sink made here.
+unsafe fn subscriber_sink_at<T>(object: *mut T) -> SubscriberSink {
     /// # Safety
-    /// `context` is the closure `subscriber_sink` moved into its allocation, not yet dropped.
-    unsafe fn call(context: *mut c_void, view: &dyn SampleView) {
-        // SAFETY: the caller's contract.
-        let closure = unsafe { &*context.cast::<CClosure>().cast_const() };
-        hand_sample(closure, view);
+    /// `context` is the object of a place whose kept closure the sink's release has not taken out.
+    unsafe fn call<T>(context: *mut c_void, view: &dyn SampleView) {
+        // SAFETY: the caller's contract: the closure stands in the place, read through a shared
+        // borrow.
+        let kept =
+            unsafe { &*crate::object_slot::kept_at::<T, SubscriberKept>(context.cast::<T>()) };
+        hand_sample(&kept.closure, view);
     }
     /// # Safety
-    /// As `call`'s, and nothing calls it again.
-    unsafe fn release(context: *mut c_void) {
-        // SAFETY: the caller's contract: the allocation is `subscriber_sink`'s, given back once.
-        drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
+    /// As `call`'s, and nothing calls either again.
+    unsafe fn release<T>(context: *mut c_void) {
+        // SAFETY: the caller's contract: what the place keeps is taken out once, here, and dropped
+        // out of it, as its closure's drop may give the place back.
+        drop(unsafe { take_kept::<T>(context) });
     }
-    let context = Box::into_raw(Box::new(closure)).cast::<c_void>();
-    // SAFETY: `call` reads the closure behind `context` through a shared borrow, which a C
-    // closure admits from any thread and from inside itself (pico calls it so, and `CClosure` is
-    // `Sync` for this plane); `release` gives the allocation back once, which the engine does
-    // after the last call.
-    unsafe { SubscriberSink::raw(call, context, Some(release)) }
+    // SAFETY: `call` reads the closure in the place through a shared borrow, which a C closure
+    // admits from any thread and from inside itself (pico calls it so, and `CClosure` is `Sync`
+    // for this plane); `release` takes it out once, which the engine does after the last call,
+    // and the place stands until then, as the closure is counted in it.
+    unsafe { SubscriberSink::raw(call::<T>, object.cast::<c_void>(), Some(release::<T>)) }
+}
+
+/// Take out what the place whose object is at `context` keeps for its row, for the row's release
+/// to drop.
+///
+/// # Safety
+/// `context` is the object of a place filled for an `Answering<T, SubscriberKept>` whose kept
+/// closure has not been taken out; called once, by the row's release.
+pub(crate) unsafe fn take_kept<T>(context: *mut c_void) -> SubscriberKept {
+    // SAFETY: the caller's: the kept value is read out of the place once.
+    unsafe {
+        core::ptr::read(crate::object_slot::kept_at::<T, SubscriberKept>(
+            context.cast::<T>(),
+        ))
+    }
 }
 
 /// pico `z_timestamp_t` (`protocol/core.h:116-120`), 32 B measured:
@@ -1586,14 +1609,25 @@ impl z_owned_publisher_t {
 
 // --- subscriber ------------------------------------------------------------
 
-/// Behind a `z_owned_subscriber_t` handle: the C subscription's id in the
-/// session's SSOT. Dropping it retracts the subscription — removing it from
-/// the SSOT (so no future face replays it) and dropping every live face's wz
-/// subscriber, which emits each wire undeclare and releases the last closure
-/// reference (→ the C `drop(context)`).
+/// Behind a `z_owned_subscriber_t` handle, a subscriber's or a liveliness subscriber's: the C
+/// subscription's id in the session's SSOT. Letting go of it retracts the subscription — removing
+/// it from the SSOT (so no future face replays it) and dropping every live face's wz subscriber,
+/// which emits each wire undeclare and lets the row's callback go (→ the C `drop(context)`). It
+/// lies in its place ([`SubscriberPlace`]) beside the C closure the row calls, which outlives it
+/// until the row lets go of it.
 pub(crate) struct SubscriberState {
     pub(crate) shared: Arc<Engine>,
-    pub(crate) id: SubId,
+    /// The declaration, once made: the place is filled before the subscriber is declared, as the
+    /// closure its row calls lies in it, and one whose declaration was refused is let go of with
+    /// none.
+    declared: Option<DeclaredSubscriber>,
+    /// R311y559 — cached loan of the declaration's key; see [`PublisherState::bind`].
+    pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
+}
+
+/// A subscriber's declaration: its id and its key.
+pub(crate) struct DeclaredSubscriber {
+    id: SubId,
     /// R311y559 — the keyexpr this subscription was declared on, so
     /// `z_subscriber_keyexpr` has something to borrow. The registry keys the
     /// per-face replicas on `id` alone, so the string was not kept anywhere the
@@ -1601,28 +1635,113 @@ pub(crate) struct SubscriberState {
     ///
     /// R2959 — WITH the declaration pico makes for the subscription's own key:
     /// the non-wild prefix for an ordinary subscriber, the whole key for a
-    /// liveliness one (see the two declare sites). Dropping the state retracts
-    /// it after the subscription, which is upstream's order.
-    pub(crate) key: DeclaredKeyexpr,
-    /// R311y559 — cached loan of `key`; see [`PublisherState::bind`].
-    pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
-    /// Opens when the subscriber's closure has run its `drop(context)`. An undeclare waits on it
-    /// after the engine let go, so it returns only when no callback is still running (pico's
-    /// `_z_sync_group_wait`), and the program may free what the callback reads.
-    pub(crate) released: Arc<crate::ffi::ReleaseLatch>,
+    /// liveliness one (see the two declare sites). Dropped after the subscription
+    /// is retracted, which is upstream's order.
+    key: DeclaredKeyexpr,
 }
 
-impl SubscriberState {
-    /// Point the cached view at this state's own keyexpr, after boxing.
-    pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.key.loaned();
+impl DeclaredSubscriber {
+    /// Subscription `id`, declared on `key`.
+    pub(crate) fn new(id: SubId, key: DeclaredKeyexpr) -> Self {
+        Self { id, key }
     }
 }
 
-impl Drop for SubscriberState {
-    fn drop(&mut self) {
-        self.shared.undeclare_subscriber(self.id);
-        self.released.wait();
+impl SubscriberState {
+    /// Point the cached view at this state's own keyexpr, once declared and placed.
+    pub(crate) fn bind(&mut self) {
+        if let Some(declared) = &self.declared {
+            self.loaned_keyexpr = declared.key.loaned();
+        }
+    }
+
+    /// The subscription's id, once declared.
+    pub(crate) fn id(&self) -> Option<SubId> {
+        self.declared.as_ref().map(|declared| declared.id)
+    }
+}
+
+/// What a subscriber's place keeps for its row past the subscriber's handle: the C closure the
+/// row calls and lets go of after its last call, and for a background subscriber a hold on its
+/// session's count, so the session's close waits for the closure as pico's does
+/// (`_z_sync_group_wait`). Let go of in that order, by the row's release.
+pub(crate) struct SubscriberKept {
+    pub(crate) closure: CClosure,
+    // Held for its drop, which lets the session's count go after the closure; never read.
+    _session: Option<crate::ffi::HeldIn>,
+}
+
+impl SubscriberKept {
+    /// `closure`, kept with `session`, the hold of a background subscriber's session.
+    pub(crate) fn new(closure: CClosure, session: Option<crate::ffi::HeldIn>) -> Self {
+        Self {
+            closure,
+            _session: session,
+        }
+    }
+}
+
+/// A subscriber's place, a liveliness subscriber's too: its state, which its owner lets go of, and
+/// what its row keeps past it; the last of the owner and the row gives the place back
+/// (`crate::object_slot::Answering`).
+pub(crate) type SubscriberPlace = crate::object_slot::Answering<SubscriberState, SubscriberKept>;
+
+/// Fill `slot` with a subscriber of `engine` not declared yet, keeping `closure` for its row
+/// and, for a background subscriber, `session`, the hold its session's close waits on; the
+/// closure is counted in the place before anything can call it or let it go.
+///
+/// # Safety
+/// `closure` is counted in no owner yet (`CClosure::uncounted`).
+pub(crate) unsafe fn fill_subscriber_place(
+    slot: crate::object_slot::Slot<SubscriberPlace>,
+    engine: &Arc<Engine>,
+    closure: CClosure,
+    session: Option<crate::ffi::HeldIn>,
+) -> *mut SubscriberState {
+    let state = slot
+        .fill(crate::object_slot::Answering::keeping(
+            SubscriberState {
+                shared: Arc::clone(engine),
+                declared: None,
+                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            },
+            SubscriberKept::new(closure, session),
+        ))
+        .cast::<SubscriberState>();
+    // SAFETY: `state` was filled for a `SubscriberPlace` just above, and its owner holds it.
+    unsafe {
+        let kept = crate::object_slot::kept_at::<SubscriberState, SubscriberKept>(state);
+        crate::object_slot::count_in_entity::<SubscriberState, SubscriberKept, _>(
+            state,
+            &mut (*kept).closure,
+        );
+    }
+    state
+}
+
+/// The subscriber at `state` as its declaration answered: declared, its handle bound; or refused,
+/// its row having let go of the closure, its owner letting go of the place with the state.
+///
+/// # Safety
+/// `state` is a live subscriber [`fill_subscriber_place`] filled, whose owner holds it.
+pub(crate) unsafe fn settle_subscriber(
+    state: *mut SubscriberState,
+    declared: Result<DeclaredSubscriber, ZResult>,
+) -> Result<*mut SubscriberState, ZResult> {
+    match declared {
+        Ok(declared) => {
+            // SAFETY: the caller's: the owner holds the state.
+            unsafe {
+                (*state).declared = Some(declared);
+                (*state).bind();
+            }
+            Ok(state)
+        }
+        Err(code) => {
+            // SAFETY: the caller's: the owner lets go of it once, here.
+            unsafe { crate::object_slot::retire_entity::<SubscriberState, SubscriberKept>(state) };
+            Err(code)
+        }
     }
 }
 
@@ -1667,10 +1786,20 @@ impl z_owned_subscriber_t {
 unsafe fn free_publisher(h: *mut c_void) {
     crate::object_slot::release_entity(h as *mut PublisherState);
 }
+/// Let go of a subscriber: its subscription is retracted, which lets its row's callback go after
+/// its last call, the release waits for the closure to be let go of (pico's
+/// `_z_sync_group_wait`) unless it is made from inside a callback, and the key goes after. The
+/// place goes back with the last of the handle and the closure.
+///
 /// # Safety
-/// `h` must be a live `SubscriberState` handle.
+/// `h` must be a live `SubscriberState` handle, let go of once.
 unsafe fn free_subscriber(h: *mut c_void) {
-    crate::object_slot::release_entity(h as *mut SubscriberState);
+    let state = h as *mut SubscriberState;
+    if let Some(id) = (*state).id() {
+        (*state).shared.undeclare_subscriber(id);
+    }
+    crate::object_slot::closures_of::<SubscriberState, SubscriberKept>(state).wait_none();
+    crate::object_slot::retire_entity::<SubscriberState, SubscriberKept>(state);
 }
 
 impl_handle_ownership7!(
@@ -3133,18 +3262,14 @@ pub unsafe extern "C" fn z_declare_subscriber(
         return Z_ERR_NULL;
     }
     guarded(
-        || match declare_subscriber_with(zs, keyexpr, callback, options, true) {
-            Ok(Some((slot, state))) => {
-                let state = slot.fill(state);
-                (*state).bind();
+        || match declare_subscriber_with(zs, keyexpr, callback, options, false) {
+            Ok(state) => {
                 *subscriber = z_owned_subscriber_t {
                     handle: state as *mut c_void,
                     _pad: [core::ptr::null_mut(); 3],
                 };
                 Z_OK
             }
-            // The owned form always asks for its place, so a declaration answers one.
-            Ok(None) => Z_ERR_GENERIC,
             Err(rc) => rc,
         },
     )
@@ -3162,7 +3287,9 @@ pub unsafe extern "C" fn z_declare_subscriber(
 /// Everything except the handle is [`z_declare_subscriber`]'s, one body for both
 /// (`declare_subscriber_with`). The registry entry is never removed, and
 /// `z_close` clears it with the rest of the session — which is also where the C
-/// `drop(context)` finally runs.
+/// `drop(context)` finally runs. Its closure lies in a place of the session's, as
+/// a subscriber's with a handle does, given back once the row lets go of it, and
+/// holds the session's count open meanwhile, so the close waits for it.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_background_subscriber(
     zs: *const z_loaned_session_t,
@@ -3171,26 +3298,29 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
     options: *const crate::session::z_subscriber_options_t,
 ) -> ZResult {
     guarded(
-        || match declare_subscriber_with(zs, keyexpr, callback, options, false) {
-            Ok(_) => Z_OK,
+        || match declare_subscriber_with(zs, keyexpr, callback, options, true) {
+            Ok(state) => {
+                // No handle will undeclare it: its owner lets go of it at once, with no wait, and
+                // the place stays with the row's callback until the session's close lets it go.
+                crate::object_slot::retire_entity::<SubscriberState, SubscriberKept>(state);
+                Z_OK
+            }
             Err(rc) => rc,
         },
     )
 }
 
-/// The place and the state of an owned subscriber the shared body declared, before the place is
-/// filled.
-type OwnedSubscriber = (crate::object_slot::Slot<SubscriberState>, SubscriberState);
-
 /// The body both subscriber doors share, out of line so neither export holds a copy of it: the
-/// moved closure taken, the session and the key read and checked, the subscription's own key
-/// declared and the subscription recorded and announced. `owned` asks for the owned door's
-/// handle place, taken after the key's checks and before anything is declared, so a full pool
-/// declares nothing; the owned door is answered the place and the state to fill it with. The
-/// background door's closure latch is kept with the session instead, which its close waits on.
+/// moved closure taken, the session and the key read and checked, the subscriber's place taken
+/// and the closure kept there, the subscription's own key declared and the subscription recorded
+/// and announced with its row calling the closure where the place keeps it. The place is taken
+/// after the key's checks and before anything is declared, so a session with no place left
+/// declares nothing; a `background` subscriber takes one as an owned one does, and its closure
+/// holds its session's count open until it is let go of, which the session's close waits on.
 ///
 /// The closure is consumed on every path (pico's consume-on-all-paths contract): from the first
-/// line it is owned here, so any refusal below drops it and runs the C `drop(context)`.
+/// line it is owned here, so any refusal below drops it and runs the C `drop(context)`, and a
+/// refused declaration lets go of the row's callback, which drops it, and of the place.
 ///
 /// # Safety
 /// As the doors': `zs` and `keyexpr` null or live loans, `callback` null or a valid moved
@@ -3201,81 +3331,79 @@ unsafe fn declare_subscriber_with(
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
     options: *const crate::session::z_subscriber_options_t,
-    owned: bool,
-) -> Result<Option<OwnedSubscriber>, ZResult> {
+    background: bool,
+) -> Result<*mut SubscriberState, ZResult> {
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
     let moved = &mut (*callback)._this;
-    let cclosure = CClosure::new(moved.context, moved.call, moved.drop);
+    let closure = CClosure::uncounted(moved.context, moved.call, moved.drop);
     *moved = z_owned_closure_sample_t::null_value();
 
     // A closed session takes no declaration; the closure this call consumed runs its drop.
-    let state = crate::session::open_session_handle(zs)?;
+    let handle = crate::session::open_session_handle(zs)?;
     // The caller's key is read where it lies: the session copies it into its own key arena, so
     // no copy is made for the call. One the outbound gate refuses is refused before anything is
     // declared.
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
-    let engine = engine_of(state);
-    // An owned subscriber's place is taken from its session before anything is declared, so a
-    // session with no place left refuses it and declares nothing.
-    let slot = if owned {
-        match crate::object_slot::Slot::take_entity(&engine, crate::object_slot::Kind::Subscriber) {
-            Some(slot) => Some(slot),
-            None => return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY),
-        }
-    } else {
-        None
+    let engine = engine_of(handle);
+    let Some(slot) = crate::object_slot::Slot::<SubscriberPlace>::take_entity(
+        &engine,
+        crate::object_slot::Kind::Subscriber,
+    ) else {
+        return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
+    let session = background.then(|| crate::session::session_count(zs).hold());
+    let state = fill_subscriber_place(slot, &engine, closure, session);
+    // The row calls the closure where the place keeps it; a refusal drops the sink, which lets
+    // the closure go.
+    let declared = declare_subscriber_in(
+        handle,
+        &engine,
+        keyexpr,
+        ke,
+        options,
+        subscriber_sink_at(state),
+    );
+    settle_subscriber(state, declared)
+}
+
+/// Declare a subscriber on `ke`, the key `keyexpr` names, its row calling `sink`: the
+/// subscription's own key declared, then the subscription recorded and announced. A refusal
+/// answers pico's code for its cause, `sink` dropped with it.
+///
+/// # Safety
+/// `keyexpr` is a live loan whose key is `ke`; `options` null or valid.
+unsafe fn declare_subscriber_in(
+    handle: &crate::session::PicoSessionHandle,
+    engine: &Arc<Engine>,
+    keyexpr: *const z_loaned_keyexpr_t,
+    ke: &str,
+    options: *const crate::session::z_subscriber_options_t,
+    sink: SubscriberSink,
+) -> Result<DeclaredSubscriber, ZResult> {
     // pico's two keys for one subscriber, which are NOT the same one. The subscription's own
     // key gets its NON-WILD PREFIX declared, and that declaration goes on the wire FIRST
     // (`vendor/zenoh-pico/src/net/primitives.c` @
     // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
     // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, ke, declared_of(keyexpr))?;
-    let wire = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key);
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(engine, ke, declared_of(keyexpr))?;
+    let wire = subscriber_wire(keyexpr, Arc::as_ref(engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
-    // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's
-    // key the announce went out on. A background subscriber's entry keeps that declaration
-    // alive through `wire`'s anchor, so the id it names stays declared as long as it can
-    // retract.
+    // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's key
+    // the announce went out on. A background subscriber's entry keeps that declaration alive
+    // through `wire`'s hold, so the id it names stays declared as long as it can retract.
     let retraction = key.retraction_naming_in(
-        crate::write_filter::session_mode(state),
-        Arc::as_ref(&engine),
+        crate::write_filter::session_mode(handle),
+        Arc::as_ref(engine),
     );
-    let released = cclosure.release_latch();
-    let released = if owned {
-        Some(released)
-    } else {
-        // No handle will undeclare this one, so the session's close waits for it.
-        state.keep_background(released);
-        None
-    };
     // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
     // the closure's drop has run.
     let id = engine
-        .declare_subscriber_on_wire(
-            ke,
-            wire,
-            subscriber_origin(options),
-            retraction,
-            subscriber_sink(cclosure),
-        )
+        .declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, sink)
         .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
-    Ok(match (slot, released) {
-        (Some(slot), Some(released)) => Some((
-            slot,
-            SubscriberState {
-                shared: engine,
-                id,
-                key,
-                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-                released,
-            },
-        )),
-        _ => None,
-    })
+    Ok(DeclaredSubscriber::new(id, key))
 }
 
 /// Undeclare a subscriber (pico `z_undeclare_subscriber`): drops the wz
@@ -3288,8 +3416,8 @@ pub unsafe extern "C" fn z_undeclare_subscriber(subscriber: *mut z_moved_subscri
         }
         let handle = (*subscriber)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release_entity(handle as *mut SubscriberState);
             (*subscriber)._this = z_owned_subscriber_t::null_value();
+            free_subscriber(handle);
         }
         Z_OK
     })
@@ -3754,6 +3882,109 @@ mod tests {
         assert_eq!(found.key, view.key.as_ptr() as usize);
         assert_eq!(found.payload, view.payload.as_ptr() as usize);
         assert_eq!(found.attachment, view.attachment.as_ptr() as usize);
+    }
+
+    /// How often the C callback of the row tests below was called, and its drop run.
+    static ROW_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    static ROW_DROPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    unsafe extern "C" fn row_call(_sample: *const z_loaned_sample_t, context: *mut c_void) {
+        assert_eq!(context as usize, 0x5b, "the program's context");
+        ROW_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn row_drop(context: *mut c_void) {
+        assert_eq!(context as usize, 0x5b, "the program's context");
+        ROW_DROPS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The callback a subscriber's row keeps hands each sample to the C callback kept in the
+    /// subscriber's place, with the program's context, through a shared borrow, and letting it
+    /// go takes the closure out and runs the C drop once. Turned red by a sink that calls
+    /// nothing, or one whose drop is not the closure's.
+    #[test]
+    fn a_subscriber_rows_callback_calls_the_c_closure_in_its_place_and_drops_it_once() {
+        use core::sync::atomic::Ordering;
+        let context = 0x5b_usize as *mut c_void;
+        let closure = CClosure::uncounted(context, Some(row_call), Some(row_drop));
+        let mut place =
+            crate::object_slot::Answering::keeping(0_u8, SubscriberKept::new(closure, None));
+        // SAFETY: `place` holds an `Answering<u8, SubscriberKept>` that outlives the sink, whose
+        // closure only the sink takes out.
+        let sink = unsafe { subscriber_sink_at(core::ptr::from_mut(&mut place).cast::<u8>()) };
+        let view = HeldView {
+            key: "demo/row",
+            payload: b"x",
+            attachment: b"",
+        };
+        sink.call(&view);
+        sink.call(&view);
+        assert_eq!(ROW_CALLS.load(Ordering::SeqCst), 2, "each sample handed");
+        assert_eq!(ROW_DROPS.load(Ordering::SeqCst), 0);
+        drop(sink);
+        assert_eq!(ROW_DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
+    }
+
+    /// A subscriber whose owner lets go of it while its row still holds the closure (an undeclare
+    /// from inside its own callback, or a background subscriber's declaration) leaves its place
+    /// to the row: the place goes back when the row lets the closure go, after its C drop ran.
+    /// Turned red by a place given back under the closure, or never.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_subscribers_place_goes_back_when_its_row_lets_go_of_the_closure() {
+        use crate::object_slot::{retire_entity, Kind, Slot};
+        use crate::session::{
+            listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+        };
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn counted_drop(_context: *mut c_void) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many subscriber places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<Engine>| {
+            let claimed: alloc::vec::Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Subscriber))
+                    .collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+        assert!(places > 0, "the session's limit admits subscribers");
+
+        let slot =
+            Slot::<SubscriberPlace>::take_entity(&engine, Kind::Subscriber).expect("a place");
+        let closure = CClosure::uncounted(core::ptr::null_mut(), None, Some(counted_drop));
+        // SAFETY: the closure is counted in no owner yet; the state's owner lets go of it once,
+        // and its closure is taken out by nothing but the sink.
+        let sink = unsafe {
+            let state = fill_subscriber_place(slot, &engine, closure, None);
+            let sink = subscriber_sink_at(state);
+            retire_entity::<SubscriberState, SubscriberKept>(state);
+            sink
+        };
+        assert_eq!(
+            free(&engine),
+            places - 1,
+            "the row's closure holds the place"
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(sink);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
+        assert_eq!(
+            free(&engine),
+            places,
+            "the closure's drop gave the place back"
+        );
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
     /// What outlives the callback holds bytes of its own: an owned sample, and a clone of the
