@@ -4867,7 +4867,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_sync_bits: AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
-                own_keyexprs: R::new_mutex(crate::declared_keyexprs::LinkKeyexprs::default()),
+                own_keyexprs: R::new_mutex(crate::declared_keyexprs::LinkKeyexprs::new()),
                 #[cfg(feature = "shared-key-ids")]
                 // Upstream's form until the engine that opened the link says otherwise.
                 link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(

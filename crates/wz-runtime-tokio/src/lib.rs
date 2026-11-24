@@ -74,6 +74,18 @@ const _: () = assert!(
      AP build; a C library names one engine"
 );
 
+// And for the key expressions this node declares. The AP declares through its one link and reads
+// its own aliases back from that link's table; `wz-session-core/session-keeps-keyexprs` (the
+// cooperative C library's selector) compiles that table out, which would leave every aliased
+// publish and every `M=0` key of ours unresolved here.
+const _: () = assert!(
+    !wz_session_core::declared_keyexprs::SESSION_KEEPS_KEYEXPRS,
+    "wz-runtime-tokio reads the key expressions this node declared from the link it declared them \
+     through; `wz-session-core/session-keeps-keyexprs` (the cooperative C library's: \
+     wz-capi-pico's `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) was unified into an \
+     AP build; a C library names one engine"
+);
+
 // And for the session itself (fixed-memory step S5). A `session-slot` build holds a
 // session in a slot of a static table: its handle is a counted reference to the
 // slot, its sink a reference to the driver the slot holds, its parameters and

@@ -450,6 +450,14 @@ limits-lent-at-open = []
 # named by the final build of a C library on the cooperative engine (`wz-capi-pico`'s
 # `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) and by no dependency line.
 session-fixed-storage = []
+# The engine this build links keeps the key expressions a session declared on the session, one
+# table for every link it has (`declared_keyexprs`), so a link keeps no table of its own: the
+# link's growable one, a hash map of strings, is not compiled. A SELECTOR, named by the final build
+# of a C library on the cooperative engine (`wz-capi-pico`'s `engine-coop`, `os-posix`,
+# `os-windows`, `os-zephyr`) and by no dependency line, because the AP engine declares through
+# its one link and reads its own aliases from that link's table; `wz-runtime-tokio` asserts at
+# build time that it is off (`declared_keyexprs::SESSION_KEEPS_KEYEXPRS`).
+session-keeps-keyexprs = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]

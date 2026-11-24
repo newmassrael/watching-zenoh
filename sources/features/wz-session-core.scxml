@@ -114,6 +114,7 @@
   <sce:feature name="session-extqos" requires="transport-qos"/>
   <sce:feature name="session-extshm" requires="session-unicast transport-shm"/>
   <sce:feature name="session-fixed-storage"/>
+  <sce:feature name="session-keeps-keyexprs"/>
   <sce:feature name="session-matching" requires="alloc keyexpr-includes"/>
   <sce:feature name="session-multicast" requires="interest-answer rx-control rx-push rx-response"/>
   <sce:feature name="session-reconnect" requires="alloc"/>
