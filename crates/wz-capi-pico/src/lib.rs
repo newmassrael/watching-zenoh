@@ -474,8 +474,6 @@ mod advanced_plane;
 // A transport the program supplies, in place of the system's sockets: wz doors (`wz_ext.h`) of the
 // unstable surface, over the links of the program's stack of whichever engine the build has.
 #[cfg(feature = "app-transport")]
-// Totality debt TD-185 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod app_transport;
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
@@ -518,8 +516,6 @@ pub mod clock_source;
 ))]
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
-// Totality debt TD-194 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
 // share, and the instance keys' and the message payloads' doors with them, in a build with any of
@@ -540,8 +536,6 @@ pub mod e2e_receiver;
 // The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "e2e-sender")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-196 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod e2e_sender;
 // `wz_ext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
@@ -599,8 +593,6 @@ mod link_properties;
 #[cfg(feature = "liveliness")]
 pub mod liveliness;
 pub mod locality;
-// Totality debt TD-181 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod matching;
 // A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
 // unstable surface, over the reader of `wz-app-frame`.
