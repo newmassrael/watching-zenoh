@@ -28,6 +28,7 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
+#[cfg(any(feature = "query", feature = "liveliness", feature = "liveliness-get"))]
 use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -4836,9 +4837,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // Counted before the row leaves its table, so an undeclaration that waits for it does
             // not read it gone while its drop runs.
             self.matching.lock().letting_go();
-            tables_mut(&guard.0.registry)
+            let row = tables_mut(&guard.0.registry)
                 .release_matching_listener(handle)
-                .map(|row| row.into_callback())
+                .map(|row| row.into_callback());
+            row
         };
         drop(row);
         // Only now is the row's drop over, which a waiting undeclaration reads.
@@ -6122,7 +6124,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(handle) = filter_handle(filter) else {
             return;
         };
-        if let Some(row) = tables(&core.0.registry).write_filters().get(handle) {
+        let tables = tables(&core.0.registry);
+        if let Some(row) = tables.write_filters().get(handle) {
             row.extension().keep_plain(plain);
         }
     }

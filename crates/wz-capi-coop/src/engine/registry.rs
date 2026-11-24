@@ -56,7 +56,6 @@ use wz_session_core::slot_observer::RequesterRows;
 use wz_session_core::declare::matching::MatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
-use wz_session_core::declare::subscriber::PublisherCriterion;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
