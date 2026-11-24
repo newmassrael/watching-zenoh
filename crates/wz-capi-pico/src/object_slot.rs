@@ -273,7 +273,7 @@ impl<T> InSession<T> {
 /// place: the one table both the open's places ([`held_places`]) and each place taken
 /// ([`Slot::take_entity`]) read. `None` for a kind that is no entity.
 #[cfg(not(feature = "engine-tokio"))]
-fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::Layout)> {
+const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::Layout)> {
     use wz_capi_port::EntityKind;
     match kind {
         Kind::Publisher => Some((
@@ -400,10 +400,10 @@ const ADVANCED: [Option<Kind>; 2] = [
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "advanced")))]
 const ADVANCED: [Option<Kind>; 2] = [None, None];
 
-/// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
-/// list the open's places ([`held_places`]) are laid out from.
+/// Each kind of entity the build has, `None` for one it has not: the one list the open's places
+/// ([`held_places`]) are laid out from.
 #[cfg(not(feature = "engine-tokio"))]
-fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
+const BUILT_KINDS: [Option<Kind>; wz_capi_port::ENTITY_KINDS] = {
     let [token, liveliness_subscriber] = LIVELINESS;
     let [querier, get] = QUERIER;
     let [advanced_publisher, advanced_subscriber] = ADVANCED;
@@ -424,21 +424,28 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         advanced_subscriber,
         link_events,
     ]
-    .into_iter()
-    .flatten()
-    .filter_map(entity_place)
-}
+};
 
 /// The places a session of the cooperative engine holds in its arena for what this ABI keeps of
 /// it: its handle's, of `handle`, and one for each entity of each kind the build has, as many as
 /// the session's limit of the kind admits, so an entity's object takes no memory of the process's
-/// and no other session's.
+/// and no other session's. A `const fn`: every kind and layout is known when the library is built,
+/// so the open reads its places as a constant and lays none of them out.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::HeldPlaces {
-    entity_places().fold(
-        wz_capi_coop::arena::HeldPlaces::handle(handle),
-        |held, (entity, layout)| held.with_entity(entity, layout),
-    )
+pub(crate) const fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::HeldPlaces {
+    let mut held = wz_capi_coop::arena::HeldPlaces::handle(handle);
+    let mut kinds: &[Option<Kind>] = &BUILT_KINDS;
+    while let [kind, rest @ ..] = kinds {
+        let place = match *kind {
+            Some(kind) => entity_place(kind),
+            None => None,
+        };
+        if let Some((entity, layout)) = place {
+            held = held.with_entity(entity, layout);
+        }
+        kinds = rest;
+    }
+    held
 }
 
 /// An entity's object, the count of the program's closures it answers for (a querier's gets, a
@@ -970,6 +977,30 @@ mod tests {
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
+    /// The places an open holds are laid out when the library is built, and they are what a walk of
+    /// the build's kinds at run time lays out: each kind's place the build has, none missed. Turned
+    /// red by a walk that stops before the last kind or skips one.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn the_held_places_are_each_built_kinds_place_laid_out_as_a_constant() {
+        use wz_capi_coop::arena::HeldPlaces;
+        const HANDLE: core::alloc::Layout = core::alloc::Layout::new::<[u64; 2]>();
+        const HELD: HeldPlaces = held_places(HANDLE);
+        let walked = BUILT_KINDS
+            .into_iter()
+            .flatten()
+            .filter_map(entity_place)
+            .fold(HeldPlaces::handle(HANDLE), |held, (entity, layout)| {
+                held.with_entity(entity, layout)
+            });
+        assert_eq!(HELD, walked);
+        assert_ne!(
+            HELD,
+            HeldPlaces::handle(HANDLE),
+            "every build has publishers, so some place is held"
+        );
+    }
+
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for
     /// reading beside the engine's own rows of the kind: the place, the object and the session that
     /// lent it, and the flag that says it is lent. Run with `cargo test -p wz-capi-pico --lib
@@ -980,7 +1011,7 @@ mod tests {
     #[ignore = "a measurement printed for reading, not a check"]
     fn print_the_place_bytes_of_each_entity_kind() {
         let flag = wz_session_core::byte_cells::LentByteCells::FLAG_BYTES;
-        for (kind, layout) in entity_places() {
+        for (kind, layout) in BUILT_KINDS.into_iter().flatten().filter_map(entity_place) {
             std::println!(
                 "place-row: {kind:?} place_bytes={} align={} flag_bytes={flag} per_entity={}",
                 layout.size(),

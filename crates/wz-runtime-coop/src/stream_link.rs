@@ -42,8 +42,8 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkRoom, LinkSendOutcome, LostCause,
-    RoomAnswer, RoomWait, TxSlot, TxSlotGrant, DEFAULT_LINK_MTU, STREAM_BATCH_LENGTH_BYTES,
+    BoxedLinkDriver, LinkDropCause, LinkEnds, LinkRoom, LinkSendOutcome, LostCause, RoomAnswer,
+    RoomWait, TxSlot, TxSlotGrant, DEFAULT_LINK_MTU, STREAM_BATCH_LENGTH_BYTES,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -54,7 +54,7 @@ use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
-use crate::udp_link::{ends_fit, link_endpoints, EndsFit, SERVICE_WAIT_MS};
+use crate::udp_link::{ends_fit, EndsFit, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
 /// the batch behind it.
@@ -387,7 +387,7 @@ impl BoxedLinkDriver for NoStream {
         match *self {}
     }
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
         match *self {}
     }
 
@@ -646,9 +646,6 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
 pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
     socket: S,
-    /// The link's two ends, `tcp/<ip>:<port>` each, known from the connection; `None` only for a
-    /// link whose ends no row holds, which is refused before it is admitted ([`EndsFit`]).
-    endpoints: Option<LinkEndpoints>,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`: a batch's length and the batch behind it.
     rx_len: usize,
@@ -709,7 +706,6 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.capacity();
         Self {
-            endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()).ok(),
             socket,
             rx_buf: RefCell::new(rx_buf),
             rx_len,
@@ -1188,8 +1184,14 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         self.drop_owed();
     }
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.as_ref()
+    // The connection's two addresses, lent as they are: a reader that reports the link writes
+    // its locators.
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
+        Some(LinkEnds::ip(
+            S::PROTO.kind(),
+            self.socket.local(),
+            self.socket.peer(),
+        ))
     }
 
     #[cfg(feature = "alloc")]
@@ -1346,6 +1348,7 @@ mod tests {
     use core::cell::UnsafeCell;
     use std::collections::VecDeque;
     use std::vec::Vec;
+    use wz_session_core::link::LinkEndsText;
 
     /// What the test hands the driver to read, in the pieces the stream cuts it into, and what
     /// the driver wrote, one entry per write.

@@ -179,12 +179,8 @@ impl RecordTree {
 
 /// What a path's field holds, as `wz_session_core::dissect::FieldValue::kind_word`
 /// names it.
-///
-/// A build without `dissect` declares no path, so it never makes a kind: the
-/// parser's arms over the kinds are still compiled, for the one grammar both
-/// builds share, and the type is allowed to go unconstructed there.
+#[cfg(feature = "dissect")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 pub(crate) enum PathKind {
     Bits,
     Flag,
@@ -197,9 +193,15 @@ pub(crate) enum PathKind {
     Nested,
 }
 
+/// See the `dissect` build's definition. A build without it declares no
+/// path, so no field has a kind: the grammar both builds share names the type
+/// and never holds one.
+#[cfg(not(feature = "dissect"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathKind {}
+
+#[cfg(feature = "dissect")]
 impl PathKind {
-    // Read by the declared shape, which only a build with `dissect` has.
-    #[cfg(feature = "dissect")]
     fn of_word(word: &str) -> Option<Self> {
         Some(match word {
             "bits" => Self::Bits,
@@ -249,6 +251,22 @@ impl PathKind {
     }
 }
 
+/// See the `dissect` build's methods: with no kind to hold, each is never called.
+#[cfg(not(feature = "dissect"))]
+impl PathKind {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {}
+    }
+
+    pub(crate) fn operators(self) -> &'static [&'static str] {
+        match self {}
+    }
+
+    pub(crate) const fn has_width(self) -> bool {
+        match self {}
+    }
+}
+
 /// A path the selector named, resolved against the declared shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FieldPath {
@@ -258,16 +276,17 @@ pub(crate) struct FieldPath {
     kind: PathKind,
     /// The words a label path can carry, when every field on it has a closed
     /// set: the union of them. `None` for every other kind.
+    #[cfg(feature = "dissect")]
     words: Option<Vec<&'static str>>,
     /// Whether a field it names can stand in the `Frame` around a record and
     /// not in the record: what makes it undecided over a record whose frame
     /// was not read ([`Envelope::Unread`]).
-    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+    #[cfg(feature = "dissect")]
     reads_envelope: bool,
     /// Whether a field it names can stand in a record a batch carries: what
     /// makes it undecided over the unread part of a batch
     /// ([`Envelope::Remainder`]).
-    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+    #[cfg(feature = "dissect")]
     reads_record: bool,
 }
 
@@ -289,12 +308,31 @@ impl FieldPath {
         self.segments.join(".")
     }
 
+    #[cfg(feature = "dissect")]
     pub(crate) fn kind(&self) -> PathKind {
         self.kind
     }
 
+    /// The kind word of the fields it names, as a refusal prints it.
+    pub(crate) fn kind_word(&self) -> &'static str {
+        self.kind.word()
+    }
+
+    /// Whether `len()` reads the fields it names.
+    pub(crate) fn has_width(&self) -> bool {
+        self.kind.has_width()
+    }
+
+    #[cfg(feature = "dissect")]
     pub(crate) fn words(&self) -> Option<&[&'static str]> {
         self.words.as_deref()
+    }
+
+    /// What a caller holding a path answers in a build without `dissect`,
+    /// which resolves none ([`Self::resolve`]): it never holds one.
+    #[cfg(not(feature = "dissect"))]
+    pub(crate) fn unresolved(&self) -> ! {
+        match self.kind {}
     }
 
     /// Resolve `written` against the declared shape.
@@ -330,6 +368,7 @@ impl FieldPath {
         if ends.iter().any(|d| d.kind != first.kind) {
             return Err(PathRefusal::Ambiguous(longer_tails(&ends, segments.len())));
         }
+        #[cfg(feature = "dissect")]
         let words = (first.kind == PathKind::Label)
             .then(|| {
                 let mut union: Vec<&'static str> = Vec::new();
@@ -343,17 +382,22 @@ impl FieldPath {
                 Some(union)
             })
             .flatten();
+        #[cfg(feature = "dissect")]
         let reads_envelope = ends
             .iter()
             .any(|d| stands_in_the_envelope(&d.segments, segments.len()));
+        #[cfg(feature = "dissect")]
         let reads_record = ends
             .iter()
             .any(|d| stands_in_a_record(&d.segments, segments.len()));
         Ok(Self {
             segments: segments.into_iter().map(String::from).collect(),
             kind: first.kind,
+            #[cfg(feature = "dissect")]
             words,
+            #[cfg(feature = "dissect")]
             reads_envelope,
+            #[cfg(feature = "dissect")]
             reads_record,
         })
     }
@@ -437,45 +481,31 @@ pub(crate) fn formerly_under<'d>(
 /// record and not in the record: any node of a `Fragment`, and of the batch
 /// carrier the carrier itself, its header, `sn` and extensions, or its
 /// `payload` level, outside the record that level holds.
+#[cfg(feature = "dissect")]
 fn stands_in_the_envelope(declared: &[&str], width: usize) -> bool {
-    #[cfg(feature = "dissect")]
-    {
-        use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL, PIECE_CARRIER};
-        if declared.first() == Some(&PIECE_CARRIER) {
-            return true;
-        }
-        if declared.first() != Some(&BATCH_CARRIER) {
-            return false;
-        }
-        // A match beginning at the record (index 2, under `Frame.payload`) or
-        // deeper reads the record alone.
-        let begins = declared.len().saturating_sub(width);
-        !(declared.get(1) == Some(&BATCH_LEVEL) && begins >= 2)
+    use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL, PIECE_CARRIER};
+    if declared.first() == Some(&PIECE_CARRIER) {
+        return true;
     }
-    #[cfg(not(feature = "dissect"))]
-    {
-        let _ = (declared, width);
-        false
+    if declared.first() != Some(&BATCH_CARRIER) {
+        return false;
     }
+    // A match beginning at the record (index 2, under `Frame.payload`) or
+    // deeper reads the record alone.
+    let begins = declared.len().saturating_sub(width);
+    !(declared.get(1) == Some(&BATCH_LEVEL) && begins >= 2)
 }
 
 /// Whether the declared path `declared`, matched by a written path of `width`
 /// segments, reaches a node of a record a batch carries. Every network message
 /// is declared under the batch carrier's `payload` too, so this is a match that
 /// begins at a record standing there (index 2) or deeper.
+#[cfg(feature = "dissect")]
 fn stands_in_a_record(declared: &[&str], width: usize) -> bool {
-    #[cfg(feature = "dissect")]
-    {
-        use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL};
-        declared.first() == Some(&BATCH_CARRIER)
-            && declared.get(1) == Some(&BATCH_LEVEL)
-            && declared.len().saturating_sub(width) >= 2
-    }
-    #[cfg(not(feature = "dissect"))]
-    {
-        let _ = (declared, width);
-        false
-    }
+    use wz_session_core::dissect_schema::{BATCH_CARRIER, BATCH_LEVEL};
+    declared.first() == Some(&BATCH_CARRIER)
+        && declared.get(1) == Some(&BATCH_LEVEL)
+        && declared.len().saturating_sub(width) >= 2
 }
 
 /// Why [`naming_tail`] has no tail to give.
@@ -565,23 +595,33 @@ fn longer_tails(ends: &[&Declared], width: usize) -> Vec<(String, &'static str)>
 }
 
 /// What a path term asks of each field it names.
+///
+/// A test of a field's value is typed by the path's kind, which only a build
+/// with `dissect` has; presence and width are asked of any path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PathTest {
     /// The path alone: is there such a field.
     Present,
     /// A comparison of an integer field.
+    #[cfg(feature = "dissect")]
     Int { op: Op, value: u64 },
     /// A flag equal to this.
+    #[cfg(feature = "dissect")]
     Flag(bool),
     /// A label or a text equal to this.
+    #[cfg(feature = "dissect")]
     Word(String),
     /// A byte field equal to these bytes.
+    #[cfg(feature = "dissect")]
     Bytes(Vec<u8>),
     /// A zid field naming this zid (canonical bytes).
+    #[cfg(feature = "dissect")]
     Zid(Vec<u8>),
     /// A label, text or byte field holding this run of bytes.
+    #[cfg(feature = "dissect")]
     Contains(Vec<u8>),
     /// A label, text or byte field the pattern is found in.
+    #[cfg(feature = "dissect")]
     Matches(Pattern),
     /// The field's wire width compared with an integer.
     Len { op: Op, value: u64 },
@@ -673,11 +713,11 @@ fn text_or_bytes(value: &wz_session_core::dissect::FieldValue) -> Option<&[u8]> 
 ///
 /// A build without `dissect` walks nothing and makes only [`Self::Absent`].
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 pub(crate) enum FrameEnvelope {
     /// The frame's `Frame` message, walked from the bytes the capture holds
     /// for it: its root with every field but the `payload` group's records,
     /// and those records apart, each with its span.
+    #[cfg(feature = "dissect")]
     Walked {
         /// The `Frame` root with its `payload` group EMPTY.
         shell: TreeNode,
@@ -691,6 +731,7 @@ pub(crate) enum FrameEnvelope {
     /// The frame's records were joined out of `Fragment`s, and this is the
     /// one the frame read, walked from the bytes the capture holds for it: it
     /// stands beside each record ([`RecordTree::beside`]).
+    #[cfg(feature = "dissect")]
     Joined {
         /// The `Fragment` root, whole.
         carrier: TreeNode,
@@ -699,6 +740,7 @@ pub(crate) enum FrameEnvelope {
     Absent,
     /// A `Frame` or a `Fragment` carried the records and its bytes are not
     /// held here, or do not walk.
+    #[cfg(feature = "dissect")]
     Unread,
 }
 
@@ -878,13 +920,15 @@ impl<'e> RecordAt<'e> {
     }
 }
 
-/// The transport message a frame's records have as their envelope.
+/// The transport message a frame's records have as their envelope. A build
+/// without `dissect` reads no carrier and has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 pub(crate) enum Carrier {
     /// A `Frame`, whose batch holds the records.
+    #[cfg(feature = "dissect")]
     Batch,
     /// A `Fragment`, the last of those the records were joined out of.
+    #[cfg(feature = "dissect")]
     Pieces,
 }
 

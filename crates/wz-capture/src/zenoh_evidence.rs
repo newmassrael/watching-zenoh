@@ -916,10 +916,8 @@ impl ZenohEvidence {
     /// The unit readings weighed so far: read whole, residual, undecoded. A
     /// datagram whose front was foreign is not among them (its reading follows
     /// from its front).
-    #[cfg(test)]
-    // Read by the corpus tests and the calibration tests, which a build with no network codecs
-    // (`--no-default-features`) compiles without their readers.
-    #[allow(dead_code)]
+    // Read by the corpus tests and the calibration tests only, so built where they are.
+    #[cfg(all(test, feature = "network-codecs", feature = "reassembly"))]
     pub(crate) fn unit_outcomes(&self) -> [u64; 3] {
         self.units.counts
     }

@@ -4,19 +4,32 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
-  Whether the key expressions a and b share a key: zenoh's `intersects`, read
-  over the two texts. Either may be a pattern; the answer is symmetric.
+  Whether the key expressions a and b relate, read over the two texts.
+  `relation` names the relation, with the codes keyexpr_walk reads:
+  * 1 - a and b share a key: zenoh's `intersects`. Either may be a pattern;
+    the answer is symmetric.
+  * 2 - a covers every key b covers: zenoh's `includes`. It is not
+    symmetric.
+  The two relations read the texts the same way and differ only in which
+  side's `**` stretches and which chunk step relates two chunks, so they are
+  one document, built once for both.
 
   * A text with an empty chunk (the empty text, a leading or trailing `/`,
-    `//`) shares nothing, and on a build whose key buffer is fixed (`bounded`)
-    neither does one of more than `chunk_bound` chunks.
-  * Two texts without a `*` are literal keys: they share one when they are the
-    same text.
-  * With `**` on one side at most, keyexpr_walk walks the other side's chunks
-    from the side that holds it (keyexpr_chunk_intersects at each step).
+    `//`) relates to nothing, and on a build whose key buffer is fixed
+    (`bounded`) neither does one of more than `chunk_bound` chunks.
+  * Two texts without a `*` are literal keys: they relate when they are the
+    same text, for both relations.
+  * A `**` of b with none in a: they intersect when the walk from b over a's
+    chunks says so; a does not cover b, since a chunk that is not `**` does
+    not cover any number of chunks.
+  * With `**` in a alone, or nowhere, keyexpr_walk walks b's chunks from a
+    (keyexpr_chunk_intersects or keyexpr_chunk_includes at each step).
   * With `**` on both sides, keyexpr_relation_dp fills the table of their
-    prefixes, its bits over the side of at most 63 chunks; two such texts of
-    more than 63 chunks each are refused, the bound of a uint64 row.
+    prefixes, its bits over b when b has at most 63 chunks and over a
+    otherwise; two such texts of more than 63 chunks each are refused, the
+    bound of a uint64 row. For the intersection a `**` stretches on either
+    side; for the inclusion only a's, so the side a is on (rows or bits) is
+    the one whose `**` the table lets stretch.
 
   `wild_single`, `wild_double` and `wild_dsl` are the build's wildcard switches
   (`keyexpr-wildcard-single`, `keyexpr-wildcard-double`, `keyexpr-dollar-star`):
@@ -27,7 +40,7 @@
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="algorithm"
-       name="keyexpr_intersects"
+       name="keyexpr_relation"
        version="1.0">
   <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
   <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
@@ -37,6 +50,7 @@
   <sce:signature>
     <sce:param name="a" type="bytes"/>
     <sce:param name="b" type="bytes"/>
+    <sce:param name="relation" type="uint8"/>
     <sce:param name="wild_single" type="bool"/>
     <sce:param name="wild_double" type="bool"/>
     <sce:param name="wild_dsl" type="bool"/>
@@ -49,7 +63,7 @@
          goes and answers unless b holds a `**`; only then are the two shapes
          read. -->
     <sce:if cond="!bounded">
-      <sce:var name="quick" type="uint8" init="keyexpr_walk(a, b, 1, wild_single, wild_double, wild_dsl)"/>
+      <sce:var name="quick" type="uint8" init="keyexpr_walk(a, b, relation, wild_single, wild_double, wild_dsl)"/>
       <sce:if cond="quick !== 2">
         <sce:return expr="quick === 1"/>
       </sce:if>
@@ -68,22 +82,25 @@
     <sce:if cond="!sa.star &amp;&amp; !sb.star">
       <sce:return expr="keyexpr_range_equal(a, 0, len(a), b, 0, len(b))"/>
     </sce:if>
+    <sce:var name="includes" type="bool" init="relation === 2"/>
     <sce:var name="da" type="bool" init="wild_double &amp;&amp; sa.double_star"/>
     <sce:var name="db" type="bool" init="wild_double &amp;&amp; sb.double_star"/>
-    <sce:if cond="da &amp;&amp; db">
+    <sce:if cond="db">
+      <sce:if cond="!da">
+        <sce:if cond="includes">
+          <sce:return expr="false"/>
+        </sce:if>
+        <!-- `**` on b alone: the walk runs over a's chunks from b. -->
+        <sce:return expr="keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) === 1"/>
+      </sce:if>
       <sce:if cond="sb.chunks &lt;= 63">
-        <sce:return expr="keyexpr_relation_dp(a, b, true, true, false, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(a, b, true, !includes, includes, wild_single, dsl)"/>
       </sce:if>
       <sce:if cond="sa.chunks &lt;= 63">
-        <sce:return expr="keyexpr_relation_dp(b, a, true, true, false, wild_single, dsl)"/>
+        <sce:return expr="keyexpr_relation_dp(b, a, !includes, true, includes, wild_single, dsl)"/>
       </sce:if>
       <sce:return expr="false"/>
     </sce:if>
-    <!-- `**` on one side at most: the walk runs over the other side's chunks
-         from the side that holds it. -->
-    <sce:if cond="db">
-      <sce:return expr="keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) === 1"/>
-    </sce:if>
-    <sce:return expr="keyexpr_walk(a, b, 1, wild_single, wild_double, dsl) === 1"/>
+    <sce:return expr="keyexpr_walk(a, b, relation, wild_single, wild_double, dsl) === 1"/>
   </sce:body>
 </scxml>

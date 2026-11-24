@@ -338,7 +338,7 @@ impl FaceLinkRow {
             return 0;
         }
         let mut links: usize = 0;
-        actions.visit_link_endpoints(|_| {
+        actions.visit_link_ends(|_| {
             // A count of the links a face holds, each a link the session admitted: it cannot
             // reach the width of the count, and a saturated one would still be a bound.
             links = links.saturating_add(1);
@@ -374,15 +374,18 @@ impl FaceLinkRow {
         let mut ends = None;
         // The links still to pass over before the one asked for.
         let mut skip = at;
-        actions.visit_link_endpoints(|link| {
+        actions.visit_link_ends(|link| {
             if let Some(rest) = skip.checked_sub(1) {
                 skip = rest;
                 return true;
             }
-            ends = Some((
-                RowText::of(link.src.as_str()),
-                RowText::of(link.dst.as_str()),
-            ));
+            ends = Some(match link {
+                Some(link) => (
+                    end_row(|out| link.write_src(out)),
+                    end_row(|out| link.write_dst(out)),
+                ),
+                None => (RowText::of(""), RowText::of("")),
+            });
             false
         });
         let (src, dst) = ends?;
@@ -433,6 +436,23 @@ impl FaceLinkRow {
             mtu: 0,
             group_endpoint: Some(GroupRowText::of(endpoint)),
         })
+    }
+}
+
+/// The locator of one end of a link, which `write` writes, in its row: there when it fits, on
+/// the heap past it, as [`RowTextOf::of`] keeps a text.
+#[cfg(feature = "session-unicast")]
+fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
+    let mut inline: crate::text_out::FixedText<{ crate::caps::MAX_LOCATOR_LEN }> =
+        crate::text_out::FixedText::new();
+    write(&mut inline);
+    match inline.finish() {
+        Ok(text) => RowText::of(text),
+        Err(_) => {
+            let mut spilled = String::new();
+            write(&mut spilled);
+            RowText::Spilled(spilled)
+        }
     }
 }
 

@@ -1342,7 +1342,10 @@ impl PayloadCensus {
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
+        #[cfg(feature = "dissect")]
         self.observe_frame_selecting(frame, filter, ctx, spaces, None, None);
+        #[cfg(not(feature = "dissect"))]
+        self.observe_frame_selecting(frame, filter, ctx, spaces, None);
     }
 
     /// [`Self::observe_frame_where`], handing every payload the selector says
@@ -1356,47 +1359,53 @@ impl PayloadCensus {
     /// the order this walk meets it, or the judgements a judge made already;
     /// `None` where the plane was handed no declarations, and then those terms
     /// are undecided over a sample.
-    pub(crate) fn observe_frame_selecting<'f>(
+    pub(crate) fn observe_frame_selecting(
         &mut self,
         frame: &crate::messages::Row<'_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
-        sink: Option<PayloadSink<'_, 'f>>,
+        #[cfg(feature = "dissect")] sink: Option<PayloadSink<'_, '_>>,
         judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         use wz_session_core::passive::Carried;
 
-        match &frame.carried {
-            Carried::Batch(batch) => {
-                self.observe_batch(spaces, frame, batch, filter, ctx, sink, judging)
-            }
+        let batch = match &frame.carried {
+            Carried::Batch(batch) => batch,
             #[cfg(feature = "reassembly")]
-            Carried::Reassembled { batch, .. } => {
-                self.observe_batch(spaces, frame, batch, filter, ctx, sink, judging)
-            }
+            Carried::Reassembled { batch, .. } => batch,
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
             // compile here rather than join the silent set.
-            Carried::Undecompressible => self.gaps.undecompressible_batches += 1,
+            Carried::Undecompressible => {
+                self.gaps.undecompressible_batches += 1;
+                return;
+            }
             #[cfg(feature = "reassembly")]
-            Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
-            Carried::Nothing => {}
+            Carried::FragmentWithoutResolution => {
+                self.gaps.unresolvable_fragments += 1;
+                return;
+            }
+            Carried::Nothing => return,
             #[cfg(feature = "reassembly")]
-            Carried::Fragment { .. } => {}
-        }
+            Carried::Fragment { .. } => return,
+        };
+        #[cfg(feature = "dissect")]
+        self.observe_batch(spaces, frame, batch, filter, ctx, sink, judging);
+        #[cfg(not(feature = "dissect"))]
+        self.observe_batch(spaces, frame, batch, filter, ctx, judging);
     }
 
     // Eight: the frame's batch, what its records are read with, and the judge.
     #[allow(clippy::too_many_arguments)]
-    fn observe_batch<'f>(
+    fn observe_batch(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &crate::messages::Row<'_>,
         batch: &wz_session_core::network_message::BatchParse,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
-        mut sink: Option<PayloadSink<'_, 'f>>,
+        #[cfg(feature = "dissect")] mut sink: Option<PayloadSink<'_, '_>>,
         mut judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         if batch.halt.is_some() {
@@ -1411,6 +1420,7 @@ impl PayloadCensus {
             let seen = Seen {
                 at,
                 record,
+                #[cfg(feature = "dissect")]
                 sink: sink.as_deref_mut(),
             };
             self.observe_message(
@@ -1432,13 +1442,16 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &crate::messages::Row<'_>,
         message: &wz_session_core::network_message::NetworkMessage,
-        seen: Seen<'_, '_, '_>,
+        #[cfg(feature = "dissect")] seen: Seen<'_, '_, '_>,
+        #[cfg(not(feature = "dissect"))] seen: Seen<'_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         judging: Option<crate::e2e_plane::E2eReading<'_>>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
-        let Seen { at, record, sink } = seen;
+        let (at, record) = (seen.at, seen.record);
+        #[cfg(feature = "dissect")]
+        let sink = seen.sink;
         let span = at.span;
 
         let direction = frame.direction;
@@ -1454,6 +1467,7 @@ impl PayloadCensus {
             if let Some(judge) = judging.and_then(crate::e2e_plane::E2eReading::judge) {
                 judge.close(ctx.list(), from_low, u64::from(f.request_id));
             }
+            #[cfg(feature = "dissect")]
             if let Some(sink) = sink {
                 sink(Sighting::Final(FinalSeen {
                     row: RowKey::of(ctx.list(), frame),
@@ -1485,6 +1499,7 @@ impl PayloadCensus {
         // declaration fixed for an id the wire did not answer, when the walk
         // was given any (see `PayloadFold::fix_key_ids`).
         let read = spaces.resolve_or_fixed(direction, keyexpr_body).ok();
+        #[cfg(feature = "dissect")]
         let fixed = read.as_ref().is_some_and(|(_, fixed)| *fixed);
         let keyexpr = read.map(|(keyexpr, _)| keyexpr);
         let payload_bytes = crate::agg::sized_payload(&counts);
@@ -1595,6 +1610,7 @@ impl PayloadCensus {
         };
         // A walk that wants the payloads takes them here, judged and resolved by
         // the lines above, and the census tally below is not this walk's.
+        #[cfg(feature = "dissect")]
         if let Some(sink) = sink {
             // The id and suffix of a reference neither the wire nor a fixed id
             // answered: a reader that joins pieces keys their stream by it.
@@ -1691,11 +1707,9 @@ use crate::agg::carries_shm_marker;
 /// One payload a selector said `yes` to, as the payload plane found it: what
 /// [`PayloadCensus::observe_frame_selecting`] hands its sink.
 ///
-/// Built wherever the payload plane is, and READ only by the values door
-/// (`field_values`), which the `dissect` feature builds: in a build without it
-/// no sink is ever handed one, so its fields are read by nothing there.
-#[cfg(feature = "network-codecs")]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+/// Read only by the values door (`field_values`), which the `dissect` feature
+/// builds, so the sink and what it is handed are built with it.
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
 pub(crate) struct SelectedPayload<'a> {
     /// The row that carried it.
     pub(crate) row: RowKey,
@@ -1729,8 +1743,7 @@ pub(crate) struct SelectedPayload<'a> {
 /// a payload the selector said `yes` to, or a query's `ResponseFinal`, which
 /// closes the streams of pieces its replies were joined in. A final is handed
 /// whatever the selector says of it: it ends state, it is no record.
-#[cfg(feature = "network-codecs")]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
 pub(crate) enum Sighting<'a> {
     /// A payload the selector picked.
     Payload(SelectedPayload<'a>),
@@ -1739,8 +1752,7 @@ pub(crate) enum Sighting<'a> {
 }
 
 /// A `ResponseFinal` as the payload plane met it.
-#[cfg(feature = "network-codecs")]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
 pub(crate) struct FinalSeen {
     /// The row that carried it.
     pub(crate) row: RowKey,
@@ -1794,10 +1806,12 @@ pub(crate) fn sample_carrier(
 /// What [`PayloadCensus::observe_message`] is told about the record beside the
 /// message itself: where it sits, its place in the batch, and the sink of a walk
 /// that takes payloads. One value so the walk's parameters stay within bound.
+/// Only a build with `dissect` has a walk that takes payloads.
 #[cfg(feature = "network-codecs")]
-struct Seen<'r, 's, 'f> {
+struct Seen<'r, #[cfg(feature = "dissect")] 's, #[cfg(feature = "dissect")] 'f> {
     at: crate::field_path::RecordAt<'r>,
     record: usize,
+    #[cfg(feature = "dissect")]
     sink: Option<PayloadSink<'s, 'f>>,
 }
 
@@ -1805,7 +1819,7 @@ struct Seen<'r, 's, 'f> {
 /// closure that may itself borrow for longer. Two lifetimes, because a `&mut`
 /// holds its object's lifetime fixed and a reborrow for one record must not
 /// demand the closure live only as long.
-#[cfg(feature = "network-codecs")]
+#[cfg(all(feature = "network-codecs", feature = "dissect"))]
 pub(crate) type PayloadSink<'s, 'f> = &'s mut (dyn FnMut(Sighting<'_>) + 'f);
 
 /// The declared encoding and the bytes a record carries, with its keyexpr.
@@ -2140,7 +2154,10 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
         message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
+        #[cfg(feature = "dissect")]
         self.feed_selecting(flow, list, packet, frame, message, grouping, None);
+        #[cfg(not(feature = "dissect"))]
+        self.feed_selecting(flow, list, packet, frame, message, grouping);
     }
 }
 
@@ -2152,7 +2169,7 @@ impl PayloadFold {
     /// the payloads makes, through the same placement as the census's.
     // Eight: the fold's own seven and the sink.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn feed_selecting<'f>(
+    pub(crate) fn feed_selecting(
         &mut self,
         flow: &crate::link::FlowKey,
         list: usize,
@@ -2160,7 +2177,7 @@ impl PayloadFold {
         frame: &crate::messages::Row<'_>,
         message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
-        sink: Option<PayloadSink<'_, 'f>>,
+        #[cfg(feature = "dissect")] sink: Option<PayloadSink<'_, '_>>,
     ) {
         self.spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
@@ -2175,21 +2192,26 @@ impl PayloadFold {
             (None, Some(table)) => Some(crate::e2e_plane::E2eReading::Read(table)),
             (None, None) => None,
         };
+        // Placed, so the selector's row terms read this frame's flow and
+        // packet: the walk is in capture order and holds both. Holding the
+        // transport message's bytes, so a path term reads the `Frame` around a
+        // record.
+        let ctx = grouping
+            .context(list)
+            .placed(*flow, Some(packet), frame.produced())
+            .holding(message);
+        #[cfg(feature = "dissect")]
         self.census.observe_frame_selecting(
             frame,
             &self.filter,
-            // Placed, so the selector's row terms read this frame's flow and
-            // packet: the walk is in capture order and holds both. Holding the
-            // transport message's bytes, so a path term reads the `Frame`
-            // around a record.
-            grouping
-                .context(list)
-                .placed(*flow, Some(packet), frame.produced())
-                .holding(message),
+            ctx,
             &mut self.spaces,
             sink,
             judging,
         );
+        #[cfg(not(feature = "dissect"))]
+        self.census
+            .observe_frame_selecting(frame, &self.filter, ctx, &mut self.spaces, judging);
     }
 }
 

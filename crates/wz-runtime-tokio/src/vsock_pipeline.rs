@@ -41,7 +41,7 @@ use std::sync::Arc;
 use tokio::io::{split, ReadHalf};
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
-use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::link_interfaces::{addressless_link_ends, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::LinkKind;
@@ -174,7 +174,7 @@ pub fn wire_vsock_stream(
     // locator form `vsock/<CID>:<PORT>` (module doc) so an admin client reads back
     // a string it could dial, not a Debug rendering of the address struct.
     let endpoints = match (stream.local_addr().ok(), stream.peer_addr().ok()) {
-        (Some(local), Some(peer)) => Some(addressless_link_endpoints(
+        (Some(local), Some(peer)) => Some(addressless_link_ends(
             LinkKind::Vsock,
             &format!("{}:{}", local.cid(), local.port()),
             &format!("{}:{}", peer.cid(), peer.port()),

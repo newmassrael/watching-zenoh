@@ -805,6 +805,10 @@ pub struct MatchingRow<Cb> {
     /// The verdict it was last told, recorded by a read that holds the tables shared beside what
     /// the peers declared ([`SessionTables::next_matching_change`]).
     last: Cell<bool>,
+    /// The verdict its callback was last handed: one apart from `last` is owed to the callback
+    /// ([`SessionTables::take_owed_matching`]), so a change and the change back before the first
+    /// was handed owe it nothing.
+    told: Cell<bool>,
     callback: Cb,
 }
 
@@ -2030,6 +2034,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             interest: owner.interest,
             count_local: owner.count_local,
             last: Cell::new(false),
+            told: Cell::new(false),
             callback,
         };
         self.insert_matching_listener(row)
@@ -2068,6 +2073,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             interest: Some(interest),
             count_local,
             last: Cell::new(false),
+            told: Cell::new(false),
             callback,
         };
         match self.insert_matching_listener(row) {
@@ -2243,6 +2249,36 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             }
         }
         None
+    }
+
+    /// The first matching listener at or after `cursor` whose callback is owed its verdict (the one
+    /// [`Self::next_matching_change`] recorded, not handed to the callback yet) and of whose
+    /// callback `take` hands something: what it handed, with the listener and the verdict, now
+    /// recorded as handed. A listener `take` hands nothing of (its callback is out for a call)
+    /// stays owed, for a later walk to find.
+    pub fn take_owed_matching<T>(
+        &mut self,
+        cursor: &mut usize,
+        mut take: impl FnMut(&mut F::Matching) -> Option<T>,
+    ) -> Option<(MatchingListenerHandle, bool, T)> {
+        let matching = self.kept_matching_mut()?;
+        loop {
+            let (handle, owed) = {
+                let (handle, row) = matching.next_from(cursor)?;
+                let last = row.last.get();
+                (handle, (row.told.get() != last).then_some(last))
+            };
+            let Some(verdict) = owed else {
+                continue;
+            };
+            let Some(row) = matching.get_mut(handle) else {
+                continue;
+            };
+            if let Some(taken) = take(&mut row.callback) {
+                row.told.set(verdict);
+                return Some((handle, verdict, taken));
+            }
+        }
     }
 
     // ---- pending gets ----------------------------------------------------------------------

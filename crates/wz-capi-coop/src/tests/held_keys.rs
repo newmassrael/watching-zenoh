@@ -268,11 +268,14 @@ fn live_holds(engine: &Engine) -> isize {
 
 /// Every hold a row's key keeps of a declaration comes back to the session: an undeclared
 /// subscriber's, a token's, those of the rows the close lets go of, and a key a closed session
-/// refuses. After the close only the program's own hold is live, and none once it is given back.
-/// The count is kept the same whether the session is open or closed. Turned red by a path that
-/// drops a row or a key with its holds: the close's walk dropping its rows
-/// (`CoopEngine::let_go_of_rows`) leaves three live after the close, and a refusal on the closed
-/// session that drops the key leaves three after it.
+/// refuses. A subscriber's row in the session's tables holds the declaration its key is named by,
+/// so the key's own hold of it comes back as the subscriber is declared and the row keeps only
+/// the hold of the declaration its retraction names. After the close only the program's own hold
+/// is live, and none once it is given back. The count is kept the same whether the session is
+/// open or closed. Turned red by a path that drops a row or a key with its holds: the close's walk
+/// dropping its rows (`CoopEngine::let_go_of_rows`) leaves two live after the close, and a
+/// refusal on the closed session that drops the key leaves three after it; and by a subscriber
+/// that keeps the key's hold of the declaration its row holds (three live after the undeclare).
 #[test]
 fn every_hold_comes_back_and_none_is_live_after_the_close_counted_open_or_closed() {
     let router = Router::start(CatchAll::None);
@@ -312,11 +315,11 @@ fn every_hold_comes_back_and_none_is_live_after_the_close_counted_open_or_closed
         .declare_liveliness_token_on_wire("demo/holds/t", held("/t"), None)
         .expect("declared");
     engine.undeclare_subscriber(first);
-    // The program's hold and the standing subscriber's two.
+    // The program's hold and the standing subscriber's hold of the declaration it retracts by.
     assert_eq!(
         live_holds(&engine),
-        3,
-        "the undeclared row and the token gave theirs back"
+        2,
+        "the undeclared row and the token gave theirs back, and each declaration its named hold"
     );
 
     SessionDrive::close(&*engine);
@@ -345,5 +348,165 @@ fn every_hold_comes_back_and_none_is_live_after_the_close_counted_open_or_closed
         dropped.load(Ordering::SeqCst),
         3,
         "each callback let go of with its row"
+    );
+}
+
+/// A subscriber's row holds the declaration its key is named by for as long as it stands, and is
+/// the one holder the subscriber has of it: the key's own hold comes back as the subscriber is
+/// declared, the declaration outlives the program's hold while the subscriber stands, and it goes
+/// with the subscriber once nothing else holds it. Turned red by a subscriber that keeps the key's
+/// hold besides the row's (two live after the declaration), and by a row that holds the
+/// declaration nowhere (gone at the program's release).
+#[test]
+fn a_subscribers_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let id = engine
+        .acquire_keyexpr("demo/named")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let subscriber = engine
+        .declare_subscriber_on_wire(
+            "demo/named/x",
+            WireKey::aliased_tail(id, "/x".len()).holding(program.share(&*engine)),
+            Locality::Any,
+            None,
+            sink(&dropped),
+        )
+        .expect("declared");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the program's hold alone: the key's came back, the row holds the declaration"
+    );
+    program.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/named".to_owned())],
+        "the subscriber's row holds it past the program's release"
+    );
+    engine.undeclare_subscriber(subscriber);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "and lets it go with the subscriber"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the callback went with it"
+    );
+}
+
+/// A liveliness subscriber's row holds the declaration its Interest names the key by, as a
+/// subscriber's does: the key's own hold comes back as the subscriber is declared, the
+/// declaration outlives the program's hold while the subscriber stands, and it goes with the
+/// subscriber once nothing else holds it. Turned red by a row that keeps the key's hold and is
+/// given no declaration in the tables (two live after the declaration).
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscribers_row_holds_the_declaration_its_interest_names() {
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let id = engine
+        .acquire_keyexpr("demo/alive")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    let subscriber = engine
+        .declare_liveliness_subscriber_on_wire(
+            "demo/alive/**",
+            WireKey::aliased_tail(id, "/**".len()).holding(program.share(&*engine)),
+            false,
+            wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {}),
+        )
+        .expect("the engine has liveliness");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the program's hold alone: the key's came back, the row holds the declaration"
+    );
+    program.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/alive".to_owned())],
+        "the subscriber's row holds it past the program's release"
+    );
+    engine.undeclare_subscriber(subscriber);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "and lets it go with the subscriber"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+}
+
+/// A queryable's row holds the declaration its key is named by for as long as it stands, and is
+/// the one holder the queryable has of it: the key's own hold comes back as the queryable is
+/// declared, and the declaration outlives the program's hold while the queryable stands. A
+/// queryable the tables refuse gives back its key's hold of the declaration with the rest. Turned
+/// red by a queryable that keeps the key's hold besides the row's (two live after the
+/// declaration), and by a refusal that keeps the named hold (two live after it).
+#[cfg(feature = "queryable")]
+#[test]
+fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
+    use wz_capi_port::{QueryHolder, QueryableSink};
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let id = engine
+        .acquire_keyexpr("demo/named")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let sink = || -> QueryableSink {
+        let guard = Dropped(dropped.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                let _held = &guard;
+            },
+        )
+    };
+    let declare = |rest: &str| {
+        engine.declare_queryable_on_wire(
+            &format!("demo/named{rest}"),
+            WireKey::aliased_tail(id, rest.len()).holding(program.share(&*engine)),
+            false,
+            Locality::Any,
+            None,
+            sink(),
+        )
+    };
+    let queryable = declare("/x").expect("declared");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the program's hold alone: the key's came back, the row holds the declaration"
+    );
+    assert!(declare("/y").is_err(), "CONTROL: the one row is taken");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the refused queryable's key gave its hold back"
+    );
+    program.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/named".to_owned())],
+        "the queryable's row holds it past the program's release"
+    );
+    engine.undeclare_queryable(queryable);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "and lets it go with the queryable"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        2,
+        "the refused callback at once, the other with its row"
     );
 }

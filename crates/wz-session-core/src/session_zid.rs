@@ -18,19 +18,22 @@
 //! No allocation and no feature gate: the fixed-memory profile keeps the same
 //! sixteen bytes and length in the session's own storage.
 
+use sce_forge_runtime::codec::{ArrayBytes, Bounded, Bytes};
+
 /// The longest zid on the wire, in bytes.
 pub const ZID_MAX: usize = 16;
 
 /// A zid: one to [`ZID_MAX`] bytes, not all zero, as the handshake sends it.
 ///
 /// It reads as the byte slice it holds (`Deref<Target = [u8]>`), so a caller
-/// that passes a zid on as `&[u8]` needs no conversion. The bytes past the
-/// length are always zero, which is what makes the derived equality and hash
-/// the equality and hash of the zids.
+/// that passes a zid on as `&[u8]` needs no conversion, and it holds its bytes
+/// within the bounds of the codec's zid field, so a message lends them
+/// ([`Self::as_field`]) with no check. The bytes past the length are always
+/// zero, which is what makes the derived equality and hash the equality and hash
+/// of the zids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionZid {
-    bytes: [u8; ZID_MAX],
-    len: u8,
+    bytes: Bounded<ArrayBytes<ZID_MAX>, ZID_MAX, 1>,
 }
 
 /// Why bytes are not a [`SessionZid`].
@@ -67,21 +70,14 @@ impl SessionZid {
     /// bytes long or its bytes are all zero.
     pub fn new(src: &[u8]) -> Result<Self, ZidError> {
         let len = src.len();
-        let mut bytes = [0u8; ZID_MAX];
-        // The prefix of the array as long as `src` exists exactly when `src` is at most
-        // `ZID_MAX` bytes: the length check and the copy's bound are one test.
-        let into = match bytes.get_mut(..len) {
-            Some(into) if len != 0 => into,
-            _ => return Err(ZidError::LengthOutOfRange { len }),
-        };
+        // The buffer holds as many bytes as the bound, so a length outside the
+        // bounds is the one refusal the copy gives.
+        let bytes: Bounded<ArrayBytes<ZID_MAX>, ZID_MAX, 1> =
+            Bounded::from_slice(src).map_err(|_| ZidError::LengthOutOfRange { len })?;
         if src.iter().all(|&byte| byte == 0) {
             return Err(ZidError::AllZero { len });
         }
-        into.copy_from_slice(src);
-        Ok(Self {
-            bytes,
-            len: len as u8,
-        })
+        Ok(Self { bytes })
     }
 
     /// The zid of an array whose length is checked when the build is made: an
@@ -90,11 +86,8 @@ impl SessionZid {
     /// the build evaluates it.
     ///
     /// A `const fn` for the constants that name a zid; a zid read at run time is
-    /// made by [`Self::new`], whose copy is one `memcpy` and not this loop.
+    /// made by [`Self::new`].
     pub const fn from_array<const N: usize>(src: [u8; N]) -> Self {
-        const {
-            assert!(N != 0 && N <= ZID_MAX, "a zid is 1 to 16 bytes on the wire");
-        }
         let mut nonzero = false;
         let mut rest = src.as_slice();
         while let [byte, tail @ ..] = rest {
@@ -104,32 +97,29 @@ impl SessionZid {
             rest = tail;
         }
         assert!(nonzero, "a zid is not zero");
-        // The array is rebuilt by value, the bytes pushed in from the last, so the
-        // zid's first byte ends up first and the bytes past it stay zero, with no
-        // index into the array.
-        let mut bytes = [0u8; ZID_MAX];
-        let mut rest = src.as_slice();
-        while let [head @ .., last] = rest {
-            let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, _] = bytes;
-            bytes = [
-                *last, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14,
-            ];
-            rest = head;
-        }
+        // The length is judged where the build evaluates this: one to `ZID_MAX`.
         Self {
-            bytes,
-            len: N as u8,
+            bytes: Bounded::proven_const(src),
         }
     }
 
     /// The zid zero-padded to [`ZID_MAX`] bytes: the form a C ABI's `z_id_t` holds.
-    pub const fn to_padded(&self) -> [u8; ZID_MAX] {
-        self.bytes
+    pub fn to_padded(&self) -> [u8; ZID_MAX] {
+        let mut padded = [0u8; ZID_MAX];
+        for (slot, byte) in padded.iter_mut().zip(self.as_slice()) {
+            *slot = *byte;
+        }
+        padded
     }
 
     /// The bytes the handshake sends.
-    pub const fn as_slice(&self) -> &[u8] {
-        self.bytes.split_at(self.len as usize).0
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes.inner().as_slice()
+    }
+
+    /// The bytes as the codec's zid field holds them, one to [`ZID_MAX`].
+    pub fn as_field(&self) -> Bytes<'_, ZID_MAX, 1> {
+        self.bytes.as_bytes()
     }
 }
 
@@ -250,6 +240,18 @@ mod tests {
         assert_eq!(SessionZid::new(&[0, 0, 0, 0x7f]), Ok(LAST_SET));
         assert_eq!(SessionZid::new(&[0xc3; ZID_MAX]), Ok(FULL));
         assert_eq!(LAST_SET.as_slice(), &[0, 0, 0, 0x7f]);
+    }
+
+    /// The field a zid lends a message is its bytes, at every length it can have.
+    #[test]
+    fn the_field_a_zid_lends_is_its_bytes() {
+        let zid = SessionZid::new(&[0x01, 0x02, 0x03]).expect("three bytes are a zid");
+        assert_eq!(zid.as_field(), [0x01, 0x02, 0x03]);
+        assert_eq!(SessionZid::from_array([0x7f]).as_field(), [0x7f]);
+        assert_eq!(
+            SessionZid::from_array([0xc3; ZID_MAX]).as_field(),
+            [0xc3; ZID_MAX]
+        );
     }
 
     #[test]

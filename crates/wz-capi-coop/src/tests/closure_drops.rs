@@ -491,3 +491,47 @@ fn a_listener_undeclared_from_its_own_callback_is_let_go_of_after_the_call() {
     });
     assert_eq!(calls.load(Ordering::SeqCst), 1, "told once, then gone");
 }
+
+/// Two listeners owed their verdict in one delivery, the first undeclaring itself from inside its
+/// call: the hand-out that finds the first's row gone lets its callback go and goes on to the
+/// second, which is told once. Turned red by a hand-out that stops at a listener whose row went
+/// during its call, or that tells a listener a verdict twice.
+#[test]
+fn a_listener_gone_during_its_call_leaves_the_next_one_told_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let id_at = Arc::new(std::sync::OnceLock::new());
+    let first = {
+        let engine = Arc::clone(&engine);
+        let calls = Arc::clone(&first_calls);
+        let id_at = Arc::clone(&id_at);
+        MatchingSink::shared(move |_matching: bool| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(&id) = id_at.get() {
+                engine.undeclare_matching_listener(id);
+            }
+        })
+    };
+    let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let second = {
+        let told = Arc::clone(&told);
+        MatchingSink::shared(move |matching: bool| told.lock().unwrap().push(matching))
+    };
+    let id = engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", first, false)
+        .expect("a row is free");
+    assert!(id_at.set(id).is_ok());
+    engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", second, false)
+        .expect("a row is free");
+    super::until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    router.send(super::Command::DeclareSubscriber(1, "demo/**"));
+    super::until(&engine, "the second listener to be told", || {
+        !told.lock().unwrap().is_empty()
+    });
+    assert_eq!(first_calls.load(Ordering::SeqCst), 1, "the first told once");
+    assert_eq!(*told.lock().unwrap(), [true], "the second told once");
+}

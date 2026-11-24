@@ -178,7 +178,6 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     assert_eq!(rows.interests(), Some(12));
     let count = |part: &str| {
         plan.rows()
-            .iter()
             .find(|row| row.part == part)
             .map(|row| row.count)
     };

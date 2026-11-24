@@ -295,7 +295,7 @@ pub use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 // reports, beside the trait that produces them. `linkstate_forward` already
 // re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
 // needs the link's protocol has no business depending on the routing tier; the
-// pair belongs where `BoxedLinkDriver::link_endpoints` is named.
+// pair belongs where `BoxedLinkDriver::link_ends` is named.
 // R2794 — plus `LinkKind`, which is what the C plane actually reads: its
 // streamed and reliability answers are the link's own, not the rule protocol.
 pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkKind, LinkSubject};

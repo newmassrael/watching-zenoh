@@ -14,7 +14,7 @@ use wz_link_lwip::{Datagram, TxPayload};
 use wz_runtime_coop::session_drive::LinkProto;
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkDropCause, LinkEnds, LinkSendOutcome, TxSlot, TxSlotGrant,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -119,11 +119,12 @@ pub struct LwipUdpDriver {
     /// Interior-mutable, so an acceptor is bound by its receive seam while the
     /// send seam reads it, both through `&self`.
     binding: PeerBinding<(u32, u16)>,
-    /// R2841 — the link's two ends as upstream's admin space reports them,
-    /// `udp/<ip>:<port>` each. Written ONCE, when the peer is known: at
-    /// construction for an initiator, at the binding `InitSyn` for an
-    /// acceptor. The peer never changes after, so neither do they.
-    endpoints: OnceCell<LinkEndpoints>,
+    /// R2841 — the link's two ends, the address lwIP routes to the peer from with
+    /// this socket's port and the peer's: what upstream's admin space reports
+    /// them by. Learnt ONCE, when the peer is known: at construction for an
+    /// initiator, at the binding `InitSyn` for an acceptor. The peer never
+    /// changes after, so neither do they.
+    ends: OnceCell<(SocketAddr, SocketAddr)>,
     /// ARCHITECTURE section 9.1 — the payload buffers lent to the session and not
     /// yet sent or given back, by slot number. Single-task, so a `RefCell`.
     lent: RefCell<[Option<TxPayload>; LENT_MAX]>,
@@ -168,7 +169,7 @@ impl LwipUdpDriver {
         let driver = Self {
             socket,
             binding,
-            endpoints: OnceCell::new(),
+            ends: OnceCell::new(),
             lent: RefCell::new([const { None }; LENT_MAX]),
         };
         driver.note_endpoints();
@@ -176,34 +177,22 @@ impl LwipUdpDriver {
     }
 
     /// Record the link's ends once the peer is known. The source is the
-    /// address lwIP routes to that peer from, with this socket's port.
-    ///
-    /// The text of each end is the cooperative engine's one rule for it
-    /// ([`link_endpoints`](wz_runtime_coop::udp_link::link_endpoints)). Every
-    /// end of this link is an IPv4 one, and the build's locator bound is held at
-    /// compile time to at least the widest IPv4 end
-    /// ([`LONGEST_IPV4_LOCATOR_LEN`](wz_runtime_coop::session_drive::LONGEST_IPV4_LOCATOR_LEN)),
-    /// so both ends are always held whole.
+    /// address lwIP routes to that peer from, with this socket's port. Asked
+    /// once, here, so a reader of the ends asks lwIP nothing.
     fn note_endpoints(&self) {
         let Some((addr, port)) = self.binding.peer() else {
             return;
         };
-        if addr == 0 || port == 0 || self.endpoints.get().is_some() {
+        if addr == 0 || port == 0 || self.ends.get().is_some() {
             return;
         }
         let Some(src) = wz_link_lwip::route_source(addr) else {
             return;
         };
         let local_port = self.socket.borrow().local_port();
-        let ends = wz_runtime_coop::udp_link::link_endpoints(
-            LinkProto::Udp,
-            socket_addr(src, local_port),
-            socket_addr(addr, port),
-        );
-        debug_assert!(ends.is_ok(), "an IPv4 end is held by every bound");
-        if let Ok(ends) = ends {
-            let _ = self.endpoints.set(ends);
-        }
+        let _ = self
+            .ends
+            .set((socket_addr(src, local_port), socket_addr(addr, port)));
     }
 
     /// The peer every send targets `(addr, port)`, once one is known.
@@ -398,8 +387,10 @@ impl BoxedLinkDriver for LwipUdpDriver {
         // session Close frame is emitted by the FSM action layer.
     }
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.get()
+    // The addresses are lent as they are; a reader that reports the link writes its locators.
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
+        let &(local, peer) = self.ends.get()?;
+        Some(LinkEnds::ip(LinkProto::Udp.kind(), local, peer))
     }
 
     // The widest datagram this socket carries, either way: it receives at most
@@ -433,6 +424,7 @@ mod tests {
     // Round 3277 -- the binder of `test_bind`: the constructor itself by default, a
     // leaked pool of one on `static-link-storage`, so these tests run on both.
     use wz_link_lwip::test_bind::session_rx as bind_session_rx;
+    use wz_session_core::link::LinkEndsText;
     use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
@@ -719,13 +711,14 @@ mod tests {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let driver = looped(&link, 7486);
         let ends = driver.link_endpoints().expect("a dialled link has ends");
-        let expected = wz_runtime_coop::udp_link::link_endpoints(
-            LinkProto::Udp,
+        let expected = LinkEnds::ip(
+            LinkProto::Udp.kind(),
             SocketAddr::from(([127, 0, 0, 1], 7486)),
             SocketAddr::from(([127, 0, 0, 1], 7486)),
         )
+        .endpoints()
         .expect("an IPv4 pair is held");
-        std::assert_eq!(ends, &expected);
+        std::assert_eq!(ends, expected);
         std::assert_eq!(ends.dst, "udp/127.0.0.1:7486");
     }
 }

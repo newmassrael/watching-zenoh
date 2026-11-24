@@ -89,7 +89,7 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
-use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::link_interfaces::{addressless_link_ends, addressless_link_subject};
 use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::PartitionedRuntime;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
@@ -903,7 +903,7 @@ pub fn wire_unixpipe_stream(
     // this reads it rather than asserting on it.
     let endpoints = read
         .node_path()
-        .map(|src| addressless_link_endpoints(LinkKind::Unixpipe, src, write_node.as_str()));
+        .map(|src| addressless_link_ends(LinkKind::Unixpipe, src, write_node.as_str()));
     let inbound = StreamReadDriver::new(
         read,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),

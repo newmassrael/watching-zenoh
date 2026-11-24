@@ -47,7 +47,7 @@ use wz_mcu_session_acceptor::{
     SESSION_PORT,
 };
 use wz_session_core::epoch::EpochSource;
-use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{BoxedLinkDriver, LinkEndsText};
 
 /// 2020-01-01T00:00:00Z: an epoch reading below this is not the time.
 const EARLIEST_PLAUSIBLE_UNIX_SECS: u64 = 1_577_836_800;

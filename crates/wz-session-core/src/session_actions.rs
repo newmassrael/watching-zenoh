@@ -4587,9 +4587,10 @@ impl LinkSeed {
         #[cfg(feature = "transport-stats")]
         {
             let mut metrics = crate::stats_registry::TransportMetrics::default();
-            let slot = R::link_driver(driver).link_endpoints().map(|ends| {
-                metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
-            });
+            let slot =
+                crate::link::LinkEndsText::link_endpoints(R::link_driver(driver)).map(|ends| {
+                    metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
+                });
             Self { metrics, slot }
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -4891,7 +4892,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_sync_bits: AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
-                own_keyexprs: R::new_mutex(crate::declared_keyexprs::LinkKeyexprs::default()),
+                own_keyexprs: R::new_mutex(crate::declared_keyexprs::LinkKeyexprs::new()),
                 #[cfg(feature = "shared-key-ids")]
                 // Upstream's form until the engine that opened the link says otherwise.
                 link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
@@ -5135,19 +5136,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// renderer becomes a projection of it — one derivation, two consumers.
     ///
     /// A link whose driver cannot name its endpoints
-    /// ([`BoxedLinkDriver::link_endpoints`] `None` — a test double, a FIFO pair, an
+    /// ([`BoxedLinkDriver::link_ends`] `None` — a test double, a FIFO pair, an
     /// MCU stack with no address) still gets an entry, with blank ends. The COUNT
     /// is the load-bearing fact for an admin client asking "is this one session
     /// over two links?", so dropping such a link would corrupt the answer in order
     /// to tidy a string.
     ///
     /// Heap profile only: it returns a `Vec`. A session in a slot has one link, and the
-    /// admin node reads its endpoints in place ([`Self::link_endpoints`]).
+    /// admin node reads its ends in place ([`Self::link_ends`]).
     #[cfg(feature = "alloc")]
     pub fn link_endpoints_all(&self) -> Vec<crate::link::LinkEndpoints> {
-        let render = |driver: &R::Driver| match driver.link_endpoints() {
-            Some(e) => e.clone(),
-            None => crate::link::LinkEndpoints::default(),
+        let render = |driver: &R::Driver| {
+            crate::link::LinkEndsText::link_endpoints(driver).unwrap_or_default()
         };
         #[cfg(feature = "transport-multilink")]
         {
@@ -5162,12 +5162,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         alloc::vec![render(self.link_driver())]
     }
 
-    /// The ends of each link of the session, handed to `visit` in place, in the order
-    /// [`Self::link_endpoints_all`] lists them and a link whose driver names none with blank ends,
-    /// until `visit` answers `false`. Nothing is copied, so a reader that writes the ends into a
-    /// row of its own allocates nothing.
-    pub fn visit_link_endpoints(&self, mut visit: impl FnMut(&crate::link::LinkEndpoints) -> bool) {
-        let blank = crate::link::LinkEndpoints::default();
+    /// The ends of each link of the session, handed to `visit` as their drivers lend them, in
+    /// the order [`Self::link_endpoints_all`] lists them and `None` for a link whose driver names
+    /// none, until `visit` answers `false`. Nothing is written or copied, so a reader that writes
+    /// the ends into a row of its own allocates nothing, and one that counts the links writes
+    /// no text.
+    pub fn visit_link_ends(
+        &self,
+        mut visit: impl FnMut(Option<crate::link::LinkEnds<'_>>) -> bool,
+    ) {
         #[cfg(feature = "transport-multilink")]
         {
             let links = self
@@ -5176,14 +5179,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !links.is_empty() {
                 for link in links.iter() {
-                    if !visit(link.link_driver().link_endpoints().unwrap_or(&blank)) {
+                    if !visit(link.link_driver().link_ends()) {
                         break;
                     }
                 }
                 return;
             }
         }
-        let _ = visit(self.link_driver().link_endpoints().unwrap_or(&blank));
+        let _ = visit(self.link_driver().link_ends());
     }
 
     /// `resource-snapshot` — what this session's receive path has counted: the
@@ -8429,7 +8432,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // names no endpoints keeps no slot, as at open.
         #[cfg(feature = "transport-stats")]
         {
-            let slot = link.link_driver().link_endpoints().map(|ends| {
+            let ends = crate::link::LinkEndsText::link_endpoints(link.link_driver());
+            let slot = ends.map(|ends| {
                 R::with_mutex_mut(&self.metrics, |metrics| {
                     metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
                 })
@@ -8977,12 +8981,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// This binding's own link's two ends, as its driver names them, or `None` where
     /// the driver cannot name them (a test double, a FIFO pair, an MCU stack with no
-    /// address). Lent and allocation-free: a session in a slot holds its one link in
-    /// place, so a reader that keeps the ends copies them. The admin space's lent
-    /// `sessions[]` row reads its link here; the heap row reads
-    /// `link_endpoints_all` (heap profile), which also walks a multilink session's set.
-    pub fn link_endpoints(&self) -> Option<&crate::link::LinkEndpoints> {
-        self.link_driver().link_endpoints()
+    /// address). Lent and allocation-free: a reader that reports them writes their locators
+    /// into a row of its own. The admin space's lent `sessions[]` row reads its link here;
+    /// the heap row reads `link_endpoints_all` (heap profile), which also walks a multilink
+    /// session's set.
+    pub fn link_ends(&self) -> Option<crate::link::LinkEnds<'_>> {
+        self.link_driver().link_ends()
     }
 
     /// The peer's zid as the handshake carried it, lent to `f`, or `None` before
@@ -10532,13 +10536,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
     /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
-        self.observe_control(&frame.control_facts().unchained());
+        self.observe_control(&frame.control_facts());
     }
 
     /// What the link records about one received transport message, whichever read it: the
     /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
     /// taken, so it cannot fail.
-    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_, ()>) {
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor

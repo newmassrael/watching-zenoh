@@ -26,7 +26,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::link_cells::CellRc;
@@ -34,9 +34,9 @@ use wz_runtime_coop::link_storage::{TxLender, TxStore};
 use wz_runtime_coop::session_drive::{
     LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
 };
-use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
+use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkDropCause, LinkEnds, LinkSendOutcome, RxFrame, TxSlot, TxSlotGrant,
     DEFAULT_LINK_MTU,
 };
 use wz_session_core::qos::Priority;
@@ -154,10 +154,8 @@ impl MemoryNetwork {
                 Some(peer) => PeerBinding::dialled(peer),
                 None => PeerBinding::accepting(),
             },
-            endpoints: OnceCell::new(),
             tx: TxLender::new(MemoryTx::new()),
         };
-        end.note_endpoints();
         CellRc::boxed(end)
     }
 
@@ -191,25 +189,10 @@ pub struct MemoryEnd {
     net: Rc<MemoryNetwork>,
     local: SocketAddr,
     binding: PeerBinding<SocketAddr>,
-    endpoints: OnceCell<LinkEndpoints>,
     tx: TxLender<MemoryTx>,
 }
 
 impl MemoryEnd {
-    /// Record the link's two ends once the peer is known. The peer never
-    /// changes after, so neither do they.
-    fn note_endpoints(&self) {
-        let Some(peer) = self.binding.peer() else {
-            return;
-        };
-        // The cooperative engine's text of each end, as its own links write it.
-        if let Ok(ends) =
-            wz_runtime_coop::udp_link::link_endpoints(LinkProto::Udp, self.local, peer)
-        {
-            let _ = self.endpoints.set(ends);
-        }
-    }
-
     /// Where this end sends, once it has a peer.
     pub fn peer(&self) -> Option<SocketAddr> {
         self.binding.peer()
@@ -279,8 +262,10 @@ impl BoxedLinkDriver for MemoryEnd {
 
     fn close_blocking(&self) {}
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.get()
+    // None until the peer is known; the addresses are lent as they are.
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
+        let peer = self.binding.peer()?;
+        Some(LinkEnds::ip(LinkProto::Udp.kind(), self.local, peer))
     }
 }
 
@@ -298,9 +283,6 @@ impl SessionDatagramLink for MemoryEnd {
             // The peer's datagrams only; the InitSyn that binds an acceptor is
             // how it learns its peer, and anyone else's is let go.
             let verdict = self.binding.admit(waiting.from, &waiting.bytes);
-            if verdict == DatagramVerdict::Bound {
-                self.note_endpoints();
-            }
             if verdict.is_taken() {
                 return Some(RxFrame::new(waiting.bytes));
             }
@@ -369,6 +351,7 @@ impl SessionLinks for MemoryLinks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::link::LinkEndsText;
 
     const HOST_A: [u8; 4] = [10, 0, 0, 1];
     const HOST_B: [u8; 4] = [10, 0, 0, 2];

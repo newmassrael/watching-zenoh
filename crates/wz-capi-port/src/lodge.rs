@@ -176,7 +176,8 @@ impl<T> Drop for Strong<T> {
 }
 
 impl<T> WeakRef<T> {
-    /// A count of the value, while one is still held.
+    /// A count of the value, while one is still held and the counts have room for one more: none
+    /// when the value is gone, or when its counts are as many as a count can say.
     pub fn upgrade(&self) -> Option<Strong<T>> {
         // SAFETY: a weak count holds the place, so its counts stand.
         let strong = unsafe { &self.at.as_ref().strong };
@@ -185,8 +186,10 @@ impl<T> WeakRef<T> {
             if seen == 0 {
                 return None;
             }
-            match strong.compare_exchange_weak(seen, seen + 1, Ordering::Acquire, Ordering::Relaxed)
-            {
+            // A count past the most would wrap to none held, and the next let go of would drop the
+            // value under the counts still held: refused, as a value gone is.
+            let next = seen.checked_add(1)?;
+            match strong.compare_exchange_weak(seen, next, Ordering::Acquire, Ordering::Relaxed) {
                 Ok(_) => return Some(Strong { at: self.at }),
                 Err(now) => seen = now,
             }
@@ -426,5 +429,32 @@ mod tests {
         drop(kept);
         drop(copy);
         assert_eq!(Arc::strong_count(&value), 1, "both counts were let go of");
+    }
+
+    /// A weak count upgrades to a count while the value is held, and is refused, the counts left
+    /// as they were, when the value has as many counts as a count can say.
+    ///
+    /// # Control
+    ///
+    /// The first upgrade, of a value with room for a count, is the control. An upgrade that adds
+    /// to the count unchecked overflows it, which reds the refusal and the count after it.
+    #[test]
+    fn an_upgrade_past_the_most_counts_is_refused() {
+        let count = Strong::boxed(7u32);
+        let weak = Strong::downgrade(&count);
+        let upgraded = weak.upgrade().expect("CONTROL: the value is held");
+        assert_eq!(Strong::strong_count(&count), 2, "the upgrade is a count");
+        drop(upgraded);
+        count.lodging().strong.store(usize::MAX, Ordering::Relaxed);
+        assert!(weak.upgrade().is_none(), "no room for one more count");
+        assert_eq!(
+            Strong::strong_count(&count),
+            usize::MAX,
+            "a refused upgrade leaves the counts as they were"
+        );
+        // Back to the one count held, so the drops below give the box back as it was made.
+        count.lodging().strong.store(1, Ordering::Relaxed);
+        drop(weak);
+        drop(count);
     }
 }
