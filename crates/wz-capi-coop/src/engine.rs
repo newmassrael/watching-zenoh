@@ -2491,7 +2491,7 @@ impl RuntimeTables {
         let groups = config.groups.len().min(caps::MAX_TASKS);
         let links = usize::from(crate::arena::dials(config))
             .saturating_add(config.max_faces)
-            .min(caps::MAX_TASKS - groups);
+            .min(caps::MAX_TASKS.saturating_sub(groups));
         Self {
             rows: RuntimeRows {
                 tasks: links,
