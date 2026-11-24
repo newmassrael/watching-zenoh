@@ -340,8 +340,9 @@ fn a_session_names_its_peer_in_sixteen_bytes() {
     );
 
     let named = |bytes: &[u8]| {
-        *actions.remote_peer_zid.lock().expect("the zid slot") =
-            wz_session_core::session_zid::SessionZid::new(bytes).ok();
+        actions.fact_remote_peer_zid(|slot| {
+            *slot = wz_session_core::session_zid::SessionZid::new(bytes).ok()
+        });
         actions.peer_zid_array()
     };
     assert_eq!(named(&[0xc3, 0xd4]), zid_from_wire(&[0xc3, 0xd4]));

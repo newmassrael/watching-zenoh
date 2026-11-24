@@ -12,11 +12,10 @@ use std::sync::{Condvar, Mutex};
 
 use super::egress::{message_cost, EgressBudget};
 use super::*;
-use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::runtime_impl::TokioTime;
 use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
 use crate::sync::PlainCell;
 use crate::Reliability;
-use wz_runtime_core::runtime::Runtime;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
@@ -180,13 +179,13 @@ pub(super) fn client_over(link: &Arc<RoomLink>, peer: Zid) -> Arc<SessionLinkAct
         fixture_session_init_params(),
         TokioTime::new(),
     );
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
+    actions.fact_peer_whatami(|s| *s = Some(0b10));
     actions
 }
 
@@ -601,7 +600,7 @@ fn a_link_state_message_does_not_wait_for_a_lane_a_blocking_put_waits_in(
     // The negotiated-QoS flag exists only in a build with `transport-qos`; without it a session
     // has the one lane, which is the `false` case below.
     #[cfg(feature = "transport-qos")]
-    TokioRuntime::with_mutex_mut(&rig.dest.is_qos, |negotiated| *negotiated = qos);
+    rig.dest.fact_is_qos(|negotiated| *negotiated = qos);
     #[cfg(not(feature = "transport-qos"))]
     assert!(
         !qos,
@@ -760,7 +759,7 @@ fn a_link_state_message_is_not_held_behind_a_put_the_data_lane_has_no_room_for()
     let rig = Rig::new(true);
     // Only a session that negotiated QoS routes a message on the lane of its priority; without
     // it every message goes on the one lane, which is the data lane.
-    TokioRuntime::with_mutex_mut(&rig.dest.is_qos, |qos| *qos = true);
+    rig.dest.fact_is_qos(|qos| *qos = true);
     forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"data")]);
     assert_eq!(
         rig.fwd.egress_held(),
@@ -880,13 +879,13 @@ fn router_over_a_queue() -> (RouterForwarder, impl Sized, crate::writer_queue::O
         crate::writer_queue::outbound_channel_with_capacity([2; Priority::NUM], 65_535);
     let link = Arc::new(QueueLink { tx });
     let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
-    TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
+    dest.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(zid(0xCC).as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
+    dest.fact_peer_whatami(|s| *s = Some(0b10));
     let fwd = RouterForwarder::new(zid(0x01));
     let quiet = RoomLink::new(false);
     fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));
@@ -1014,13 +1013,13 @@ async fn a_real_write_queue_tells_the_router_when_its_writer_makes_room() {
     let (tx, mut rx) = crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
     let link = Arc::new(QueueLink { tx });
     let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
-    TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
+    dest.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(zid(0xCC).as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
+    dest.fact_peer_whatami(|s| *s = Some(0b10));
     let fwd = RouterForwarder::new(zid(0x01));
     let quiet = RoomLink::new(false);
     fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));

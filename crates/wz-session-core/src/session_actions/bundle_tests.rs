@@ -420,9 +420,7 @@ mod reply_egress_gate {
 mod handshake_records {
     use alloc::vec;
 
-    use wz_runtime_core::Runtime;
-
-    use super::{bundle, PlainRuntime};
+    use super::bundle;
 
     const ACCEPTS: bool = cfg!(feature = "session-unicast-accept");
 
@@ -450,10 +448,9 @@ mod handshake_records {
         actions
             .handle_inbound(&init_syn)
             .expect("the InitSyn decodes in either build");
-        let routed = PlainRuntime::with_mutex_mut(&actions.remote_peer_zid, |slot| *slot);
-        let bound = PlainRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot);
-        let caps =
-            PlainRuntime::with_mutex_mut(&actions.inbound_peer_init_caps, |slot| slot.is_some());
+        let routed = actions.fact_remote_peer_zid(|slot| *slot);
+        let bound = actions.fact_inbound_peer_zid(|slot| *slot);
+        let caps = actions.fact_inbound_peer_init_caps(|slot| slot.is_some());
         let expected = ACCEPTS.then_some(&ZID[..]);
         assert_eq!(routed.as_deref(), expected, "the zid the routing reads");
         assert_eq!(bound.as_deref(), expected, "the zid the cookie binds");
@@ -477,11 +474,10 @@ mod handshake_records {
         actions
             .handle_inbound(&open_syn)
             .expect("the OpenSyn decodes in either build");
-        let kept =
-            PlainRuntime::with_mutex_mut(&actions.inbound_opensyn_cookie, |slot| slot.is_some());
+        let kept = actions.fact_inbound_opensyn_cookie(|slot| slot.is_some());
         assert_eq!(kept, ACCEPTS, "the echoed cookie");
         assert!(
-            PlainRuntime::with_mutex_mut(&actions.peer_open_lease_ms, |slot| slot.is_none()),
+            actions.fact_peer_open_lease_ms(|slot| slot.is_none()),
             "no lease is taken from an OpenSyn that was only read"
         );
     }

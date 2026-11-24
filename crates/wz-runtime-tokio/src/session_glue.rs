@@ -4612,7 +4612,7 @@ mod rx_sn_gate_tests {
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
         let zid = [0x0A; 4];
-        *actions.inbound_peer_zid.lock().unwrap() = Some(zid.into());
+        actions.fact_inbound_peer_zid(|slot| *slot = Some(zid.into()));
 
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
@@ -4675,7 +4675,7 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
         let begin = DriverLoopOutcome::Fragment {
@@ -4744,7 +4744,7 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
         let mut reasm: ReassemblyDispatcher<1, 4096> = ReassemblyDispatcher::new(
             ReassemblyConfig::new(2, 5_000).with_pool_overflow(PoolOverflow::OldestWins),
         );
@@ -4805,7 +4805,7 @@ mod rx_sn_gate_tests {
 
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
 
@@ -7739,10 +7739,8 @@ mod reconnect_tx_tests {
         // Stamp the handshake-scoped slots the open path would populate.
         TokioRuntime::with_mutex_mut(&actions.link.established_at, |slot| *slot = Some(42));
         TokioRuntime::with_mutex_mut(&actions.link.last_inbound_at, |slot| *slot = Some(43));
-        TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
-        TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| {
-            *slot = Some([9; 4].into())
-        });
+        actions.fact_inbound_cookie(|slot| *slot = Some(vec![1, 2]));
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([9; 4].into()));
         actions
             .link
             .lease_armed
@@ -7787,14 +7785,8 @@ mod reconnect_tx_tests {
             &actions.link.last_inbound_at,
             |slot| slot.is_none()
         ));
-        assert!(TokioRuntime::with_mutex_mut(
-            &actions.inbound_cookie,
-            |slot| slot.is_none()
-        ));
-        assert!(TokioRuntime::with_mutex_mut(
-            &actions.inbound_peer_zid,
-            |slot| slot.is_none()
-        ));
+        assert!(actions.fact_inbound_cookie(|slot| slot.is_none()));
+        assert!(actions.fact_inbound_peer_zid(|slot| slot.is_none()));
         // Session-scoped survivors.
         assert_eq!(
             actions.resolve_outbound_mapping(7).as_deref(),

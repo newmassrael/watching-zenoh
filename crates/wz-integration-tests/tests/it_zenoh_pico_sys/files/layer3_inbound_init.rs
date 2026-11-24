@@ -189,7 +189,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
-    let pre = actions.inbound_cookie.lock().unwrap().clone();
+    let pre = actions.fact_inbound_cookie(|slot| slot.clone());
     assert!(pre.is_none(), "cookie slot starts empty");
 
     let frame = actions
@@ -197,7 +197,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
         .expect("handle_inbound on pico InitAck");
     assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
 
-    let post = actions.inbound_cookie.lock().unwrap().clone();
+    let post = actions.fact_inbound_cookie(|slot| slot.clone());
     assert_eq!(
         post.as_deref(),
         Some(cookie.as_slice()),

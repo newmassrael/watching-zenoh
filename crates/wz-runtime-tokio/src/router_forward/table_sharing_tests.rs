@@ -10,11 +10,10 @@
 //! tables, and fails instead of printing a number.
 
 use super::*;
-use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::runtime_impl::TokioTime;
 use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
 use crate::Reliability;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use wz_runtime_core::runtime::Runtime;
 
 /// The publishers' threads, each a face forwarding Puts without pause.
 const PUBLISHERS: u64 = 8;
@@ -74,13 +73,13 @@ fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<CountingLinkDriver>) {
         wz_runtime_tokio_test_support::fixture_session_init_params(),
         TokioTime::new(),
     );
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
+    actions.fact_peer_whatami(|s| *s = Some(0b10));
     (actions, sink)
 }
 

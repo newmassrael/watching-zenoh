@@ -1257,8 +1257,10 @@ mod tests {
         let (primary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
         let (secondary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
-        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        primary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+        secondary.core.fact_multilink_pubkey(|s| *s = Some(key));
         let JoinOutcome::Joined(second_link) = join_link(&primary, &secondary, 2) else {
             panic!("the second link joins the shared core");
         };
@@ -1364,8 +1366,10 @@ mod tests {
         let (primary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
         let (secondary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Udp);
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
-        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        primary
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+        secondary.core.fact_multilink_pubkey(|s| *s = Some(key));
         let JoinOutcome::Joined(datagram_link) = join_link(&primary, &secondary, 2) else {
             panic!("the second link joins the shared core");
         };
@@ -1409,8 +1413,10 @@ mod tests {
         let (datagram, datagram_driver) =
             crate::test_fixtures::recording_actions_over(LinkKind::Udp);
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-        TokioRuntime::with_mutex_mut(&stream.core.multilink_pubkey, |s| *s = Some(key.clone()));
-        TokioRuntime::with_mutex_mut(&datagram.core.multilink_pubkey, |s| *s = Some(key));
+        stream
+            .core
+            .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+        datagram.core.fact_multilink_pubkey(|s| *s = Some(key));
         let JoinOutcome::Joined(datagram_link) = join_link(&stream, &datagram, 2) else {
             panic!("the datagram link joins the shared core");
         };

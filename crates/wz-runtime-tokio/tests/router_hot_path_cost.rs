@@ -42,11 +42,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use wz_runtime_core::runtime::Runtime;
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
-use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, IterationEvent, LinkSendOutcome, SessionLinkActions,
 };
@@ -116,13 +115,13 @@ fn client_over(link: &Arc<CountingLink>, peer: Zid) -> Arc<SessionLinkActions> {
         fixture_session_init_params(),
         TokioTime::new(),
     );
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
+    actions.fact_peer_whatami(|s| *s = Some(0b10));
     actions
 }
 

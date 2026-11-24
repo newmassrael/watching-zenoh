@@ -949,12 +949,12 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
         "after the InitAck: no routing zid"
     );
     assert!(
-        actions.inbound_peer_zid.lock().unwrap().is_none(),
+        actions.fact_inbound_peer_zid(|slot| slot.is_none()),
         "no accept-side zid"
     );
     assert_eq!(actions.peer_whatami_wire(), None, "no role");
     assert!(
-        actions.inbound_peer_init_caps.lock().unwrap().is_none(),
+        actions.fact_inbound_peer_init_caps(|slot| slot.is_none()),
         "no caps -- all four are in the cookie"
     );
 
@@ -971,7 +971,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
         "the routing zid is back"
     );
     assert_eq!(
-        actions.inbound_peer_zid.lock().unwrap().map(|z| z.to_vec()),
+        actions.fact_inbound_peer_zid(|slot| slot.map(|z| z.to_vec())),
         Some(zid),
         "the accept-side zid is back"
     );
@@ -981,7 +981,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
         "the role is back"
     );
     assert_eq!(
-        *actions.inbound_peer_init_caps.lock().unwrap(),
+        actions.fact_inbound_peer_init_caps(|slot| *slot),
         Some(PeerInitCaps::from_init_body(
             announced.s.map(|s| s.sn_res),
             announced.s.map(|s| s.batch_size)
@@ -1001,7 +1001,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let mut expected = RxConduits::default();
     expected.seed(negotiated, 0);
     assert_eq!(
-        *actions.rx_sn.lock().unwrap(),
+        actions.fact_rx_sn(|slot| slot.clone()),
         expected,
         "the RX baseline is one before initial_sn on the NEGOTIATED ring"
     );
@@ -1046,8 +1046,8 @@ async fn a_replayed_open_syn_after_established_is_not_admitted() {
             "frame {sn} is delivered; got {outcome:?}"
         );
     }
-    let rx_before = actions.rx_sn.lock().unwrap().clone();
-    let lease_before = *actions.peer_open_lease_ms.lock().unwrap();
+    let rx_before = actions.fact_rx_sn(|slot| slot.clone());
+    let lease_before = actions.fact_peer_open_lease_ms(|slot| *slot);
 
     // The same cookie, a different lease (VLE 5, where the admitted one
     // announced 0).
@@ -1071,12 +1071,12 @@ async fn a_replayed_open_syn_after_established_is_not_admitted() {
         "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
     );
     assert_eq!(
-        *actions.rx_sn.lock().unwrap(),
+        actions.fact_rx_sn(|slot| slot.clone()),
         rx_before,
         "the replay did not move the RX baseline"
     );
     assert_eq!(
-        *actions.peer_open_lease_ms.lock().unwrap(),
+        actions.fact_peer_open_lease_ms(|slot| *slot),
         lease_before,
         "nor the peer lease"
     );

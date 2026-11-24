@@ -3073,7 +3073,7 @@ where
     // delivery dispatches must not run under that slot's lock. The Router keys
     // a chain on at most this many bytes of it.
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
-    let peer_len = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    let peer_len = actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         for (to, from) in peer.iter_mut().zip(zid) {
             *to = *from;
@@ -4201,7 +4201,7 @@ where
     else {
         return false;
     };
-    R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
         // chain the rejected frame's conduit owns, not a sibling priority's.
@@ -4290,7 +4290,7 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     // mutex behind one seam); the non-reentrant MCU mutex is safe because
     // `ingest` does not re-enter the session's mutex slots.
     let mut completed: Option<DriverLoopOutcome> = None;
-    let ingest_outcome = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    let ingest_outcome = actions.fact_inbound_peer_zid(|zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
         // arena when it can be, so the reassembled message is decoded where its

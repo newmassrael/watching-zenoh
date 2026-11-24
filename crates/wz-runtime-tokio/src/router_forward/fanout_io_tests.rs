@@ -31,7 +31,7 @@ use wz_session_core::sample::QosLevel;
 
 use super::{hold_face_link, RouterForwarder, WhatAmI, Zid};
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::runtime_impl::TokioTime;
 use crate::session_glue::{new_session_actions, IterationEvent, SessionLinkActions};
 use crate::stream_link::{stream_outbound_channel, writer_task, StreamWriteDriver};
 use crate::writer_queue::{InlineWrite, OutboundRx, WriterHandle};
@@ -176,13 +176,13 @@ fn face_over(sender: &Arc<SenderWrite>, peer: Zid) -> (Arc<SessionLinkActions>, 
         None,
     ));
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
+    actions.fact_peer_whatami(|s| *s = Some(0b10));
     (actions, rx)
 }
 
