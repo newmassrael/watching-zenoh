@@ -678,11 +678,34 @@ impl PeerSlot {
     /// so does this for the rest of the slot.
     fn init_in(slot: &mut MaybeUninit<Self>) -> &mut Self {
         let at = slot.as_mut_ptr();
+        // Names every field of the slot with no `..`, so one added to the struct stops this from
+        // compiling until it is named here, and whoever names it reads it against the writes below.
+        let _fields_are_written = |free: &Self| {
+            let Self {
+                engine: _,
+                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                    member: _,
+                src: _,
+                zid: _,
+                last_seen_ms: _,
+                lease_ms: _,
+                sn_mask: _,
+                rx_sn: _,
+                #[cfg(feature = "routing-namespace")]
+                    namespace_ingress: _,
+                #[cfg(feature = "multicast-declarations")]
+                    keyexpr_table: _,
+                whatami: _,
+                #[cfg(feature = "multicast-declarations")]
+                    remote_subs: _,
+                #[cfg(feature = "reassembly")]
+                    patch: _,
+            } = free;
+        };
         // SAFETY: `at` points at storage for one slot that holds no value. The machine is built
         // in its field by `new_in_place`, which writes every field of the engine, and every other
-        // field is written below; `fields_are_written_by_init_in` names each of them, so a field
-        // added to the struct stops that from compiling until it is written here too. With all
-        // written the slot is whole, and it is lent as such.
+        // field is written below; the list above names each of them. With all written the slot is
+        // whole, and it is lent as such.
         let peer = unsafe {
             let engine = &mut *addr_of_mut!((*at).engine)
                 .cast::<MaybeUninit<Engine<MulticastPeerPolicy<PeerBinding>>>>();
@@ -736,34 +759,6 @@ impl PeerSlot {
             Self::init_in(&mut *cell);
         }
     }
-
-    /// Names every field of the slot, so that [`Self::init_in`], which writes each by its address,
-    /// cannot miss one that is added: this stops compiling until the new field is named here, and
-    /// whoever names it reads it against `init_in`.
-    #[allow(dead_code)]
-    fn fields_are_written_by_init_in(self) {
-        let Self {
-            engine: _,
-            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-                member: _,
-            src: _,
-            zid: _,
-            last_seen_ms: _,
-            lease_ms: _,
-            sn_mask: _,
-            rx_sn: _,
-            #[cfg(feature = "routing-namespace")]
-                namespace_ingress: _,
-            #[cfg(feature = "multicast-declarations")]
-                keyexpr_table: _,
-            whatami: _,
-            #[cfg(feature = "multicast-declarations")]
-                remote_subs: _,
-            #[cfg(feature = "reassembly")]
-                patch: _,
-        } = self;
-    }
-
     /// Store the per-peer state a JOIN advertises: the per-channel RX SN
     /// baselines (§3.2 `init_rx_seq`: baseline = one before, so the first
     /// frame at exactly `next_sn` passes the half-window gate) and the
@@ -1009,11 +1004,31 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// slot may be uninitialised; whatever it held is not dropped.
     pub fn new_in_place(slot: &mut MaybeUninit<Self>, config: MulticastConfig) -> &mut Self {
         let at = slot.as_mut_ptr();
+        // Names every field of the dispatcher, for the reason [`PeerSlot::init_in`] names its
+        // slot's.
+        let _fields_are_written = |dispatcher: &Self| {
+            let Self {
+                session: _,
+                peers: _,
+                by_src: _,
+                config: _,
+                running: _,
+                join_refusals: _,
+                incompatible_joins: _,
+                #[cfg(feature = "routing-namespace")]
+                    namespace: _,
+                #[cfg(feature = "multicast-ingress-gate")]
+                    ingress_gate: _,
+                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                    member_tags: _,
+                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                    member_retractions: _,
+            } = dispatcher;
+        };
         // SAFETY: `at` points at storage for one dispatcher that holds no value. Each field is
         // written by its address and the peer slots one at a time in their cells, so no copy of
-        // the dispatcher or of its array of slots is built; `fields_are_written_by_new_in_place`
-        // names each of them, so a field added to the struct stops that from compiling until it
-        // is written here too. With all written the dispatcher is whole, and it is lent as such.
+        // the dispatcher or of its array of slots is built; the list above names each of them.
+        // With all written the dispatcher is whole, and it is lent as such.
         let dispatcher = unsafe {
             let session = &mut *addr_of_mut!((*at).session)
                 .cast::<MaybeUninit<Engine<SessionFsmMulticastPolicy<SessionBinding>>>>();
@@ -1056,30 +1071,6 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             .unwrap_or_else(|never| match never {});
         dispatcher
     }
-
-    /// Names every field of the dispatcher, for the reason
-    /// [`PeerSlot::fields_are_written_by_init_in`] does.
-    #[allow(dead_code)]
-    fn fields_are_written_by_new_in_place(self) {
-        let Self {
-            session: _,
-            peers: _,
-            by_src: _,
-            config: _,
-            running: _,
-            join_refusals: _,
-            incompatible_joins: _,
-            #[cfg(feature = "routing-namespace")]
-                namespace: _,
-            #[cfg(feature = "multicast-ingress-gate")]
-                ingress_gate: _,
-            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-                member_tags: _,
-            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-                member_retractions: _,
-        } = self;
-    }
-
     /// Open-debt item 913 — keep each member's declarations apart for the session's observer
     /// (call on the owned dispatcher before the drive loop spins, as [`Self::set_namespace`]
     /// is): every subscriber, queryable and token id a member declares or retracts reaches the

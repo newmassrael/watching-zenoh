@@ -1048,8 +1048,8 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// it with [`ObserverCell::init_with`] instead, which builds it where it stays.
     pub fn new() -> Self {
         let mut observer = MaybeUninit::<Self>::uninit();
-        // SAFETY: `init_in_place` writes every field, which `every_field_is_written`
-        // below holds to the field list at compile time.
+        // SAFETY: `init_in_place` writes every field, which the list it names holds to
+        // the struct's fields at compile time.
         unsafe {
             Self::init_in_place(observer.as_mut_ptr());
             observer.assume_init()
@@ -1077,11 +1077,32 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     #[inline(never)]
     pub unsafe fn init_in_place(at: *mut Self) {
         use core::ptr::{self, addr_of_mut};
+        // A field added to the observer and not written below would be read uninitialised.
+        // This names every field with no `..`, so adding one without naming it here (and so
+        // without writing it below) does not compile.
+        let _every_field_is_written = |observer: &Self| {
+            let Self {
+                tables: _,
+                #[cfg(feature = "switchboard")]
+                    switchboard: _,
+                #[cfg(feature = "declare-subscriber")]
+                    remote_subscribers: _,
+                #[cfg(feature = "declare-queryable")]
+                    remote_queryables: _,
+                #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+                    matching: _,
+                #[cfg(feature = "liveliness-token")]
+                    liveliness: _,
+                #[cfg(feature = "liveliness-token")]
+                    local_tokens: _,
+            } = observer;
+        };
         // Each gated statement opens with the path `ptr::write(`, not with the
         // `addr_of_mut!` macro: the feature-public-surface census reads a gated
         // line that starts with a macro call as a macro that may expand to a public
         // item, and a statement here is not one.
-        // SAFETY: the caller's; each field is written once through a pointer to it.
+        // SAFETY: the caller's; each field the list above names is written once through a
+        // pointer to it.
         unsafe {
             ptr::write(addr_of_mut!((*at).tables), ObserverTables::empty());
             #[cfg(feature = "switchboard")]
@@ -1103,28 +1124,6 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
         }
-    }
-
-    /// A field added to [`SlotObserverOf`] and not written by `init_in_place` would be
-    /// read uninitialised. This destructures the struct with no `..`, so adding a field
-    /// without naming it here (and so without writing it above) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(observer: Self) {
-        let Self {
-            tables: _,
-            #[cfg(feature = "switchboard")]
-                switchboard: _,
-            #[cfg(feature = "declare-subscriber")]
-                remote_subscribers: _,
-            #[cfg(feature = "declare-queryable")]
-                remote_queryables: _,
-            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
-                matching: _,
-            #[cfg(feature = "liveliness-token")]
-                liveliness: _,
-            #[cfg(feature = "liveliness-token")]
-                local_tokens: _,
-        } = observer;
     }
 }
 

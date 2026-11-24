@@ -253,10 +253,14 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
         mut init: impl FnMut(&mut MaybeUninit<T>),
     ) -> &mut Self {
         let at = slot.as_mut_ptr();
+        // Names every field of the table with no `..`, so one added to the struct stops this from
+        // compiling until it is named here, and so written below.
+        let _fields_are_written = |rows: &Self| {
+            let Self { fixed: _, grown: _ } = rows;
+        };
         // SAFETY: `at` is storage for one table that holds no value. Each fixed row is written by
-        // `init`, which is the caller's contract, and the grown rows are written empty;
-        // `fields_are_written_by_init_in` names every field, so one added to the struct stops that
-        // from compiling until it is written here too. With all written the table is whole.
+        // `init`, which is the caller's contract, and the grown rows are written empty; the list
+        // above names every field. With all written the table is whole.
         unsafe {
             let fixed = addr_of_mut!((*at).fixed).cast::<MaybeUninit<T>>();
             for index in 0..N {
@@ -265,13 +269,6 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
             addr_of_mut!((*at).grown).write(<G::Rows<T> as GrownRows<T>>::empty());
             &mut *at
         }
-    }
-
-    /// Names every field of the table, so that [`Self::init_in`], which writes each by its
-    /// address, cannot miss one that is added.
-    #[allow(dead_code)]
-    fn fields_are_written_by_init_in(self) {
-        let Self { fixed: _, grown: _ } = self;
     }
 
     /// How many rows the table has: the fixed ones and those grown past them. Read where a
