@@ -867,8 +867,8 @@ TARGETS = {
 
 # A locator's address is an IPv4 one or a bracketed IPv6 one, as zenoh writes a socket address
 # (`io/zenoh-link-commons/src/lib.rs` @ `pub async fn get_ip_addrs(`) and the node's own reader
-# takes it (`crates/wz-session-mcu/src/dial.rs`, `parse_endpoint`). The IPv6 text is held to an
-# address by `ipaddress`, not by the pattern.
+# takes it (`crates/wz-runtime-coop/src/locator_text.rs`, `parse_endpoint`). The IPv6 text is
+# held to an address by `ipaddress`, not by the pattern.
 LOCATOR_RE = re.compile(
     r"(?P<scheme>[a-z]+)/"
     r"(?:(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3})|\[(?P<v6>[0-9A-Fa-f:.]+)\])"

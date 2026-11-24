@@ -171,6 +171,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/told.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/transport.rs` | S7 | |
 | `crates/wz-capi-coop/src/host_group.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
 | `crates/wz-capi-coop/src/open_source.rs` | S7 | |
@@ -225,6 +227,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-core/src/engine_port.rs` | S7 | |
 | `crates/wz-capi-core/src/faces.rs` | S7 | |
 | `crates/wz-capi-core/src/faces/multicast.rs` | S7 | |
+| `crates/wz-capi-core/src/fan_undo.rs` | S7 | |
 | `crates/wz-capi-core/src/gossip.rs` | S7 | |
 | `crates/wz-capi-core/src/group.rs` | S7 | |
 | `crates/wz-capi-core/src/group/node.rs` | S7 | |
@@ -315,6 +318,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/session_ext.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_memory.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_place.rs` | S7 | |
+| `crates/wz-capi-pico/src/sized.rs` | S7 | |
 | `crates/wz-capi-pico/src/snapshot.rs` | S7 | |
 | `crates/wz-capi-pico/src/stream_supervision.rs` | S12 | |
 | `crates/wz-capi-pico/src/string_array.rs` | S7 | |
@@ -333,6 +337,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/held_key.rs` | S7 | |
 | `crates/wz-capi-port/src/lib.rs` | S7 | |
 | `crates/wz-capi-port/src/listeners.rs` | S7 | |
+| `crates/wz-capi-port/src/lodge.rs` | S7 | |
 | `crates/wz-capi-port/src/observation/clock.rs` | S7 | |
 | `crates/wz-capi-port/src/observation/events.rs` | S7 | |
 | `crates/wz-capi-port/src/observation/mod.rs` | S7 | |
@@ -343,9 +348,11 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/query.rs` | S7 | |
 | `crates/wz-capi-port/src/refusal.rs` | S7 | |
 | `crates/wz-capi-port/src/runtime_limits.rs` | S7 | |
+| `crates/wz-capi-port/src/scout_ask.rs` | S7 | |
 | `crates/wz-capi-port/src/sync.rs` | S7 | |
 | `crates/wz-capi-port/src/time_base.rs` | S7 | |
 | `crates/wz-capi-port/src/tls_material.rs` | S7 | |
+| `crates/wz-capi-port/src/told.rs` | S7 | |
 | `crates/wz-codecs/src/encoding_ids.rs` | S9 | |
 | `crates/wz-codecs/src/lib.rs` | S9 | |
 | `crates/wz-codecs/src/vle.rs` | S9 | |
@@ -365,6 +372,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-eth-mac-cyt4bf/src/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-eth-mac-lan9118/src/lib.rs` | S9 | |
 | `crates/wz-ext-pubsub/src/advanced_cache.rs` | S6 | |
+| `crates/wz-ext-pubsub/src/advanced_cache/ring.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/advanced_cache/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-ext-pubsub/src/advanced_ke.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/advanced_publisher.rs` | S6 | |
@@ -435,15 +443,20 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/app_link.rs` | S12 | |
 | `crates/wz-runtime-coop/src/atomic.rs` | S5 | |
 | `crates/wz-runtime-coop/src/cs.rs` | S5 | |
+| `crates/wz-runtime-coop/src/either_links.rs` | S5 | |
 | `crates/wz-runtime-coop/src/executor.rs` | S5 | |
+| `crates/wz-runtime-coop/src/face_life.rs` | S5 | |
+| `crates/wz-runtime-coop/src/face_send.rs` | S5 | |
 | `crates/wz-runtime-coop/src/faces.rs` | S5 | |
 | `crates/wz-runtime-coop/src/group_transport.rs` | S5 | |
+| `crates/wz-runtime-coop/src/handed.rs` | S5 | |
 | `crates/wz-runtime-coop/src/ip_stack.rs` | S5 | |
 | `crates/wz-runtime-coop/src/join_handle.rs` | S5 | |
 | `crates/wz-runtime-coop/src/lib.rs` | S5, S10, S12 | |
 | `crates/wz-runtime-coop/src/link_cells.rs` | S5 | |
 | `crates/wz-runtime-coop/src/link_storage.rs` | S5 | |
 | `crates/wz-runtime-coop/src/local.rs` | S5 | |
+| `crates/wz-runtime-coop/src/locator_text.rs` | S5 | |
 | `crates/wz-runtime-coop/src/reassembly_rx.rs` | S5 | |
 | `crates/wz-runtime-coop/src/runtime_impl.rs` | S5 | |
 | `crates/wz-runtime-coop/src/session_drive.rs` | S5 | |
@@ -454,6 +467,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/table_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-coop/src/time.rs` | S5 | |
 | `crates/wz-runtime-coop/src/timer.rs` | S5 | |
+| `crates/wz-runtime-coop/src/transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/udp_link.rs` | S5 | |
 | `crates/wz-runtime-coop/src/yield_now.rs` | S10 | |
 | `crates/wz-runtime-core/src/allocator.rs` | S9 | |

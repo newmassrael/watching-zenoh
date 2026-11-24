@@ -33,6 +33,7 @@ use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
+use wz_runtime_coop::transport::GroupRecord;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
@@ -57,6 +58,8 @@ use wz_session_core::multicast_tx::{
 };
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
+#[cfg(feature = "queryable")]
+use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -334,6 +337,10 @@ impl Default for MemberRows {
 /// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
 /// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
+
+/// `GROUP_TICK_MS` on the session's clock, in microseconds: a product the build evaluates, so
+/// one that did not fit a `u64` would not compile.
+const GROUP_TICK_US: u64 = GROUP_TICK_MS as u64 * 1_000;
 
 /// What a group's dispatch hands what it staged to: the group's stage, which its task writes.
 pub(super) type GroupReplies = MulticastReplySink<GroupTxStage>;
@@ -977,10 +984,7 @@ impl<W: LinkWaits> GroupFace<W> {
         match &self.task {
             Some(task) if task.is_finished() => Some(0),
             Some(_) if self.tx.holds() => {
-                let tick_us = self
-                    .pace
-                    .now_us()
-                    .saturating_add(u64::from(GROUP_TICK_MS) * 1_000);
+                let tick_us = self.pace.now_us().saturating_add(GROUP_TICK_US);
                 Some(self.due.due_us().map_or(0, |due_us| due_us.min(tick_us)))
             }
             Some(_) if !self.tx.is_empty() => Some(0),
@@ -1333,6 +1337,65 @@ impl<W: LinkWaits> GroupFace<W> {
         )
         .map_err(|_| FanoutError::ExceedsCapacity)?;
         Ok(0)
+    }
+}
+
+/// What the session's transport reads of the group (`wz_runtime_coop::transport`): each a reading
+/// of the group's own.
+impl<W: LinkWaits> GroupRecord for GroupFace<W> {
+    fn id(&self) -> FaceId {
+        self.id
+    }
+
+    fn took_input(&self) -> bool {
+        GroupFace::took_input(self)
+    }
+
+    fn input(&self) -> Option<LinkWait> {
+        GroupFace::input(self)
+    }
+
+    fn unwaited(&self) -> bool {
+        GroupFace::unwaited(self)
+    }
+
+    fn due_us(&self) -> Option<u64> {
+        GroupFace::due_us(self)
+    }
+
+    fn stop(&self) {
+        GroupFace::stop(self);
+    }
+
+    #[cfg(feature = "query")]
+    fn asks_queries(&self) -> bool {
+        self.declarations().asks_queries()
+    }
+
+    #[cfg(feature = "queryable")]
+    fn answer_sink(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        self.answers_as(generation)
+            .then_some(self.replies() as &dyn ResponseSink)
+    }
+
+    #[cfg(feature = "queryable")]
+    fn write_staged(&self) {
+        GroupFace::write_staged(self);
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_rows(&self) -> usize {
+        GroupFace::member_rows(self)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_row(&self, at: usize) -> Option<FaceLinkRow> {
+        GroupFace::member_row(self, at)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_snapshots(&self) -> Vec<FaceSnapshot> {
+        GroupFace::member_snapshots(self)
     }
 }
 

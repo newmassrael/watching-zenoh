@@ -112,8 +112,10 @@ impl AdvancedPublisherPlane for PicoPlane {
     type Beacon = PlainPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
-    /// periodic jobs, whose publisher then declares and sends no heartbeat.
-    type Timer = Option<Ticker>;
+    /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
+    /// engine as the session holds it, so a build that reaches its engine as its own type makes no
+    /// table of the engine's periodic jobs for it.
+    type Timer = Option<Ticker<crate::session::Engine>>;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
@@ -123,11 +125,10 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Option<Ticker> {
+    ) -> Option<Ticker<crate::session::Engine>> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        // The engine as it is, named by its periodic jobs alone ([`wz_capi_port::Tickers`]).
-        Ticker::start(self.session.engine.clone(), period_ms, tick).ok()
+        Ticker::start_on(self.session.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -273,6 +274,27 @@ impl AdvancedPublisherPlane for PicoPlane {
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go.
         Some(Retained::new(Arc::new(publisher.key().share())))
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use core::any::TypeId;
+
+    use super::*;
+
+    /// The heartbeat's job holds the session's engine as the session does, not as the port's
+    /// object of periodic jobs, so no table of the engine's jobs is made for it.
+    #[test]
+    fn the_beacon_timer_holds_the_engine_as_the_session_does() {
+        assert_eq!(
+            TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
+            TypeId::of::<Option<Ticker<crate::session::Engine>>>()
+        );
+        assert_ne!(
+            TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
+            TypeId::of::<Option<Ticker>>()
+        );
     }
 }
 

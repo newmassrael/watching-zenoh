@@ -706,6 +706,30 @@ pub const MAX_SAMPLE_MISS_LISTENERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_ADVANCED_SOURCES`] is bound.
+pub const MAX_ADVANCED_SOURCES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::ADVANCED_SUBSCRIBER_PENDING_BYTES`] is bound.
+pub const ADVANCED_SUBSCRIBER_PENDING_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

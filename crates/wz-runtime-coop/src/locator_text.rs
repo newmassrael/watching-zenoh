@@ -1,0 +1,660 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! An endpoint's text read into the [`Locator`] a link is opened towards, and why a text names
+//! none.
+//!
+//! UDP, TCP and TLS over IPv4 or IPv6, by address: a host name is refused as
+//! [`DialRefused::BadAddress`], since a node of this runtime has no resolver, and another scheme,
+//! or upstream's `?metadata` / `#config` parts, as [`DialRefused::Unsupported`]: no link here
+//! honours them, and opening one anyway would quietly drop what the writer asked for. Both are
+//! permanent for the text. Whether a stack carries the protocol or the family is the stack's to
+//! answer when it opens the link; a stack built without IPv6 reads its endpoints with
+//! [`parse_locator_for`], so its image holds the IPv4 reader alone.
+//!
+//! Written once for every engine over this runtime: the session shell's dialler and connection
+//! manager, and a transport that dials and listens for a C ABI's session.
+
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+use crate::session_drive::{LinkProto, Locator};
+
+/// Why a dial could not even be attempted. Permanent for this endpoint text in this build, so it
+/// is not retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialRefused {
+    /// The endpoint's scheme names a link this build does not carry.
+    Unsupported,
+    /// The address could not be read as one this link can reach.
+    BadAddress,
+    /// One locator of a `{ strategy, locators }` group of several: one session over several
+    /// links, which a session of this runtime cannot hold. Decided by a connection manager from
+    /// the list, before any dial.
+    MultiLinkGroup,
+}
+
+impl DialRefused {
+    /// The reason in the word a node reports it with, at `status/connect`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DialRefused::Unsupported => "unsupported",
+            DialRefused::BadAddress => "bad_address",
+            DialRefused::MultiLinkGroup => "multi_link_group",
+        }
+    }
+}
+
+/// Read `udp/<a.b.c.d>:<port>`, `tcp/[<ipv6>]:<port>`, `tls/...` into the locator it
+/// names: an IPv4 address or a bracketed IPv6 one, as zenoh writes them. A port of 0 names
+/// nothing to dial.
+pub fn parse_locator(endpoint: &str) -> Result<Locator, DialRefused> {
+    parse_endpoint::<true>(endpoint, false)
+}
+
+/// [`parse_locator`] for a stack that opens IPv6 links only when `ipv6` says so, its
+/// `Bind::IPV6` or `SessionLinks::IPV6`. With `false` a bracketed address is refused as
+/// [`DialRefused::Unsupported`], which is what the stack's socket would answer for the family,
+/// whether or not the text is a well-formed IPv6 address; every other text reads as
+/// [`parse_locator`] reads it. Always inlined, so that the stack's constant picks one reader where
+/// it is called and an image of a stack without IPv6 links no reader of IPv6 text.
+#[inline(always)]
+pub fn parse_locator_for(endpoint: &str, ipv6: bool) -> Result<Locator, DialRefused> {
+    if ipv6 {
+        parse_endpoint::<true>(endpoint, false)
+    } else {
+        parse_endpoint::<false>(endpoint, false)
+    }
+}
+
+/// Read the locator of a port to listen on: [`parse_locator`]'s text, where a port of 0 is
+/// the stack's to choose and the locator it is bound to then names the port it chose.
+pub fn parse_listen_locator(endpoint: &str) -> Result<Locator, DialRefused> {
+    parse_endpoint::<true>(endpoint, true)
+}
+
+/// An endpoint's text, read for a stack that opens IPv6 links when `IPV6` is true.
+fn parse_endpoint<const IPV6: bool>(
+    endpoint: &str,
+    any_port: bool,
+) -> Result<Locator, DialRefused> {
+    let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
+        .into_iter()
+        .find_map(|proto| {
+            let rest = endpoint.strip_prefix(proto.scheme())?.strip_prefix('/')?;
+            Some((proto, rest))
+        })
+    else {
+        return Err(DialRefused::Unsupported);
+    };
+    if rest.bytes().any(|b| b == b'?' || b == b'#') {
+        return Err(DialRefused::Unsupported);
+    }
+    // The address is a socket address's text, as zenoh resolves a locator's address
+    // (`io/zenoh-link-commons/src/lib.rs` @ `pub async fn get_ip_addrs(`): `a.b.c.d:port`, or an
+    // IPv6 address in brackets, `[x:y::z]:port` with a numeric `%scope` inside them, which is
+    // the text zenoh-pico takes the host out of too (`vendor/zenoh-pico/src/link/endpoint.c` @
+    // `char *_z_endpoint_parse_host(`). A name the node has no resolver for is refused.
+    //
+    // A socket address's text is IPv6's when it opens with a bracket and IPv4's otherwise, as
+    // `SocketAddr`'s own reader tells them apart, so each family is read by its own reader, which
+    // a stack without IPv6 never reaches for the bracketed form.
+    let at = if rest.starts_with('[') {
+        if !IPV6 {
+            return Err(DialRefused::Unsupported);
+        }
+        SocketAddr::V6(socket_addr_v6(rest.as_bytes()).ok_or(DialRefused::BadAddress)?)
+    } else {
+        SocketAddr::V4(socket_addr_v4(rest.as_bytes()).ok_or(DialRefused::BadAddress)?)
+    };
+    if at.port() == 0 && !any_port {
+        return Err(DialRefused::BadAddress);
+    }
+    Ok(Locator { proto, at })
+}
+
+/// `a.b.c.d:port` read as `SocketAddrV4`'s `FromStr` reads it, in one pass over the bytes: four
+/// decimal octets of one to three digits, none above 255 and none written with a leading zero (an
+/// octet `010` is octal to C's `inet_aton`, so it is one text two readers would take for different
+/// addresses), then `:` and a port of decimal digits, leading zeros taken, none above 65535.
+/// `None` for anything else.
+///
+/// Written here rather than taken from `core::net`, whose reader is one parser for both families
+/// and every radix, some 1.5 KB of an image's text; a stack without IPv6 needs this grammar alone.
+/// `the_ipv4_reader_reads_what_core_reads` holds the two to the same answer for every text.
+fn socket_addr_v4(text: &[u8]) -> Option<SocketAddrV4> {
+    let mut text = Text(text);
+    let octets = ipv4_address(&mut text)?;
+    if !text.eat(b':') {
+        return None;
+    }
+    Some(SocketAddrV4::new(Ipv4Addr::from(octets), text.port()?))
+}
+
+/// `[address%scope]:port` read as `SocketAddrV6`'s `FromStr` reads it: an IPv6 address in
+/// brackets ([`ipv6_address`]), a scope of decimal digits after `%` inside them (leading zeros
+/// taken, none above `u32::MAX`), then `:` and a port as the IPv4 reader reads one. `None` for
+/// anything else.
+///
+/// Written here for the reason [`socket_addr_v4`] is: `core::net`'s reader of this text brings
+/// its reader of every family and radix (some 3 KB of an image's text).
+/// `the_ipv6_reader_reads_what_core_reads` holds the two to the same answer for every text.
+fn socket_addr_v6(text: &[u8]) -> Option<SocketAddrV6> {
+    let mut text = Text(text);
+    if !text.eat(b'[') {
+        return None;
+    }
+    let groups = ipv6_address(&mut text)?;
+    let mut scope = 0;
+    if text.eat(b'%') {
+        let (digits, value) = text.number(10);
+        if digits == 0 {
+            return None;
+        }
+        scope = u32::try_from(value).ok()?;
+    }
+    if !(text.eat(b']') && text.eat(b':')) {
+        return None;
+    }
+    Some(SocketAddrV6::new(
+        Ipv6Addr::from(groups),
+        text.port()?,
+        0,
+        scope,
+    ))
+}
+
+/// The IPv6 address at the front of `text` as `core::net` reads one, taken from it: up to eight
+/// groups, and when fewer, `::` and the rest, the groups `::` stands for being zeros. An
+/// embedded IPv4 address closes the groups after `::`, or all eight without it.
+fn ipv6_address(text: &mut Text<'_>) -> Option<[u16; 8]> {
+    let mut head = [0u16; 8];
+    let (head_size, head_ipv4) = ipv6_groups(text, &mut head);
+    if head_size == head.len() {
+        return Some(head);
+    }
+    if head_ipv4 || !(text.eat(b':') && text.eat(b':')) {
+        return None;
+    }
+    // `::` stands for one group at least, so the groups after it are seven at most.
+    let mut tail = [0u16; 7];
+    let room = tail.len().saturating_sub(head_size);
+    let (tail_size, _) = ipv6_groups(text, tail.get_mut(..room)?);
+    let at = head.len().saturating_sub(tail_size);
+    for (slot, group) in head.iter_mut().skip(at).zip(tail) {
+        *slot = group;
+    }
+    Some(head)
+}
+
+/// One run of an IPv6 address's groups at the front of `text`, as `core::net` reads one, taken
+/// from it: up to `groups.len()` groups of one to four hexadecimal digits, `:` between two, the
+/// last two of which may be written as an IPv4 address. Answers how many groups it read and
+/// whether an IPv4 address closed them; a separator that no group follows is not taken.
+fn ipv6_groups(text: &mut Text<'_>, groups: &mut [u16]) -> (usize, bool) {
+    let limit = groups.len();
+    for index in 0..limit {
+        let mut group = *text;
+        if index > 0 && !group.eat(b':') {
+            return (index, false);
+        }
+        // `index` is below the groups' length, so neither sum wraps.
+        let (next, after_pair) = (index.wrapping_add(1), index.wrapping_add(2));
+        if next < limit {
+            let mut embedded = group;
+            if let (Some([a, b, c, d]), Some([high, low])) = (
+                ipv4_address(&mut embedded),
+                groups.get_mut(index..after_pair),
+            ) {
+                *high = u16::from_be_bytes([a, b]);
+                *low = u16::from_be_bytes([c, d]);
+                *text = embedded;
+                return (after_pair, true);
+            }
+        }
+        let (digits, value) = group.number(16);
+        match (digits, u16::try_from(value), groups.get_mut(index)) {
+            (1..=4, Ok(value), Some(slot)) => *slot = value,
+            _ => return (index, false),
+        }
+        *text = group;
+    }
+    (limit, false)
+}
+
+/// The IPv4 address at the front of `text` as `core::net` reads one, taken from it: four octets
+/// of one to three decimal digits, `.` between two, none above 255 and none written with a
+/// leading zero. A fourth digit in an octet refuses the address. [`socket_addr_v4`] reads one
+/// before its port and [`ipv6_groups`] one as an IPv6 address's last two groups.
+fn ipv4_address(text: &mut Text<'_>) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    for (index, octet) in octets.iter_mut().enumerate() {
+        if index > 0 && !text.eat(b'.') {
+            return None;
+        }
+        let leading_zero = text.0.first() == Some(&b'0');
+        let (digits, value) = text.number(10);
+        if digits == 0 || digits > 3 || (digits > 1 && leading_zero) {
+            return None;
+        }
+        *octet = u8::try_from(value).ok()?;
+    }
+    Some(octets)
+}
+
+/// The text of an address still to be read, which each reader above takes its part from. A
+/// reader that may not take what it tried reads a copy and keeps it only when it reads.
+///
+/// One cursor over the bytes, so that no reader indexes the text: each step is a look at the
+/// front, and none has a bound to check or a panic to carry.
+#[derive(Clone, Copy)]
+struct Text<'a>(&'a [u8]);
+
+impl Text<'_> {
+    /// Take `byte` when the text begins with it.
+    fn eat(&mut self, byte: u8) -> bool {
+        match self.0 {
+            [first, rest @ ..] if *first == byte => {
+                self.0 = rest;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Take the run of digits of `radix` (10 or 16) at the front: how many there were, and their
+    /// value, held at `u64::MAX` once it passes it, which every reader refuses. `str::parse`
+    /// would also take a leading `+`, and is a copy of the integer reader for each width.
+    fn number(&mut self, radix: u8) -> (usize, u64) {
+        let (mut digits, mut value) = (0usize, 0u64);
+        while let [first, rest @ ..] = self.0 {
+            let Some(digit) = digit_of(*first, radix) else {
+                break;
+            };
+            value = value
+                .saturating_mul(u64::from(radix))
+                .saturating_add(u64::from(digit));
+            digits = digits.saturating_add(1);
+            self.0 = rest;
+        }
+        (digits, value)
+    }
+
+    /// The whole of the rest as a port: decimal digits only, leading zeros taken, none above
+    /// 65535.
+    fn port(mut self) -> Option<u16> {
+        let (digits, value) = self.number(10);
+        if digits == 0 || !self.0.is_empty() {
+            return None;
+        }
+        u16::try_from(value).ok()
+    }
+}
+
+/// The value of one ASCII digit of `radix` (10 or 16, either case), `None` for any other byte.
+fn digit_of(byte: u8, radix: u8) -> Option<u8> {
+    let value = match byte {
+        // Each arm's byte is at or past the arm's first, and below it plus 16.
+        b'0'..=b'9' => byte.wrapping_sub(b'0'),
+        b'a'..=b'f' => byte.wrapping_sub(b'a').wrapping_add(10),
+        b'A'..=b'F' => byte.wrapping_sub(b'A').wrapping_add(10),
+        _ => return None,
+    };
+    (value < radix).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use core::str::FromStr;
+
+    /// An IPv6 address is read in the brackets zenoh writes it in, with a numeric scope inside
+    /// them, on every scheme; the same address without brackets, an empty pair, a named scope and
+    /// a bracketed IPv4 address are not a socket address's text and are refused.
+    #[test]
+    fn udp_tcp_or_tls_to_a_bracketed_ipv6_address_is_dialable() {
+        use core::net::{Ipv6Addr, SocketAddrV6};
+        let loopback = SocketAddr::from((Ipv6Addr::LOCALHOST, 7447));
+        std::assert_eq!(parse_locator("tcp/[::1]:7447"), Ok(Locator::tcp(loopback)));
+        std::assert_eq!(parse_locator("tls/[::1]:7447"), Ok(Locator::tls(loopback)));
+        std::assert_eq!(
+            parse_locator("udp/[ff02::1]:7446"),
+            Ok(Locator::udp(SocketAddr::from((
+                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1),
+                7446
+            ))))
+        );
+        std::assert_eq!(
+            parse_locator("udp/[fe80::1%3]:7447"),
+            Ok(Locator::udp(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+                7447,
+                0,
+                3
+            ))))
+        );
+        std::assert_eq!(
+            parse_listen_locator("tcp/[::]:0"),
+            Ok(Locator::tcp(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))))
+        );
+        for (text, why) in [
+            ("tcp/::1:7447", DialRefused::BadAddress),
+            ("tcp/[]:7447", DialRefused::BadAddress),
+            ("tcp/[::1]", DialRefused::BadAddress),
+            ("tcp/[::1]:0", DialRefused::BadAddress),
+            ("tcp/[fe80::1%eth0]:7447", DialRefused::BadAddress),
+            ("tcp/[127.0.0.1]:7447", DialRefused::BadAddress),
+            ("tcp/[::1]:7447?prio=1", DialRefused::Unsupported),
+            ("udp/[::1]:7447#iface=eth0", DialRefused::Unsupported),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+    }
+
+    #[test]
+    fn udp_tcp_or_tls_to_an_ipv4_address_is_dialable() {
+        let at = SocketAddr::from(([127, 0, 0, 1], 7447));
+        std::assert_eq!(parse_locator("udp/127.0.0.1:7447"), Ok(Locator::udp(at)));
+        std::assert_eq!(parse_locator("tcp/127.0.0.1:7447"), Ok(Locator::tcp(at)));
+        // Whether a stack carries the secure channel is the stack's to say, not the parser's.
+        std::assert_eq!(parse_locator("tls/127.0.0.1:7447"), Ok(Locator::tls(at)));
+        for (text, why) in [
+            ("quic/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tlsx/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tls/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
+            ("tcp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
+            ("tcp/router.local:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1:7447#iface=eth0", DialRefused::Unsupported),
+            ("udp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
+            ("udp/router.local:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1", DialRefused::BadAddress),
+            ("udp/127.0.0.1:0", DialRefused::BadAddress),
+            ("udp/127.0.0.1:+80", DialRefused::BadAddress),
+            ("udp/127.0.0.256:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1.5:7447", DialRefused::BadAddress),
+            ("udp/127.0.0:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.:7447", DialRefused::BadAddress),
+            ("udp/.127.0.0.1:7447", DialRefused::BadAddress),
+            ("udp/127..0.1:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1:", DialRefused::BadAddress),
+            ("udp/:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1:65536", DialRefused::BadAddress),
+            (
+                "udp/127.0.0.1:99999999999999999999",
+                DialRefused::BadAddress,
+            ),
+            ("udp/127.0.0.1:-1", DialRefused::BadAddress),
+            ("udp/+1.0.0.1:7447", DialRefused::BadAddress),
+            ("udp/1.0.0.9999999999:7447", DialRefused::BadAddress),
+            ("udp//127.0.0.1:7447", DialRefused::BadAddress),
+            ("udp", DialRefused::Unsupported),
+            ("", DialRefused::Unsupported),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+    }
+
+    /// The numbers the reader takes: the widest of each, and leading zeros in the port but not in
+    /// an octet, as a socket address's text is read (and as the host's parser reads a locator,
+    /// `wz_session_core::locator::parse_locator`): `010` is octal to C's `inet_aton`, so an
+    /// octet written that way is one text two readers would take for different addresses.
+    #[test]
+    fn the_widest_numbers_and_a_ports_leading_zeros_are_read() {
+        let at = |addr: [u8; 4], port| SocketAddr::from((addr, port));
+        std::assert_eq!(
+            parse_locator("udp/255.255.255.255:65535"),
+            Ok(Locator::udp(at([255; 4], 65535)))
+        );
+        std::assert_eq!(
+            parse_locator("udp/1.2.3.4:00080"),
+            Ok(Locator::udp(at([1, 2, 3, 4], 80)))
+        );
+        std::assert_eq!(
+            parse_locator("udp/001.002.003.004:80"),
+            Err(DialRefused::BadAddress)
+        );
+        std::assert_eq!(
+            parse_locator("tcp/0.0.0.0:1"),
+            Ok(Locator::tcp(at([0; 4], 1)))
+        );
+        std::assert_eq!(
+            parse_listen_locator("udp/10.0.0.1:0"),
+            Ok(Locator::udp(at([10, 0, 0, 1], 0)))
+        );
+    }
+
+    /// The IPv4 reader takes exactly the texts `SocketAddrV4`'s `FromStr` takes, as the same
+    /// address and port. Each field is drawn from texts on either side of every rule of the grammar
+    /// (a leading zero, the widest value and one past it, a fourth digit, a sign, a letter, nothing),
+    /// every combination is read both ways, and so is each malformed shape of the whole text.
+    #[test]
+    fn the_ipv4_reader_reads_what_core_reads() {
+        const OCTETS: [&str; 14] = [
+            "0", "00", "01", "7", "10", "99", "100", "255", "256", "999", "1000", "", "+1", "a",
+        ];
+        const PORTS: [&str; 11] = [
+            "0",
+            "00080",
+            "7447",
+            "65535",
+            "065535",
+            "65536",
+            "99999999999999999999",
+            "",
+            "+80",
+            "-1",
+            "80 ",
+        ];
+        let same = |text: &str| {
+            let ours = socket_addr_v4(text.as_bytes());
+            std::assert_eq!(ours, SocketAddrV4::from_str(text).ok(), "{text:?}");
+            ours.is_some()
+        };
+        let (mut taken, mut refused) = (0usize, 0usize);
+        let mut count = |was_taken: bool| {
+            if was_taken {
+                taken += 1;
+            } else {
+                refused += 1;
+            }
+        };
+        for a in OCTETS {
+            for b in ["0", "255", "01", ""] {
+                for c in OCTETS {
+                    for d in OCTETS {
+                        for port in PORTS {
+                            count(same(std::format!("{a}.{b}.{c}.{d}:{port}").as_str()));
+                        }
+                    }
+                }
+            }
+        }
+        for text in [
+            "1.2.3.4",
+            "1.2.3:80",
+            "1.2.3.4.5:80",
+            "1..3.4:80",
+            ".1.2.3:80",
+            "1.2.3.4.:80",
+            "1.2.3.4:",
+            ":80",
+            "1.2.3.4:80:80",
+            "[1.2.3.4]:80",
+            " 1.2.3.4:80",
+            "1.2.3.4 :80",
+            "1.2.3.4:8a0",
+            "",
+            "\u{0661}.2.3.4:80",
+            "1.2.3.\u{0664}:80",
+        ] {
+            count(same(text));
+        }
+        std::assert!(
+            taken > 0 && refused > 0,
+            "the corpus reaches both answers: {taken} taken, {refused} refused"
+        );
+    }
+
+    /// The IPv6 reader takes exactly the texts `SocketAddrV6`'s `FromStr` takes, as the same
+    /// address, port and scope. The addresses are built on either side of every rule of the
+    /// grammar (each count of groups before and after `::`, `::` twice, a fifth digit, either
+    /// case, an embedded IPv4 address in each place and malformed), each is read with scopes and
+    /// ports on either side of theirs, and so is each malformed shape of the brackets.
+    #[test]
+    fn the_ipv6_reader_reads_what_core_reads() {
+        use std::string::String;
+        use std::vec::Vec;
+        const GROUPS: [&str; 9] = ["0", "1", "ffff", "FFFF", "0000", "00000", "1a2B", "g", ""];
+        const IPV4: [&str; 8] = [
+            "1.2.3.4",
+            "255.255.255.255",
+            "01.2.3.4",
+            "1.2.3",
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "1234.1.1.1",
+            "1.2.3.04",
+        ];
+        const SCOPES: [&str; 8] = [
+            "",
+            "%0",
+            "%3",
+            "%0003",
+            "%4294967295",
+            "%4294967296",
+            "%",
+            "%x",
+        ];
+        const PORTS: [&str; 7] = [":7447", ":0", ":065535", ":65536", ":", "", ":+1"];
+        let same = |text: &str| {
+            let ours = socket_addr_v6(text.as_bytes());
+            std::assert_eq!(ours, SocketAddrV6::from_str(text).ok(), "{text:?}");
+            ours.is_some()
+        };
+        let run = |n: usize, from: usize| -> String {
+            (from..from + n)
+                .map(|g| std::format!("{g:x}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        let mut addresses: Vec<String> = Vec::new();
+        for head in 0..=8 {
+            addresses.push(run(head, 1));
+            for tail in 0..=8 {
+                addresses.push(std::format!("{}::{}", run(head, 1), run(tail, 10)));
+            }
+        }
+        addresses.push(String::from("1::2::3"));
+        addresses.push(String::from("1:::2"));
+        addresses.push(String::from(":1:2:3:4:5:6:7:8"));
+        addresses.push(String::from("1:2:3:4:5:6:7:8:"));
+        for group in GROUPS {
+            addresses.push(std::format!("{group}::1"));
+            addresses.push(std::format!("1::{group}"));
+            addresses.push(std::format!("{group}:1:2:3:4:5:6:7"));
+            addresses.push(std::format!("1:2:3:4:5:6:7:{group}"));
+        }
+        for v4 in IPV4 {
+            for shape in [
+                "::{}",
+                "::ffff:{}",
+                "1:2:3:4:5:6:{}",
+                "1:2:3:4:5:6:7:{}",
+                "1:2:3:4:5::{}",
+                "1:2:3:4:5:6::{}",
+                "{}::1",
+                "1::2:3:4:5:6:{}",
+                "1::2:3:4:5:{}",
+                "{}",
+            ] {
+                addresses.push(shape.replace("{}", v4));
+            }
+        }
+        let (mut taken, mut refused) = (0usize, 0usize);
+        let mut count = |was_taken: bool| {
+            if was_taken {
+                taken += 1;
+            } else {
+                refused += 1;
+            }
+        };
+        for address in &addresses {
+            for scope in SCOPES {
+                for port in PORTS {
+                    count(same(std::format!("[{address}{scope}]{port}").as_str()));
+                }
+            }
+        }
+        for text in [
+            "::1]:80",
+            "[::1:80",
+            "[::1]]:80",
+            "[[::1]:80",
+            "[::1] :80",
+            " [::1]:80",
+            "[::1]:80 ",
+            "[ ::1]:80",
+            "[::1%3%4]:80",
+            "[::1]:80:80",
+            "[]:80",
+            "[",
+            "",
+            "[\u{0661}::1]:80",
+            "[::\u{00e9}]:80",
+            "[::1]:\u{0668}0",
+        ] {
+            count(same(text));
+        }
+        std::assert!(
+            taken > 0 && refused > 0,
+            "the corpus reaches both answers: {taken} taken, {refused} refused"
+        );
+    }
+
+    /// A stack without IPv6 reads an IPv4 endpoint as every stack does and refuses a bracketed
+    /// address as one it never dials (`Unsupported`, the answer its socket gives the family),
+    /// whether or not the text is a well-formed IPv6 address. A stack with IPv6 reads both as
+    /// `parse_locator` reads them.
+    #[test]
+    fn a_stack_without_ipv6_refuses_a_bracketed_address_as_unsupported() {
+        for text in [
+            "udp/127.0.0.1:7447",
+            "tcp/10.0.0.1:80",
+            "tls/10.0.0.1:7447",
+            "udp/127.0.0.1:0",
+            "udp/router.local:7447",
+            "udp/001.0.0.1:7447",
+            "quic/1.2.3.4:5",
+            "udp/1.2.3.4:5?prio=1",
+        ] {
+            std::assert_eq!(
+                parse_locator_for(text, false),
+                parse_locator(text),
+                "{text}"
+            );
+            std::assert_eq!(parse_locator_for(text, true), parse_locator(text), "{text}");
+        }
+        for text in [
+            "tcp/[::1]:7447",
+            "udp/[fe80::1%3]:7447",
+            "tcp/[]:7447",
+            "tcp/[127.0.0.1]:7447",
+            "tcp/[::1]:0",
+        ] {
+            std::assert_eq!(
+                parse_locator_for(text, false),
+                Err(DialRefused::Unsupported),
+                "{text}"
+            );
+            std::assert_eq!(parse_locator_for(text, true), parse_locator(text), "{text}");
+        }
+        std::assert_eq!(
+            parse_locator_for("tcp/[::1]:7447", true),
+            Ok(Locator::tcp(SocketAddr::from((
+                core::net::Ipv6Addr::LOCALHOST,
+                7447
+            ))))
+        );
+    }
+}

@@ -96,8 +96,8 @@ use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, HandshakeEnd, IdleWait,
-    Link, LinkSupervisor,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
+    LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -108,11 +108,13 @@ use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
-    router_session_task_bytes, spawn_session_with_router, OpenedLink, PumpFields,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    router_session_task_bytes, OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig,
+    SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
+use wz_runtime_coop::transport::{TransportRefusal, TransportSession};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -128,6 +130,8 @@ use wz_session_core::locality::Locality;
 use wz_session_core::locator_directory::LocatorText;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
@@ -152,8 +156,6 @@ use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
-#[cfg(feature = "listen")]
-use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::McuActions;
 #[cfg(feature = "queryable")]
 use {
@@ -454,110 +456,6 @@ pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     config.limits
 }
 
-/// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
-/// given, and why.
-// Typed and not a text: the C ABIs answer a refusal with a code and never read its words, so the
-// formatter is linked only into a program that prints one (`Display`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EndpointRefusal {
-    /// The endpoint, as the config or the caller states it, at most `MAX_LOCATOR_LEN` bytes of
-    /// it; empty when the refusal is the session's and names no endpoint ([`Refusal::LinkLost`]).
-    pub endpoint: LocatorText,
-    /// Why it could not be used.
-    pub why: Refusal,
-}
-
-impl EndpointRefusal {
-    /// The refusal of `endpoint` for `why`. A refusal is made after the open too (a dial again
-    /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
-    /// longer than that is kept up to the last whole character that fits. Out of line: every way
-    /// an endpoint is refused makes one.
-    #[inline(never)]
-    pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
-        let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
-        while !endpoint.is_char_boundary(cut) {
-            cut = cut.saturating_sub(1);
-        }
-        let mut kept = LocatorText::new();
-        // The cut is at most a row's length, so the text before it fits whole.
-        let _ = kept.push_str(endpoint.get(..cut).unwrap_or_default());
-        Self {
-            endpoint: kept,
-            why,
-        }
-    }
-}
-
-/// Why an endpoint could not be used ([`EndpointRefusal`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// The endpoint does not parse as a locator this build can dial or listen on.
-    Locator(wz_session_mcu::connect_manager::DialRefused),
-    /// The network opened no link, listener or group for it.
-    Link(LinkOpenError),
-    /// The handshake ended with a close reason.
-    HandshakeClosed(CloseReason),
-    /// The handshake ended with no close reason.
-    HandshakeEnded,
-    /// Nothing answered by the deadline.
-    NoAnswerInTime,
-    /// The link was lost and the session dials no endpoint again.
-    LinkLost,
-    /// The endpoint is one to listen on, and this build does not listen.
-    ListeningNotBuilt,
-    /// The endpoint is a group to join, and this build joins no group.
-    GroupsNotBuilt,
-    /// The group was joined and its link did not open.
-    GroupLinkDidNotOpen,
-    /// The session is closed.
-    SessionClosed,
-    /// The session holds as many faces as `max_faces` admits.
-    FacesFull,
-    /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
-    /// bytes.
-    TextTooLong,
-    /// The group's endpoint is longer than the row a member's link is reported in,
-    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
-    GroupEndpointTooLong,
-}
-
-impl From<HandshakeEnd> for Refusal {
-    fn from(end: HandshakeEnd) -> Self {
-        match end {
-            HandshakeEnd::Closed(reason) => Refusal::HandshakeClosed(reason),
-            HandshakeEnd::Ended => Refusal::HandshakeEnded,
-            HandshakeEnd::NoAnswerInTime => Refusal::NoAnswerInTime,
-        }
-    }
-}
-
-impl core::fmt::Display for EndpointRefusal {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if !self.endpoint.is_empty() {
-            write!(f, "{}: ", self.endpoint)?;
-        }
-        match self.why {
-            Refusal::Locator(why) => write!(f, "{why:?}"),
-            Refusal::Link(why) => write!(f, "{why:?}"),
-            Refusal::HandshakeClosed(reason) => write!(f, "the handshake ended: {reason:?}"),
-            Refusal::HandshakeEnded => f.write_str("the handshake ended"),
-            Refusal::NoAnswerInTime => f.write_str("no answer in time"),
-            Refusal::LinkLost => f.write_str("the link was lost"),
-            Refusal::ListeningNotBuilt => f.write_str("listening is not built"),
-            Refusal::GroupsNotBuilt => f.write_str("joining a group is not built"),
-            Refusal::GroupLinkDidNotOpen => f.write_str("the group's link did not open"),
-            Refusal::SessionClosed => f.write_str("the session is closed"),
-            Refusal::FacesFull => {
-                f.write_str("the session holds as many faces as max_faces admits")
-            }
-            Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
-            Refusal::GroupEndpointTooLong => {
-                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
-            }
-        }
-    }
-}
-
 /// Why no session was opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
@@ -612,6 +510,19 @@ pub enum KeyWireFormRefused {
     NoDictionary,
     /// The form of one endpoint is stated twice.
     LinkStatedTwice,
+}
+
+impl From<TransportRefusal> for OpenError {
+    fn from(refused: TransportRefusal) -> Self {
+        match refused {
+            TransportRefusal::NoEndpoint => OpenError::NoEndpoint,
+            TransportRefusal::Listen(why) => OpenError::Listen(why),
+            TransportRefusal::Group(why) => OpenError::Group(why),
+            TransportRefusal::Unreachable(why) => OpenError::Unreachable(why),
+            TransportRefusal::EntropyUnavailable => OpenError::EntropyUnavailable,
+            TransportRefusal::NoTask(why) => OpenError::NoTask(why),
+        }
+    }
 }
 
 /// The key ids every node of a deployment shares that an open hands the session, and the
@@ -947,8 +858,11 @@ fn session_zid(
 /// session it opens holds a zid.
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
-    let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    SessionZid::new(&stated[..len]).map_err(OpenError::InvalidZid)
+    let mut kept: &[u8] = &stated;
+    while let [rest @ .., 0] = kept {
+        kept = rest;
+    }
+    SessionZid::new(kept).map_err(OpenError::InvalidZid)
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
@@ -981,7 +895,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint.as_ref()) else {
+        let Ok(at) = wz_runtime_coop::locator_text::parse_listen_locator(endpoint.as_ref()) else {
             continue;
         };
         let transport = match at.proto {
@@ -1819,6 +1733,17 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     }
 }
 
+impl<C: ClockSource + 'static> TransportSession<C> for LinkSession<C> {
+    fn actions(&self) -> &SessionHandle<C> {
+        &self.actions
+    }
+
+    #[cfg(feature = "queryable")]
+    fn answers_as(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+}
+
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>>;
 
@@ -2263,6 +2188,15 @@ fn issued_so_far(issued: usize) -> Result<usize, Declined> {
     }
 }
 
+/// The deadline of a leg asked at `now_us` that waits `timeout_ms`, in milliseconds on the
+/// session's clock, rounded up so a sweep that reads whole milliseconds never ends the leg before
+/// its timeout. A clock of microseconds read in milliseconds leaves room past it for any timeout a
+/// `u32` states, so the sum does not saturate.
+#[cfg(any(feature = "query", feature = "liveliness-get"))]
+fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
+    now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
+}
+
 /// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2513,7 +2447,7 @@ impl RuntimeTables {
         let groups = config.groups.len().min(caps::MAX_TASKS);
         let links = usize::from(crate::arena::dials(config))
             .saturating_add(config.max_faces)
-            .min(caps::MAX_TASKS - groups);
+            .min(caps::MAX_TASKS.saturating_sub(groups));
         Self {
             rows: RuntimeRows {
                 tasks: links,
@@ -2601,19 +2535,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        // The link's actions go in its cell of the session's table, as its gates do below.
         let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
-        let actions: SessionHandle<C> =
-            CellRc::in_cells(self.transport.actions_cells.as_ref(), actions)
-                .map_err(|_| self.transport.cells_exhausted(endpoint))?;
-        // The link has its place in the session's admission before the handshake runs, which asks
-        // it once the remote's zid is known: a second link to a node the session holds is refused
-        // there, with nothing declared over it by either end, and not closed after it came up.
-        #[cfg(feature = "listen")]
-        actions.install_link_admission(
-            Arc::clone(&self.transport.admission),
-            matches!(role, SessionRole::Initiator),
-        );
+        let actions = self.transport.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
         // source that is dry now is not a link to accept.
@@ -2639,9 +2562,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         {
             actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
                 self.session.key_ids.clone(),
-                self.transport
-                    .key_forms
-                    .form_of(endpoint.map(|endpoint| endpoint.text(&self.transport.endpoints))),
+                self.transport.key_form_of(endpoint),
                 resolve_limits(&self.config).link_noted_requests(),
             ));
             if let Some(ids) = &self.session.key_ids {
@@ -2682,11 +2603,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let gate: LinkGate<C> =
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
-        // The gates go in the link's cell of the session's table, as the link's driver goes in
-        // one of the stack's: a link past the cells is refused as one past the buffers is.
-        let link = CellRc::in_cells(self.transport.gate_cells.as_ref(), gate)
-            .map_err(|_| self.transport.cells_exhausted(endpoint))?
-            .into_link();
+        let link = self.transport.place_gate(gate, endpoint)?;
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -2699,11 +2616,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             generation,
             lane: self.session.lane.clone(),
         };
-        // The link's fragmented messages are staged by the session's one Router, which its links
-        // share, keyed by their peers, in buffers of the session's one table: a chain claims one
-        // when its first fragment arrives and gives it back when it ends, and a chain that finds
-        // none free is refused and counted. The link's task holds the place it is lent in.
-        let spawned = spawn_session_with_router(
+        let task = self.transport.spawn_link(
             &self.local,
             PumpFields {
                 link: link.clone(),
@@ -2716,15 +2629,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     max_iters: None,
                 },
             },
-            self.transport.lend.clone(),
             dispatch,
-        );
-        // The runtime's cells were reserved at the open, one for each link the config admits: a
-        // link past them has no task to run its session.
-        let task = match spawned {
-            Ok(task) => task,
-            Err(why) => return Err(OpenError::NoTask(why)),
-        };
+        )?;
         Ok(wz_runtime_coop::faces::Wire::new(
             LinkSession {
                 actions,
@@ -2765,7 +2671,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let row = match self.transport.dial_row(at) {
                 Ok(row) => row,
                 Err(refused) => {
-                    last = refused;
+                    last = refused.into();
                     continue;
                 }
             };
@@ -2962,7 +2868,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
-                let last = self.transport.handshake_failed(at, &then, why, now_us);
+                let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
                 self.follow(at, then, last, redial_ms)
             }
             // The dial under way was asked, never waited for: its link's handshake begins once
@@ -3156,10 +3062,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .install_shared_key_ids(id, ids.clone());
             }
             match self.join_group(id, join) {
-                Ok(face) => {
-                    self.transport.links.advance_face_id();
-                    self.transport.groups.push(face);
-                }
+                Ok(face) => self.transport.add_group(face),
                 Err(refused) => {
                     self.session.registry.borrow_mut().remove_face(id);
                     return Err(refused);
@@ -3186,23 +3089,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         id: FaceId,
         join: GroupJoin,
     ) -> Result<GroupFace<L::Waits>, OpenError> {
-        // A member's link is reported by the endpoint the group was joined by, in a row of
-        // `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one is refused before the group is joined, so
-        // no row of this engine is held on the heap.
-        if join.endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
-            return Err(OpenError::Group(EndpointRefusal::new(
-                &join.endpoint,
-                Refusal::GroupEndpointTooLong,
-            )));
-        }
-        let transport = self
-            .transport
-            .links
-            .links()
-            .open_group(&join.endpoint)
-            .map_err(|why| {
-                OpenError::Group(EndpointRefusal::new(&join.endpoint, Refusal::Link(why)))
-            })?;
+        let transport = self.transport.open_group(&join.endpoint)?;
         let endpoint = join.endpoint.clone();
         let params = join.profile.params(
             self.config.whatami,
@@ -3471,7 +3358,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // datagram is stepped again at once, its task taking one a step, so its own time is not
         // asked.
         #[cfg(feature = "group")]
-        let group_took = self.transport.groups.iter().any(GroupFace::took_input);
+        let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
             self.session.next_get_deadline_ms(),
@@ -3487,12 +3374,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if group_took {
                 None
             } else {
-                self.transport
-                    .groups
-                    .iter()
-                    .filter_map(GroupFace::due_us)
-                    .min()
-                    .map(|due_us| due_us.div_ceil(1_000))
+                self.transport.groups_due_ms()
             },
         ]
         .into_iter()
@@ -3513,7 +3395,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         let most = if group_took {
             0
-        } else if self.transport.groups.iter().any(GroupFace::unwaited) {
+        } else if self.transport.group_unwaited() {
             most.min(group::GROUP_TICK_MS)
         } else {
             most
@@ -3534,10 +3416,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 clock.now_us()
             })
         };
-        #[cfg(feature = "group")]
-        let others = self.transport.groups.iter().filter_map(GroupFace::input);
-        #[cfg(not(feature = "group"))]
-        let others = core::iter::empty();
         // The bounds above are the clock's time read as the wall's, which a clock the program
         // moves is not: its word that the time moved on ends the wait as well.
         #[cfg(feature = "time-base")]
@@ -3548,9 +3426,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "time-base"))]
         let beside = None;
-        self.transport
-            .links
-            .idle_wait(most, &mut now_us, others, beside)
+        self.transport.idle_wait(most, &mut now_us, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
@@ -3577,10 +3453,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
         // leaves and lets the group's link go; its tables go with it.
         #[cfg(feature = "group")]
-        if !self.transport.groups.is_empty() {
-            for group in &self.transport.groups {
-                group.stop();
-            }
+        if self.transport.stop_groups() {
             self.run_tasks();
             let mut registry = self.session.registry.borrow_mut();
             for group in self.transport.groups.drain(..) {
@@ -4185,8 +4058,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// its readers are: the tests module is a host's (`all(test, feature = "std")`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
-        self.live()
-            .map(|core| (core.0.transport.dial().replay.pacing(), core.0.policy))
+        self.live().map(|core| {
+            let dial = core.0.transport.dial();
+            (dial.and_then(|dial| dial.replay.pacing()), core.0.policy)
+        })
     }
 
     /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
@@ -6031,7 +5906,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = &guard.0;
         // What the peers hold now is told first, so the ring must have the rows for it before
         // the watch is declared.
-        let mut held = 0;
+        let mut held: usize = 0;
         {
             let registry = core.session.registry.borrow();
             for face in core.transport.links.faces() {
@@ -6039,7 +5914,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     continue;
                 }
                 if let Some(tables) = registry.tables_of(face.id) {
-                    held += decl_watch::held(plane, tables);
+                    held = held.saturating_add(decl_watch::held(plane, tables));
                 }
             }
         }
@@ -6130,7 +6005,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // and nothing local when the link refused it.
         let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
         #[cfg(feature = "local-subscriber")]
-        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts)?;
+        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
         Ok(sent)
     }
 
@@ -6633,7 +6508,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .count();
             #[cfg(not(feature = "group"))]
             let groups = 0;
-            links + groups
+            links.saturating_add(groups)
         })
     }
 
@@ -6755,7 +6630,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             opts.expose_timestamp_by(&guard.0.policy)
         };
         let remote = opts.allowed_destination.allows_remote();
-        let mut issued = 0;
+        let mut issued: usize = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
@@ -6780,8 +6655,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never
             // ends before its timeout.
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             match core
                 .session
@@ -6792,14 +6667,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 Some(true) => {}
                 Some(false) => {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                     continue;
                 }
                 None => continue,
             }
             // The leg's callback, in a row of the plane's the entry's sink holds.
             let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             };
             let sink = ConsolidatingSink::with_hold(
@@ -6824,7 +6699,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     )
                 });
             if !matches!(registered, Some(Ok(_))) {
-                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                unheld = unheld.saturating_add(usize::from(matches!(
+                    registered,
+                    Some(Err(RegisterError::TableFull))
+                )));
                 // A leg no table holds is let go of with no lock held.
                 drop(guard);
                 self.end_leg_now(leg_id);
@@ -6863,11 +6741,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 kind: GetKind::Query(rid),
                 fan: tag,
             }) {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
                 return Ok(issued);
@@ -6908,8 +6786,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
             let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             match core
                 .session
@@ -6920,13 +6798,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 Some(true) => {}
                 Some(false) => {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                     continue;
                 }
                 None => continue,
             }
             let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             };
             let sink = ConsolidatingSink::with_hold(
@@ -6950,7 +6828,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     )
                 });
             if !matches!(registered, Some(Ok(_))) {
-                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                unheld = unheld.saturating_add(usize::from(matches!(
+                    registered,
+                    Some(Err(RegisterError::TableFull))
+                )));
                 drop(guard);
                 self.end_leg_now(leg_id);
                 continue;
@@ -6970,11 +6851,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 kind: GetKind::Query(rid),
                 fan: tag,
             }) {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             if self.cut_short(fan, tag) {
                 return Ok(issued);
             }
@@ -6988,8 +6869,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut guard.0;
             let rid = own.rid();
             let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms = (timeout_ms > 0)
-                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms =
+                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
             let row = if core.session.registry.borrow().local.replies.has_room() {
                 self.gets.open_leg(leg, expose)
@@ -7025,18 +6906,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     kind: GetKind::Query(rid),
                     fan: tag,
                 }) {
-                    unheld += 1;
+                    unheld = unheld.saturating_add(1);
                 } else {
                     // Asked once the legs to the peers were, as zenoh-pico asks it only once the
                     // send succeeded.
                     let asked = self.ask_own_queryables(core, own, keyexpr, opts);
                     drop(guard);
-                    issued += 1;
+                    issued = issued.saturating_add(1);
                     let _ = self.cut_short(fan, tag);
                     self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
             } else {
-                unheld += 1;
+                unheld = unheld.saturating_add(1);
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
@@ -7070,7 +6951,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             0 => DEFAULT_QUERY_TIMEOUT_MS,
             set => set,
         };
-        let mut issued = 0;
+        let mut issued: usize = 0;
         // The faces whose links are up, each asked once, as a query's are.
         let mut asked = None;
         loop {
@@ -7092,7 +6973,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             };
             let interest_id = u64::from(interest_id);
-            let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let deadline_ms = Some(leg_deadline_ms(core.clock.now_us(), timeout_ms));
             // A snapshot no row holds is refused before its leg's callback is minted.
             if !core
                 .session
@@ -7155,7 +7036,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             }
             drop(guard);
-            issued += 1;
+            issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
                 return Ok(issued);
@@ -7993,5 +7874,27 @@ mod row_id_tests {
             cfg!(feature = "local-subscriber")
         );
         assert_eq!(counts_own(querier, true), cfg!(feature = "local-queryable"));
+    }
+}
+
+#[cfg(all(test, any(feature = "query", feature = "liveliness-get")))]
+mod leg_deadline_tests {
+    //! Where a get's leg ends on the session's clock.
+    use super::leg_deadline_ms;
+
+    /// A leg's deadline is its timeout past the asking millisecond rounded up, at the clock's
+    /// last microsecond too.
+    ///
+    /// # Control
+    ///
+    /// Reading the clock as `now_us / 1000`, rounded down, reds the first assertion.
+    #[test]
+    fn a_legs_deadline_rounds_up_at_every_reading_of_the_clock() {
+        assert_eq!(leg_deadline_ms(1_001, 5), 7, "1.001 ms rounds up to 2");
+        assert_eq!(leg_deadline_ms(2_000, 0), 2, "a whole millisecond stays");
+        assert_eq!(
+            leg_deadline_ms(u64::MAX, u32::MAX),
+            18_446_744_073_709_552 + 4_294_967_295
+        );
     }
 }

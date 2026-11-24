@@ -58,7 +58,7 @@ use crate::matching::{
     z_owned_matching_listener_t,
 };
 // A build of one engine calls the engine through its own type, so the port's trait is in scope.
-#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
+#[cfg(not(feature = "engine-tokio"))]
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};

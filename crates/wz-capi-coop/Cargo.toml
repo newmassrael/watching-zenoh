@@ -107,7 +107,7 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # The queues of the delivery lane (`lane::SharedLane`), generated from their SCE document into
 # `out/wz-capi-coop/`, name the runtime's queue and codec types.
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
-# The dialler's endpoint reader and the application layer's dispatch.
+# The session shell's action bundle, its group session and the application layer's dispatch.
 wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
     "alloc",
     "dial",
