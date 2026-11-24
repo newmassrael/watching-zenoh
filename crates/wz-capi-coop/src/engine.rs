@@ -3060,7 +3060,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Whether the dial role's face has what an open waits for: its link is up, or the node it
     /// reached is held by another face (`Link::Held`, with `listen`).
-    #[inline(never)]
     fn dial_settled(&self) -> bool {
         match self.dial().link {
             Link::Up(_) => true,
@@ -3090,7 +3089,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Listen on every endpoint the config lists. [`OpenError::Listen`] for the first that does
     /// not parse, that the network opens no listener for, or whose port is taken; a build without
     /// `listen` answers every endpoint so.
-    #[inline(never)]
     fn listen_on_config(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "listen")]
         for row in 0..self.endpoints.listens() {
@@ -3122,7 +3120,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// session's local set, stepped once here so that its first JOIN leaves now.
     /// [`OpenError::Group`] for the first the network joins no group for, or whose session ended
     /// at its first step (its link did not open); a build without `group` answers every group so.
-    #[inline(never)]
     fn join_groups(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "group")]
         for join in self.config.groups.clone() {
