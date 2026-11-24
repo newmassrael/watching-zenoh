@@ -133,6 +133,7 @@ fn code_of(why: &Refusal) -> ZResult {
         Refusal::Absent { .. } => WZ_EXT_ERR_PAYLOAD_ABSENT,
         Refusal::Schema { .. } => Z_ERR_CONFIG_INVALID_VALUE,
         Refusal::Wire(_) => WZ_EXT_ERR_PAYLOAD_WIRE,
+        Refusal::Full { .. } => Z_ERR_OVERFLOW,
     }
 }
 
@@ -810,19 +811,30 @@ pub unsafe extern "C" fn wz_ext_message_payload_encode(
             return Z_ERR_NULL;
         };
         let mut held = locked(held);
-        let encoded = held.payload.encode();
-        let message = String::from(held.payload.message_name());
-        match encoded {
-            Ok(bytes) => copy_out(
-                &mut held,
-                &message,
-                Ok(bytes.as_slice()),
-                false,
-                out,
-                capacity,
-                written,
-            ),
-            Err(why) => answer(&mut held, Err(why)),
+        // Measured first and written where the program asked: nothing is built apart.
+        let need = match held.payload.encoded_len() {
+            Ok(need) => need,
+            Err(why) => return answer(&mut held, Err(why)),
+        };
+        *written = need;
+        if need > capacity {
+            held.refusal = Some(format!(
+                "`{}`: the value needs {need} byte(s), and the buffer has {capacity}",
+                held.payload.message_name()
+            ));
+            return Z_ERR_OVERFLOW;
+        }
+        if need == 0 {
+            return answer(&mut held, Ok(()));
+        }
+        // `out` is not null with a capacity, and the caller's contract makes it writable for it.
+        let room = core::slice::from_raw_parts_mut(out, capacity);
+        match held.payload.encode_into(room) {
+            Ok(_) => answer(&mut held, Ok(())),
+            Err(why) => {
+                *written = 0;
+                answer(&mut held, Err(why))
+            }
         }
     })
 }
