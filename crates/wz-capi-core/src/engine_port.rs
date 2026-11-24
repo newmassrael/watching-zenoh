@@ -267,6 +267,10 @@ impl SessionEngine for SharedSession {
         all
     }
 
+    fn told_ledger(&self) -> Option<&wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>> {
+        Some(&self.told)
+    }
+
     fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> Result<u64, Refusal> {
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);

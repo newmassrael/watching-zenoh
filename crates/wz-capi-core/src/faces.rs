@@ -2411,6 +2411,9 @@ pub struct SharedSession {
     /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
     /// query replies and the batch calls).
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// What each connectivity listener whose history is being replayed was told of the faces
+    /// ([`wz_capi_port::SessionEngine::told_ledger`]), on the heap, as the faces are read.
+    pub(crate) told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
     /// The periodic jobs a C ABI started on the session ([`wz_capi_port::Tickers::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
     /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
@@ -2934,6 +2937,7 @@ impl SharedSession {
             policy,
             aggregation,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
             #[cfg(feature = "advanced")]

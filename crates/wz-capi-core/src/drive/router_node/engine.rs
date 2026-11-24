@@ -111,6 +111,9 @@ pub(super) struct EngineState {
     /// The program's liveliness tokens, as `queryables` holds its queryables.
     tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
+    /// What each connectivity listener whose history is being replayed was told of the node's
+    /// faces ([`SessionEngine::told_ledger`]).
+    told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
 }
 
 impl EngineState {
@@ -123,6 +126,7 @@ impl EngineState {
             queryables: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
+            told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
         }
     }
 
@@ -232,6 +236,10 @@ impl SessionEngine for RouterState {
 
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         self.forwarder.face_snapshots()
+    }
+
+    fn told_ledger(&self) -> Option<&wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>> {
+        Some(&self.engine.told)
     }
 
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {

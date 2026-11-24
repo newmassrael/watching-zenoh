@@ -102,6 +102,8 @@ mod refusal;
 pub mod runtime_limits;
 pub mod scout_ask;
 pub mod sync;
+// What each connectivity listener was told while its history is replayed (`SessionEngine::tell_came`).
+pub mod told;
 // A time base the program supplies, made from the calls each C ABI's door is handed.
 #[cfg(feature = "time-base")]
 pub mod time_base;
