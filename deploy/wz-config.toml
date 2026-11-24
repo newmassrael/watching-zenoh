@@ -2167,7 +2167,7 @@ kconfig = "WZ_LIMIT_KEY_ARENA_BYTES"
 kind = "parameter"
 range = [1, 4294967291]
 on_heap = "quota"
-default = 95040
+default = 239712
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2177,9 +2177,9 @@ read = "snapshot"
 wire = "none"
 help = '''
 How many bytes of key text the rows of a session's tables hold at once, in one
-arena each row keeps its key in: the session's own declarations, the
-application's tables, its pending gets and what each peer declares to it. Each
-key takes 8 bytes and its length, rounded up to 4. A declaration of the session
+arena each row keeps its key in: the session's own declarations and entities,
+its pending gets and what each peer declares to it. Each key takes 8 bytes and
+its length, rounded up to 4, and a key a row holds already is shared. A declaration of the session
 whose key finds no room is refused, as one that finds its table full is; one
 a peer sends is dropped and counted. A key given back is taken again. It must
 be at least 1.
@@ -2187,11 +2187,11 @@ be at least 1.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds, with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, every row of the engine's record at the build's defaults (224), of the application's tables (40), of one face's pending gets (16) and of what one face's peer declares and asks (80: its aliases, its subscribers, queryables and tokens, its interests), 360 rows and 95,040 bytes, so a build that states nothing refuses no key it took before. The session's own tokens are rows of the engine's record alone: the cooperative engine answers a peer's liveliness Interest from them and keeps no second table of them with keys of its own (crates/wz-capi-coop/src/engine.rs, lend_session)."
+reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds, with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, a key of its own for every keyed row of a session at the build's defaults: the session's one table set (548: its 332 declared key expressions, 100 subscribers, 100 queryables, 8 tokens and 8 liveliness subscribers), the engine's record of its publishers and queriers (264: 116 write filters, 16 matching listeners and the 132 Interests they hold open), one face's pending gets (16) and what one face's peer declares and asks (80: its aliases, its subscribers, queryables and tokens, its interests), 908 rows and 239,712 bytes, so a build that states nothing refuses no key a row of it takes. A row whose key another row keeps already shares that block (crates/wz-session-core/src/key_arena.rs, KeySpace::kept), so this is the most the rows hold apart; the session's tokens are rows of its one table set alone, which answers a peer's liveliness Interest (crates/wz-capi-coop/src/engine.rs, lend_session)."
 
 [limit.pico_preset]
-value = 3960
-reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds, with a key of up to 52 bytes, about twice that, in a block of 60, the 34 rows of the engine's record, the 8 of the application's tables and the 2 of one face's pending gets at the preset's other values, 2,640 bytes, and 22 keys of what the peers declare in the rest, 1,320 bytes."
+value = 44400
+reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds, with a key of up to 52 bytes, about twice that, in a block of 60, a key of its own for every keyed row of a session at the preset's other values: the one table set's 510 (306 declared key expressions, 100 subscribers, 100 queryables, 2 tokens and 2 liveliness subscribers), the engine record's 206 (102 write filters, a matching listener and 103 Interests) and the 2 of one face's pending gets, 718 rows and 43,080 bytes, and 22 keys of what the peers declare in the rest, 1,320 bytes."
 
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"
