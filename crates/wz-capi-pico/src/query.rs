@@ -1482,7 +1482,7 @@ unsafe fn declare_queryable_in(
         &mut (*kept).closure,
     );
     match declare_queryable_on(
-        &session,
+        session,
         ke,
         declared_of(keyexpr),
         complete,
@@ -1652,7 +1652,7 @@ unsafe fn queryable_place<'a>(
         }
     };
     match crate::object_slot::Slot::take_entity(
-        &crate::session::engine_of(handle),
+        crate::session::engine_held(handle),
         crate::object_slot::Kind::Queryable,
     ) {
         Some(slot) => Ok((handle, slot)),

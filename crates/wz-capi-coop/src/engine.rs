@@ -7982,6 +7982,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C
         &self.engine
     }
 
+    /// The session's own hold of the engine, borrowed for the length of one call: a caller that
+    /// keeps the engine clones it where it keeps it, and one that only reaches it counts nothing.
+    pub fn engine_hold(&self) -> &Arc<CoopEngine<L, C>> {
+        &self.engine
+    }
+
     /// The place the session's arena lent the ABI's handle (`open_made_in`'s `handle`), `None`
     /// for a session opened without one. It stands while the engine does.
     pub fn handle_place(&self) -> Option<HandlePlace> {

@@ -364,6 +364,14 @@ impl z_owned_string_t {
     }
 }
 
+/// `bytes` read as UTF-8 text, or `None` for bytes that are not. One body out of line for every
+/// door that reads a caller's text (a key, a config value): each is a call answering the text in
+/// two registers, where each held the check's call and the reading of its result of its own.
+#[inline(never)]
+pub(crate) fn text_of(bytes: &[u8]) -> Option<&str> {
+    core::str::from_utf8(bytes).ok()
+}
+
 /// Read a borrowed `{ start, len }` loaned view as a byte slice.
 ///
 /// # Safety
@@ -762,6 +770,15 @@ mod tests {
     }
 
     const SIZE: usize = core::mem::size_of::<z_owned_config_t>();
+
+    /// A caller's bytes read as text are the text when they are UTF-8, empty ones included, and
+    /// nothing when they are not. Turned red by a reader that passes bytes it cannot read as text.
+    #[test]
+    fn a_callers_bytes_read_as_text_only_when_they_are_utf8() {
+        assert_eq!(text_of(b"demo/key"), Some("demo/key"));
+        assert_eq!(text_of(b""), Some(""));
+        assert_eq!(text_of(&[b'a', 0xff]), None, "not UTF-8");
+    }
 
     /// A take moves every byte of the block, the padding too, and leaves the source null; a
     /// null pointer on either side takes nothing.
