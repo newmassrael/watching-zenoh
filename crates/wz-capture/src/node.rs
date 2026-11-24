@@ -653,7 +653,10 @@ impl NodeCensus {
             if !may_name_a_zid(head.kind) {
                 continue;
             }
-            let row = frames.row(start + at);
+            // `heads_from` yields only the places the list holds, so a place it names has a row.
+            let Some(row) = frames.get(start + at) else {
+                continue;
+            };
             let frame: &PassiveFrame = &row;
             let Some((zid, whatami, kind)) = named_zid(frame) else {
                 continue;
