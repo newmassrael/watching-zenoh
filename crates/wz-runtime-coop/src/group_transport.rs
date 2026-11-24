@@ -208,7 +208,7 @@ pub enum GroupSend {
 /// the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
 /// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
 /// it cut one past a buffer of the transport's own.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub enum GroupRx {
     /// The transport's own, made when the group was joined.
     Own(alloc::vec::Vec<u8>),
@@ -218,7 +218,7 @@ pub enum GroupRx {
     GivenBack,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
 impl GroupRx {
     /// The buffer `lent` names, when the session lent one, or one of the transport's own of
     /// `own_len` bytes.
@@ -386,7 +386,7 @@ mod tests {
 
     /// A buffer of the transport's own stays with it; a lent one is the session's, read and
     /// written as the transport's own is, and given back once, after which it reads as empty.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
     #[test]
     fn a_lent_group_buffer_is_given_back_once_and_an_own_one_never() {
         use wz_session_core::byte_cells::{ByteCells, ByteSource};

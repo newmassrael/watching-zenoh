@@ -1102,6 +1102,18 @@ pub const HANDED_LEG_BYTES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::UDP_PORT_SLOTS`] is bound.
+pub const UDP_PORT_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::PICO_UNICAST_BATCH_BYTES`] is bound.
 pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,

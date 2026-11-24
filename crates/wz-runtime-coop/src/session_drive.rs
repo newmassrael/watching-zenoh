@@ -774,6 +774,15 @@ pub trait SessionLinks {
         let _ = cells;
     }
 
+    /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
+    /// sorted for them in, for the session the ports serve: a peer or a datagram the rows have no
+    /// room for is dropped and counted, and none is kept on the heap. The default ignores them, as
+    /// a stack that opens no udp port does.
+    #[cfg(feature = "udp-listen")]
+    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+        let _ = rows;
+    }
+
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the
     /// dial is asked again ([`PendingDial::poll`]) until its link is made or refused, so a dial that
     /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the
