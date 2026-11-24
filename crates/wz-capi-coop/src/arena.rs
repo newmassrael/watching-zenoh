@@ -582,6 +582,17 @@ impl HeldPlaces {
         }
         self
     }
+
+    /// The first kind at or after the place `from` in [`EntityKind::ALL`] these places name a
+    /// layout for: its place there and the layout. A walk by it ends on the places named, as
+    /// [`PlaceRows`]'s walk of the kinds it holds does.
+    fn next_entity(&self, from: usize) -> Option<(usize, Layout)> {
+        self.entities
+            .iter()
+            .enumerate()
+            .skip(from)
+            .find_map(|(at, place)| Some((at, (*place)?)))
+    }
 }
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
@@ -1129,16 +1140,28 @@ impl PlaceRows {
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>, rows: EntityRows) -> PlaceTables {
         let handle = (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1));
         let mut entities = EntityPlaces::NONE;
-        for ((kind, bytes), cells) in EntityKind::ALL
-            .into_iter()
-            .zip(self.entity_bytes)
-            .zip(entities.cells.iter_mut())
-        {
-            if bytes != 0 {
-                *cells = Some(lend.byte_cells(bytes, rows.of_kind(kind)));
+        let mut from = 0;
+        while let Some((at, bytes)) = self.next_held(from) {
+            from = at + 1;
+            if let Some(cells) = entities.cells.get_mut(at) {
+                let count = rows.kinds.get(at).copied().unwrap_or(0);
+                *cells = Some(lend.byte_cells(bytes, count));
             }
         }
         PlaceTables { handle, entities }
+    }
+
+    /// The first kind at or after the place `from` in [`EntityKind::ALL`] the plan holds places
+    /// of: its place there and the bytes of each of its places. A walk by it ends on the bytes:
+    /// one over every kind has a constant trip count, which the compiler unrolls into a copy of
+    /// the walk's body for each kind.
+    fn next_held(&self, from: usize) -> Option<(usize, usize)> {
+        self.entity_bytes
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(from)
+            .find(|&(_, bytes)| bytes != 0)
     }
 }
 
@@ -1830,20 +1853,22 @@ impl ArenaPlan {
                 );
             }
         }
-        let laid = self.places.entity_bytes;
-        for ((kind, place), laid) in EntityKind::ALL.into_iter().zip(held.entities).zip(laid) {
-            let Some(place) = place else {
-                continue;
-            };
+        // Read where `held` lies, kind by kind, rather than copied whole into the walk.
+        let mut from = 0;
+        while let Some((at, place)) = held.next_entity(from) {
+            from = at + 1;
             if place.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
             }
+            let Some(&kind) = EntityKind::ALL.get(at) else {
+                break;
+            };
             let count = self.session.entities.of_kind(kind);
-            if place.size() == 0 || count == 0 || laid != 0 {
+            if place.size() == 0 || count == 0 || self.entity_bytes(kind) != 0 {
                 continue;
             }
             self.put_table(place_parts(kind), count, place.size());
-            if let Some(bytes) = self.places.entity_bytes.get_mut(kind as usize) {
+            if let Some(bytes) = self.places.entity_bytes.get_mut(at) {
                 *bytes = place.size();
             }
         }
@@ -2670,6 +2695,57 @@ mod tests {
             assert_eq!(laid, Some((at + 1, 8 * (at + 1))), "{kind:?}");
             assert_eq!(plan.entity_bytes(kind), 8 * (at + 1), "{kind:?}");
         }
+    }
+
+    /// The places are laid out and lent for each kind named and for no other, past a run of kinds
+    /// with none and up to the last kind, each table as many places as the rows the session keeps
+    /// of its kind; a layout past the arena's alignment is refused though kinds with none lie
+    /// before it. Turned red by a walk of the kinds that stops at the first kind with no places,
+    /// never reaches the last, or lends a kind's table at a neighbour's place.
+    #[test]
+    fn the_places_of_each_kind_named_are_laid_out_and_lent_past_the_kinds_with_none() {
+        const NAMED: [EntityKind; 3] = [
+            EntityKind::Publisher,
+            EntityKind::Token,
+            EntityKind::LinkEventsListener,
+        ];
+        let place = Layout::new::<[u64; 2]>();
+        let mut plan = empty_plan();
+        for (at, rows) in plan.session.entities.kinds.iter_mut().enumerate() {
+            *rows = at + 2;
+        }
+        let held = NAMED
+            .into_iter()
+            .fold(HeldPlaces::NONE, |held, kind| held.with_entity(kind, place));
+        plan.holding(&held).expect("the places fit");
+        let parts: alloc::vec::Vec<_> = plan.rows().map(ArenaRow::part).collect();
+        assert_eq!(
+            parts,
+            [
+                "publisher place flags",
+                "publisher places",
+                "token place flags",
+                "token places",
+                "link events listener place flags",
+                "link events listener places",
+            ]
+        );
+        let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("an arena");
+        let mut lend = arena.lender();
+        let places = plan.places().lent_from(&mut lend, plan.entities());
+        assert!(places.handle.is_none());
+        for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
+            let lent = if NAMED.contains(&kind) { at + 2 } else { 0 };
+            assert_eq!(places.entities.counts(kind), (0, lent), "{kind:?}");
+        }
+
+        let wide = Layout::from_size_align(ARENA_ALIGN * 2, ARENA_ALIGN * 2).expect("a layout");
+        let mut plan = empty_plan();
+        plan.session.entities.kinds[0] = 1;
+        let held = HeldPlaces::NONE
+            .with_entity(EntityKind::Publisher, place)
+            .with_entity(EntityKind::AdvancedSubscriber, wide);
+        assert_eq!(plan.holding(&held), Err(ArenaRefused::TooLarge));
     }
 
     /// The ABI's handle is laid out on the plan where the plan lies, once: its flag before its
