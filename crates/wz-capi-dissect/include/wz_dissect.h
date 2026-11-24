@@ -7955,20 +7955,25 @@ int wz_dissect_pcap_local_options_of_link_type(
  * messages its "observed" names. What the planes keep per row is given up for
  * the rows no list holds as it doubles, so it stays near what the lists hold.
  *
- * WHAT STILL FOLDS AGAIN, AND WHY. Three costs remain in this revision:
+ * WHAT STILL FOLDS AGAIN, AND WHY. One cost remains: an INIT or a JOIN that
+ * names a node begins every plane again, so a capture whose sessions open one
+ * after another pays one fold of what is held per opening. A fold continued past
+ * it would write a document the container doors do not write for the same
+ * bytes, for three reasons. Which node a direction belongs to is settled by its
+ * handshake, and what was credited to that direction before the handshake
+ * arrived is credited anew. A node is numbered by the place of its list among
+ * the lists, so a node a later INIT names on an earlier list comes before nodes
+ * already numbered. And the planes key what they fold (whose request ids, whose
+ * declared keys) by the session grouping the new node changes.
  *
- *   - an INIT or a JOIN that names a node begins every plane again: which node
- *     a direction belongs to is settled by its handshake, and what the planes
- *     credited to that direction before the handshake arrived is credited
- *     anew, so a capture whose sessions open one after another pays one fold of
- *     what is held per opening;
- *   - the scouting lists are folded into a copy on every call: a node first
- *     named by a HELLO is numbered after every node the transport named, an
- *     order a continued fold cannot keep, and the lists are small;
- *   - every exchange still open is judged on every call, so a capture whose
- *     queries never close pays for each of them.
+ * What no longer folds again. Each scouting list is read once as it grows, and
+ * again only when the ceiling trims its front; what it named is applied to the
+ * census at every call. Each exchange still open is judged once, when the walk
+ * that took it ends, and keeps its verdict until a response to it arrives, so a
+ * capture whose queries never close pays for each of them once; a call still
+ * passes over the exchanges open to count them, without judging them again.
  *
- * None of the three changes a document: each is the cost of the answer the
+ * None of this changes a document: each is the cost of the answer the
  * container doors give for the same bytes.
  *
  * The document is the one the census doors emit, so a consumer keeps one

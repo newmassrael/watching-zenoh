@@ -1173,12 +1173,10 @@ impl LiveDissection {
     /// ([`Self::set_selector_memories`]) is every change of selector) and where
     /// the exchanges still open alone outgrow four times the messages held; then
     /// `trimmed` is 0 again. The node census is kept the same way, begins again
-    /// when a message that arrived names a node, and begins again with the other planes
-    /// and they with it, so one document covers one set of messages; the
-    /// scouting lists are folded over a
-    /// copy on every call, and a capture that holds many exchanges that never
-    /// close pays for each of them on every call, because a call judges the
-    /// exchanges still open.
+    /// when a message that arrived names a node, and begins again with the other
+    /// planes and they with it, so one document covers one set of messages. Each
+    /// scouting list is read once as it grows, and each exchange still open is
+    /// judged once and keeps its verdict until a response to it arrives.
     ///
     /// `None` when the callback set by [`Self::set_progress`] stopped the census; the
     /// plane that was being folded is then dropped from the memory and the next call

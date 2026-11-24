@@ -109,6 +109,12 @@ pub(crate) trait OrderedFold: Clone {
         message: Option<&[u8]>,
         grouping: &SessionGrouping,
     );
+
+    /// Called once a walk has fed every message it took, before the fold is
+    /// kept and read: where a fold settles what a reading would otherwise work
+    /// out again at every call from what it holds (the exchange plane's verdict
+    /// on each exchange still open). Nothing by default.
+    fn settle(&mut self) {}
 }
 
 /// Feed `fold` every message of `dissection` in capture order, once: the walk
@@ -360,6 +366,7 @@ impl<F: OrderedFold> Resumable<F> {
                     self.saved = None;
                     return None;
                 }
+                saved.fold.settle();
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
@@ -399,6 +406,7 @@ impl<F: OrderedFold> Resumable<F> {
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
+                fold.settle();
                 self.saved = Some(Saved {
                     fold,
                     grouping: grouping.clone(),
@@ -537,6 +545,11 @@ impl OrderedFold for CensusFold {
             self.interests
                 .feed(flow, list, packet, frame, message, grouping);
         }
+    }
+
+    fn settle(&mut self) {
+        #[cfg(feature = "network-codecs")]
+        self.exchanges.settle();
     }
 }
 

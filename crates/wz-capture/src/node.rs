@@ -715,64 +715,7 @@ impl NodeCensus {
     /// [`ObservedNode::anchors_exact`] exists to notice, and a token that is
     /// itself a leak would have made the flag agree with anything.
     pub fn observe_scouting(&mut self, flow: &FlowKey, scouting: crate::Scoutings<'_>) {
-        for datagram in scouting.iter() {
-            let Ok(decoded) = &datagram.frame else {
-                continue;
-            };
-            // A datagram that holds more than the message read out of it names
-            // nobody, on `named_zid`'s rule for a transport unit.
-            if !datagram.read_whole {
-                continue;
-            }
-            let (zid, whatami, kind) = match decoded {
-                wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } => {
-                    (body.zid.to_vec(), Some(body.whatami()), Named::Hello)
-                }
-                // The zid is OPTIONAL on a scout: a node may ask without saying
-                // who it is, and `None` is that node declining to be named
-                // rather than an empty identity.
-                wz_session_core::scouting_message::ScoutingFrame::Scout { body, .. } => {
-                    match &body.zid {
-                        Some(z) => (z.to_vec(), None, Named::Scout),
-                        None => continue,
-                    }
-                }
-                _ => continue,
-            };
-            if zid.is_empty() {
-                continue;
-            }
-            // R2456 — PacketIndex by construction, not by inheritance. See the
-            // method doc.
-            let at = At {
-                anchor: datagram.packet_index,
-                kind: crate::AnchorSpace::PacketIndex,
-                space: self.space_of(crate::AnchorSpace::PacketIndex, Direction::A),
-            };
-            let idx = self.intern_scouted(&zid, whatami, at, flow);
-            // The message names its sender, and the datagram says which end of
-            // the flow it travelled from. The receiver is not named by either
-            // message and is not seated: see the module docs.
-            self.record_end(idx, end_sending(datagram.direction), flow);
-            // R311y714 — the locator list, which only a HELLO carries. Taken
-            // from the decoded body rather than from the flow's addresses: see
-            // `ObservedNode::locators` for why the two are not the same claim.
-            if let wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } = decoded {
-                if let Some(list) = body.locators.as_ref() {
-                    for loc in list.iter() {
-                        let text = loc.locator.as_str();
-                        if !text.is_empty() && !self.nodes[idx].locators.iter().any(|l| l == text) {
-                            self.nodes[idx].locators.push(String::from(text));
-                        }
-                    }
-                }
-            }
-            match kind {
-                Named::Hello => self.nodes[idx].evidence.hello += 1,
-                Named::Scout => self.nodes[idx].evidence.scout += 1,
-                _ => {}
-            }
-        }
+        ScoutingFold::over(*flow, scouting).apply_to(self);
     }
 
     fn record_link(&mut self, a: usize, b: usize, flow: &FlowKey) {
@@ -895,6 +838,200 @@ impl NodeCensus {
     }
 }
 
+/// The produced-index of the oldest message a scouting list holds.
+fn first_produced(scouting: &crate::Scoutings<'_>) -> u64 {
+    scouting.produced() - scouting.len() as u64
+}
+
+/// What one datagram flow's scouting list named, folded once: the nodes its
+/// messages named, in the order the list first named them, with what it said of
+/// each, and the ends it seated them at, in the order it first seated them.
+///
+/// Applying it to a census ([`Self::apply_to`]) leaves the census as folding the
+/// list's messages into it one by one leaves it, whatever the census held
+/// before: a node's interval runs from the first anchor to the greatest, its
+/// role is the first one stated, its locators and the ends keep their first
+/// appearance, and its evidence adds up. So a memory goes on with it as the list
+/// grows, applies it to every call's census, and reads each message once.
+#[derive(Debug, Clone)]
+struct ScoutingFold {
+    flow: FlowKey,
+    /// The produced-index of the oldest message taken, and one past the newest.
+    first_produced: u64,
+    produced: u64,
+    nodes: Vec<ScoutedNode>,
+    /// Each end a node was seated at, by its place in `nodes`, once.
+    ends: Vec<(usize, FlowEnd)>,
+}
+
+/// One node a scouting list named, as [`ScoutingFold`] keeps it.
+#[derive(Debug, Clone)]
+struct ScoutedNode {
+    zid: Vec<u8>,
+    /// The first role a message stated for it.
+    whatami: Option<u8>,
+    first_anchor: usize,
+    last_anchor: usize,
+    locators: Vec<String>,
+    hello: usize,
+    scout: usize,
+}
+
+impl ScoutingFold {
+    /// A fold that has taken nothing, of a list whose oldest message held has
+    /// produced-index `first_produced`.
+    fn new(flow: FlowKey, first_produced: u64) -> Self {
+        Self {
+            flow,
+            first_produced,
+            produced: first_produced,
+            nodes: Vec::new(),
+            ends: Vec::new(),
+        }
+    }
+
+    /// The fold of every message `scouting` holds.
+    fn over(flow: FlowKey, scouting: crate::Scoutings<'_>) -> Self {
+        let mut fold = Self::new(flow, first_produced(&scouting));
+        fold.take_new(scouting);
+        fold
+    }
+
+    /// Whether this fold may go on with `scouting`, the list of `flow` now: the
+    /// same flow, nothing trimmed from its front since, nothing fewer produced.
+    fn continues(&self, flow: &FlowKey, scouting: &crate::Scoutings<'_>) -> bool {
+        self.flow == *flow
+            && self.first_produced == first_produced(scouting)
+            && self.produced <= scouting.produced()
+    }
+
+    /// Take the messages of `scouting` this fold has not taken, and return how
+    /// many were read.
+    fn take_new(&mut self, scouting: crate::Scoutings<'_>) -> u64 {
+        let from = usize::try_from(self.produced - first_produced(&scouting)).unwrap_or(usize::MAX);
+        let mut read = 0;
+        // By position and not by skipping an iterator: each message is decoded
+        // when it is reached, and a skipped one would be decoded too.
+        for index in from..scouting.len() {
+            if let Some(datagram) = scouting.get(index) {
+                self.take(&datagram);
+                read += 1;
+            }
+        }
+        self.produced = scouting.produced();
+        read
+    }
+
+    /// Take one message. See [`NodeCensus::observe_scouting`] for what each
+    /// kind says of its sender.
+    fn take(&mut self, datagram: &crate::ScoutingDatagram) {
+        let Ok(decoded) = &datagram.frame else {
+            return;
+        };
+        // A datagram that holds more than the message read out of it names
+        // nobody, on `named_zid`'s rule for a transport unit.
+        if !datagram.read_whole {
+            return;
+        }
+        let (zid, whatami, kind) = match decoded {
+            wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } => {
+                (body.zid.to_vec(), Some(body.whatami()), Named::Hello)
+            }
+            // The zid is OPTIONAL on a scout: a node may ask without saying
+            // who it is, and `None` is that node declining to be named
+            // rather than an empty identity.
+            wz_session_core::scouting_message::ScoutingFrame::Scout { body, .. } => {
+                match &body.zid {
+                    Some(z) => (z.to_vec(), None, Named::Scout),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        if zid.is_empty() {
+            return;
+        }
+        let node = match self.nodes.iter().position(|n| n.zid == zid) {
+            Some(i) => i,
+            None => {
+                self.nodes.push(ScoutedNode {
+                    zid,
+                    whatami: None,
+                    first_anchor: datagram.packet_index,
+                    last_anchor: datagram.packet_index,
+                    locators: Vec::new(),
+                    hello: 0,
+                    scout: 0,
+                });
+                self.nodes.len() - 1
+            }
+        };
+        // The message names its sender, and the datagram says which end of the
+        // flow it travelled from. The receiver is not named by either message
+        // and is not seated: see the module docs.
+        let end = end_sending(datagram.direction);
+        if !self.ends.contains(&(node, end)) {
+            self.ends.push((node, end));
+        }
+        let scouted = &mut self.nodes[node];
+        scouted.last_anchor = scouted.last_anchor.max(datagram.packet_index);
+        if scouted.whatami.is_none() {
+            scouted.whatami = whatami;
+        }
+        // R311y714 — the locator list, which only a HELLO carries. Taken from
+        // the decoded body rather than from the flow's addresses: see
+        // `ObservedNode::locators` for why the two are not the same claim.
+        if let wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } = decoded {
+            if let Some(list) = body.locators.as_ref() {
+                for loc in list.iter() {
+                    let text = loc.locator.as_str();
+                    if !text.is_empty() && !scouted.locators.iter().any(|l| l == text) {
+                        scouted.locators.push(String::from(text));
+                    }
+                }
+            }
+        }
+        match kind {
+            Named::Hello => scouted.hello += 1,
+            Named::Scout => scouted.scout += 1,
+            _ => {}
+        }
+    }
+
+    /// Fold what this list named into `census`, as its messages one by one would.
+    fn apply_to(&self, census: &mut NodeCensus) {
+        // R2456 — PacketIndex by construction, not by inheritance. See
+        // `NodeCensus::observe_scouting`.
+        let space = census.space_of(crate::AnchorSpace::PacketIndex, Direction::A);
+        let mut at_census = Vec::with_capacity(self.nodes.len());
+        for scouted in &self.nodes {
+            let at = At {
+                anchor: scouted.first_anchor,
+                kind: crate::AnchorSpace::PacketIndex,
+                space,
+            };
+            let idx = census.intern_scouted(&scouted.zid, scouted.whatami, at, &self.flow);
+            let node = &mut census.nodes[idx];
+            if node.space == space {
+                node.last_anchor = node.last_anchor.max(scouted.last_anchor);
+            } else {
+                node.anchors_exact = false;
+            }
+            for text in &scouted.locators {
+                if !node.locators.contains(text) {
+                    node.locators.push(text.clone());
+                }
+            }
+            node.evidence.hello += scouted.hello;
+            node.evidence.scout += scouted.scout;
+            at_census.push(idx);
+        }
+        for &(node, end) in &self.ends {
+            census.record_end(at_census[node], end, &self.flow);
+        }
+    }
+}
+
 /// Which kind of message named a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Named {
@@ -1005,6 +1142,9 @@ pub struct NodeStats {
     pub restarts: u64,
     /// Calls that continued from where the last one stopped.
     pub resumes: u64,
+    /// Scouting messages read, over every datagram flow: each once as its list
+    /// grows, and again only when its list was trimmed at its front.
+    pub scouting_folded: u64,
 }
 
 /// The lists a node census stopped at, and the two ends each had settled.
@@ -1036,9 +1176,12 @@ struct NodeSaved {
 /// node therefore starts the census again; a capture after its handshake, which is
 /// nearly all of one, does not.
 ///
-/// The scouting lists are folded into a copy on every call: they are not message
-/// lists, they are small, and a node first named by a HELLO is interned after
-/// every node the transport named, an order a continuation could not keep.
+/// Each datagram flow's scouting list is folded once, as it grows, into what it
+/// named, and that is applied to a copy of the census at every call: a node first
+/// named by a HELLO is interned after every node the transport named, an order a
+/// fold of the scouting lists into the saved census could not keep. A list
+/// trimmed at its front is folded again over what it holds, as the census of what
+/// is held reads it.
 ///
 /// The result is the census [`nodes`] builds for the same capture, and a test
 /// holds the two equal at every step of a growing one.
@@ -1046,6 +1189,8 @@ struct NodeSaved {
 pub struct NodeMemory {
     saved: Option<NodeSaved>,
     stats: NodeStats,
+    /// One fold per datagram flow, in the dissection's order.
+    scouting: Vec<ScoutingFold>,
 }
 
 impl NodeMemory {
@@ -1118,13 +1263,40 @@ impl NodeMemory {
             .expect("a census was kept above")
             .census
             .clone();
-        for flow in dissection.datagram_flows() {
-            census.observe_scouting(&flow.flow, flow.scouting());
+        self.fold_scouting(dissection);
+        for fold in &self.scouting {
+            fold.apply_to(&mut census);
         }
         // On the COPY, like the scouting above: the saved census holds what the
         // lists said, and the words are what the flows say now.
         census.word_the_lists(dissection);
         census
+    }
+
+    /// Bring the scouting folds up to `dissection`'s datagram flows: each goes on
+    /// with the messages its list produced since the last call, and is folded
+    /// again over what the list holds when the list was trimmed at its front.
+    fn fold_scouting(&mut self, dissection: &crate::Dissection) {
+        let flows = dissection.datagram_flows();
+        self.scouting.truncate(flows.len());
+        for (i, flow) in flows.iter().enumerate() {
+            let scouting = flow.scouting();
+            let continues = self
+                .scouting
+                .get(i)
+                .is_some_and(|fold| fold.continues(&flow.flow, &scouting));
+            if continues {
+                self.stats.scouting_folded += self.scouting[i].take_new(scouting);
+                continue;
+            }
+            let mut fold = ScoutingFold::new(flow.flow, first_produced(&scouting));
+            self.stats.scouting_folded += fold.take_new(scouting);
+            if i < self.scouting.len() {
+                self.scouting[i] = fold;
+            } else {
+                self.scouting.push(fold);
+            }
+        }
     }
 
     fn restart(
@@ -2720,6 +2892,118 @@ pub(crate) mod tests {
             2,
             "three scouts from two sockets are two flows: {:?}",
             census.ends()
+        );
+    }
+
+    /// A NODE MEMORY READS EACH SCOUTING MESSAGE ONCE, AND ITS CENSUS IS THE ONE
+    /// A FRESH FOLD WRITES. Two hosts scout the group and answer each other, so
+    /// the scouting lists of three flows grow in turn and the answers' flow
+    /// seats both ends; at every step the memory's nodes and ends are those of
+    /// [`nodes`] over the same capture, a node's locators and evidence included.
+    #[test]
+    fn a_node_memory_reads_each_scouting_message_once_and_equals_a_fresh_census() {
+        let low_host = [192, 168, 1, 5];
+        let high_host = [192, 168, 1, 9];
+        let one = ["udp/192.168.1.9:7447"];
+        let two = ["udp/192.168.1.9:7447", "tcp/192.168.1.9:7447"];
+        let packets = [
+            udp_packet(
+                low_host,
+                43210,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x01; 4])),
+            ),
+            udp_packet(
+                high_host,
+                7447,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x02; 4])),
+            ),
+            udp_packet(
+                high_host,
+                7447,
+                low_host,
+                43210,
+                &hello_wire(&[0x02; 4], &one),
+            ),
+            udp_packet(
+                low_host,
+                43210,
+                high_host,
+                7447,
+                &hello_wire(&[0x01; 4], &[]),
+            ),
+            udp_packet(
+                low_host,
+                43210,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x01; 4])),
+            ),
+            udp_packet(
+                high_host,
+                7447,
+                low_host,
+                43210,
+                &hello_wire(&[0x02; 4], &two),
+            ),
+        ];
+        let mut d = Dissection::new();
+        let mut memory = NodeMemory::new();
+        for (i, packet) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, packet);
+            let (kept, fresh) = (memory.nodes(&d), nodes(&d));
+            assert_eq!(kept.nodes(), fresh.nodes(), "nodes after packet {i}");
+            assert_eq!(kept.ends(), fresh.ends(), "ends after packet {i}");
+        }
+        assert_eq!(
+            memory.stats().scouting_folded,
+            packets.len() as u64,
+            "each scouting message is read once"
+        );
+        let census = memory.nodes(&d);
+        let high = &census.nodes()[index_of(&census, &[0x02; 4])];
+        assert_eq!(high.locators, two, "{high:?}");
+        assert_eq!(
+            (high.evidence.scout, high.evidence.hello),
+            (1, 2),
+            "{high:?}"
+        );
+        assert_eq!(census.ends().len(), 4, "{:?}", census.ends());
+    }
+
+    /// A SCOUTING LIST TRIMMED AT ITS FRONT IS READ AGAIN OVER WHAT IT HOLDS: the
+    /// census of what is held names only the scouts the ceiling kept, and the
+    /// memory's says the same at every step instead of naming a scout the list
+    /// gave up.
+    #[test]
+    fn a_trimmed_scouting_list_is_read_again_and_still_equals() {
+        let limits = crate::DissectionLimits {
+            frames_per_flow: Some(2),
+            ..crate::DissectionLimits::default()
+        };
+        let mut d = Dissection::with_limits(limits);
+        let mut memory = NodeMemory::new();
+        let host = [192, 168, 1, 5];
+        for i in 0..5u8 {
+            let wire = scout_wire(Some(&[0x10 + i; 4]));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                usize::from(i),
+                &udp_packet(host, 43210, SCOUT_GROUP, 7446, &wire),
+            );
+            let (kept, fresh) = (memory.nodes(&d), nodes(&d));
+            assert_eq!(kept.nodes(), fresh.nodes(), "nodes after scout {i}");
+            assert_eq!(kept.ends(), fresh.ends(), "ends after scout {i}");
+        }
+        let census = memory.nodes(&d);
+        assert_eq!(census.nodes().len(), 2, "{:?}", census.nodes());
+        assert!(
+            memory.stats().scouting_folded > 5,
+            "a trimmed list is read again: {:?}",
+            memory.stats()
         );
     }
 

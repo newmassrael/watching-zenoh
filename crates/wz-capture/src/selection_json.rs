@@ -781,6 +781,12 @@ impl OrderedFold for SelectionFold {
             exchanges.table_so_far(),
         );
     }
+
+    fn settle(&mut self) {
+        if let Some(planes) = self.planes.as_mut() {
+            planes.exchanges.settle();
+        }
+    }
 }
 
 /// The word of a row read by a memory whose planes went on: what was said of a

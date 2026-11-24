@@ -203,8 +203,8 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
 /// The node census is kept the same way ([`crate::node::NodeMemory`]): it is
 /// what the grouping, and so the validity of every other plane's fold, is derived
 /// from, so it has to be current before any of them, and it continues unless a
-/// message that arrived names a node. The scouting lists are folded over a copy
-/// on every call.
+/// message that arrived names a node. Each scouting list is folded once as it
+/// grows, and what it named is applied over a copy at every call.
 ///
 /// A memory whose census is over its HISTORY (`CensusMemory::over_history`, a
 /// live handle's) goes on across a front trim instead of beginning again, so
