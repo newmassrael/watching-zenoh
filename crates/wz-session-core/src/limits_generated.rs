@@ -1858,7 +1858,7 @@ impl SessionLimits {
     /// build is compiled, from the declaration and not from the build's environment.
     pub const PICO_PRESET: Self = Self {
         max_keyexpr_bytes: Limited::build_default(),
-        key_arena_bytes: Limited::preset_or_build(4096, LimitValue::Integer(4096)),
+        key_arena_bytes: Limited::preset_or_build(3960, LimitValue::Integer(3960)),
         max_subscriptions: Limited::build_default(),
         match_memo_slots: Limited::build_default(),
         delivery_lane_events: Limited::build_default(),

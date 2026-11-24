@@ -922,6 +922,28 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     held: crate::reply_hold::HeldReplies<PendingGetHandle, P>,
 }
 
+/// The session's own tokens are the rows of its tokens' table, where the tables keep one: what a
+/// peer's liveliness Interest is answered from, with no second table of them.
+#[cfg(feature = "liveliness-token")]
+impl<F: RowCallbacks, P: Storage> crate::declare::local_token::HeldTokens for SessionTables<F, P> {
+    fn each_token(&self, each: &mut dyn FnMut(u64, &str)) {
+        for (_, row) in self
+            .kept_tokens()
+            .into_iter()
+            .flat_map(|tokens| tokens.iter())
+        {
+            each(u64::from(row.id), text(&row.key.key));
+        }
+    }
+
+    fn keyexpr_for(&self, token_id: u64) -> Option<&str> {
+        self.kept_tokens()?
+            .iter()
+            .find(|(_, row)| u64::from(row.id) == token_id)
+            .map(|(_, row)| text(&row.key.key))
+    }
+}
+
 /// The text of a key a row keeps.
 fn text<Key: KeyBacking>(key: &Key) -> &str {
     key.as_str()

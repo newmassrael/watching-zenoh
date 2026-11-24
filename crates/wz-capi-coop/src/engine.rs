@@ -859,9 +859,11 @@ fn lend_session(
         &resolve_limits(config),
         arena.arena_mut(),
         keys,
+        // The session's tokens are rows of its one table set, which answers a peer's Interest
+        // too, so the observer's own registry of them is lent none.
         ObserverRows {
             tables: plan.tables(),
-            local_tokens: plan.entities().tokens,
+            local_tokens: 0,
         },
         plan.gets(),
         plan.peers(),
@@ -7673,21 +7675,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let form = core.key_form(&wire, retraction.is_some());
         let declared = tables_mut(&core.registry).declare_token(keyexpr, form)?;
         let id = declared.id;
-        if let Err(refused) = core
-            .registry
-            .borrow_mut()
-            .app
-            .local_tokens
-            .register(u64::from(id), keyexpr)
-        {
-            let _ = tables_mut(&core.registry).undeclare_token(declared.handle);
-            return Err(refused.into());
-        }
         core.announce_token(declared.handle);
         // A token takes no traffic of its own, so every group that is told tokens is told it. It is
-        // held before it is announced (the registration above, in the tables a group's
-        // dispatch answers a member's Interest from), so a member that asks right after it
-        // hears the announcement finds it held: the tokio engine's group holds it the same way.
+        // held before it is announced (its row, which a peer's and a group member's Interest are
+        // answered from), so a member that asks right after it hears the announcement finds it
+        // held: the tokio engine's group holds it the same way.
         #[cfg(feature = "group")]
         core.announce_token_to_groups(declared.handle);
         Ok(id)
@@ -7729,11 +7721,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         #[cfg(feature = "group")]
         core.retract_from_groups(id);
-        core.registry
-            .borrow_mut()
-            .app
-            .local_tokens
-            .unregister(u64::from(id));
         // The rows went before the links are told: a send never finds the tables borrowed.
         let key = undeclared.row.as_ref().map(|row| row.key().as_str());
         core.retract_at(token_place, &|actions| {
