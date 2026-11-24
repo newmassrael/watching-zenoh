@@ -706,6 +706,10 @@ impl KeyBacking for KeyRef {
     fn as_str(&self) -> &str {
         KeyRef::as_str(self)
     }
+
+    fn held(&self) -> Option<&KeyRef> {
+        Some(self)
+    }
 }
 
 impl AsRef<str> for KeyRef {

@@ -149,6 +149,21 @@ pub trait QueryView {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         None
     }
+    /// [`Self::encoding`] as its parts, the packed id and the schema's bytes, read where they lie
+    /// when the view read them in the frame the query came in: a holder that keeps the query
+    /// past the call may read the schema there rather than copy it. The provided answer reads
+    /// them off [`Self::encoding`]'s hint, which a holder copies.
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        #[cfg(feature = "alloc")]
+        {
+            self.encoding()
+                .map(|hint| (hint.packed_id, hint.schema.as_deref()))
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            None
+        }
+    }
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
     fn rid(&self) -> crate::wire_id::RequestId;
@@ -210,6 +225,9 @@ pub struct ProvenQuery<'a> {
     pub inner: &'a dyn QueryView,
     /// The zid the link's key proved, or `None` when it proved none.
     pub peer: Option<[u8; 16]>,
+    /// The value's encoding as its parts, where the dispatcher read them in the frame the query
+    /// came in ([`QueryView::encoding_parts`]); `None` hands the inner view's.
+    pub encoding: Option<(u32, Option<&'a [u8]>)>,
 }
 
 impl QueryView for ProvenQuery<'_> {
@@ -240,6 +258,9 @@ impl QueryView for ProvenQuery<'_> {
     #[cfg(feature = "alloc")]
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.inner.encoding()
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding.or_else(|| self.inner.encoding_parts())
     }
     fn rid(&self) -> crate::wire_id::RequestId {
         self.inner.rid()
@@ -967,6 +988,9 @@ impl QueryView for SharedQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.base.encoding()
     }
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.base.encoding_parts()
+    }
     fn rid(&self) -> crate::wire_id::RequestId {
         self.base.rid()
     }
@@ -1171,6 +1195,7 @@ mod tests {
             &ProvenQuery {
                 inner: &view,
                 peer: None,
+                encoding: None,
             },
             &mut out,
         );
@@ -1178,6 +1203,7 @@ mod tests {
             &ProvenQuery {
                 inner: &view,
                 peer: Some([0x2f; 16]),
+                encoding: None,
             },
             &mut out,
         );
@@ -1194,11 +1220,13 @@ mod tests {
         let proven = ProvenQuery {
             inner: &view,
             peer: Some([0x3c; 16]),
+            encoding: None,
         };
         assert_eq!(
             ProvenQuery {
                 inner: &proven,
                 peer: None,
+                encoding: None,
             }
             .requester(),
             Some([0x3c; 16]),
