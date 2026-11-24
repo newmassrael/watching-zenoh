@@ -1756,11 +1756,11 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     /// was refused before it took the Init that carried it
     /// (`SessionLinkActions::link_admission_node`). A session that does not listen keeps no face
     /// for a node apart from its dial, and asks none.
-    fn node(&self) -> Option<Vec<u8>> {
+    fn node(&self) -> Option<SessionZid> {
         #[cfg(feature = "listen")]
         {
             self.actions
-                .peer_zid()
+                .peer_session_zid()
                 .or_else(|| self.actions.link_admission_node())
         }
         #[cfg(not(feature = "listen"))]
