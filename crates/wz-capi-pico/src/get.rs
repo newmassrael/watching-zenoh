@@ -145,8 +145,9 @@ use crate::prelude::*;
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
+use crate::refusal::{refusal_code, Door};
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
-use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
 

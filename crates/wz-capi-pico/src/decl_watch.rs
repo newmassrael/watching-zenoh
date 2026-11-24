@@ -41,9 +41,8 @@ use wz_session_core::session_zid::ZID_MAX;
 
 use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
 use crate::prelude::Box;
-use crate::result::{
-    refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
-};
+use crate::refusal::{refusal_code, Door};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 
 /// The peer declared an entity.

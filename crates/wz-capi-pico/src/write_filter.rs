@@ -56,7 +56,8 @@ use wz_session_core::WhatAmI;
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::matching::FilterListeners;
 use crate::prelude::*;
-use crate::result::{refusal_code, Door, ZResult};
+use crate::refusal::{refusal_code, Door};
+use crate::result::ZResult;
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open

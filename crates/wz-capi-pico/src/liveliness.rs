@@ -49,7 +49,8 @@ use crate::pubsub::{
     z_owned_subscriber_t, CClosure, DeclaredSubscriber, SubscriberKept, SubscriberPlace,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
-use crate::result::{refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::refusal::{refusal_code, Door};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{engine_of, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 

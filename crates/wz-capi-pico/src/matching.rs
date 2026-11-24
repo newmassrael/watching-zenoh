@@ -50,7 +50,8 @@ use crate::ffi::{catch, guarded, CClosure, HeldIn, InCallback};
 use crate::object_slot::{count_in_entity, kept_at, retire_entity, Answering, Kind, Slot};
 use crate::prelude::*;
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
-use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
+use crate::refusal::{refusal_code, Door};
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 use crate::write_filter::WriteFilter;
 use alloc::sync::Arc;
 

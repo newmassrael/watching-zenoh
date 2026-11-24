@@ -1760,7 +1760,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             if let Some(refused) = ext.face_watch_refused() {
                 drop(ext);
                 drive.close();
-                return crate::result::refusal_code(refused, crate::result::Door::Session);
+                return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
             }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2220,7 +2220,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     if let Some(refused) = ext.face_watch_refused() {
         drop(ext);
         drive.close();
-        return crate::result::refusal_code(refused, crate::result::Door::Session);
+        return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
     }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2705,7 +2705,7 @@ pub unsafe extern "C" fn zp_send_join(
         if live == Z_OK {
             if let Some(handle) = session_handle(zs) {
                 if let Err(refused) = engine_ref(handle).send_join_on_groups() {
-                    return crate::result::refusal_code(refused, crate::result::Door::Session);
+                    return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
                 }
             }
         }

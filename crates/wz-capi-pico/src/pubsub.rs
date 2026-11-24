@@ -3402,7 +3402,7 @@ unsafe fn declare_subscriber_in(
     // the closure's drop has run.
     let id = engine
         .declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, sink)
-        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
+        .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
     Ok(DeclaredSubscriber::new(id, key))
 }
 

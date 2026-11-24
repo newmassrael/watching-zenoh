@@ -453,7 +453,7 @@ impl DeclaredKeyexpr {
         // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
         // back with `text`.
         let id = shared.acquire_keyexpr(prefix).map_err(|refused| {
-            crate::result::refusal_code(refused, crate::result::Door::Keyexpr)
+            crate::refusal::refusal_code(refused, crate::refusal::Door::Keyexpr)
         })?;
         Ok(Self {
             literal: text,

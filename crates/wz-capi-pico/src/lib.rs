@@ -667,6 +667,7 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
 pub mod replay_publisher;
