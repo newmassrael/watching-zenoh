@@ -1047,6 +1047,7 @@ name = "wz-capi-port"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "wz-host-sync",
  "wz-session-core",
 ]
 
@@ -1073,6 +1074,14 @@ dependencies = [
  "wz-capi-port",
  "wz-node-time",
  "wz-session-core",
+]
+
+[[package]]
+name = "wz-host-sync"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]
