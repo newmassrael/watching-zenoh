@@ -176,8 +176,9 @@ const REASSEMBLY_ROWS: usize = 2;
 /// The application's tables apart from the session's one table set: liveliness tokens
 /// (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets, and the ends of their legs (`query`).
-const GET_ROWS: usize = 1 + cfg!(feature = "query") as usize;
+/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
+/// nothing holds no table of gets.
+const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
