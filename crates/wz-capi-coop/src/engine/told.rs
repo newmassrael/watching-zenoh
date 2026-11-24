@@ -21,6 +21,7 @@
 
 use super::*;
 use wz_capi_port::told::{ToldBits, ToldKey, ToldPlane};
+use wz_runtime_coop::faces::FacePlaces;
 
 /// A row of a face that went, as its listeners were told it, and those still to be told it left.
 pub(super) struct Tomb {
@@ -204,12 +205,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .transport
             .links
             .places_mut()
-            .iter_mut()
-            .position(|place| {
-                place
-                    .as_mut()
-                    .is_some_and(|face| face.told.tell_went(plane, listener, key))
-            })
+            .placed_mut()
+            .find_map(|(at, face)| face.told.tell_went(plane, listener, key).then_some(at))
         else {
             return false;
         };

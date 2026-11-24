@@ -197,6 +197,7 @@ fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
         OpenStorage {
             memory: &AllocatorMemory,
             held,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -507,7 +508,12 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         );
         assert!(plan.peers().tables <= MAX_FACE_SETS);
         assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
-        assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+        // The index of held sets is a row of a build that takes faces beside the dial role's.
+        if crate::arena::TAKES_FACES {
+            assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+        } else {
+            assert!(plan.rows().all(|laid| laid.part() != "held faces"));
+        }
     }
 }
 
@@ -813,6 +819,7 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
 /// among them, and for the dial role only when it dials; the buffers of a link for each of those
 /// and for each handshake it may take off its port besides; and the application's tables once,
 /// however many faces it holds.
+#[cfg(feature = "listen")]
 #[test]
 fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     let dial = ArenaPlan::of(
@@ -890,6 +897,7 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
 /// a listener that lists an endpoint lays out one link and one face more than the same listener
 /// with none, and a session that lists neither an endpoint nor a port still lays the dial role's
 /// out, as its open tries to dial (and fails for want of an endpoint, as before).
+#[cfg(feature = "listen")]
 #[test]
 fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
     let listener = |endpoints: Vec<String>| CoopConfig {
@@ -978,6 +986,7 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
 /// faces could hold together, each at the bound of one peer: a session of one face lends what that
 /// face's tables held, a listener of four lends four faces' worth, and a session limit lowered at
 /// the open lowers its pool and no other, the faces' own tables untouched.
+#[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could() {
     let one = ArenaPlan::of(
@@ -1120,7 +1129,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 
     let config = CoopConfig {
-        max_faces: 2,
+        max_faces: BESIDE_DIAL,
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
@@ -1179,7 +1188,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
     let plan = ArenaPlan::of(
         &CoopConfig {
-            max_faces: 2,
+            max_faces: BESIDE_DIAL,
             ..client_config()
         },
         &SessionLimits::defaults(),
@@ -1269,6 +1278,7 @@ fn a_build_without_queryables_lays_out_no_row_of_finals() {
 /// than its `MAX_ACCEPT_PENDING`, is refused by the limit's name before any memory is asked, as is
 /// one past the build's value; a session that only dials is not held to the handshakes' bound, as
 /// it takes none. The CONTROL is the same config at the limit, which lays an arena out.
+#[cfg(feature = "listen")]
 #[test]
 fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
     let listen = vec!["tcp/127.0.0.1:0".to_owned()];
@@ -1345,27 +1355,72 @@ fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
     );
 }
 
+/// The faces a test session takes beside its dial role's where the build takes any: none in a
+/// build that holds its dial role's face alone, which refuses one more (`TAKES_FACES`).
+const BESIDE_DIAL: usize = if crate::arena::TAKES_FACES { 2 } else { 0 };
+
+/// A build without `listen` and `group` holds its dial role's face alone: its limits admit no
+/// face beside it, whatever the session states, and a config that asks for one is refused by the
+/// limit's name before any memory is asked. The CONTROL is the same config with none, which lays
+/// out the dial role's one set of face tables.
+///
+/// Turned red by an `admitted_faces` that answers the session's `MAX_FACES` in such a build.
+#[cfg(not(any(feature = "listen", feature = "group")))]
+#[test]
+fn a_session_that_only_dials_is_refused_a_face_beside_its_dial() {
+    use crate::arena::admitted_faces;
+
+    assert_eq!(admitted_faces(&SessionLimits::defaults()), Ok(0));
+    assert_eq!(
+        ArenaPlan::of(
+            &CoopConfig {
+                max_faces: 1,
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        ),
+        Err(ArenaRefused::Limit {
+            limit: ArenaLimit::MaxFaces,
+            why: UnlentRows::OverCeiling {
+                value: 1,
+                ceiling: 0,
+            },
+        })
+    );
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("CONTROL: the dial role's face alone lays an arena out");
+    assert_eq!((plan.peers().tables, plan.peers().sets()), (1, 1));
+    assert!(plan.peers().dial, "the one face is the dial role's");
+}
+
 /// The links' rows are what the open lends first: their tables take exactly the rows' spans, a
 /// receive buffer of the batch and [`LINK_TX_SLOTS`] slots of it for each link the config admits,
 /// and the rest of the plan fills the arena to its size, so the reservation is still the plan.
 #[test]
 fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     let config = CoopConfig {
-        max_faces: 2,
+        max_faces: BESIDE_DIAL,
         ..client_config()
     };
+    let held = 1 + BESIDE_DIAL;
     let batch = usize::from(config.batch_size);
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         row(&plan, "link receive buffers").count,
-        pooled(caps::RX_POOL_BUFFERS, 3),
+        pooled(caps::RX_POOL_BUFFERS, held),
         "the links share a pool, of no more buffers than links"
     );
     assert_eq!(row(&plan, "link receive buffers").entry_bytes, batch);
-    assert_eq!(link_places(&plan), 3);
+    assert_eq!(link_places(&plan), held);
     assert_eq!(
         row(&plan, "link transmit slots").count,
-        pooled(caps::TX_POOL_SLOTS, 3),
+        pooled(caps::TX_POOL_SLOTS, held),
         "the links share a pool of outbound slots, of no more than links"
     );
     assert_eq!(
@@ -1891,7 +1946,9 @@ const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 /// client's arena lends one set of a face's tables and the buffers of one link; a peer's lends the
 /// same rows, with a set and a link for each of the ten faces it admits and a link for its one
 /// handshake: every other row is the client's, item for item, which is the sum
-/// `docs/c-abi-no-heap-pools.md` (section 9.6) states.
+/// `docs/c-abi-no-heap-pools.md` (section 9.6) states. The peer listens, so a build without
+/// `listen` refuses its faces.
+#[cfg(feature = "listen")]
 #[test]
 fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     use crate::arena::{admitted_faces, admitted_handshakes};
@@ -2450,10 +2507,11 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .fold(HeldPlaces::handle(place), |held, kind| {
             held.with_entity(kind, place)
         });
-    // Faces that share their pools, so the table of tokens the faces that went owe is put too.
+    // Faces that share their pools where the build takes faces beside its dial role's, so the
+    // table of tokens the faces that went owe is put too.
     let mut plan = ArenaPlan::of(
         &CoopConfig {
-            max_faces: 3,
+            max_faces: BESIDE_DIAL,
             groups: vec![join; groups],
             ..client_config()
         },
@@ -2531,6 +2589,7 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
         OpenStorage {
             memory: &RECORDED,
             held: HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .err();
@@ -2550,4 +2609,211 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);
     assert!(reserved > 0, "the arena was reserved before the refusal");
     assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
+}
+
+/// A plan laid out when the build is compiled is the plan an open lays out at run time, row by
+/// row: for a client of the build's limits, and for a client of the pico preset that dials as many
+/// endpoints as the build admits, the shape a build of fixed limits lays its arena out by. Turned
+/// red by a row the walk lays out at one time and not the other, or by a number of the config the
+/// shape reads apart from the one the open reads.
+#[test]
+fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
+    use crate::arena::PlanShape;
+    const CLIENT: PlanShape = PlanShape {
+        max_faces: caps::MAX_FACES,
+        accept_pending: caps::MAX_ACCEPT_PENDING,
+        ..PlanShape::dial_only(0, 1024)
+    };
+    const CLIENT_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(CLIENT, &SessionLimits::BUILD);
+    assert_eq!(PlanShape::of(&client_config()), CLIENT);
+    let at_open = ArenaPlan::of(&client_config(), &SessionLimits::defaults());
+    assert!(
+        at_open.is_ok(),
+        "CONTROL: the build lays its own client out"
+    );
+    assert_eq!(CLIENT_PLAN, at_open);
+
+    const PRESET: PlanShape = PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024);
+    const PRESET_PLAN: Result<ArenaPlan, ArenaRefused> =
+        ArenaPlan::planned(PRESET, &SessionLimits::PICO_PRESET);
+    let preset = CoopConfig {
+        endpoints: vec![String::from("udp/127.0.0.1:7447"); caps::MAX_STATIC_CONNECT],
+        max_faces: 0,
+        accept_pending: 0,
+        limits: SessionLimits::PICO_PRESET,
+        ..client_config()
+    };
+    assert_eq!(PlanShape::of(&preset), PRESET);
+    let at_open = ArenaPlan::of(&preset, &SessionLimits::PICO_PRESET);
+    assert!(at_open.is_ok(), "CONTROL: the preset lays a client out");
+    let (Ok(at_build), Ok(at_open)) = (&PRESET_PLAN, &at_open) else {
+        unreachable!("both laid out");
+    };
+    assert!(
+        at_build.rows().eq(at_open.rows()),
+        "row by row: {at_build:?} against {at_open:?}"
+    );
+    assert_eq!(at_build.reserved_bytes(), at_open.reserved_bytes());
+    assert_eq!(PRESET_PLAN.as_ref(), Ok(at_open));
+}
+
+/// The region of a client of the pico preset that dials as many endpoints as the build admits and
+/// advertises a batch of 1024 bytes, as a build of fixed limits lays it out when it is compiled.
+static PRESET_REGION: crate::arena::ArenaRegion = match crate::arena::ArenaRegion::of(
+    crate::arena::PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024),
+    SessionLimits::PICO_PRESET,
+) {
+    Ok(region) => region,
+    Err(_) => panic!("the preset lays a client out"),
+};
+
+/// A client of [`PRESET_REGION`]'s shape and limits that dials `dials` endpoints.
+fn preset_client(dials: usize) -> CoopConfig {
+    CoopConfig {
+        endpoints: vec![String::from("udp/127.0.0.1:7447"); dials],
+        max_faces: 0,
+        limits: SessionLimits::PICO_PRESET,
+        ..client_config()
+    }
+}
+
+/// The pico preset with one limit lowered: limits a region of the preset was not laid out for.
+fn other_than_preset() -> SessionLimits {
+    let preset = SessionLimits::PICO_PRESET;
+    let fewer = if preset.max_subscriptions() == Quota::at_most(2) {
+        1
+    } else {
+        2
+    };
+    let mut other = preset;
+    other
+        .select_max_subscriptions(Quota::at_most(fewer))
+        .expect("the build admits a few subscribers");
+    assert_ne!(other, preset, "CONTROL: the limits differ from the preset");
+    other
+}
+
+/// A region lays out, for an open of a config of its shape and limits, the rows an open of its own
+/// shape lays out from the config, whether the config dials as many endpoints as the region holds
+/// rows for or fewer, and admits handshakes it never takes, listening on nothing. A config that
+/// dials more, listens, advertises another batch, admits another face or holds other limits is
+/// refused under what differs, and is laid out no row. Turned red by a region that lays its rows
+/// out for a config it was not laid out for, or refuses one it was.
+#[test]
+fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
+    let lay_out = |config: &CoopConfig| {
+        let mut plan = ArenaPlan::vacant();
+        PRESET_REGION.lay_out_on(&mut plan, config).map(|()| plan)
+    };
+    let most = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    );
+    assert!(most.is_ok(), "CONTROL: the preset lays a client out");
+    assert_ne!(
+        preset_client(1).accept_pending,
+        0,
+        "CONTROL: the client admits handshakes it never takes"
+    );
+    assert_eq!(lay_out(&preset_client(caps::MAX_STATIC_CONNECT)), most);
+    assert_eq!(lay_out(&preset_client(1)), most);
+    assert_eq!(
+        lay_out(&preset_client(caps::MAX_STATIC_CONNECT + 1)),
+        Err(ArenaRefused::Limit {
+            limit: ArenaLimit::MaxStaticConnect,
+            why: UnlentRows::OverCeiling {
+                value: caps::MAX_STATIC_CONNECT + 1,
+                ceiling: caps::MAX_STATIC_CONNECT,
+            },
+        })
+    );
+    let other_shape = Err(ArenaRefused::Limit {
+        limit: ArenaLimit::ShapeDiffersFromBuild,
+        why: UnlentRows::NoCeiling,
+    });
+    assert_eq!(
+        lay_out(&CoopConfig {
+            batch_size: 512,
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            max_faces: 1,
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            listen: vec![String::from("tcp/127.0.0.1:7447")],
+            ..preset_client(1)
+        }),
+        other_shape
+    );
+    assert_eq!(
+        lay_out(&CoopConfig {
+            limits: other_than_preset(),
+            ..preset_client(1)
+        }),
+        Err(ArenaRefused::Limit {
+            limit: ArenaLimit::LimitsDifferFromBuild,
+            why: UnlentRows::NoCeiling,
+        })
+    );
+}
+
+/// An open whose rows come from a region reserves the arena an open of the same config lays out
+/// from the config, and an open of limits the region was not laid out for is refused before
+/// anything is dialled. Turned red by an open that reads the region apart from the config, or
+/// lends from a region it should refuse.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
+    use crate::arena::{ArenaRegion, HeldPlaces, OpenStorage, PlanFrom, PlanShape};
+
+    let open_by = |config: CoopConfig, region: &'static ArenaRegion| {
+        Engine::open_made_in(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            || config,
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            OpenStorage {
+                memory: &AllocatorMemory,
+                held: HeldPlaces::NONE,
+                plan: PlanFrom::Region(region),
+            },
+        )
+    };
+    let router = Router::start(CatchAll::None);
+    let own: &'static ArenaRegion = Box::leak(Box::new(
+        ArenaRegion::of(PlanShape::of(&config(&router)), config(&router).limits)
+            .expect("the build's limits lay an arena out"),
+    ));
+    let engine = open_by(config(&router), own).expect("the session opens");
+    let plan = host_plan(&config(&router)).expect("the build's limits lay an arena out");
+    assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
+    let probe = Probe::bind();
+    let refused = open_by(
+        CoopConfig {
+            endpoints: vec![probe.endpoint()],
+            open_timeout_ms: 300,
+            limits: other_than_preset(),
+            ..preset_client(0)
+        },
+        &PRESET_REGION,
+    )
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::Arena(ArenaRefused::Limit {
+            limit: ArenaLimit::LimitsDifferFromBuild,
+            why: UnlentRows::NoCeiling,
+        }))
+    );
+    assert!(!probe.reached(), "a refused open dials nothing");
 }

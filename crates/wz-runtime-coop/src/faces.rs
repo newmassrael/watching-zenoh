@@ -516,16 +516,222 @@ const OWING_WAITS: usize = {
     }
 };
 
+/// The faces of a session by their places, as its [`LinkSupervisor`] keeps them: the dial role's
+/// face at the first place, which is never taken out, and the faces taken beside it each at a
+/// place it keeps until it is taken out. The table is made whole when the supervisor is, and none
+/// grows after. A session that only dials holds its dial role's face alone, and its table is one
+/// face with no places to walk; one that takes faces beside it keeps a place for each.
+pub trait FacePlaces<F> {
+    /// Whether the table holds faces beside the dial role's. One that does not holds that face
+    /// alone, so every face it is asked of is read in that role (`LinkSupervisor::read_face`).
+    const TAKES: bool;
+
+    /// The table whose dial role's face is `dial`, at the first place, with `places` places in
+    /// all (one at least) where the table keeps more than one.
+    fn with_dial(dial: F, places: usize) -> Self;
+
+    /// How many places the table has, held or free.
+    fn places(&self) -> usize;
+
+    /// The face at place `at`, while one holds it.
+    fn get(&self, at: usize) -> Option<&F>;
+
+    /// The face at place `at`, while one holds it, to change.
+    fn get_mut(&mut self, at: usize) -> Option<&mut F>;
+
+    /// The faces in the order of their places, the dial role's first.
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a F>
+    where
+        F: 'a;
+
+    /// [`Self::iter`], to change each face.
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
+    where
+        F: 'a;
+
+    /// Each face with its place, in the order of their places.
+    fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
+    where
+        F: 'a;
+
+    /// [`Self::placed`], to change each face.
+    fn placed_mut<'a>(&'a mut self) -> impl Iterator<Item = (usize, &'a mut F)>
+    where
+        F: 'a;
+
+    /// Put `face` at the free place `at`; handed back at the dial role's place, at a place
+    /// another face holds, and past the table.
+    fn put(&mut self, at: usize, face: F) -> Result<(), F>;
+
+    /// Take the face at `at` out, its place free from then; the dial role's is never taken.
+    fn take(&mut self, at: usize) -> Option<F>;
+
+    /// Take out every face but the dial role's.
+    fn keep_dial_only(&mut self);
+}
+
+/// The faces of a session that takes faces beside its dial role's: a place for each, held or
+/// free, made at the open for as many as the session holds at once and never grown.
+pub struct ManyFaces<F> {
+    faces: Vec<Option<F>>,
+}
+
+impl<F> FacePlaces<F> for ManyFaces<F> {
+    const TAKES: bool = true;
+
+    fn with_dial(dial: F, places: usize) -> Self {
+        let places = places.max(1);
+        let mut faces = Vec::with_capacity(places);
+        faces.push(Some(dial));
+        faces.resize_with(places, || None);
+        Self { faces }
+    }
+
+    fn places(&self) -> usize {
+        self.faces.len()
+    }
+
+    fn get(&self, at: usize) -> Option<&F> {
+        self.faces.get(at)?.as_ref()
+    }
+
+    fn get_mut(&mut self, at: usize) -> Option<&mut F> {
+        self.faces.get_mut(at)?.as_mut()
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a F>
+    where
+        F: 'a,
+    {
+        self.faces.iter().flatten()
+    }
+
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
+    where
+        F: 'a,
+    {
+        self.faces.iter_mut().flatten()
+    }
+
+    fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
+    where
+        F: 'a,
+    {
+        self.faces
+            .iter()
+            .enumerate()
+            .filter_map(|(at, face)| Some((at, face.as_ref()?)))
+    }
+
+    fn placed_mut<'a>(&'a mut self) -> impl Iterator<Item = (usize, &'a mut F)>
+    where
+        F: 'a,
+    {
+        self.faces
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(at, face)| Some((at, face.as_mut()?)))
+    }
+
+    fn put(&mut self, at: usize, face: F) -> Result<(), F> {
+        match self.faces.get_mut(at) {
+            Some(place) if at > 0 && place.is_none() => {
+                *place = Some(face);
+                Ok(())
+            }
+            _ => Err(face),
+        }
+    }
+
+    fn take(&mut self, at: usize) -> Option<F> {
+        if at == 0 {
+            return None;
+        }
+        self.faces.get_mut(at)?.take()
+    }
+
+    fn keep_dial_only(&mut self) {
+        for place in self.faces.iter_mut().skip(1) {
+            *place = None;
+        }
+    }
+}
+
+/// The face of a session that only dials: its dial role's face, always held and never taken
+/// out. No face is put beside it, so there is no place to walk, none free and none to look up:
+/// every walk over the faces is one face, and the first place is the only one.
+pub struct OneFace<F> {
+    face: F,
+}
+
+impl<F> FacePlaces<F> for OneFace<F> {
+    const TAKES: bool = false;
+
+    fn with_dial(dial: F, _places: usize) -> Self {
+        Self { face: dial }
+    }
+
+    fn places(&self) -> usize {
+        1
+    }
+
+    fn get(&self, at: usize) -> Option<&F> {
+        (at == 0).then_some(&self.face)
+    }
+
+    fn get_mut(&mut self, at: usize) -> Option<&mut F> {
+        (at == 0).then_some(&mut self.face)
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a F>
+    where
+        F: 'a,
+    {
+        core::iter::once(&self.face)
+    }
+
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
+    where
+        F: 'a,
+    {
+        core::iter::once(&mut self.face)
+    }
+
+    fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
+    where
+        F: 'a,
+    {
+        core::iter::once((0, &self.face))
+    }
+
+    fn placed_mut<'a>(&'a mut self) -> impl Iterator<Item = (usize, &'a mut F)>
+    where
+        F: 'a,
+    {
+        core::iter::once((0, &mut self.face))
+    }
+
+    fn put(&mut self, _at: usize, face: F) -> Result<(), F> {
+        Err(face)
+    }
+
+    fn take(&mut self, _at: usize) -> Option<F> {
+        None
+    }
+
+    fn keep_dial_only(&mut self) {}
+}
+
 /// A session's faces, dials and ports over the network `L`, each face kept as the session's
-/// record `F` at a place of its own. The first place is the dial role's face's, which is never
-/// taken out.
-pub struct LinkSupervisor<L: SessionLinks, F> {
+/// record `F` at a place of its own in the table `P`. The first place is the dial role's face's,
+/// which is never taken out.
+pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     links: L,
     /// The faces by their places, the table made whole at the open for as many places as the
     /// session holds faces at and never grown: a face keeps the place it was put at until it is
     /// taken out, so its place names it for that whole time, and the session names the face's
     /// other tables by the same place. A place no face holds is free for the next.
-    faces: Vec<Option<F>>,
+    faces: P,
     listeners: Vec<Listening<L::Pump>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
     /// and wake a read waits on at once; `None` while a read waits with it, so that a read on
@@ -534,19 +740,17 @@ pub struct LinkSupervisor<L: SessionLinks, F> {
     next_face: FaceId,
 }
 
-impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervisor<L, F> {
+impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlaces<F>>
+    LinkSupervisor<L, F, P>
+{
     /// The faces of a session over `links`, `dial` the dial role's at the first place: `places`
     /// places in all (one at least, the dial role's), each face with a dial under way at most, and
     /// `waits` waits a read makes at once, reserved now. The ports are the open's, taken as it
     /// listens ([`Self::listen`]). Faces taken after are numbered from 1.
     pub fn new(links: L, dial: F, places: usize, waits: usize) -> Self {
-        let places = places.max(1);
-        let mut table = Vec::with_capacity(places);
-        table.push(Some(dial));
-        table.resize_with(places, || None);
         Self {
             links,
-            faces: table,
+            faces: P::with_dial(dial, places),
             listeners: Vec::new(),
             waits: Some(Vec::with_capacity(waits)),
             next_face: 1,
@@ -560,39 +764,43 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
 
     /// How many places the table has, held or free.
     pub fn places(&self) -> usize {
-        self.faces.len()
+        self.faces.places()
+    }
+
+    /// Whether the table holds faces beside the dial role's ([`FacePlaces::TAKES`]): what only
+    /// such a face does, going with its link, and what the dial role's does for a node such a face
+    /// holds, standing by, are never asked of a session whose table holds the dial role's alone.
+    pub fn takes_faces(&self) -> bool {
+        P::TAKES
     }
 
     /// The face at place `at`, while one holds it.
     pub fn face(&self, at: usize) -> Option<&F> {
-        self.faces.get(at)?.as_ref()
+        self.faces.get(at)
     }
 
     /// The face at place `at`, while one holds it, to change what the session keeps of it.
     pub fn face_mut(&mut self, at: usize) -> Option<&mut F> {
-        self.faces.get_mut(at)?.as_mut()
+        self.faces.get_mut(at)
     }
 
     /// The faces in the order of their places, the dial role's first.
     pub fn faces(&self) -> impl Iterator<Item = &F> {
-        self.faces.iter().flatten()
+        self.faces.iter()
     }
 
     /// The faces in the order of their places, to change what the session keeps of each.
     pub fn faces_mut(&mut self) -> impl Iterator<Item = &mut F> {
-        self.faces.iter_mut().flatten()
+        self.faces.iter_mut()
     }
 
     /// Each face with its place, in the order of their places.
     pub fn placed(&self) -> impl Iterator<Item = (usize, &F)> {
-        self.faces
-            .iter()
-            .enumerate()
-            .filter_map(|(at, face)| Some((at, face.as_ref()?)))
+        self.faces.placed()
     }
 
-    /// Every place, with the face that holds it, for a walk that names a face by its place.
-    pub fn places_mut(&mut self) -> &mut [Option<F>] {
+    /// The table of the faces by their places, for a walk that names a face by its place.
+    pub fn places_mut(&mut self) -> &mut P {
         &mut self.faces
     }
 
@@ -614,22 +822,13 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// Put `face` at the free place `at`, which it keeps until it is taken out; handed back at
     /// the dial role's place, at a place another face holds, and past the table.
     pub fn place_face(&mut self, at: usize, face: F) -> Result<(), F> {
-        match self.faces.get_mut(at) {
-            Some(place) if at > 0 && place.is_none() => {
-                *place = Some(face);
-                Ok(())
-            }
-            _ => Err(face),
-        }
+        self.faces.put(at, face)
     }
 
     /// Take the face at `at` out of the table, its place free from then; the dial role's, at the
     /// first, is never taken. No other face moves.
     pub fn take_face(&mut self, at: usize) -> Option<F> {
-        if at == 0 {
-            return None;
-        }
-        self.faces.get_mut(at)?.take()
+        self.faces.take(at)
     }
 
     /// Begin a dial of `to`, which the network answers later.
@@ -733,11 +932,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// since (`Signals`), and the answer of a dial under way, which is asked here and kept for the
     /// link it made. A face past the table reads as one taken besides the dial role's that waits
     /// with no time to dial again. The role is the place's: the first is the dial role's, placed
-    /// by [`Self::new`] and never taken out ([`Self::take_face`]).
+    /// by [`Self::new`] and never taken out ([`Self::take_face`]). A table of the dial role's face
+    /// alone reads every place in that role, and holds no other face to hold a node.
     // Out of line, so its caller reads the role as a value and takes one path for either role.
     #[inline(never)]
     pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
-        let role = if at == 0 {
+        let role = if at == 0 || !P::TAKES {
             FaceRole::Dial
         } else {
             FaceRole::Taken
@@ -766,7 +966,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             None => {}
         }
         if let Phase::Held { node } = &phase {
-            signals.node_held = self.node_is_held(node.as_slice(), id);
+            signals.node_held = P::TAKES && self.node_is_held(node.as_slice(), id);
         }
         FaceRead {
             role,
@@ -879,7 +1079,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         let mut dial_left_ms: Option<u64> = None;
         let mut now = None;
         let mut read_now = || *now.get_or_insert_with(&mut *now_us);
-        for face in self.faces.iter().flatten() {
+        for face in self.faces.iter() {
             // The soonest a face's link is to be looked at again bounds the wait.
             if let Some(wake_us) = face.link().phase().wake_at(&mut read_now) {
                 let left_ms = wake_us.saturating_sub(read_now()).saturating_div(1000);
@@ -992,9 +1192,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                 wire.abort();
             }
         }
-        for place in self.faces.iter_mut().skip(1) {
-            *place = None;
-        }
+        self.faces.keep_dial_only();
     }
 }
 
@@ -1348,6 +1546,31 @@ mod tests {
         assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
         assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
         assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+    }
+
+    /// A table of the dial role's face alone reads every place in that role, so a step of such a
+    /// session never names a face to remove; a dial role's face that stands by finds no node held,
+    /// as no other face is there to hold one. Turned red by a role read off the place in such a
+    /// table.
+    #[test]
+    fn a_table_of_one_face_reads_every_place_in_the_dial_role() {
+        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> = LinkSupervisor::new(
+            Net,
+            TestFace {
+                id: 100,
+                link: Link::Held { zid: held_node() },
+            },
+            2,
+            2,
+        );
+        assert!(!faces.takes_faces());
+        assert!(
+            supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
+            "CONTROL: a table of many faces takes them"
+        );
+        assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
+        assert!(!faces.read_face(0, 100).signals.node_held);
     }
 
     /// A dial that is over is let go of and hands over the endpoint it dialled, its own text
@@ -1848,5 +2071,62 @@ mod tests {
             dial(&faces).link,
             Link::Waiting { at_us: u64::MAX }
         ));
+    }
+
+    /// A table of many faces keeps the dial role's at the first place for good, puts a face at a
+    /// free place only, and walks the held places alone, each with its place.
+    ///
+    /// # Control
+    ///
+    /// A `put` that took the dial role's place, or a `take` that gave it up, reds the first
+    /// assertions; a walk that read the free places reds the `placed` list.
+    #[test]
+    fn a_table_of_many_faces_keeps_each_face_at_its_place() {
+        let mut table = ManyFaces::with_dial(10_u32, 3);
+        assert_eq!(table.places(), 3);
+        assert_eq!(
+            table.put(0, 11),
+            Err(11),
+            "the dial role's place is never put"
+        );
+        assert_eq!(table.take(0), None, "the dial role's face is never taken");
+        assert_eq!(table.put(2, 12), Ok(()));
+        assert_eq!(table.put(2, 13), Err(13), "a held place is not put again");
+        assert_eq!(table.put(3, 14), Err(14), "past the table");
+        assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &10), (2, &12)]);
+        assert_eq!(table.get(1), None, "a free place holds no face");
+        assert_eq!(table.take(2), Some(12));
+        assert_eq!(table.put(1, 15), Ok(()));
+        table.keep_dial_only();
+        assert_eq!(table.iter().collect::<Vec<_>>(), [&10]);
+        assert_eq!(table.places(), 3, "the places stay, free");
+    }
+
+    /// The face of a session that only dials is its dial role's alone, at the one place, whatever
+    /// count of places the open names: nothing is put beside it, it is never taken, and every walk
+    /// reads it once.
+    ///
+    /// # Control
+    ///
+    /// A `get` that answered past the first place, or a `put` that kept its face, reds the
+    /// assertions on place 1.
+    #[test]
+    fn a_table_of_one_face_holds_its_dial_role_alone() {
+        let mut table = OneFace::with_dial(10_u32, 4);
+        assert_eq!(table.places(), 1, "one place, whatever the open counts");
+        assert_eq!(table.get(0), Some(&10));
+        assert_eq!(table.get(1), None, "no place past the first");
+        assert_eq!(table.put(1, 11), Err(11), "no face is put beside it");
+        assert_eq!(table.take(0), None, "the dial role's face is never taken");
+        if let Some(face) = table.get_mut(0) {
+            *face = 12;
+        }
+        table.keep_dial_only();
+        assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &12)]);
+        assert_eq!(table.iter_mut().count(), 1);
+        assert_eq!(
+            table.placed_mut().map(|(at, _)| at).collect::<Vec<_>>(),
+            [0]
+        );
     }
 }

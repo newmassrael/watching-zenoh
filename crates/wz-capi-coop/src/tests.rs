@@ -2199,6 +2199,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::handle(layout),
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2273,6 +2274,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
                 held,
+                plan: crate::arena::PlanFrom::Config,
             },
         )
         .expect("the session opens")
@@ -2359,6 +2361,7 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         OpenStorage {
             memory: &AllocatorMemory,
             held,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2869,7 +2872,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
     );
     let refused = open_with_result(CoopConfig {
         listen: vec![long.clone()],
-        max_faces: 1,
+        max_faces: 0,
         accept_pending: 1,
         ..config(&router)
     });
@@ -2944,6 +2947,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .err();
@@ -2988,6 +2992,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("a listener opens once it is bound");
