@@ -912,7 +912,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     listen: impl IntoIterator<Item = T>,
     entropy: &mut dyn EntropySource,
 ) -> Result<SessionZid, OpenError> {
-    use wz_runtime_coop::session_drive::LinkProto;
+    use wz_runtime_coop::session_drive::{LinkProto, Locator};
     use wz_session_core::zid_derivation::{ListenerFacts, ListenerTransport, RANDOM_BYTES};
     let mut random = [0u8; RANDOM_BYTES];
     entropy
@@ -924,7 +924,10 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = parse_listen_locator(endpoint.as_ref()) else {
+        let Some(at) = parse_listen_locator(endpoint.as_ref())
+            .ok()
+            .and_then(Locator::as_ip)
+        else {
             continue;
         };
         let transport = match at.proto {

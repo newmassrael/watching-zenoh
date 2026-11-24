@@ -655,6 +655,9 @@ pub mod scout_static;
 // distinct from wz-codecs::locator (the wire codec).
 #[cfg(feature = "alloc")]
 pub mod locator;
+// The part of the locator grammar that needs no heap: the span split every leaf shares and the
+// serial leaf, read and written, for the heap profile's leaf above and an engine without a heap.
+pub mod locator_grammar;
 // What an open of a configuration asks of the operating system, for every reader of one
 // (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
 #[cfg(feature = "alloc")]
@@ -677,6 +680,12 @@ pub mod serial_link;
 // charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
+
+// The RFC 6455 pieces of a WebSocket link with no heap and no I/O: the opening handshake, its
+// accept value, the frame header, the mask and the mask keys. The engine with no heap reads and
+// writes its `ws/` links with these. Gated on `transport-link-ws`.
+#[cfg(feature = "transport-link-ws")]
+pub mod ws_link;
 
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +

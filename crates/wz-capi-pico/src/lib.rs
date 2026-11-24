@@ -213,20 +213,27 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's serial lines are the host's ttys (`wz-runtime-posix`'s `serial`), which
+// it opens on Linux and Android; a host without them, and a Zephyr image, whose UARTs no module
+// opens yet, are refused by name rather than by the missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "transport-link-serial",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(any(target_os = "linux", target_os = "android"))
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-serial` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-serial` on the cooperative engine opens the host's ttys, \
+     which `wz-runtime-posix` opens on Linux and Android only, and a Zephyr image has no serial \
+     line in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's serial lines"
 );
 #[cfg(all(
     feature = "transport-link-tls",
@@ -289,7 +296,6 @@ compile_error!(
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-serial",
         feature = "transport-link-tls",
         feature = "transport-link-unixpipe",
         feature = "transport-link-ws"
@@ -297,9 +303,10 @@ compile_error!(
 ))]
 compile_error!(
     "wz-capi-pico: a library has one engine, and this build names `engine-tokio` beside a \
-     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): build the \
-     cooperative library with `--no-default-features` and its features, or the tokio engine's \
-     without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
+     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): the default \
+     features name `engine-coop`, so build the tokio engine's library with \
+     `--no-default-features` and `engine-tokio` with its features (`wz_config.py \
+     --bench-cargo-args tokio` prints them), or the cooperative one without the tokio engine"
 );
 
 // `os-zephyr` is the image's engine and host, and an image has no standard library: a capability

@@ -243,6 +243,16 @@ pub mod session_drive;
 #[cfg(feature = "session-unicast")]
 pub mod locator_text;
 
+/// The session's link over a serial line: the line a platform opens ([`serial_link::SerialOpen`],
+/// [`serial_link::SerialDevice`]) under the session core's serial framing.
+#[cfg(feature = "serial")]
+pub mod serial_link;
+
+/// The session's link over a WebSocket: the stream link under RFC 6455's framing
+/// ([`ws_link::WsFraming`]).
+#[cfg(feature = "ws")]
+pub mod ws_link;
+
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
 /// `input_wait` and `room_wait` methods of the socket traits), and nothing elsewhere.

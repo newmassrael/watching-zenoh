@@ -95,6 +95,10 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # on, and a scouting window's sockets, one for each interface that can carry multicast
 # (`scouting`). The heap profile's: the table and the members are lists the host sizes.
 host-multicast = ["alloc", "dep:log"]
+# The host's ttys as the lines of the cooperative engine's `serial/` links (`serial`:
+# `PosixSerialLine`, set as zenoh-pico's POSIX tty sets one, on Linux and Android). The heap
+# profile's, as the engine's serial links are.
+serial = ["alloc", "wz-runtime-coop/serial"]
 
 [lints]
 workspace = true

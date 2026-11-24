@@ -4,12 +4,15 @@
 //! An endpoint's text read into the [`Locator`] a link is opened towards, and why a text names
 //! none.
 //!
-//! UDP, TCP and TLS over IPv4 or IPv6, by address: a host name is refused as
+//! UDP, TCP and TLS over IPv4 or IPv6, by address (and `ws/`, at the same address, in a build with
+//! WebSocket links, `ws`): a host name is refused as
 //! [`DialRefused::BadAddress`], since a node of this runtime has no resolver, and another scheme,
 //! or upstream's `?metadata` / `#config` parts, as [`DialRefused::Unsupported`]: no link here
 //! honours them, and opening one anyway would quietly drop what the writer asked for. Both are
-//! permanent for the text. Whether a stack carries the protocol or the family is the stack's to
-//! answer when it opens the link; a stack built without IPv6 reads its endpoints with
+//! permanent for the text. A build with serial links (`serial`) reads `serial/` too, with the
+//! `#config` that is that link's own (`wz_session_core::locator_grammar`); without it the scheme
+//! is one more this build does not carry. Whether a stack carries the protocol or the family is
+//! the stack's to answer when it opens the link; a stack built without IPv6 reads its endpoints with
 //! [`parse_locator_for`], so its image holds the IPv4 reader alone.
 //!
 //! Written once for every engine over this runtime: the session shell's dialler and connection
@@ -18,6 +21,10 @@
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::session_drive::{LinkProto, Locator};
+#[cfg(feature = "serial")]
+use crate::session_drive::{SerialLine, SerialLocator, SerialPath};
+#[cfg(feature = "serial")]
+use wz_session_core::locator_grammar::{read_serial_locator, SerialAddress, SerialTextError};
 
 /// Why a dial could not even be attempted. Permanent for this endpoint text in this build, so it
 /// is not retried.
@@ -77,6 +84,21 @@ fn parse_endpoint<const IPV6: bool>(
     endpoint: &str,
     any_port: bool,
 ) -> Result<Locator, DialRefused> {
+    #[cfg(feature = "serial")]
+    if let Some(serial) = serial_endpoint(endpoint) {
+        return serial;
+    }
+    // A WebSocket link is reached at a socket address as a TCP one is
+    // (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`), so its text is
+    // read by the same reader. Upstream's link reads no config key and no metadata, so a `#` or
+    // `?` part (zenoh-pico's `tout` among them) is refused below as on every IP scheme.
+    #[cfg(feature = "ws")]
+    if let Some(rest) = endpoint
+        .strip_prefix(wz_session_core::link::LinkKind::Ws.scheme())
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        return socket_addr::<IPV6>(rest, any_port).map(Locator::ws);
+    }
     let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
         .into_iter()
         .find_map(|proto| {
@@ -86,6 +108,14 @@ fn parse_endpoint<const IPV6: bool>(
     else {
         return Err(DialRefused::Unsupported);
     };
+    socket_addr::<IPV6>(rest, any_port).map(|at| Locator::ip(proto, at))
+}
+
+/// The socket address an IP scheme's text names after its `<scheme>/`, read for a stack that
+/// opens IPv6 links when `IPV6` is true. A port of 0 is taken only where `any_port` says the
+/// stack chooses one.
+#[inline(always)]
+fn socket_addr<const IPV6: bool>(rest: &str, any_port: bool) -> Result<SocketAddr, DialRefused> {
     if rest.bytes().any(|b| b == b'?' || b == b'#') {
         return Err(DialRefused::Unsupported);
     }
@@ -109,7 +139,38 @@ fn parse_endpoint<const IPV6: bool>(
     if at.port() == 0 && !any_port {
         return Err(DialRefused::BadAddress);
     }
-    Ok(Locator { proto, at })
+    Ok(at)
+}
+
+/// A `serial/` endpoint's text read into its locator, or `None` for a text of another scheme. A
+/// line that cannot be read, or a device path longer than a row of the build names
+/// ([`SerialPath`]), is [`DialRefused::BadAddress`]; a `?metadata` span is
+/// [`DialRefused::Unsupported`], as on every other scheme here. A listener reads the same text:
+/// a line has no port for the stack to choose.
+#[cfg(feature = "serial")]
+fn serial_endpoint(endpoint: &str) -> Option<Result<Locator, DialRefused>> {
+    let read = match read_serial_locator(endpoint) {
+        Ok(read) => read,
+        Err(SerialTextError::NotSerialScheme) => return None,
+        Err(SerialTextError::EmptyAddress | SerialTextError::BadNumber(_)) => {
+            return Some(Err(DialRefused::BadAddress))
+        }
+    };
+    if !read.metadata.is_empty() {
+        return Some(Err(DialRefused::Unsupported));
+    }
+    let line = match read.address {
+        SerialAddress::Device(path) => match SerialPath::new(path) {
+            Some(path) => SerialLine::Device(path),
+            None => return Some(Err(DialRefused::BadAddress)),
+        },
+        SerialAddress::Pins { tx, rx } => SerialLine::Pins { tx, rx },
+    };
+    Some(Ok(Locator::Serial(SerialLocator {
+        line,
+        baudrate: read.baudrate,
+        options: read.options,
+    })))
 }
 
 /// `a.b.c.d:port` read as `SocketAddrV4`'s `FromStr` reads it, in one pass over the bytes: four
@@ -668,6 +729,164 @@ mod tests {
                 core::net::Ipv6Addr::LOCALHOST,
                 7447
             ))))
+        );
+    }
+
+    /// A locator read from its text writes that text back, through the one reader and the one
+    /// writer, by either writer (`Locator::text` and `Display`), and its IP form builds the same
+    /// locator again. Turned red by a writer or a reader that drifts from the other.
+    #[test]
+    fn an_ip_locator_is_written_as_it_was_read() {
+        for text in ["udp/127.0.0.1:7447", "tcp/10.0.0.1:80", "tls/[::1]:7447"] {
+            let read = parse_locator(text).expect("a dialable locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            let ip = read.as_ip().expect("an IP locator");
+            std::assert_eq!(Locator::ip(ip.proto, ip.at), read);
+        }
+    }
+
+    /// A WebSocket locator is read at the address a TCP one is, written back under its own scheme
+    /// by either writer, and is no IP locator; a port of 0 is a listener's alone, and a stack
+    /// without IPv6 refuses a bracketed address. Turned red by a `ws/` text read as another kind,
+    /// or by a writer that drifts from the reader.
+    #[cfg(feature = "ws")]
+    #[test]
+    fn a_ws_locator_is_read_at_a_socket_address_and_written_back() {
+        for text in ["ws/127.0.0.1:7447", "ws/[::1]:8080"] {
+            let read = parse_locator(text).expect("a dialable ws locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            std::assert_eq!(read.as_ip(), None, "{text}");
+            std::assert_eq!(parse_listen_locator(text), Ok(read), "{text}");
+        }
+        std::assert_eq!(
+            parse_locator("ws/10.0.0.1:7447").map(Locator::as_ws),
+            Ok(Some(crate::session_drive::WsLocator {
+                at: SocketAddr::from(([10, 0, 0, 1], 7447))
+            }))
+        );
+        std::assert_eq!(
+            parse_listen_locator("ws/0.0.0.0:0"),
+            Ok(Locator::ws(SocketAddr::from(([0, 0, 0, 0], 0))))
+        );
+        std::assert_eq!(
+            parse_locator_for("ws/[::1]:7447", false),
+            Err(DialRefused::Unsupported)
+        );
+    }
+
+    /// What upstream's WebSocket link does not read is refused, never dropped: a config part
+    /// (zenoh-pico's `tout`), a metadata part, a host name, a port of 0 to dial, another scheme
+    /// that starts with the same letters. Turned red by a reader that opens the link and loses
+    /// what the text asked for.
+    #[cfg(feature = "ws")]
+    #[test]
+    fn a_ws_text_upstream_would_not_read_is_refused() {
+        for (text, why) in [
+            ("ws/127.0.0.1:7447#tout=1000", DialRefused::Unsupported),
+            ("ws/127.0.0.1:7447?rel=1", DialRefused::Unsupported),
+            ("ws/router.local:7447", DialRefused::BadAddress),
+            ("ws/127.0.0.1:0", DialRefused::BadAddress),
+            ("ws/", DialRefused::BadAddress),
+            ("wss/127.0.0.1:7447", DialRefused::Unsupported),
+            ("ws127.0.0.1:7447", DialRefused::Unsupported),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+    }
+
+    /// A build without WebSocket links carries no `ws/` scheme: the text is refused as one it
+    /// does not carry, not read as another. Turned red by a `ws` reader that escapes its feature.
+    #[cfg(not(feature = "ws"))]
+    #[test]
+    fn a_build_without_ws_links_refuses_the_scheme() {
+        std::assert_eq!(
+            parse_locator("ws/127.0.0.1:7447"),
+            Err(DialRefused::Unsupported)
+        );
+    }
+
+    /// A serial locator read from its text writes that text back by either writer, to dial and to
+    /// listen on, and is no IP locator. Turned red by a reader or a writer of the serial grammar
+    /// that drifts from the other, or by a serial text read as another kind.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_locator_is_written_as_it_was_read() {
+        for text in [
+            "serial//dev/ttyUSB0#baudrate=115200",
+            "serial/12.13#baudrate=9600",
+            "serial//dev/ttyS1#baudrate=9600;exclusive=false;tout=1000;release_on_close=false",
+        ] {
+            let read = parse_locator(text).expect("a dialable serial locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            std::assert_eq!(read.as_ip(), None, "{text}");
+            std::assert_eq!(parse_listen_locator(text), Ok(read), "{text}");
+        }
+    }
+
+    /// What a serial locator names is read into its parts: the device, the baud rate (upstream's
+    /// 9600 when none is written, and written back then) and the options. Turned red by a reader
+    /// that loses the default or a key.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_locator_is_read_into_its_line_and_rate() {
+        use wz_session_core::locator_grammar::SerialOptions;
+        let read = parse_locator("serial//dev/ttyACM0").expect("no config");
+        let serial = read.as_serial().expect("a serial locator");
+        std::assert_eq!(
+            serial.line,
+            SerialLine::Device(SerialPath::new("/dev/ttyACM0").expect("short"))
+        );
+        std::assert_eq!(serial.baudrate, 9600);
+        std::assert_eq!(serial.options, SerialOptions::UPSTREAM);
+        std::assert_eq!(
+            read.text().finish(),
+            Ok("serial//dev/ttyACM0#baudrate=9600")
+        );
+        let pins = parse_locator("serial/3.4#baudrate=57600;tout=10")
+            .ok()
+            .and_then(Locator::as_serial);
+        std::assert_eq!(
+            pins.map(|serial| (serial.line, serial.baudrate, serial.options.timeout_us)),
+            Some((SerialLine::Pins { tx: 3, rx: 4 }, 57600, 10))
+        );
+    }
+
+    /// A serial text this engine cannot open a line from is refused for good, with the reason:
+    /// no line, a number that is no positive `u32`, a path longer than a row names, and a
+    /// `?metadata` span no link here honours. Turned red by a reader that takes any of them.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_text_that_names_no_line_is_refused() {
+        use crate::session_drive::SERIAL_PATH_LEN;
+        for (text, why) in [
+            ("serial/#baudrate=9600", DialRefused::BadAddress),
+            ("serial//dev/ttyUSB0#baudrate=0", DialRefused::BadAddress),
+            ("serial//dev/ttyUSB0#baudrate=fast", DialRefused::BadAddress),
+            ("serial/0.1#baudrate=9600", DialRefused::BadAddress),
+            (
+                "serial//dev/ttyUSB0?prio=1#baudrate=9600",
+                DialRefused::Unsupported,
+            ),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+        let longest = std::format!("serial//{}", "a".repeat(SERIAL_PATH_LEN - 1));
+        std::assert!(parse_locator(&longest).is_ok(), "{longest}");
+        let past = std::format!("serial//{}", "a".repeat(SERIAL_PATH_LEN));
+        std::assert_eq!(parse_locator(&past), Err(DialRefused::BadAddress));
+    }
+
+    /// A build without serial links refuses a serial text as a scheme it does not carry. Turned
+    /// red by a reader that takes it into another kind of locator.
+    #[cfg(not(feature = "serial"))]
+    #[test]
+    fn a_build_without_serial_links_refuses_a_serial_text() {
+        std::assert_eq!(
+            parse_locator("serial//dev/ttyUSB0#baudrate=115200"),
+            Err(DialRefused::Unsupported)
         );
     }
 

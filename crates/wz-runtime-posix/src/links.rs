@@ -18,6 +18,13 @@ use crate::stream::PosixTcpDial;
 /// `PosixLinks::new(local, PosixTcpDial)`.
 pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;
 
+/// [`PosixLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial and
+/// listener refused as unsupported, and no link over a [`PosixUdpSocket`] made.
+pub type PosixStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+    wz_runtime_coop::udp_link::NoDatagramOf<PosixUdpSocket>,
+    PosixTcpDial,
+>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -357,6 +357,10 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     # `admin_space_roundtrip` target are reached only by that feature.
     "wz-capi-pico|hook|admin-space,transport-link-quic,transport-link-serial,transport-link-tls,\
 transport-link-unixpipe,transport-link-ws|"
+    # The `serial/` link on the cooperative engine, the default one: the host's ttys beside its
+    # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
+    # which names no tty of a host, refused at the dial. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
     # pico's session-local delivery, a row of its own rather than two more features on
     # the row above: with them a session's own put reaches its own subscribers, which
     # every other test of the crate is written against pico's default build NOT doing.
@@ -763,6 +767,9 @@ transport-link-unixpipe,transport-link-ws|"
     # bound and pinned as its keys say, the group transport's room and input over loopback, and a
     # scouting window's sockets asking, reading and waiting.
     "wz-runtime-posix|hook|host-multicast|"
+    # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
+    # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
+    "wz-runtime-posix|hook|serial|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
@@ -867,6 +874,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         reassembly,\
         rx-in-place,\
         scouting-static,\
+        serial,\
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
@@ -874,7 +882,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-batching,\
         transport-keepalive,\
         transport-qos,\
-        udp-listen\
+        udp-listen,\
+        ws\
         |"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
@@ -1005,6 +1014,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         transport-link-raweth,\
         transport-link-serial,\
+        transport-link-ws,\
         transport-lowlatency,\
         transport-multilink,\
         transport-qos,\

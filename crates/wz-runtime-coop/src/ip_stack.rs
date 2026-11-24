@@ -571,24 +571,27 @@ where
     /// carry (a `tls/` dial on links given no secure channel) is [`LinkOpenError::Unsupported`],
     /// before any buffer is claimed; buffers claimed before a refusal go back with it.
     pub fn dial(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
-        match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
                 let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
                 // Port 0 has the stack choose a free one, one per initiator session.
-                let socket = U::bind(dial_bind(self.local, to.at)).map_err(bind_refused::<U>)?;
-                self.shape.place.datagram(socket, Some(to.at), rx, tx)
+                let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
+                self.shape.place.datagram(socket, Some(ip.at), rx, tx)
             }
             LinkProto::Tcp if !D::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tcp => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let socket = self.dial.dial(to.at)?;
+                let socket = self.dial.dial(ip.at)?;
                 self.shape.place.stream(socket, rx, tx)
             }
             LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let channel = self.tls.dial(to.at)?;
+                let channel = self.tls.dial(ip.at)?;
                 self.shape.place.stream(channel, rx, tx)
             }
         }
@@ -681,10 +684,13 @@ where
     /// dial's are, before the connection is begun, and held by the dial until its link is made: a
     /// refused or abandoned dial gives them back.
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
-        match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Tcp if D::CARRIED => {
                 let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let socket = self.dial.dial_started(to.at)?;
+                let socket = self.dial.dial_started(ip.at)?;
                 Ok(IpDial(IpDialing::Tcp(PendingStream {
                     socket: Some(socket),
                     buffers: Some(buffers),
@@ -693,7 +699,7 @@ where
             }
             LinkProto::Tls if L::CARRIED => {
                 let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let channel = self.tls.dial_started(to.at)?;
+                let channel = self.tls.dial_started(ip.at)?;
                 Ok(IpDial(IpDialing::Tls(PendingStream {
                     socket: Some(channel),
                     buffers: Some(buffers),
@@ -712,10 +718,13 @@ where
         &self,
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
-        match at.proto {
+        let Some(ip) = at.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
             LinkProto::Udp if U::CARRIED => {
-                let socket = U::bind(at.at).map_err(bind_refused::<U>)?;
+                let socket = U::bind(ip.at).map_err(bind_refused::<U>)?;
                 // A session that lent its ports a table of datagram slots has the port read into
                 // them, and a port that finds none free to read into is not opened; without the
                 // table the port reads into memory of its own.
@@ -735,14 +744,14 @@ where
                 }))
             }
             LinkProto::Tcp if D::CARRIED => {
-                let listener = self.dial.listen(at.at)?;
+                let listener = self.dial.listen(ip.at)?;
                 Ok(Box::new(IpListener {
                     listener,
                     shape: self.shape,
                 }))
             }
             LinkProto::Tls if L::CARRIED => {
-                let listener = self.tls.listen(at.at)?;
+                let listener = self.tls.listen(ip.at)?;
                 Ok(Box::new(IpTlsListener {
                     listener,
                     shape: self.shape,
@@ -1057,20 +1066,23 @@ where
         to: Locator,
         out: &mut core::mem::MaybeUninit<IpDriver<U, D::Stream, L::Stream>>,
     ) -> Result<(), LinkOpenError> {
-        match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Udp if !U::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
-                out.write(IpDriver::Udp(self.udp.bind_initiator(to.at)?));
+                out.write(IpDriver::Udp(self.udp.bind_initiator(ip.at)?));
             }
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
-                let socket = named(self.dial.dial(to.at)?)?;
+                let socket = named(self.dial.dial(ip.at)?)?;
                 out.write(IpDriver::Tcp(link_over(socket, rx, tx)));
             }
             LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
-                let channel = named(self.tls.dial(to.at)?)?;
+                let channel = named(self.tls.dial(ip.at)?)?;
                 out.write(IpDriver::Tls(link_over(channel, rx, tx)));
             }
         }
@@ -2368,6 +2380,31 @@ mod tests {
             UDP_RX_CAPACITY,
             "and none is larger than the largest datagram"
         );
+    }
+
+    /// Links over a platform's sockets in a build that links no datagram link refuse `udp/` for
+    /// good, to dial, to accept on and to listen on, carry the platform's streams as before, and
+    /// wait with the platform's waits. Turned red by a datagram link made over the absent socket,
+    /// or by a refusal that a later try could lift.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn links_without_their_datagram_link_refuse_udp_and_keep_their_streams() {
+        type Absent = crate::udp_link::NoDatagramOf<Datagrams>;
+        let links = IpLinks::<Absent, Dial>::new(NODE, Dial);
+        assert!(matches!(
+            links.open_initiator(Locator::udp(ROUTER)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(matches!(
+            links.open_acceptor(7447),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(matches!(
+            links.open_listener(Locator::udp(SocketAddr::new(NODE, 0))),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(links.open_initiator(Locator::tcp(ROUTER)).is_ok());
+        let _: <Datagrams as DatagramSocket>::Waits = links.waits();
     }
 
     /// Links lent their session's tables claim every link's buffers there, a dial's and an
