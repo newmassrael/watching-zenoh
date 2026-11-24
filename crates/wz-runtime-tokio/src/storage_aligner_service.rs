@@ -726,10 +726,7 @@ mod tests {
             Some(key),
             payload,
             None,
-            TimestampHint {
-                time: now,
-                zid: vec![0x01],
-            },
+            TimestampHint::new(now, &[0x01]).unwrap(),
         )
         .unwrap();
         Arc::new(Mutex::new(st))
@@ -1017,10 +1014,7 @@ mod tests {
         // Retrieval variant.
         let meta = EventMetadata::delete(
             Some("demo/a".into()),
-            TimestampHint {
-                time: 1,
-                zid: vec![0x01],
-            },
+            TimestampHint::new(1, &[0x01]).unwrap(),
         );
         let attachment = encode_alignment_reply(&AlignmentReply::Retrieval(meta));
         let view = reply_view("@zid/01/9/aligner", &[], Some(&attachment), None);
@@ -1041,10 +1035,7 @@ mod tests {
         // for the driver-side value gating that had matched Put alone.
         let meta = EventMetadata::wildcard(
             Some("demo/wild/**".into()),
-            TimestampHint {
-                time: 1,
-                zid: vec![0x01],
-            },
+            TimestampHint::new(1, &[0x01]).unwrap(),
             Action::WildcardPut("demo/wild/**".into()),
         );
         let attachment = encode_alignment_reply(&AlignmentReply::Retrieval(meta));

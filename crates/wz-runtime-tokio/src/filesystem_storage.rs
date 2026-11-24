@@ -1213,10 +1213,11 @@ fn file_time_timestamp(file: &Path) -> Result<TimestampHint, ReadFailure> {
             "its time is past the NTP64 seconds range",
         ));
     }
-    Ok(TimestampHint {
-        time: Ntp64::from_unix(since.as_secs(), since.subsec_nanos()).as_word(),
-        zid: FILE_TIME_ZID.to_vec(),
-    })
+    Ok(TimestampHint::new(
+        Ntp64::from_unix(since.as_secs(), since.subsec_nanos()).as_word(),
+        &FILE_TIME_ZID,
+    )
+    .expect("the file-time zid is a zid"))
 }
 
 /// `fsync` a directory so an entry created, renamed or removed in it is
@@ -1244,10 +1245,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn ts(time: u64) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![0x01, 0x02, 0x03],
-        }
+        TimestampHint::new(time, &[0x01, 0x02, 0x03]).unwrap()
     }
 
     fn enc() -> Option<EncodingHint> {
@@ -1514,10 +1512,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut s = open(dir.path());
         s.put(Some("k"), b"v1".to_vec(), None, ts(10)).unwrap();
-        let empty_zid = TimestampHint {
-            time: 20,
-            zid: vec![],
-        };
+        let empty_zid = TimestampHint::new(20, &[]).unwrap();
         assert!(s.put(Some("k"), b"v2".to_vec(), None, empty_zid).is_err());
         assert_eq!(payload_of(&s, Some("k")), Some(b"v1".to_vec()));
     }

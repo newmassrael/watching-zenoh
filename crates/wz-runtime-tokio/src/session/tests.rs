@@ -2001,10 +2001,7 @@ fn publish_options_with_metadata_setters_chain() {
     // and pins exactly the field it names, leaving the other
     // four metadata slots untouched.
     let opts = PublishOptions::put()
-        .with_timestamp(TimestampHint {
-            time: 0x1122_3344_5566_7788,
-            zid: vec![0xAA, 0xBB],
-        })
+        .with_timestamp(TimestampHint::new(0x1122_3344_5566_7788, &[0xAA, 0xBB]).unwrap())
         .with_encoding(EncodingHint {
             packed_id: 13,
             schema: Some("application/json".into()),
@@ -2066,10 +2063,8 @@ fn push_metadata_drops_qos_when_feature_off() {
 #[test]
 fn loopback_drops_timestamp_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.timestamp = Some(crate::sample::TimestampHint {
-        time: 0x1122_3344_5566_7788,
-        zid: vec![0xAA],
-    });
+    opts.timestamp =
+        Some(crate::sample::TimestampHint::new(0x1122_3344_5566_7788, &[0xAA]).unwrap());
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.timestamp.is_none(),
@@ -2142,10 +2137,7 @@ fn publish_loopback_propagates_timestamp_to_sample() {
 
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
-        .with_timestamp(TimestampHint {
-            time: 0xDEAD_BEEF,
-            zid: vec![1, 2, 3],
-        });
+        .with_timestamp(TimestampHint::new(0xDEAD_BEEF, &[1, 2, 3]).unwrap());
     let fired = session.publish("home/temp", b"22.5", opts).unwrap();
     assert_eq!(fired, 1);
 
@@ -2288,10 +2280,7 @@ fn timestamp_seen_on(
     });
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
-        .with_timestamp(TimestampHint {
-            time: 0xDEAD_BEEF,
-            zid: vec![1, 2, 3],
-        });
+        .with_timestamp(TimestampHint::new(0xDEAD_BEEF, &[1, 2, 3]).unwrap());
     session.publish("home/temp", b"22.5", opts).unwrap();
     let seen = seen.lock().unwrap();
     seen.clone()
@@ -2667,10 +2656,7 @@ fn publish_loopback_propagates_all_metadata_in_one_chain() {
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
         .with_reliability(Reliability::BestEffort)
-        .with_timestamp(TimestampHint {
-            time: 0x0102_0304,
-            zid: vec![0x11],
-        })
+        .with_timestamp(TimestampHint::new(0x0102_0304, &[0x11]).unwrap())
         .with_encoding(EncodingHint {
             packed_id: 9,
             schema: None,
@@ -2783,10 +2769,7 @@ fn auto_stamp_keeps_the_callers_timestamp() {
             b"22.5",
             PublishOptions::put()
                 .with_locality(Locality::SessionLocal)
-                .with_timestamp(TimestampHint {
-                    time: 0x0102_0304,
-                    zid: vec![0x11],
-                }),
+                .with_timestamp(TimestampHint::new(0x0102_0304, &[0x11]).unwrap()),
         )
         .unwrap();
 
@@ -3116,10 +3099,7 @@ fn publish_aliased_loopback_propagates_metadata_to_sample() {
 
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
-        .with_timestamp(TimestampHint {
-            time: 0xAABB_CCDD,
-            zid: vec![0x42],
-        })
+        .with_timestamp(TimestampHint::new(0xAABB_CCDD, &[0x42]).unwrap())
         .with_attachment(b"aliased-meta");
     let fired = session
         .publish_aliased(7, None, "home/temp", b"x", opts)
@@ -7555,10 +7535,7 @@ fn reply_timestamps_seen_on(
             .queryables
             .register("home/temp", move |_q, responder| {
                 for (payload, time) in versions {
-                    let stamp = TimestampHint {
-                        time: *time,
-                        zid: vec![1, 2, 3],
-                    };
+                    let stamp = TimestampHint::new(*time, &[1, 2, 3]).unwrap();
                     responder
                         .reply_keyed_stamped("home/temp", payload, None, &stamp)
                         .unwrap();
@@ -7673,7 +7650,7 @@ fn stamped_reply_outcome(options: QueryableOptions, time: u64) -> StampedReplyOu
                 writer
                     .lock()
                     .unwrap()
-                    .push(reply.timestamp().map(|t| (t.time, t.zid.clone())));
+                    .push(reply.timestamp().map(|t| (t.time, t.zid.to_vec())));
             },
             |_| {},
         )
@@ -7746,7 +7723,7 @@ fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec
                 writer
                     .lock()
                     .unwrap()
-                    .push(reply.timestamp().map(|t| t.zid.clone()));
+                    .push(reply.timestamp().map(|t| t.zid.to_vec()));
             },
             |_| {},
         )
@@ -15977,10 +15954,7 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
                         "hist/key",
                         b"old",
                         None,
-                        &TimestampHint {
-                            time: 10,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(10, &[0x01]).unwrap(),
                     )
                     .unwrap();
                 responder
@@ -15988,10 +15962,7 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
                         "hist/key",
                         b"new",
                         None,
-                        &TimestampHint {
-                            time: 20,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(20, &[0x01]).unwrap(),
                     )
                     .unwrap();
             })
@@ -16055,10 +16026,7 @@ fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
                         "hist/key",
                         b"old",
                         None,
-                        &TimestampHint {
-                            time: 10,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(10, &[0x01]).unwrap(),
                     )
                     .unwrap();
                 responder
@@ -16066,10 +16034,7 @@ fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
                         "hist/key",
                         b"new",
                         None,
-                        &TimestampHint {
-                            time: 20,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(20, &[0x01]).unwrap(),
                     )
                     .unwrap();
             })
@@ -16125,10 +16090,7 @@ fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() 
                         "hist/key",
                         b"old",
                         None,
-                        &TimestampHint {
-                            time: 10,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(10, &[0x01]).unwrap(),
                     )
                     .unwrap();
                 responder
@@ -16136,10 +16098,7 @@ fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() 
                         "hist/key",
                         b"new",
                         None,
-                        &TimestampHint {
-                            time: 20,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(20, &[0x01]).unwrap(),
                     )
                     .unwrap();
             })
@@ -16197,10 +16156,7 @@ fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
                         "hist/key",
                         b"old",
                         None,
-                        &TimestampHint {
-                            time: 10,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(10, &[0x01]).unwrap(),
                     )
                     .unwrap();
                 responder
@@ -16208,10 +16164,7 @@ fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
                         "hist/key",
                         b"new",
                         None,
-                        &TimestampHint {
-                            time: 20,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(20, &[0x01]).unwrap(),
                     )
                     .unwrap();
             })
@@ -16279,10 +16232,7 @@ fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
                         "hist/key",
                         b"old",
                         None,
-                        &TimestampHint {
-                            time: 10,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(10, &[0x01]).unwrap(),
                     )
                     .unwrap();
                 responder
@@ -16290,10 +16240,7 @@ fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
                         "hist/key",
                         b"new",
                         None,
-                        &TimestampHint {
-                            time: 20,
-                            zid: vec![0x01],
-                        },
+                        &TimestampHint::new(20, &[0x01]).unwrap(),
                     )
                     .unwrap();
             })
@@ -18342,10 +18289,7 @@ fn a_subscription_takes_the_overload_answer_of_the_session_unless_it_says_its_ow
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
     use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
-    let stamp = TimestampHint {
-        time: 0x1234_5678_9abc_def0,
-        zid: vec![1, 2, 3, 4],
-    };
+    let stamp = TimestampHint::new(0x1234_5678_9abc_def0, &[1, 2, 3, 4]).unwrap();
     let encoded = EncodingHint {
         packed_id: 0x2d,
         schema: Some(b"text/plain".to_vec()),

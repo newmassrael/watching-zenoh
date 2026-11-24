@@ -1126,10 +1126,7 @@ mod tests {
     #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]
     fn build_msg_put_with_meta_sets_timestamp_field_and_t_flag() {
-        let ts = TimestampHint {
-            time: 0xDEAD_BEEF_CAFE_BABE,
-            zid: vec![0xAA, 0xBB],
-        };
+        let ts = TimestampHint::new(0xDEAD_BEEF_CAFE_BABE, &[0xAA, 0xBB]).unwrap();
         let put = build_msg_put_with_meta(b"payload", Some(&ts), None, None, None).unwrap();
         assert!(put.timestamp.is_some(), "set_t routes through Option");
         assert_eq!(put.timestamp.as_ref().unwrap().time, 0xDEAD_BEEF_CAFE_BABE);
@@ -1237,10 +1234,7 @@ mod tests {
         // encoding slot — _z_msg_del_t has no encoding field on the
         // wire. This test pins that the API forbids a caller from
         // accidentally attaching encoding to a Del wire form.
-        let ts = TimestampHint {
-            time: 0x0102_0304_0506_0708,
-            zid: vec![0x99],
-        };
+        let ts = TimestampHint::new(0x0102_0304_0506_0708, &[0x99]).unwrap();
         let del = build_msg_del_with_meta(Some(&ts), None, None).unwrap();
         assert!(del.timestamp.is_some());
         assert!(del.t(), "T flag set when Del carries timestamp");
@@ -1804,10 +1798,7 @@ mod tests {
         // Validates that the wire form survives SCE's encode/decode
         // path with every metadata field set, not just that the
         // in-memory Push struct shape is correct.
-        let stamp = TimestampHint {
-            time: 0x1122_3344_5566_7788,
-            zid: vec![0xAA, 0xBB, 0xCC],
-        };
+        let stamp = TimestampHint::new(0x1122_3344_5566_7788, &[0xAA, 0xBB, 0xCC]).unwrap();
         let encoded = EncodingHint {
             packed_id: 5,
             schema: Some("text/plain".into()),
@@ -1893,10 +1884,7 @@ mod tests {
         // Del path: timestamp + source_info + attachment + qos must
         // round-trip; encoding has no parameter slot so the wire form
         // cannot carry it. Mirrors the loopback path's projection.
-        let stamp = TimestampHint {
-            time: 0xAABB_CCDD,
-            zid: vec![0x42],
-        };
+        let stamp = TimestampHint::new(0xAABB_CCDD, &[0x42]).unwrap();
         let encoded = EncodingHint {
             packed_id: 99,
             schema: Some("ignored".into()),

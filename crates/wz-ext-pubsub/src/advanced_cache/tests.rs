@@ -167,10 +167,7 @@ fn answer_from_ring_filters_and_replies() {
             "demo/k",
             vec![sn as u8],
             Some(SourceInfo::new(&[0x07], 9, sn)),
-            TimestampHint {
-                time: 100 + sn as u64,
-                zid: vec![1],
-            },
+            TimestampHint::new(100 + sn as u64, &[1]).unwrap(),
             SampleKind::Put,
         ));
     }
@@ -253,10 +250,7 @@ fn cached_delete_replays_on_the_del_arm() {
                 vec![sn as u8]
             },
             Some(SourceInfo::new(&[0x07], 9, sn)),
-            TimestampHint {
-                time: 100 + sn as u64,
-                zid: vec![1],
-            },
+            TimestampHint::new(100 + sn as u64, &[1]).unwrap(),
             kind,
         ));
     }
@@ -345,10 +339,7 @@ fn recovery_reply_carries_encoding_and_attachment() {
             "demo/k",
             vec![0xAA],
             Some(SourceInfo::new(&[0x07], 9, 0)),
-            TimestampHint {
-                time: 100,
-                zid: vec![1],
-            },
+            TimestampHint::new(100, &[1]).unwrap(),
             SampleKind::Put,
         )
         .with_encoding(Some(enc.clone()))
@@ -360,10 +351,7 @@ fn recovery_reply_carries_encoding_and_attachment() {
         "demo/k",
         vec![0xBB],
         Some(SourceInfo::new(&[0x07], 9, 1)),
-        TimestampHint {
-            time: 101,
-            zid: vec![1],
-        },
+        TimestampHint::new(101, &[1]).unwrap(),
         SampleKind::Put,
     ));
     // sn 2: a DELETE. Carries neither by construction (the wire's rule).
@@ -371,10 +359,7 @@ fn recovery_reply_carries_encoding_and_attachment() {
         "demo/k",
         Vec::new(),
         Some(SourceInfo::new(&[0x07], 9, 2)),
-        TimestampHint {
-            time: 102,
-            zid: vec![1],
-        },
+        TimestampHint::new(102, &[1]).unwrap(),
         SampleKind::Del,
     ));
 
@@ -484,10 +469,7 @@ fn answer_from_ring_applies_time_filter() {
             "demo/k",
             vec![i as u8],
             Some(SourceInfo::new(&[0x07], 9, i as u32)),
-            TimestampHint {
-                time: secs << 32,
-                zid: vec![1],
-            },
+            TimestampHint::new(secs << 32, &[1]).unwrap(),
             SampleKind::Put,
         ));
     }
@@ -527,10 +509,7 @@ fn the_query_handler_reads_now_from_the_host_and_from_nothing_else() {
             "demo/k",
             vec![i as u8],
             None,
-            TimestampHint {
-                time: secs << 32,
-                zid: vec![1],
-            },
+            TimestampHint::new(secs << 32, &[1]).unwrap(),
             SampleKind::Put,
         ));
     }
@@ -590,10 +569,7 @@ fn the_cache_replies_on_its_own_qos_not_the_querys() {
                 vec![sn as u8]
             },
             Some(SourceInfo::new(&[0x07], 9, sn)),
-            TimestampHint {
-                time: 100 + sn as u64,
-                zid: vec![1],
-            },
+            TimestampHint::new(100 + sn as u64, &[1]).unwrap(),
             kind,
         ));
     }

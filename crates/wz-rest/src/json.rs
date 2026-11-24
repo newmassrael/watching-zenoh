@@ -494,10 +494,7 @@ mod tests {
     #[test]
     fn timestamp_json_renders_zenoh_display() {
         assert_eq!(timestamp_json(None), "null");
-        let ts = TimestampHint {
-            time: 7669276098242084704,
-            zid: vec![0x1a, 0x2b, 0x3c],
-        };
+        let ts = TimestampHint::new(7669276098242084704, &[0x1a, 0x2b, 0x3c]).unwrap();
         assert_eq!(timestamp_json(Some(&ts)), "\"7669276098242084704/3c2b1a\"");
     }
 

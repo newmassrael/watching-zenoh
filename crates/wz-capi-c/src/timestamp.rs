@@ -90,10 +90,8 @@ impl z_timestamp_t {
             .iter()
             .rposition(|b| *b != 0)
             .map_or(0, |last| last + 1);
-        wz_runtime_tokio::sample::TimestampHint {
-            time: self._time,
-            zid: self._id[..end].to_vec(),
-        }
+        wz_runtime_tokio::sample::TimestampHint::new(self._time, &self._id[..end])
+            .expect("a z_id_t is sixteen bytes")
     }
 }
 
@@ -226,12 +224,11 @@ mod tests {
     #[test]
     fn a_hint_round_trips_through_the_c_struct_at_both_zid_widths() {
         for width in [16usize, 12, 8, 1] {
-            let hint = wz_runtime_tokio::sample::TimestampHint {
-                time: 0x0000_1234_8000_0000,
-                // Non-zero in the LAST byte, so the trailing-zero trim cannot
-                // shorten a value that is genuinely `width` long.
-                zid: (1..=width as u8).collect(),
-            };
+            // Non-zero in the LAST byte, so the trailing-zero trim cannot
+            // shorten a value that is genuinely `width` long.
+            let zid: Vec<u8> = (1..=width as u8).collect();
+            let hint =
+                wz_runtime_tokio::sample::TimestampHint::new(0x0000_1234_8000_0000, &zid).unwrap();
             let back = z_timestamp_t::from_hint(&hint).to_hint();
             assert_eq!(back, hint, "round trip failed at zid width {width}");
         }

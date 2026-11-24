@@ -919,10 +919,7 @@ mod tests {
                             &ke,
                             &encode_member(&Member::new(mid)),
                             None,
-                            &TimestampHint {
-                                time,
-                                zid: vec![0x7Au8],
-                            },
+                            &TimestampHint::new(time, &[0x7Au8]).unwrap(),
                         )
                         .unwrap();
                     }

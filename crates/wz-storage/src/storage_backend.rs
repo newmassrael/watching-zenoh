@@ -468,10 +468,7 @@ mod tests {
     use alloc::vec;
 
     fn ts(time: u64) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![0x01],
-        }
+        TimestampHint::new(time, &[0x01]).unwrap()
     }
 
     fn enc() -> Option<EncodingHint> {

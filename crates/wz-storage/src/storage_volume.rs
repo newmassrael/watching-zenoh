@@ -255,10 +255,7 @@ mod tests {
     use wz_session_core::sample::TimestampHint;
 
     fn ts(time: u64) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![0x01],
-        }
+        TimestampHint::new(time, &[0x01]).unwrap()
     }
 
     #[test]

@@ -749,10 +749,7 @@ mod forward_stamp {
     /// A Put carrying `time` paired with `zid`.
     #[cfg(feature = "time-hlc")]
     fn stamped_put(time: u64, zid: &[u8]) -> wz_session_core::wire::PushOwned {
-        let stamp = wz_session_core::sample::TimestampHint {
-            time,
-            zid: zid.to_vec(),
-        };
+        let stamp = wz_session_core::sample::TimestampHint::new(time, &zid).unwrap();
         let meta = wz_session_core::metadata::PushMetadata {
             timestamp: Some(&stamp),
             ..Default::default()
@@ -930,10 +927,7 @@ mod forward_stamp {
             &RuntimeLimits::BUILD,
         );
         let mut push = build_push_del_literal("demo/hlc").expect("build del");
-        let given = wz_session_core::sample::TimestampHint {
-            time: 1u64 << 40,
-            zid: vec![0xB2],
-        };
+        let given = wz_session_core::sample::TimestampHint::new(1u64 << 40, &[0xB2]).unwrap();
         set_publication_timestamp(&mut push, &given).expect("sets");
         let before = push.clone();
         node.treat_own_timestamp(&mut push);

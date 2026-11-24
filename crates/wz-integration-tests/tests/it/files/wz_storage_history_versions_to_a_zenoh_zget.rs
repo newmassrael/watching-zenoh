@@ -255,10 +255,7 @@ where
                 Some(QUERY_KEY),
                 value.as_bytes().to_vec(),
                 None,
-                TimestampHint {
-                    time,
-                    zid: vec![0x02],
-                },
+                TimestampHint::new(time, &[0x02]).unwrap(),
             )
             .expect("the in-memory backend commits");
         assert!(

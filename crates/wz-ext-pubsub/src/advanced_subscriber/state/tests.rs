@@ -91,10 +91,7 @@ fn sequenced(sn: u32, v: u8) -> Sample {
 #[cfg(feature = "advanced-history")]
 fn timestamped(time: u64, v: u8) -> Sample {
     let mut s = Sample::new_put("demo/data", vec![v]);
-    s.timestamp = Some(wz_session_core::sample::TimestampHint {
-        time,
-        zid: vec![0x02u8],
-    });
+    s.timestamp = Some(wz_session_core::sample::TimestampHint::new(time, &[0x02u8]).unwrap());
     s
 }
 

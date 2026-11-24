@@ -173,10 +173,7 @@ async fn wz_multi_storage_host_serves_both_storages_to_a_pico_zget() {
             Some(key),
             value.as_bytes().to_vec(),
             None,
-            TimestampHint {
-                time: 1,
-                zid: vec![0x03],
-            },
+            TimestampHint::new(1, &[0x03]).unwrap(),
         );
     }
 

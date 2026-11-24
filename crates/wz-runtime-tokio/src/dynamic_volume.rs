@@ -533,10 +533,8 @@ unsafe extern "C" fn mirror_sink(ctx: *mut c_void, entry: *const StoredEntry) {
         StoredData {
             payload,
             encoding,
-            timestamp: TimestampHint {
-                time: e.ts_time,
-                zid,
-            },
+            timestamp: TimestampHint::new(e.ts_time, &zid)
+                .expect("a stored timestamp's zid is at most sixteen bytes"),
         },
     );
 }
@@ -828,10 +826,7 @@ mod tests {
     }
 
     fn ts(time: u64) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![0xAB, 0xCD],
-        }
+        TimestampHint::new(time, &[0xAB, 0xCD]).unwrap()
     }
 
     #[test]
@@ -1043,10 +1038,7 @@ mod tests {
                         packed_id: 0x2B,
                         schema: Some(b"application/json".to_vec()),
                     }),
-                    TimestampHint {
-                        time: 0xDEAD_BEEF,
-                        zid: vec![1, 2, 3, 4],
-                    },
+                    TimestampHint::new(0xDEAD_BEEF, &[1, 2, 3, 4]).unwrap(),
                 )
                 .unwrap();
         }

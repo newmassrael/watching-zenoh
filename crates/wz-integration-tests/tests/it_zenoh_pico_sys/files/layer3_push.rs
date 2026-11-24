@@ -198,10 +198,7 @@ fn layer3_push_with_timestamp_and_attachment_byte_equivalent() {
     const TS_TIME: u64 = 0x0102_0304_0506_0708;
     const TS_ZID: &[u8] = &[0xAA, 0xBB, 0xCC];
 
-    let stamp = TimestampHint {
-        time: TS_TIME,
-        zid: TS_ZID.to_vec(),
-    };
+    let stamp = TimestampHint::new(TS_TIME, &TS_ZID).unwrap();
     let owned = build_push_literal_with_meta(
         KEYEXPR,
         PAYLOAD,
