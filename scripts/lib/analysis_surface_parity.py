@@ -1003,6 +1003,17 @@ ONLY_CAPI = {
         "and `--select` reads it as every door does.",
         (),
     ),
+    # (ABI 65) -- the binder with a zone rule that goes forward and back. Filed
+    # in the round that added the symbol.
+    "a zone rule's offsets, written onto a selector's dates and clock times": (
+        "wz_dissect_selector_bind_in_tz",
+        "DELIBERATE. A `time` value with a POSIX TZ rule in brackets is read by "
+        "both surfaces, through the one parser. The door is for a list whose zone "
+        "is a setting the reader chose; a person at the command line types the "
+        "rule or the offset into the literal, and `--select` reads it as every "
+        "door does.",
+        (),
+    ),
     # (ABI 59) -- the same values, bounded to a window of sequence numbers.
     # Filed in the round that added the symbol.
     "a WINDOW of the typed values of a few payload field paths after a cursor": (

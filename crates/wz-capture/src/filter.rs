@@ -46,7 +46,7 @@
 //! | `dir` | `a` / `b`, either case | `==` `!=` | never |
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
-//! | `time` | an integer, ms since the Unix epoch; an ISO 8601 date, with a clock time and an offset or without; a clock time alone, on the capture's day | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock; for a clock time alone, also the plane was not told the origin |
+//! | `time` | an integer, ms since the Unix epoch; an ISO 8601 date, with a clock time and an offset or without; a clock time alone, on the capture's day; a date or a clock time with a POSIX TZ rule in brackets | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock; for a clock time alone, also the plane was not told the origin, or its rule skips or repeats it on the capture's day |
 //! | `elapsed` | an interval since the capture began: an integer of ms, or a number and a unit (`250ms`, `1.5s`) | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
 //! | `offset` | an integer, bytes into the framing unit | `==` `!=` `<` `<=` `>` `>=` | never — every record was walked out of a unit |
 //! | `delay` | an interval, as `elapsed` writes one, from the source's stamp to arrival | `==` `!=` `<` `<=` `>` `>=` | no source clock, no arrival clock, or the source's clock is ahead |
@@ -105,9 +105,17 @@
 //! capture of an afternoon. A literal with no offset is read in UTC; a consumer
 //! that shows times in another zone hands its offset to the binder
 //! ([`crate::filter::bind_json_in_zone`]), which writes it onto every such
-//! literal, so no door is told a zone. `elapsed`, `delay`, `first_reply` and
-//! `completion` take a number and a unit (`250ms`, `1.5s`, `2min`) that comes
-//! to a whole number of milliseconds. `filter::clock` has the rules.
+//! literal, so no door is told a zone. A zone that changes its clock is a POSIX
+//! TZ rule written in brackets after the time, inside quotes
+//! (`"12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`): a date is read at the offset the
+//! rule puts in force then, and refused where the clock skips it or shows it
+//! twice; a clock time is read on the capture's day at the offset in force
+//! there, and is undecided on a day that skips or repeats it. The binder that
+//! takes such a rule ([`crate::filter::bind_json_in_tz`]) writes the offset
+//! onto a date and the rule onto a clock time. `elapsed`, `delay`,
+//! `first_reply` and `completion` take a number and a unit (`250ms`, `1.5s`,
+//! `2min`) that comes to a whole number of milliseconds. `filter::clock` and
+//! `filter::tz` have the rules.
 //!
 //! ## `zids` and `session` name the nodes at BOTH ends
 //!
@@ -346,6 +354,7 @@ use crate::field_path::{FieldPath, PathKind, PathRefusal, PathTest};
 use crate::pattern::{Pattern, PatternRefusal};
 
 mod clock;
+mod tz;
 
 /// Which counter a record moves — the record's kind as a filter can ask about
 /// it.
@@ -1115,6 +1124,37 @@ pub fn selector_fields_json() -> String {
     out
 }
 
+/// The clock a clock-time term is read on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockZone {
+    /// A clock this many milliseconds ahead of UTC all year.
+    Fixed(i64),
+    /// A clock that goes forward and back as a POSIX TZ rule says (`tz`).
+    Rule(tz::ZoneRule),
+}
+
+impl ClockZone {
+    /// The clock `rule` keeps: one offset where it never changes.
+    fn of(rule: tz::ZoneRule) -> Self {
+        match rule.fixed_east_ms() {
+            Some(east_ms) => Self::Fixed(east_ms),
+            None => Self::Rule(rule),
+        }
+    }
+}
+
+/// Where a `time` value written with no offset sits in the selector's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Unzoned {
+    /// The value's first byte, its opening quote for a quoted one.
+    start: usize,
+    /// One past the value's last byte, its closing quote included.
+    end: usize,
+    /// Where an offset is written: after the value's last character, inside
+    /// its quotes for a quoted one.
+    insert_at: usize,
+}
+
 /// One comparison, already validated against its field's admissible operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Term {
@@ -1158,22 +1198,22 @@ enum Term {
         value: u64,
     },
     /// An instant in milliseconds since the Unix epoch: an integer, or a date
-    /// read at its offset (`clock`). `unzoned_at` is the byte a binder
-    /// writes an offset at, for a date written with none.
+    /// read at its offset or its zone rule (`clock`, `tz`). `unzoned` is
+    /// where a date written with neither sits, for a binder that zones it.
     Time {
         op: Op,
         value: u64,
-        unzoned_at: Option<usize>,
+        unzoned: Option<Unzoned>,
     },
     /// A clock time with no date, milliseconds after the midnight of the clock
-    /// `offset_ms` ahead of UTC: the instant is that time on the day the clock
-    /// reads the capture's first instant in (`clock::anchor`).
-    /// `unzoned_at` as for `Term::Time`.
+    /// `zone` keeps: the instant is that time on the day the clock reads the
+    /// capture's first instant in (`clock::anchor`, `tz::anchor_in`).
+    /// `unzoned` as for `Term::Time`.
     Clock {
         op: Op,
         of_day_ms: u64,
-        offset_ms: i64,
-        unzoned_at: Option<usize>,
+        zone: ClockZone,
+        unzoned: Option<Unzoned>,
     },
     /// Either end of the record is this node: the sender (`zid`) or the
     /// receiver. `!=` is built as the negation.
@@ -1627,14 +1667,16 @@ impl Term {
             // A clock time is a day's time until the capture says which day,
             // and the capture's first instant is the record's less its elapsed
             // time: undecidable exactly where `time` or `elapsed` is.
+            // A clock time in a zone that changes its clock is undecided on a
+            // day that skips or repeats it, as on a capture with no clock.
             Self::Clock {
                 op,
                 of_day_ms,
-                offset_ms,
+                zone,
                 ..
             } => match (
                 record.observed_at_ms,
-                clock_instant(record, *of_day_ms, *offset_ms),
+                clock_instant(record, *of_day_ms, zone),
             ) {
                 (Some(at), Some(instant)) => Truth::of(op.apply(at, instant)),
                 _ => Truth::Unknown,
@@ -1877,21 +1919,27 @@ fn same_node(a: &[u8], b: &[u8]) -> bool {
 /// The instant a clock-time term compares the record's own with: the clock time
 /// on the day the capture began, whose first instant is the record's instant
 /// less its elapsed time.
-fn clock_instant(record: &RecordView<'_>, of_day_ms: u64, offset_ms: i64) -> Option<u64> {
+fn clock_instant(record: &RecordView<'_>, of_day_ms: u64, zone: &ClockZone) -> Option<u64> {
     let origin = record.observed_at_ms?.checked_sub(record.elapsed_ms?)?;
-    clock::anchor(origin, of_day_ms, offset_ms)
+    match zone {
+        ClockZone::Fixed(offset_ms) => clock::anchor(origin, of_day_ms, *offset_ms),
+        ClockZone::Rule(rule) => tz::anchor_in(origin, of_day_ms, rule),
+    }
 }
 
 /// A `time` term: milliseconds since the Unix epoch, a date with or without a
-/// clock time, or a clock time alone. `insert_at` is where an offset goes in
-/// the text of a value written with none.
-fn time_term(op: Op, value: &str, at: usize, insert_at: usize) -> Result<Term, FilterError> {
+/// clock time, or a clock time alone, each with an offset, a zone rule in
+/// brackets, or neither. `place` is where the value sits in the text.
+fn time_term(op: Op, value: &str, at: usize, place: Unzoned) -> Result<Term, FilterError> {
     if reads_as_integer(value) {
         return Ok(Term::Time {
             op,
             value: integer(value, at)?,
-            unzoned_at: None,
+            unzoned: None,
         });
+    }
+    if let Some((time, rule)) = tz::bracketed(value) {
+        return time_in_rule(op, time, rule, value, at);
     }
     let refused = || FilterError {
         at,
@@ -1900,12 +1948,12 @@ fn time_term(op: Op, value: &str, at: usize, insert_at: usize) -> Result<Term, F
             value: value.to_string(),
         },
     };
-    let unzoned_at = |zoned: bool| (!zoned).then_some(insert_at);
+    let unzoned = |zoned: bool| (!zoned).then_some(place);
     Ok(match clock::time_literal(value).ok_or_else(refused)? {
         clock::TimeLiteral::Instant { ms, zoned } => Term::Time {
             op,
             value: ms,
-            unzoned_at: unzoned_at(zoned),
+            unzoned: unzoned(zoned),
         },
         clock::TimeLiteral::Clock {
             of_day_ms,
@@ -1914,10 +1962,63 @@ fn time_term(op: Op, value: &str, at: usize, insert_at: usize) -> Result<Term, F
         } => Term::Clock {
             op,
             of_day_ms,
-            offset_ms,
-            unzoned_at: unzoned_at(zoned),
+            zone: ClockZone::Fixed(offset_ms),
+            unzoned: unzoned(zoned),
         },
     })
+}
+
+/// A `time` value `value`, written as the time `time` and the zone rule
+/// `rule` in brackets after it. A date is read at the offset the rule puts in
+/// force at that local time, and refused where the rule's clock skips it or
+/// shows it twice; a clock time keeps the rule, for the day a capture gives it.
+/// A time that also carries an offset names two zones and is refused.
+fn time_in_rule(
+    op: Op,
+    time: &str,
+    rule: &str,
+    value: &str,
+    at: usize,
+) -> Result<Term, FilterError> {
+    let refusal = |kind| FilterError { at, kind };
+    let rule = tz::ZoneRule::parse(rule).map_err(|e| {
+        refusal(FilterErrorKind::BadZone {
+            value: value.to_string(),
+            why: e.to_string(),
+        })
+    })?;
+    let not_a_time = || {
+        refusal(FilterErrorKind::UnknownValue {
+            field: "time",
+            value: value.to_string(),
+        })
+    };
+    match clock::time_literal(time).ok_or_else(not_a_time)? {
+        clock::TimeLiteral::Instant { zoned: true, .. }
+        | clock::TimeLiteral::Clock { zoned: true, .. } => Err(not_a_time()),
+        clock::TimeLiteral::Instant { ms, .. } => {
+            let local = i64::try_from(ms).map_err(|_| not_a_time())?;
+            match rule.resolve(local) {
+                tz::Local::One(east_ms) => Ok(Term::Time {
+                    op,
+                    value: u64::try_from(local - east_ms).map_err(|_| not_a_time())?,
+                    unzoned: None,
+                }),
+                tz::Local::Skipped => Err(refusal(FilterErrorKind::SkippedLocalTime {
+                    value: value.to_string(),
+                })),
+                tz::Local::Repeated => Err(refusal(FilterErrorKind::RepeatedLocalTime {
+                    value: value.to_string(),
+                })),
+            }
+        }
+        clock::TimeLiteral::Clock { of_day_ms, .. } => Ok(Term::Clock {
+            op,
+            of_day_ms,
+            zone: ClockZone::of(rule),
+            unzoned: None,
+        }),
+    }
 }
 
 /// An interval of `field`: an integer of milliseconds, or a number and a unit
@@ -2534,21 +2635,25 @@ impl Node {
         }
     }
 
-    /// Every place a binder writes an offset at: the end of each `time` value
-    /// written with none.
-    fn unzoned_times(&self, out: &mut Vec<usize>) {
+    /// Every `time` value written with no offset and no zone rule: what a
+    /// binder writes a zone onto.
+    fn unzoned_times(&self, out: &mut Vec<UnzonedTime>) {
         match self {
             Self::Any | Self::Ambiguous => {}
             Self::Or(nodes) | Self::And(nodes) => nodes.iter().for_each(|n| n.unzoned_times(out)),
             Self::Not(inner) => inner.unzoned_times(out),
             Self::Term(Term::Time {
-                unzoned_at: Some(at),
+                value,
+                unzoned: Some(place),
                 ..
-            })
-            | Self::Term(Term::Clock {
-                unzoned_at: Some(at),
+            }) => out.push(UnzonedTime::Date {
+                local_ms: *value,
+                place: *place,
+            }),
+            Self::Term(Term::Clock {
+                unzoned: Some(place),
                 ..
-            }) => out.push(*at),
+            }) => out.push(UnzonedTime::Clock { place: *place }),
             Self::Term(_) => {}
         }
     }
@@ -2942,6 +3047,15 @@ pub enum FilterErrorKind {
     UnclosedList,
     /// `in {}`: a list with nothing to be in.
     EmptyList,
+    /// A `time` value with a zone rule in brackets the rule grammar refuses:
+    /// the value, and why.
+    BadZone { value: String, why: String },
+    /// A date with a zone rule that the rule's clock skips where it goes
+    /// forward, so no instant shows it.
+    SkippedLocalTime { value: String },
+    /// A date with a zone rule that the rule's clock shows twice where it goes
+    /// back, so it names two instants.
+    RepeatedLocalTime { value: String },
 }
 
 impl fmt::Display for FilterError {
@@ -3001,6 +3115,19 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
             }
+            FilterErrorKind::BadZone { value, why } => {
+                write!(f, "time does not admit the value {value:?}: {why}")
+            }
+            FilterErrorKind::SkippedLocalTime { value } => write!(
+                f,
+                "{value:?} is a local time its zone skips where the clock goes forward, so no \
+                 instant shows it"
+            ),
+            FilterErrorKind::RepeatedLocalTime { value } => write!(
+                f,
+                "{value:?} is a local time its zone shows twice where the clock goes back; \
+                 write the offset of the one meant"
+            ),
             FilterErrorKind::OperatorNotAdmitted { field, op } => {
                 write!(f, "{field} does not admit the operator {op}")
             }
@@ -3305,32 +3432,163 @@ pub fn bind_json_in_zone(
     offset_minutes: i32,
 ) -> Option<String> {
     let offset = clock::offset_text(offset_minutes)?;
-    Some(bind_json_zoned(selector, names_json, Some(&offset)))
+    Some(bind_json_zoned(
+        selector,
+        names_json,
+        Some(Ok(Zone::Offset(&offset))),
+    ))
 }
 
-/// `text` with `offset` written after every `time` value that carries none.
+/// [`bind_json`], with every `time` value the selector writes with no offset
+/// zoned by the POSIX TZ rule `rule` (`CET-1CEST,M3.5.0,M10.5.0/3`): what
+/// `wz_dissect_selector_bind_in_tz` writes.
+///
+/// A date gains the offset the rule puts in force at that local time, so a
+/// date on either side of a change gets its own (`+01:00` in January,
+/// `+02:00` in July). A clock time has no day until a capture gives it one,
+/// so it gains the rule itself, in brackets, inside quotes
+/// (`"12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`), and each door reads it on the
+/// capture's day at the offset in force there; a rule that never changes its
+/// clock writes its one offset instead. Every other byte is as `bind_json`
+/// leaves it.
+///
+/// A date the rule's clock skips where it goes forward, or shows twice where
+/// it goes back, names no single instant and is refused, `skipped_time` or
+/// `repeated_time` with the value's span in the text typed; a rule the
+/// grammar refuses is `zone`, with no position, as a table that does not read
+/// is `table`.
+pub fn bind_json_in_tz(selector: &str, names_json: Option<&str>, rule: &str) -> String {
+    let zone = tz::ZoneRule::parse(rule).map(|parsed| Zone::Rule {
+        rule: parsed,
+        text: rule,
+    });
+    bind_json_zoned(selector, names_json, Some(zone))
+}
+
+/// What a binder writes onto each `time` value that carries no offset.
+enum Zone<'a> {
+    /// One offset, as a literal spells it (`+09:00`).
+    Offset(&'a str),
+    /// A POSIX TZ rule, and the text it was read from.
+    Rule { rule: tz::ZoneRule, text: &'a str },
+}
+
+/// A `time` value written with no offset, as a binder finds it.
+#[derive(Clone, Copy)]
+enum UnzonedTime {
+    /// A date, read as UTC, so `local_ms` is the local time it writes.
+    Date { local_ms: u64, place: Unzoned },
+    /// A clock time.
+    Clock { place: Unzoned },
+}
+
+impl UnzonedTime {
+    fn place(self) -> Unzoned {
+        match self {
+            Self::Date { place, .. } | Self::Clock { place } => place,
+        }
+    }
+}
+
+/// Why a selector could not be zoned.
+enum ZoneTimeError {
+    /// The text does not compile.
+    Selector(FilterError),
+    /// A date the zone's clock skips (`repeated` false) or shows twice, at
+    /// `place`.
+    Local { repeated: bool, place: Unzoned },
+}
+
+impl Zone<'_> {
+    /// The text `time` gains, as `(byte, text)` insertions into `out`.
+    fn insertions(
+        &self,
+        time: UnzonedTime,
+        out: &mut Vec<(usize, String)>,
+    ) -> Result<(), ZoneTimeError> {
+        let (rule, text) = match self {
+            Self::Offset(offset) => {
+                out.push((time.place().insert_at, String::from(*offset)));
+                return Ok(());
+            }
+            Self::Rule { rule, text } => (rule, *text),
+        };
+        match time {
+            UnzonedTime::Date { local_ms, place } => {
+                let refused = |repeated| ZoneTimeError::Local { repeated, place };
+                let local = i64::try_from(local_ms).map_err(|_| refused(false))?;
+                match rule.resolve(local) {
+                    tz::Local::One(east_ms) => out.push((place.insert_at, offset_of(east_ms))),
+                    tz::Local::Skipped => return Err(refused(false)),
+                    tz::Local::Repeated => return Err(refused(true)),
+                }
+            }
+            UnzonedTime::Clock { place } => match rule.fixed_east_ms() {
+                Some(east_ms) => out.push((place.insert_at, offset_of(east_ms))),
+                // A rule holds characters a bare word does not, so a word is
+                // quoted to carry it.
+                None if place.insert_at == place.end => {
+                    out.push((place.start, String::from("\"")));
+                    out.push((place.insert_at, alloc::format!("[{text}]\"")));
+                }
+                None => out.push((place.insert_at, alloc::format!("[{text}]"))),
+            },
+        }
+        Ok(())
+    }
+}
+
+/// `east_ms` ahead of UTC as a literal writes it. A rule's offsets are whole
+/// minutes within 23:59, which `tz` holds them to.
+fn offset_of(east_ms: i64) -> String {
+    i32::try_from(east_ms / 60_000)
+        .ok()
+        .and_then(clock::offset_text)
+        .unwrap_or_default()
+}
+
+/// `bound` with `zone` written onto its `time` values, once `typed`, the text it
+/// was bound from, has been zoned without a refusal: a refusal's span is one in
+/// the text typed.
+fn zone_bound(typed: &str, bound: &str, zone: &Zone<'_>) -> Result<String, ZoneTimeError> {
+    zone_times(typed, zone)?;
+    zone_times(bound, zone)
+}
+
+/// `text` with `zone` written onto every `time` value that carries no offset.
 ///
 /// `text` is a selector the binder has already read, so it parses; its terms
-/// say where each value ends, so the grammar is read once, by the parser.
-fn zone_times(text: &str, offset: &str) -> Result<String, FilterError> {
-    let filter = Filter::parse_tree(text)?;
-    let mut at = Vec::new();
-    filter.root.unzoned_times(&mut at);
-    at.sort_unstable();
-    let mut out = String::with_capacity(text.len() + at.len() * offset.len());
+/// say where each value sits, so the grammar is read once, by the parser.
+fn zone_times(text: &str, zone: &Zone<'_>) -> Result<String, ZoneTimeError> {
+    let filter = Filter::parse_tree(text).map_err(ZoneTimeError::Selector)?;
+    let mut times = Vec::new();
+    filter.root.unzoned_times(&mut times);
+    let mut insertions = Vec::with_capacity(times.len());
+    for time in times {
+        zone.insertions(time, &mut insertions)?;
+    }
+    // Stable, so a word's opening quote stays before what follows it.
+    insertions.sort_by_key(|(at, _)| *at);
+    let added: usize = insertions.iter().map(|(_, piece)| piece.len()).sum();
+    let mut out = String::with_capacity(text.len() + added);
     let mut from = 0;
-    for position in at {
+    for (position, piece) in insertions {
         out.push_str(&text[from..position]);
-        out.push_str(offset);
+        out.push_str(&piece);
         from = position;
     }
     out.push_str(&text[from..]);
     Ok(out)
 }
 
-/// The binder's verdict, with `offset` written onto every `time` value the
-/// bound selector writes with none, or with nothing written for `None`.
-fn bind_json_zoned(selector: &str, names_json: Option<&str>, offset: Option<&str>) -> String {
+/// The binder's verdict, with `zone` written onto every `time` value the bound
+/// selector writes with no offset, or with nothing written for `None`. A zone
+/// that did not read is refused after the table and before the selector.
+fn bind_json_zoned(
+    selector: &str,
+    names_json: Option<&str>,
+    zone: Option<Result<Zone<'_>, tz::ZoneError>>,
+) -> String {
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_BIND, &mut out);
     let names = match names_json {
@@ -3359,21 +3617,41 @@ fn bind_json_zoned(selector: &str, names_json: Option<&str>, offset: Option<&str
             wz_session_core::json::push_str_array(candidates, out);
         }
     };
-    match names.map(|names| bind_nodes(selector, &names)) {
-        Err(e) => refusal(&mut out, BindRefusal::Table, &e, None, None, None),
-        Ok(Ok(bound)) => {
-            let zoned = match offset {
-                Some(offset) => zone_times(&bound, offset),
+    let names = match names {
+        Ok(names) => names,
+        Err(e) => {
+            refusal(&mut out, BindRefusal::Table, &e, None, None, None);
+            out.push('}');
+            return out;
+        }
+    };
+    let zone = match zone {
+        None => None,
+        Some(Ok(zone)) => Some(zone),
+        Some(Err(e)) => {
+            refusal(&mut out, BindRefusal::Zone, &e, None, None, None);
+            out.push('}');
+            return out;
+        }
+    };
+    match bind_nodes(selector, &names) {
+        Ok(bound) => {
+            // A date the zone cannot place is refused at its span in the text
+            // typed, before any text is written; the text written is the
+            // bound one, whose spans differ where a `node` term was replaced.
+            let zoned = match &zone {
                 None => Ok(bound),
+                Some(zone) => zone_bound(selector, &bound, zone),
             };
             match zoned {
                 Ok(text) => {
                     out.push_str(",\"ok\":true,\"selector\":");
                     wz_session_core::json::escape_into(&text, &mut out);
                 }
-                // Not reached: the bound text is the binder's own and parses.
-                // Were it refused, the refusal is the selector's, at its byte.
-                Err(e) => refusal(
+                // Not reached: the text is one `bind_nodes` read, and the bound
+                // text is its own. Were it refused, the refusal is the
+                // selector's, at its byte.
+                Err(ZoneTimeError::Selector(e)) => refusal(
                     &mut out,
                     BindRefusal::Selector,
                     &e,
@@ -3381,9 +3659,37 @@ fn bind_json_zoned(selector: &str, names_json: Option<&str>, offset: Option<&str
                     Some((e.at, e.at)),
                     None,
                 ),
+                Err(ZoneTimeError::Local { repeated, place }) => {
+                    let value = &selector[place.start..place.end];
+                    let (which, message) = if repeated {
+                        (
+                            BindRefusal::RepeatedTime,
+                            alloc::format!(
+                                "{value} is a local time the zone shows twice where its clock \
+                                 goes back; write the offset of the one meant"
+                            ),
+                        )
+                    } else {
+                        (
+                            BindRefusal::SkippedTime,
+                            alloc::format!(
+                                "{value} is a local time the zone skips where its clock goes \
+                                 forward, so no instant shows it"
+                            ),
+                        )
+                    };
+                    refusal(
+                        &mut out,
+                        which,
+                        &message,
+                        None,
+                        Some((place.start, place.end)),
+                        None,
+                    );
+                }
             }
         }
-        Ok(Err(e)) => match &e {
+        Err(e) => match &e {
             NodeBindError::Selector(f) => refusal(
                 &mut out,
                 BindRefusal::Selector,
@@ -3425,25 +3731,34 @@ fn bind_json_zoned(selector: &str, names_json: Option<&str>, offset: Option<&str
 #[derive(Clone, Copy)]
 enum BindRefusal {
     AmbiguousNode,
+    RepeatedTime,
     Selector,
+    SkippedTime,
     Table,
     UnknownNode,
+    Zone,
 }
 
 impl BindRefusal {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 7] = [
         Self::AmbiguousNode,
+        Self::RepeatedTime,
         Self::Selector,
+        Self::SkippedTime,
         Self::Table,
         Self::UnknownNode,
+        Self::Zone,
     ];
 
     const fn word(self) -> &'static str {
         match self {
             Self::AmbiguousNode => "ambiguous_node",
+            Self::RepeatedTime => "repeated_time",
             Self::Selector => "selector",
+            Self::SkippedTime => "skipped_time",
             Self::Table => "table",
             Self::UnknownNode => "unknown_node",
+            Self::Zone => "zone",
         }
     }
 }
@@ -4624,13 +4939,18 @@ fn build_fixed(
             value: integer(&value, value_at)?,
         },
         // A clock time or a date written with no offset is read in UTC, and
-        // the binder writes a consumer's offset where `unzoned_at` says.
+        // the binder writes a consumer's zone where `unzoned` says.
         Field::Time => {
             let insert_at = match literal {
                 Literal::Quoted(_) => value_end - 1,
                 Literal::Word(_) => value_end,
             };
-            time_term(op, &value, value_at, insert_at)?
+            let place = Unzoned {
+                start: value_at,
+                end: value_end,
+                insert_at,
+            };
+            time_term(op, &value, value_at, place)?
         }
         Field::Elapsed => Term::Elapsed {
             op,
@@ -5734,6 +6054,168 @@ mod tests {
             Some(bind_json("time > 12:04Z", None)),
             bind_json_in_zone("time > 12:04Z", None, 540)
         );
+    }
+
+    /// Central European time: an hour ahead in winter, two in summer, forward at
+    /// 01:00 UTC on the last Sunday of March and back on the last of October.
+    const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+
+    /// The selector a rule binder's verdict carries, as the JSON writes it.
+    fn bound_in_tz(selector: &str, rule: &str) -> String {
+        let doc = bind_json_in_tz(selector, None, rule);
+        let start = doc.find("\"selector\":\"").expect("a bound selector") + 12;
+        doc[start..doc.len() - 2].to_string()
+    }
+
+    /// THE RULE BINDER writes onto a date the offset its rule puts in force at
+    /// that local time, on either side of both changes, and onto a clock time
+    /// the rule itself, quoted, since its day is the capture's; a rule that
+    /// never changes its clock writes its one offset.
+    #[test]
+    fn the_rule_binder_writes_the_offset_in_force_onto_each_date() {
+        for (date, offset) in [
+            ("2026-01-15T12:00", "+01:00"),
+            ("2026-07-15T12:00", "+02:00"),
+            ("2026-03-29T01:59", "+01:00"),
+            ("2026-03-29T03:00", "+02:00"),
+            ("2026-10-25T01:59", "+02:00"),
+            ("2026-10-25T03:00", "+01:00"),
+        ] {
+            let typed = alloc::format!("time > {date}");
+            assert_eq!(
+                bound_in_tz(&typed, CET),
+                alloc::format!("time > {date}{offset}"),
+                "{date}"
+            );
+        }
+        assert_eq!(
+            bound_in_tz("time > \"2026-07-15 12:00\"", CET),
+            "time > \\\"2026-07-15 12:00+02:00\\\""
+        );
+        assert_eq!(
+            bound_in_tz("time > 12:04", CET),
+            "time > \\\"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\\\""
+        );
+        assert_eq!(
+            bound_in_tz("time > '12:04'", CET),
+            "time > '12:04[CET-1CEST,M3.5.0,M10.5.0/3]'"
+        );
+        assert_eq!(
+            bound_in_tz("time in {12:00, 2026-07-15}", CET),
+            "time in {\\\"12:00[CET-1CEST,M3.5.0,M10.5.0/3]\\\", 2026-07-15+02:00}"
+        );
+        assert_eq!(
+            bound_in_tz("time > 12:04Z or time > 5", CET),
+            "time > 12:04Z or time > 5"
+        );
+        assert_eq!(bound_in_tz("time > 12:04", "JST-9"), "time > 12:04+09:00");
+        // What it writes is a selector the doors take, and a date it zoned
+        // reads the instant the written offset names.
+        const DATE_WITH_RULE: &str = "time > \"2026-07-15T12:00[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        const CLOCK_WITH_RULE: &str = "time > \"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        let parsed = |text: &str| Filter::parse(text).expect(text);
+        assert_eq!(
+            parsed(DATE_WITH_RULE),
+            parsed("time > 2026-07-15T12:00+02:00")
+        );
+        assert!(Filter::parse(CLOCK_WITH_RULE).is_ok());
+    }
+
+    /// A date the rule's clock skips or shows twice names no single instant,
+    /// and the rule binder refuses it at its span in the text TYPED, after a
+    /// `node` term too; a rule that does not read is refused before the
+    /// selector, and after the table.
+    #[test]
+    fn the_rule_binder_refuses_a_date_the_clock_skips_or_repeats() {
+        fn refused_as(doc: &str, word: &str) -> bool {
+            doc.contains(&alloc::format!("\"refusal\":\"{word}\""))
+        }
+        let skipped = bind_json_in_tz("kind == put and time > 2026-03-29T02:30", None, CET);
+        assert!(refused_as(&skipped, "skipped_time"), "{skipped}");
+        assert!(skipped.contains("\"start\":23,\"end\":39"), "{skipped}");
+        let repeated = bind_json_in_tz("time < 2026-10-25T02:30", None, CET);
+        assert!(refused_as(&repeated, "repeated_time"), "{repeated}");
+        assert!(repeated.contains("\"start\":7,\"end\":23"), "{repeated}");
+        let table = r#"{"cam":"ff0eedd0c0b0a0908070605040302011"}"#;
+        let typed = "node == cam and time > 2026-03-29T02:30";
+        let named = bind_json_in_tz(typed, Some(table), CET);
+        assert!(named.contains("\"start\":23,\"end\":39"), "{named}");
+
+        let zone = bind_json_in_tz("time > 12:04", None, "CET-1CEST");
+        assert!(refused_as(&zone, "zone"), "{zone}");
+        assert!(!zone.contains("\"start\""), "{zone}");
+        let both = bind_json_in_tz("time > 12:04", Some("[]"), "CET-1CEST");
+        assert!(refused_as(&both, "table"), "{both}");
+    }
+
+    /// Written by hand, a date with a rule the clock skips or repeats is
+    /// refused at the value; a rule that does not read, and a time with an
+    /// offset AND a rule, are refused too.
+    #[test]
+    fn a_date_with_a_rule_the_clock_skips_or_repeats_does_not_parse() {
+        let kind = |selector: &str| Filter::parse(selector).expect_err(selector).kind;
+        assert!(matches!(
+            kind("time > \"2026-03-29T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\""),
+            FilterErrorKind::SkippedLocalTime { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"2026-10-25T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\""),
+            FilterErrorKind::RepeatedLocalTime { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"12:04[CET-1CEST]\""),
+            FilterErrorKind::BadZone { .. }
+        ));
+        assert!(matches!(
+            kind("time > \"12:04+01:00[CET-1]\""),
+            FilterErrorKind::UnknownValue { field: "time", .. }
+        ));
+        let at = Filter::parse("time > \"2026-03-29T02:30[CET-1CEST,M3.5.0,M10.5.0/3]\"")
+            .expect_err("skipped")
+            .at;
+        assert_eq!(at, 7);
+    }
+
+    /// A clock time with a rule is read on the capture's day at the offset in
+    /// force there: the same `12:00` is 11:00 UTC on a January capture and
+    /// 10:00 UTC on a July one. On the day the clock skips or repeats it, it is
+    /// undecided.
+    #[test]
+    fn a_clock_time_with_a_rule_takes_the_offset_of_the_captures_day() {
+        let at = |observed_ms: u64| {
+            let mut r = view(
+                Direction::A,
+                Some("demo/a"),
+                RecordKind::Put,
+                10,
+                Some(observed_ms),
+            );
+            r.elapsed_ms = Some(5_000);
+            r
+        };
+        let judged = |selector: &str, observed_ms: u64| {
+            let typed = alloc::format!("time {selector}");
+            let bound = bound_in_tz(&typed, CET).replace("\\\"", "\"");
+            Filter::parse(&bound)
+                .expect(&bound)
+                .matches(&at(observed_ms))
+        };
+        // 2026-01-15T11:00:05Z, five seconds into a capture: 12:00:05 there.
+        let january = 1_768_474_805_000;
+        assert_eq!(judged("> 12:00", january), Truth::Yes);
+        assert_eq!(judged("> 12:01", january), Truth::No);
+        // 2026-07-15T10:00:05Z: 12:00:05 there as well.
+        let july = 1_784_109_605_000;
+        assert_eq!(judged("> 12:00", july), Truth::Yes);
+        assert_eq!(judged("> 12:01", july), Truth::No);
+        // 2026-03-29T00:30:05Z: the day 02:30 is skipped there.
+        let spring = 1_774_744_205_000;
+        assert_eq!(judged("> 02:30", spring), Truth::Unknown);
+        assert_eq!(judged("> 04:00", spring), Truth::No);
+        // 2026-10-25T00:30:05Z: the day 02:30 is shown twice there.
+        let autumn = 1_792_888_205_000;
+        assert_eq!(judged("> 02:30", autumn), Truth::Unknown);
+        assert_eq!(judged("< 03:30", autumn), Truth::Yes);
     }
 
     /// R311y636 (§1.1v) — the outcome axis, driven the same way: every field,

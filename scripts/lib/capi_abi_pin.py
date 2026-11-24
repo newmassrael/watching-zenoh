@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 64
+EXPECTED_VERSION = 65
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -469,6 +469,12 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # a `char*` released by `wz_dissect_string_free`. The memory rule does not
     # move.
     "wz_dissect_selector_bind_in_zone": 60,
+    # (ABI 65) -- the binder with a POSIX TZ rule: the offset in force written
+    # onto each date and the rule onto each clock time. One string more in than
+    # `wz_dissect_selector_bind`; the document is that door's `selector_bind`
+    # (revision 2 for its three refusals), a `char*` released by
+    # `wz_dissect_string_free`. The memory rule does not move.
+    "wz_dissect_selector_bind_in_tz": 65,
     # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
     # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
     # comes out, and a null pointer clears the hook. A stopped call answers

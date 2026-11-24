@@ -2239,7 +2239,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 64
+#define WZ_DISSECT_ABI_REVISION 65
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2727,7 +2727,17 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *     - A LITERAL WITH NO OFFSET IS READ IN UTC, by every door. The zone a list
  *       shows times in is the reader's and not the capture's: to have such
  *       literals read in yours, pass the selector through
- *       wz_dissect_selector_bind_in_zone, which writes your offset onto each.
+ *       wz_dissect_selector_bind_in_zone, which writes your offset onto each,
+ *       or, for a zone that goes forward and back, wz_dissect_selector_bind_in_tz.
+ *     - (ABI 65, selector_diagnose revision 13) A ZONE RULE in brackets after
+ *       the time, inside quotes: `time > "12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`.
+ *       The rule is a POSIX TZ string (wz_dissect_selector_bind_in_tz gives
+ *       its grammar). A date is read at the offset the rule puts in force at
+ *       that local time, and one the clock skips where it goes forward or
+ *       shows twice where it goes back is refused at the value, as is a rule
+ *       that does not read and a time that also carries an offset. A clock
+ *       time is read on the capture's day at the offset in force on that day,
+ *       and is UNDECIDED on a day that skips or repeats it.
  *
  * More than three digits of a fraction name an instant the field cannot
  * compare, and are refused, as are a date before 1970 and a day the month does
@@ -3894,6 +3904,11 @@ int wz_dissect_pcap_session_table_keyed(const unsigned char *bytes, size_t len,
  * (wz_dissect_selector_bind) is one the doors take. The `tokens` classes did
  * not move: `contains` is a `word`, an operator only where one stands.
  *
+ * From verdict revision 13 a `time` value may carry a zone rule in brackets
+ * (THE SELECTOR LANGUAGE), and a date with one that its clock skips or shows
+ * twice, or a rule that does not read, is refused at the value with a
+ * `message` saying which.
+ *
  * The useful moment to ask "is this valid, and if not where" is while the
  * expression is being typed -- before there is a capture to run it against,
  * and long before a caller would want to pay four walks of a file to find
@@ -3978,7 +3993,7 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * rule is untouched: OK means a string you own, an error means none. It opens
  * with its own revision:
  *
- *     {"document":{"name":"selector_bind","revision":1},"ok":true,
+ *     {"document":{"name":"selector_bind","revision":2},"ok":true,
  *      "selector":"kind == put and zid == ff0e..."}
  *
  * `selector` is the text to hand every other door. Each `node` term is replaced
@@ -4005,6 +4020,16 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  *     `ambiguous_node`  the name stands for two or more zids. `name`, the span,
  *                       and `candidates`: the zids, in the spelling the
  *                       documents print, in the order the table gave them.
+ *
+ * (revision 2) Three more, which only wz_dissect_selector_bind_in_tz writes:
+ *
+ *     `zone`            the zone rule does not read. `message` names the byte
+ *                       of the rule and why. No position, as for `table`.
+ *     `skipped_time`    a date the rule's clock skips where it goes forward,
+ *                       which no instant shows. `start` and `end`: the BYTE
+ *                       span of the value, quotes included.
+ *     `repeated_time`   a date the rule's clock shows twice where it goes
+ *                       back, so two instants. `start` and `end` as above.
  *
  * The first refusing term is the one reported. The table is judged before the
  * selector, so a bad table is reported whatever the selector says.
@@ -4042,10 +4067,70 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  * (`selector_bind`, the same revision, the same refusals, with every position
  * in the text you passed and not in the text with offsets written), and the
  * memory rule. A literal that carries an offset, and an integer of
- * milliseconds, are left as written. */
+ * milliseconds, are left as written. A zone that goes forward and back is
+ * wz_dissect_selector_bind_in_tz's. */
 int wz_dissect_selector_bind_in_zone(const char *selector,
                                      const char *names_json,
                                      int utc_offset_minutes, char **out);
+
+/* (ABI 65) -- wz_dissect_selector_bind, AND A ZONE THAT GOES FORWARD AND BACK.
+ *
+ * The sibling of wz_dissect_selector_bind_in_zone for a zone one offset
+ * cannot state. `tz` is a POSIX TZ rule, the string a `TZ` environment
+ * variable holds, read by this library with no zone database:
+ *
+ *     std offset [dst [offset] [,start[/time],end[/time]]]
+ *
+ *     CET-1CEST,M3.5.0,M10.5.0/3       Central Europe
+ *     AEST-10AEDT,M10.1.0,M4.1.0/3     Eastern Australia (summer across the new year)
+ *     <+0530>-5:30                     a zone that never changes
+ *
+ *   - a NAME is three or more letters, or three or more letters, digits, `+`
+ *     or `-` between `<` and `>`;
+ *   - an OFFSET is [+|-]hh[:mm[:ss]] and counts WEST of UTC (`CET-1` is an
+ *     hour ahead); the summer offset defaults to an hour ahead of the
+ *     standard one;
+ *   - a DATE is Jn (1 to 365, February 29 never counted), n (0 to 365,
+ *     counting it) or Mm.w.d (weekday d of week w of month m, Sunday 0, week
+ *     5 the last); a TIME is the local time of the change in the clock in
+ *     force before it, [+|-]hh[:mm[:ss]] with the hours from -167 to 167,
+ *     02:00:00 when it is left out.
+ *
+ * Two things POSIX leaves to an implementation are refused rather than
+ * guessed: a rule that names a summer zone and gives no dates (an
+ * implementation's default dates are not text the selector can be read again
+ * by), and an offset that is not whole minutes or is past 23:59 (an offset a
+ * time literal cannot spell).
+ *
+ * WHAT IS WRITTEN. A date gains the offset the rule puts in force at that
+ * local time: `time > 2026-01-15T12:00` becomes `...12:00+01:00` and
+ * `time > 2026-07-15T12:00` becomes `...12:00+02:00` under the rule above. A
+ * clock time has no day until a capture gives it one, so it gains the rule in
+ * brackets, quoted: `time > 12:04` becomes
+ * `time > "12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`, which every door reads on the
+ * capture's day at the offset in force there (THE SELECTOR LANGUAGE). A rule
+ * that never changes its clock writes its one offset instead, as
+ * wz_dissect_selector_bind_in_zone does. A literal that carries an offset or
+ * a rule, and an integer of milliseconds, are left as written.
+ *
+ * A TIME THE CLOCK SKIPS OR REPEATS IS REFUSED, NOT RESOLVED. On the day the
+ * clock goes forward the skipped hour is shown by no instant, and on the day
+ * it goes back the repeated hour by two; a date in either names no single
+ * instant, and picking one would select rows the person who typed it did not
+ * mean. Such a date is the refusal `skipped_time` or `repeated_time` with
+ * the value's span in the text you passed; write its offset to say which. A
+ * clock time is judged per capture, so on a capture whose day skips or repeats
+ * it, it is UNDECIDED rather than refused.
+ *
+ * A rule that does not read is the refusal `zone`, judged after `names_json`
+ * and before the selector, a verdict and not an error code, as a table that
+ * does not read is `table`. Everything else is wz_dissect_selector_bind's:
+ * the document (`selector_bind`, revision 2 for these refusals), every
+ * position in the text you passed, and the memory rule. A null `selector`,
+ * `tz` or `out`, or text that is not UTF-8, is WZ_DISSECT_ERR_INVALID_ARG and
+ * no string. */
+int wz_dissect_selector_bind_in_tz(const char *selector, const char *names_json,
+                                   const char *tz, char **out);
 
 /* (ABI 52) -- THE SELECTOR A NODE OF THE FIELD DOCUMENT OFFERS: filter by the
  * field it shows, add it to the selector typed, or exclude it.

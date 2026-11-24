@@ -499,6 +499,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // bytes one fragment chain may join, which was a fixed 65,536. No symbol
     // moves. The `caps` group of every document that carries
     // `dropped_by_limits` gained `chain_bytes` on the same step.
+    // 65, for `wz_dissect_selector_bind_in_tz`: the binder with a POSIX TZ
+    // rule, writing the offset in force onto each date and the rule onto each
+    // clock time. The `selector_bind` document moves to 2 for its refusals.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -516,7 +519,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 64;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 65;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3568,6 +3571,52 @@ pub unsafe extern "C" fn wz_dissect_selector_bind_in_zone(
         Some(document) => write_string(document, out),
         None => WZ_DISSECT_ERR_INVALID_ARG,
     }
+}
+
+/// ABI 65 -- [`wz_dissect_selector_bind`], with every `time` literal of the
+/// selector that has no offset zoned by a POSIX TZ rule, a zone whose clock
+/// goes forward and back (`CET-1CEST,M3.5.0,M10.5.0/3`).
+///
+/// The sibling of [`wz_dissect_selector_bind_in_zone`] for a zone one offset
+/// cannot state. A date gains the offset the rule puts in force at that local
+/// time; a clock time, whose day is the capture's, gains the rule in brackets
+/// and each door reads it on that day. The document is `selector_bind`,
+/// written by `wz_capture::filter::bind_json_in_tz`: a rule that does not read
+/// is the refusal `zone`, and a date its clock skips or shows twice is
+/// `skipped_time` or `repeated_time` with the date's span in the text passed,
+/// so a malformed rule is a verdict and not an error code, as a malformed
+/// `names_json` is.
+///
+/// # Safety
+/// As for [`wz_dissect_selector_bind`], and `tz` must be a NUL-terminated C
+/// string. `selector`, `tz` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_bind_in_tz(
+    selector: *const c_char,
+    names_json: *const c_char,
+    tz: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || tz.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(expr), Ok(rule)) = (
+        unsafe { std::ffi::CStr::from_ptr(selector) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(tz) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let names = if names_json.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(names_json) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    write_string(wz_capture::filter::bind_json_in_tz(expr, names, rule), out)
 }
 
 /// ABI 52 -- the selector a field document's node offers.
@@ -10266,7 +10315,7 @@ mod tests {
         // revision 10 the four `e2e` fields joining.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
@@ -10286,7 +10335,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -10475,6 +10524,76 @@ mod tests {
         };
         assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
         assert!(out.is_null());
+    }
+
+    /// (ABI 65) THE RULE BINDER writes onto a date the offset its rule puts in
+    /// force then, on each side of both changes, and onto a clock time the rule
+    /// itself, quoted; it refuses a date the clock skips or shows twice at the
+    /// date's span, a rule that does not read with no span, and a null with no
+    /// string. What it writes is a selector the doors take.
+    #[test]
+    fn the_rule_binder_writes_the_offset_in_force_and_refuses_what_it_cannot_place() {
+        const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+        let typed = "time > 2026-01-15T12:00 and time < 2026-07-15T12:00 or time > 12:04";
+        let bound = call_selector_bind_in_tz(typed, None, CET).expect("a readable text");
+        assert!(
+            bound.contains(
+                "\"ok\":true,\"selector\":\"time > 2026-01-15T12:00+01:00 and \
+                 time < 2026-07-15T12:00+02:00 or \
+                 time > \\\"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\\\"\""
+            ),
+            "{bound}"
+        );
+        let skipped =
+            call_selector_bind_in_tz("time > 2026-03-29T02:30", None, CET).expect("readable");
+        assert!(
+            skipped.contains("\"refusal\":\"skipped_time\"")
+                && skipped.contains("\"start\":7,\"end\":23"),
+            "{skipped}"
+        );
+        let repeated =
+            call_selector_bind_in_tz("time > 2026-10-25T02:30", None, CET).expect("readable");
+        assert!(
+            repeated.contains("\"refusal\":\"repeated_time\"")
+                && repeated.contains("\"start\":7,\"end\":23"),
+            "{repeated}"
+        );
+        let zone = call_selector_bind_in_tz("time > 12:04", None, "CET-1CEST").expect("readable");
+        assert!(
+            zone.contains("\"refusal\":\"zone\"") && !zone.contains("\"start\""),
+            "{zone}"
+        );
+
+        // The selector it hands back is one the doors take.
+        let file = census_capture();
+        let written = "time > \"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        let dated = "time > 2026-01-15T12:00+01:00";
+        assert!(call_census_where(&file, written).is_ok());
+        assert!(call_census_where(&file, dated).is_ok());
+
+        // A null is refused and hands back no string.
+        let sel = CString::new("time > 12:04").expect("no NUL");
+        let rule = CString::new(CET).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        for (selector, tz) in [
+            (core::ptr::null(), rule.as_ptr()),
+            (sel.as_ptr(), core::ptr::null()),
+        ] {
+            let rc = unsafe {
+                wz_dissect_selector_bind_in_tz(selector, core::ptr::null(), tz, &mut out)
+            };
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+            assert!(out.is_null());
+        }
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_tz(
+                sel.as_ptr(),
+                core::ptr::null(),
+                rule.as_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
     }
 
     /// The census door keeps the ABI's memory contract: a bad capture is a
@@ -10948,7 +11067,10 @@ mod tests {
         // in and a `uint64_t` the caller owns out; nothing is retained of the
         // bytes and no struct is new.
         // 64, for that struct growing `chain_bytes`; no symbol moves.
-        assert_eq!(wz_dissect_abi_version(), 64);
+        // 65, for `wz_dissect_selector_bind_in_tz`: one symbol, the binder with
+        // one string more in, a `char*` released by `wz_dissect_string_free`
+        // out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 65);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -12413,6 +12535,37 @@ mod tests {
         Ok(s)
     }
 
+    /// Drive the rule binder the way C does: the document on OK, the code on
+    /// anything else.
+    fn call_selector_bind_in_tz(
+        selector: &str,
+        names: Option<&str>,
+        rule: &str,
+    ) -> Result<String, c_int> {
+        let text = CString::new(selector).expect("no interior NUL");
+        let table = names.map(|n| CString::new(n).expect("no interior NUL"));
+        let tz = CString::new(rule).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_tz(
+                text.as_ptr(),
+                table.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                tz.as_ptr(),
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refused call handed back a string");
+            return Err(rc);
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
     /// Every shape the binder's verdict takes, success first.
     /// Drive the node sentence the way C does.
     fn call_selector_term(node: &str, verb: c_int, selector: Option<&str>) -> String {
@@ -12503,12 +12656,20 @@ mod tests {
 
     fn bind_documents() -> Vec<String> {
         const NAMES: &str = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+        let in_tz = |selector: &str, rule: &str| {
+            call_selector_bind_in_tz(selector, None, rule).expect("a readable text")
+        };
         vec![
             call_selector_bind("kind == put and node == cam or node != lidar", Some(NAMES)),
             call_selector_bind("node == radar", Some(NAMES)),
             call_selector_bind("node == twin", Some(r#"{"twin":"a1b2","twin":"c3d4"}"#)),
             call_selector_bind("node ==", Some(NAMES)),
             call_selector_bind("node == cam", Some("[]")),
+            // The rule binder's three words, which only it writes.
+            in_tz("time > 12:04", "CET-1CEST"),
+            in_tz("time > 2026-03-29T02:30", CET),
+            in_tz("time > 2026-10-25T02:30", CET),
         ]
     }
 
