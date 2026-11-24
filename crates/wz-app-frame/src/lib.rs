@@ -30,7 +30,7 @@
 //! |---|---|---|
 //! | `e2e_crc` | a CRC engine for the widths 8, 16, 32 and 64, parameterised by the Rocksoft model | always |
 //! | `e2e_judge` | the receiver's judgment of one stream of frames: CRC, counter and timeout | always |
-//! | `e2e_profile` | the profile of an end-to-end protection header, read from a JSON document | `alloc` |
+//! | `e2e_profile` | the profile of an end-to-end protection header, read from a JSON document (`wz-app-schema`'s reader) | `alloc` |
 //! | `e2e_frame` | building and opening a protected frame under a profile | `alloc` |
 //! | `e2e_stream_sender` | the sender of one message: a counter per stream, and a CRC cache for an unchanged payload | `alloc` |
 //! | `e2e_receiver` | the receiving judge of one message: a judge per stream or per sender, the profile's rules, a verdict per frame | `alloc` |
@@ -39,8 +39,8 @@
 //! | `segment_profile` | the profile of the header in front of each piece of a split message | `alloc` |
 //! | `segment_chain` | the joining state of those pieces: a transfer per stream, a verdict per piece, the whole message on the piece that completes it | `alloc` |
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
-//! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
-//! | `message_catalog` | the reader and judge of a message catalog, and the senders, receivers and supervision rows made from it | `alloc` |
+//! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it (`wz-app-schema`'s) | always |
+//! | `message_catalog` | a message catalog read (by `wz-app-schema`'s reader) and judged against its profiles, and the senders, receivers and supervision rows made from it | `alloc` |
 //! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked (`wz-app-schema`'s) | `proto` |
 //! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
 //! | `message_payload` | one message set and read field by field at paths, its protobuf bytes encoded and decoded | `message-payload` |
@@ -68,7 +68,9 @@ extern crate self as wz_app_frame;
 
 pub mod e2e_crc;
 pub mod e2e_judge;
-pub mod message_catalog_table;
+// The catalog's static tables are data an image links with no allocator, beside the catalog's
+// reader in the crate built for size; they stay at the path they had here.
+pub use wz_app_schema::message_catalog_table;
 
 #[cfg(feature = "alloc")]
 pub mod e2e_frame;

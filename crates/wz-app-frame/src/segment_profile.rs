@@ -92,8 +92,8 @@ use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::{width_mask, Crc};
 use crate::e2e_profile::{
-    field_called, optional, read_crc_object, read_field_head, read_json, CrcFields, DocError,
-    Pointer, MAX_FIELDS,
+    field_called, optional, read_crc_object, read_field_head, read_json, read_name, CrcFields,
+    DocError, Pointer, MAX_FIELDS,
 };
 
 /// The largest whole message a segment profile may admit, in bytes.
@@ -288,7 +288,7 @@ impl SegmentProfile {
         let doc = Pointer::text("");
         let entries = doc.object(root)?;
         doc.check_keys(entries, &["name", SEGMENTS_KEY])?;
-        let name = doc.key("name").read_name(doc.required(entries, "name")?)?;
+        let name = read_name(&doc.key("name"), doc.required(entries, "name")?)?;
 
         let path = Pointer::text("/segments");
         let body = path.object(doc.required(entries, SEGMENTS_KEY)?)?;
