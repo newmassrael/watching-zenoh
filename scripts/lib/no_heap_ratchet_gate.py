@@ -99,6 +99,12 @@ TABLE = Path("deploy/no_heap_ratchet.json")
 TEST_FILE = Path("crates/wz-capi-pico/tests/no_heap_after_open.rs")
 SCHEMA = "wz-no-heap-ratchet/1"
 TABLE_KEYS = {"about", "schema", "tolerance", "families"}
+# What the table says of each capability of the measured build's profile: the families that
+# measure it, or the reason it has no path after a session opens, read where the code says so.
+CAPABILITIES_KEY = "capabilities"
+CAPABILITY_KEYS = ({"families"}, {"reason"})
+# A reason names the code it is read from as `<file>:<line>`.
+REASON_CITE = re.compile(r"[\w./-]+\.(?:rs|h|c|py|toml|json5?):\d+")
 ROW_KEYS = {"allocs_per_round", "locked", "debt"}
 PREFIX = "no-heap:"
 NOT_BUILT = "not-built"
@@ -268,8 +274,9 @@ def parse_row(family: str, row: object) -> tuple[Row | None, list[str]]:
 def parse_table(doc: object) -> tuple[float, dict[str, Row]]:
     """The tolerance and the rows of a table document; Refused with every finding when it is not
     one this gate can use."""
-    if not isinstance(doc, dict) or set(doc) != TABLE_KEYS:
-        raise Refused(f"the table is an object with exactly the keys {', '.join(sorted(TABLE_KEYS))}")
+    if not isinstance(doc, dict) or not TABLE_KEYS <= set(doc) <= TABLE_KEYS | {CAPABILITIES_KEY}:
+        raise Refused(f"the table is an object with the keys {', '.join(sorted(TABLE_KEYS))} and, "
+                      f"besides, {CAPABILITIES_KEY}")
     findings: list[str] = []
     if doc["schema"] != SCHEMA:
         findings.append(f"the schema is not {SCHEMA}")
@@ -292,6 +299,92 @@ def parse_table(doc: object) -> tuple[float, dict[str, Row]]:
     if findings:
         raise Refused("; ".join(findings))
     return float(tolerance), rows
+
+
+@dataclass(frozen=True)
+class CapabilityRow:
+    """What the table says of one capability: the families that measure it, or why it has none."""
+
+    families: tuple[str, ...]
+    reason: str | None
+
+
+def parse_capabilities(doc: dict) -> dict[str, CapabilityRow]:
+    """The table's rows of capabilities; Refused when one is not a list of families or a reason
+    that names the code it is read from."""
+    raw = doc.get(CAPABILITIES_KEY, {})
+    if not isinstance(raw, dict):
+        raise Refused(f"`{CAPABILITIES_KEY}` is an object of one row per capability")
+    out: dict[str, CapabilityRow] = {}
+    findings: list[str] = []
+    for cap, body in raw.items():
+        if not isinstance(body, dict) or set(body) not in CAPABILITY_KEYS:
+            findings.append(f"capability {cap}: a row is {{\"families\": [...]}} or {{\"reason\": \"...\"}}")
+            continue
+        if "families" in body:
+            families = body["families"]
+            if (not isinstance(families, list) or not families
+                    or not all(isinstance(f, str) and FAMILY_NAME.match(f) for f in families)):
+                findings.append(f"capability {cap}: `families` is a list of one family name or more")
+                continue
+            out[cap] = CapabilityRow(tuple(families), None)
+        else:
+            reason = body["reason"]
+            if not isinstance(reason, str) or not REASON_CITE.search(reason):
+                findings.append(f"capability {cap}: a reason names the code it is read from, as "
+                                f"<file>:<line>")
+                continue
+            out[cap] = CapabilityRow((), reason)
+    if findings:
+        raise Refused("; ".join(findings))
+    return out
+
+
+def load_capabilities(text: str) -> dict[str, CapabilityRow]:
+    try:
+        doc = json.loads(text, object_pairs_hook=refuse_duplicates)
+    except ValueError as error:
+        raise Refused(f"not JSON: {error}") from None
+    if not isinstance(doc, dict):
+        raise Refused("the table is not an object")
+    return parse_capabilities(doc)
+
+
+def coverage(capabilities: set[str], rows: dict[str, CapabilityRow],
+             found: dict[str, Reading]) -> list[Judged]:
+    """Each capability of the measured build's profile, judged: measured by its families, each
+    read and built, or stated to have no path after open; anything else is NOT-MEASURED, as a
+    family the build lacks is, so the lane never passes on a capability it does not hold."""
+    out: list[Judged] = []
+    for cap in sorted(capabilities):
+        row = rows.get(cap)
+        name = f"capability {cap}"
+        if row is None:
+            out.append(Judged(name, "NOT-MEASURED", "the profile has it, and neither a family "
+                                                    "measures it nor a reason row says it has no "
+                                                    "path after open"))
+        elif row.reason is not None:
+            out.append(Judged(name, "PASS", f"no path after open: {row.reason}"))
+        else:
+            missing = [f for f in row.families if f not in found or not found[f].built]
+            if missing:
+                out.append(Judged(name, "NOT-MEASURED", f"its families {', '.join(missing)} were "
+                                                        f"not read, or not built"))
+            else:
+                out.append(Judged(name, "PASS", f"measured by {', '.join(row.families)}"))
+    return out
+
+
+def profile_capabilities(profile: Path) -> set[str]:
+    """The capabilities of the pico C ABI that `profile`, merged as the packager merges it, turns
+    on: the population `coverage` holds. Read by the one resolver, `wz_config.py`."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import wz_config  # noqa: E402  the declaration and its Kconfig resolver
+
+    decl = wz_config.load_decl()
+    kconf = wz_config.resolve([profile])
+    return {cid for cid in wz_config.resolved_caps(decl, kconf)
+            if "pico" in decl["caps"][cid].get("abis", [])}
 
 
 def refuse_duplicates(pairs: list[tuple[str, object]]) -> dict:
@@ -401,10 +494,12 @@ def exit_status(judged: list[Judged], findings: list[str]) -> int:
     return 3 if "NOT-MEASURED" in outcomes else 0
 
 
-def check(reading_text: str, table_text: str) -> int:
-    """Judge a reading against a table, print every family's outcome, and return the status."""
+def check(reading_text: str, table_text: str, capabilities: set[str] | None = None) -> int:
+    """Judge a reading against a table, print every family's outcome, and return the status; with
+    `capabilities`, the profile's, each judged by its row too (`coverage`)."""
     try:
         tolerance, rows = load_table(table_text)
+        cap_rows = load_capabilities(table_text)
     except Refused as why:
         print(f"  no-heap-ratchet FAIL: the table is refused: {why}", file=sys.stderr)
         return 1
@@ -414,6 +509,8 @@ def check(reading_text: str, table_text: str) -> int:
     if findings:
         return 1
     judged = judge(found, rows, tolerance)
+    if capabilities is not None:
+        judged += coverage(capabilities, cap_rows, found)
     for j in judged:
         stream = sys.stderr if j.outcome == "FAIL" else sys.stdout
         print(f"  no-heap-ratchet {j.outcome} {j.family}: {j.sentence}", file=stream)
@@ -499,6 +596,13 @@ def _run(reading: str, table: str) -> tuple[int, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         status = check(reading, table)
+    return status, out.getvalue() + err.getvalue()
+
+
+def _run_caps(reading: str, table: str, capabilities: set[str]) -> tuple[int, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        status = check(reading, table, capabilities)
     return status, out.getvalue() + err.getvalue()
 
 
@@ -656,6 +760,26 @@ def selftest() -> int:
     assert declared(base, spread) == [], declared(base, spread)
     cases += 1
 
+    # Each capability of the profile is held by a row: its families read and built, or a reason
+    # that names its code; one with neither, or whose family was not built, is NOT-MEASURED.
+    caps_table = json.dumps({"about": "fixture", "schema": SCHEMA, "tolerance": 0.05,
+                             "families": {"put-small": _row(2.0), "get": _row(0, locked=True, debt=None)},
+                             CAPABILITIES_KEY: {"query": {"families": ["get"]},
+                                                "scout": {"reason": "src/scout.rs:10 opens no session"}}})
+    status, shown = _run_caps(clean, caps_table, {"query", "scout"})
+    assert status == 0, shown
+    status, shown = _run_caps(clean, caps_table, {"query", "scout", "connectivity"})
+    assert status == 3 and "NOT-MEASURED capability connectivity" in shown, shown
+    status, shown = _run_caps(clean.replace(_line("get", 0), f"{PREFIX} get {NOT_BUILT}"), caps_table,
+                              {"query"})
+    assert status == 3 and "NOT-MEASURED capability query" in shown, shown
+    uncited = caps_table.replace("src/scout.rs:10 opens no session", "opens no session")
+    status, shown = _run_caps(clean, uncited, {"scout"})
+    assert status == 1 and "names the code" in shown, shown
+    status, shown = _run(clean, caps_table)
+    assert status == 0, f"a table with capabilities read without a profile failed: {shown}"
+    cases += 1
+
     print(f"no_heap_ratchet_gate selftest: {cases} cases pass")
     return 0
 
@@ -668,6 +792,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--check", type=Path, metavar="READING", help="judge a reading")
     mode.add_argument("--fill", type=Path, metavar="READING", help="print the rows a reading writes")
     ap.add_argument("--table", type=Path, default=ROOT / TABLE)
+    ap.add_argument("--profile", type=Path, metavar="PROFILE",
+                    help="with --check: every capability this profile turns on is held by a row")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
@@ -695,7 +821,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  no-heap-ratchet FAIL: the reading {path} cannot be read: {error}", file=sys.stderr)
         return 1
     if args.check is not None:
-        return check(reading_text, table_text)
+        capabilities = None
+        if args.profile is not None:
+            try:
+                capabilities = profile_capabilities(args.profile)
+            except Exception as error:  # noqa: BLE001  the resolver's refusal, said as a failure
+                print(f"  no-heap-ratchet FAIL: the profile {args.profile} did not resolve: {error}",
+                      file=sys.stderr)
+                return 1
+            if not capabilities:
+                print(f"  no-heap-ratchet FAIL: the profile {args.profile} resolved to no capability "
+                      f"of the pico C ABI: the reader stopped matching, which a pass would hide",
+                      file=sys.stderr)
+                return 1
+        return check(reading_text, table_text, capabilities)
     rows, notes = fill(reading_text, table_text)
     if rows is None:
         for note in notes:

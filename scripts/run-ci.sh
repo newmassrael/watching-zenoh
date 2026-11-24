@@ -13328,7 +13328,7 @@ layer_c1nh_no_heap_after_open() {
     _runci_leg measure -- _runci_guarded_test "C1nh no heap after open" 1 \
         env "${limit_env[@]}" cargo test -p wz-capi-pico "${args[@]}" \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1
-    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading"
+    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading" --profile "$profile"
     _runci_legs_close
 }
 
