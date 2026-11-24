@@ -6,9 +6,10 @@
  * with `_z_task_join` (`tests/z_test_peer_unicast.c`), when scripts/lib/pico_upstream_programs.py
  * builds it against the library under test. The two are zenoh-pico's system layer and not its API:
  * a drop-in for the API owes neither, and wz's does not export them. They are defined here as
- * zenoh-pico's own system layer defines them (`vendor/zenoh-pico/src/system/unix/system.c` and
- * `src/system/windows/system.c`), so the program's text is unchanged. The control links zenoh-pico,
- * which has its own, and does not take this unit.
+ * zenoh-pico's own system layer defines them (`vendor/zenoh-pico/src/system/unix/system.c` @
+ * `_Z_CHECK_SYS_ERR(pthread_join(*task, NULL));` and `vendor/zenoh-pico/src/system/windows/system.c`
+ * @ `WaitForSingleObject(*task, INFINITE);`), so the program's text is unchanged. The control links
+ * zenoh-pico, which has its own, and does not take this unit.
  */
 
 #include "zenoh-pico.h"
