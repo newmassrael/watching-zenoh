@@ -598,54 +598,78 @@ impl LinkProto {
     }
 }
 
-/// What a dial names: a protocol and the end it reaches, an IPv4 or an IPv6 address and a port:
-/// `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s, which every
-/// stack's socket seam takes, so one locator type reaches datagram and stream links alike and a
-/// stack refuses a family it does not carry when it opens the socket.
+/// What a dial names and a listener is bound to: the kind of link and the end it reaches, each kind
+/// in the form its own locators take. Every link of this runtime is reached by one of these, so a
+/// stack is asked for any link by one type and answers for the kinds it carries; a kind it does not
+/// carry is [`LinkOpenError::Unsupported`]. The text of a locator is read in one place
+/// (`crate::locator_text`) and written in one ([`Locator::text`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Locator {
+pub enum Locator {
+    /// A link over IP: `udp/`, `tcp/` or `tls/` to an address and a port.
+    Ip(IpLocator),
+}
+
+/// The locator of a link over IP: a protocol and the end it reaches, an IPv4 or an IPv6 address
+/// and a port: `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s,
+/// which every stack's socket seam takes, so one locator reaches datagram and stream links alike
+/// and a stack refuses a family it does not carry when it opens the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpLocator {
     /// The protocol the link speaks.
     pub proto: LinkProto,
     /// The end the link reaches.
     pub at: SocketAddr,
 }
 
-impl Locator {
-    /// A UDP locator.
-    pub const fn udp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Udp,
-            at,
-        }
-    }
-
-    /// A TCP locator.
-    pub const fn tcp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tcp,
-            at,
-        }
-    }
-
-    /// A TLS locator.
-    pub const fn tls(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tls,
-            at,
-        }
-    }
-
-    /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt` into text of [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written
-    /// whole. Whether a row of the build holds it, at most
-    /// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's question
-    /// ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at compile
-    /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
+impl IpLocator {
+    /// zenoh's text of the locator, written without `core::fmt` into text of
+    /// [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written whole. Whether a row of the
+    /// build holds it, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's
+    /// question ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at
+    /// compile time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
     pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
         let mut text = FixedText::new();
         wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at)
             .write_src(&mut text);
         text
+    }
+}
+
+impl Locator {
+    /// The locator of a link of `proto` to `at`.
+    pub const fn ip(proto: LinkProto, at: SocketAddr) -> Self {
+        Self::Ip(IpLocator { proto, at })
+    }
+
+    /// A UDP locator.
+    pub const fn udp(at: SocketAddr) -> Self {
+        Self::ip(LinkProto::Udp, at)
+    }
+
+    /// A TCP locator.
+    pub const fn tcp(at: SocketAddr) -> Self {
+        Self::ip(LinkProto::Tcp, at)
+    }
+
+    /// A TLS locator.
+    pub const fn tls(at: SocketAddr) -> Self {
+        Self::ip(LinkProto::Tls, at)
+    }
+
+    /// The locator of an IP link, or `None` for a link of another kind, which a stack of IP links
+    /// alone refuses as [`LinkOpenError::Unsupported`].
+    pub const fn as_ip(self) -> Option<IpLocator> {
+        match self {
+            Self::Ip(ip) => Some(ip),
+        }
+    }
+
+    /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
+    /// `core::fmt`: [`IpLocator::text`] for an IP link.
+    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+        match self {
+            Self::Ip(ip) => ip.text(),
+        }
     }
 }
 
@@ -667,10 +691,12 @@ const _: () = assert!(
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 
-/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`.
+/// zenoh's text of the locator: `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port` for an IP link.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}/{}", self.proto.scheme(), self.at)
+        match self {
+            Self::Ip(ip) => write!(f, "{}/{}", ip.proto.scheme(), ip.at),
+        }
     }
 }
 
