@@ -305,8 +305,8 @@ pub unsafe extern "C" fn wz_ext_transport_new(
             drop: calls.drop,
         };
         let transport = Arc::new(AppTransport::new(
-            crate::object_slot::boxed(PortLock(wz_capi_port::sync::Lock::new(AppLinkTable::new()))),
-            crate::object_slot::boxed(port),
+            Box::new(PortLock(wz_capi_port::sync::Lock::new(AppLinkTable::new()))),
+            Box::new(port),
         ));
         *this_ = wz_ext_owned_transport_t {
             handle: Arc::into_raw(transport) as *mut c_void,
