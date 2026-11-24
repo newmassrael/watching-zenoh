@@ -23,6 +23,7 @@
 //! runtime), a C session another (its entities on one shared key table), and the cooperative
 //! engine a third. Nothing here spawns a task, reads a clock or holds a socket.
 
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
@@ -33,7 +34,9 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::sample::{EncodingHint, SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::sample::{
+    CarriedEncoding, EncodingHint, EncodingRef, SampleKind, SourceInfo, TimestampHint,
+};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -105,26 +108,43 @@ impl MissDetectionConfig {
 /// `#[non_exhaustive]`, matching [`AdvancedPublisherOptions`]: the QoS trio
 /// (priority / congestion control / express) also rides upstream's struct and
 /// is a later round's wiring, which must not break a struct literal here.
+///
+/// Each value is the options' own or lent by its holder for as long as the put runs, as a plain
+/// publish's options take them ([`PublishOptions`]): a C program's encoding and attachment are
+/// read where the program keeps them, and the put copies them only into its cache's row.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct AdvancedPutOptions {
+pub struct AdvancedPutOptions<'a> {
     /// The value's encoding — the inner `MsgPut` E-flag. Rides both the wire
     /// publish and the cache entry, so a recovered sample renders identically.
-    pub encoding: Option<wz_session_core::sample::EncodingHint>,
+    pub encoding: Option<CarriedEncoding<'a>>,
     /// An opaque attachment side-band — the inner body ext id 0x03. Put-only
     /// on the wire, so there is no delete-side counterpart.
-    pub attachment: Option<Vec<u8>>,
+    pub attachment: Option<Cow<'a, [u8]>>,
 }
 
-impl AdvancedPutOptions {
-    /// Set the value encoding.
-    pub fn with_encoding(mut self, encoding: wz_session_core::sample::EncodingHint) -> Self {
-        self.encoding = Some(encoding);
+impl<'a> AdvancedPutOptions<'a> {
+    /// Set the value encoding, the options' own.
+    pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
+        self.encoding = Some(CarriedEncoding::Owned(encoding));
         self
     }
-    /// Set the attachment side-band.
+
+    /// Set the value encoding, read where its holder keeps it for as long as the put runs.
+    pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
+        self.encoding = Some(CarriedEncoding::Lent(encoding));
+        self
+    }
+
+    /// Set the attachment side-band, the options' own.
     pub fn with_attachment(mut self, attachment: impl Into<Vec<u8>>) -> Self {
-        self.attachment = Some(attachment.into());
+        self.attachment = Some(Cow::Owned(attachment.into()));
+        self
+    }
+
+    /// Set the attachment side-band, read where its holder keeps it for as long as the put runs.
+    pub fn with_attachment_lent(mut self, attachment: &'a [u8]) -> Self {
+        self.attachment = Some(Cow::Borrowed(attachment));
         self
     }
 }
@@ -1010,7 +1030,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     pub fn put_with(
         &self,
         payload: &[u8],
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         self.put_sample(SamplePayload::Bytes(payload), options)
     }
@@ -1023,7 +1043,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     pub fn put_shm_with(
         &self,
         payload: &Arc<dyn ShmChunk>,
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         self.put_sample(SamplePayload::Chunk(payload), options)
     }
@@ -1055,7 +1075,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     fn put_sample(
         &self,
         payload: SamplePayload<'_>,
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         // What the cache keeps of the sample, read where the put holds it. A cache that cannot
         // keep it refuses the put first, before it takes a time or a sequence number, so no
@@ -1070,7 +1090,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
                         SamplePayload::Chunk(_) => &[],
                     },
                     kind: SampleKind::Put,
-                    encoding: options.encoding.as_ref().map(EncodingHint::view),
+                    encoding: options.encoding.as_ref().map(CarriedEncoding::view),
                     attachment: options.attachment.as_deref(),
                     #[cfg(feature = "transport-shm")]
                     shared: match &payload {
@@ -1126,7 +1146,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         // `advanced_cache`'s source_info already follows.
         #[cfg(feature = "pubsub-encoding")]
         if let Some(enc) = &options.encoding {
-            opts = opts.with_encoding(enc.clone());
+            opts = opts.with_encoding_ref(enc.view());
         }
         #[cfg(feature = "pubsub-attachment")]
         if let Some(att) = &options.attachment {

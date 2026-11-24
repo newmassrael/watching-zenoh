@@ -283,7 +283,7 @@ where
     pub fn put_shm_with(
         &self,
         payload: &Arc<crate::shm_provider::ShmBackedPayload>,
-        options: AdvancedPutOptions,
+        options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         let chunk: Arc<dyn ShmChunk> = Arc::clone(payload) as Arc<dyn ShmChunk>;
         self.0.put_shm_with(&chunk, options)
