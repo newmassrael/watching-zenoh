@@ -74,7 +74,7 @@ use wz_session_core::slot_observer::ObserverRows;
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
 #[cfg(feature = "listen")]
-use crate::admission_gate::{AdmissionGate, Admitted};
+use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
@@ -1698,11 +1698,11 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
 /// the link itself and its owner's waits for it are the driver's ([`Wire`]).
 struct LinkSession<C: ClockSource + 'static> {
     actions: SessionHandle<C>,
-    /// Opened when the face is brought up (`bring_up`); until then the link gives the session
-    /// nothing past its handshake, so the watchers hear the face come up before anything its link
-    /// carried.
+    /// The link's gates, whose admission is granted when the face is brought up (`bring_up`);
+    /// until then the link gives the session nothing past its handshake, so the watchers hear the
+    /// face come up before anything its link carried.
     #[cfg(feature = "listen")]
-    admitted: Admitted,
+    gate: CellRc<LinkGate<C>>,
     /// The link's generation, which the queries it carries are answered under (`query`).
     #[cfg(feature = "queryable")]
     generation: u64,
@@ -2647,12 +2647,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // What the session's read waits on for the link's input and its room, read off it before
         // its gates take it.
         let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
-        // The link gives the session nothing between its handshake and the face table's decision
-        // (`admit`), so a link that is refused has put nothing in the tables.
-        #[cfg(feature = "listen")]
-        let admitted = Admitted::default();
         // The session is handed a record of a link only while its round of deliveries has the room
-        // one record can take (decision Q4), and with `listen` only once the engine admitted it.
+        // one record can take (decision Q4), and with `listen` only once the engine admitted it:
+        // the link gives the session nothing between its handshake and the face table's decision
+        // (`admit`), so a link that is refused has put nothing in the tables.
         let record_room = crate::round::read_room::<
             { caps::MAX_SUBSCRIPTIONS },
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
@@ -2661,7 +2659,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let gate: LinkGate<C> = unsafe {
             RoundGate::new(
-                AdmissionGate::new(pump, actions.clone(), admitted.clone()),
+                AdmissionGate::new(pump, actions.clone()),
                 self.session.lane.clone(),
                 record_room,
             )
@@ -2670,7 +2668,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let gate: LinkGate<C> =
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
-        let link = self.transport.place_gate(gate, endpoint)?;
+        let gate = self.transport.place_gate(gate, endpoint)?;
+        // The wire keeps a handle on the gates to admit the link through them.
+        #[cfg(feature = "listen")]
+        let admission = gate.clone();
+        let link = gate.into_link();
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
         let dispatch = FaceDispatch {
@@ -2702,7 +2704,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             LinkSession {
                 actions,
                 #[cfg(feature = "listen")]
-                admitted,
+                gate: admission,
                 #[cfg(feature = "queryable")]
                 generation,
             },
@@ -3102,7 +3104,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return;
         };
         #[cfg(feature = "listen")]
-        wire.admitted.grant();
+        wire.gate.pump().grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(on) = wire.room_wait() {
             self.rooms.hold(face.id, on);

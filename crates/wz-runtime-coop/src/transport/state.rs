@@ -364,17 +364,17 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// A link's gates placed in their cell of the session's table, as the link's driver is in one
-    /// of the stack's: a link past the cells is refused as one past the buffers is.
+    /// of the stack's: a link past the cells is refused as one past the buffers is. The handle
+    /// names the gates as they are, so the engine can reach them as well as pump the link through
+    /// them (`CellRc::into_link`).
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn place_gate<Gate: SessionDatagramLink + 'static>(
         &self,
         gate: Gate,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<CellRc<dyn SessionDatagramLink>, TransportRefusal> {
-        Ok(CellRc::in_cells(self.gate_cells.as_ref(), gate)
-            .map_err(|_| self.cells_exhausted(endpoint))?
-            .into_link())
+    ) -> Result<CellRc<Gate>, TransportRefusal> {
+        CellRc::in_cells(self.gate_cells.as_ref(), gate).map_err(|_| self.cells_exhausted(endpoint))
     }
 
     /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged

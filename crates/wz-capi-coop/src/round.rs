@@ -316,6 +316,12 @@ impl<P> RoundGate<P> {
         Self { pump, round, room }
     }
 
+    /// The link this gate stands before, as the engine admits it through the gates (`listen`).
+    #[cfg(feature = "listen")]
+    pub(crate) fn pump(&self) -> &P {
+        &self.pump
+    }
+
     /// Whether the round has the room of a record, and nothing a source outside the gate owes is
     /// still to come before it.
     fn has_room(&self) -> bool {
