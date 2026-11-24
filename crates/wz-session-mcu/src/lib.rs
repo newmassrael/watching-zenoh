@@ -211,7 +211,5 @@ pub mod admin_fixed;
 pub mod admin_node;
 // An in-memory network for the shell's tests, and for a sibling crate's that
 // wants a peer no stack owns.
-// Totality debt TD-223 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(any(test, feature = "test-support"), not(feature = "session-slot")))]
 pub mod memory;
