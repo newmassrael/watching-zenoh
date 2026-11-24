@@ -727,8 +727,6 @@ pub mod sync;
 pub mod time_base;
 pub mod whatami;
 mod write_filter;
-// Totality debt TD-161 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod zid;
 
 // Re-export the ABI types and every exported function at the crate root so the
