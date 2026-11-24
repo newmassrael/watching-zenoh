@@ -120,7 +120,7 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     ///
     /// The Router asks before it drives the slot machine: a payload that does
     /// not fit is a `codec.error` for the machine, one that does is a
-    /// `fragment.chunk` whose duty then stages it, and a transition cannot be
+    /// `fragment.more` or `fragment.last` whose duty then stages it, and a transition cannot be
     /// taken back once a refused append shows it was the wrong one.
     ///
     /// The provided answer is the rule `append` states, the chain's total
