@@ -83,13 +83,16 @@ mod tests {
         }
     }
 
+    /// What a watcher of a test is told, in the order it was told it.
+    type Told<T> = Arc<StdMutex<Vec<T>>>;
+
     /// Rows told through a watch of snapshots are each snapshot's rows, a face with no link one
     /// row; snapshots told through a watch of rows are the faces the rows were made of, each told
     /// once at its last row. Turned red by a snapshot handed on before its last link, or by a face
     /// with no link told as no row.
     #[test]
     fn each_form_of_a_watcher_is_told_what_the_other_is() {
-        let rows_told: Arc<StdMutex<Vec<(FaceEventKind, u8, usize, usize)>>> = Arc::default();
+        let rows_told: Told<(FaceEventKind, u8, usize, usize)> = Arc::default();
         let into = Arc::clone(&rows_told);
         let by_snapshot = rows_of_snapshots(Arc::new(move |kind, row: &FaceLinkRow| {
             into.lock()
@@ -107,7 +110,7 @@ mod tests {
             ]
         );
 
-        let faces_told: Arc<StdMutex<Vec<(FaceEventKind, u8, Vec<String>)>>> = Arc::default();
+        let faces_told: Told<(FaceEventKind, u8, Vec<String>)> = Arc::default();
         let into = Arc::clone(&faces_told);
         let by_row = snapshots_of_rows(Arc::new(move |kind, face: &FaceSnapshot| {
             let srcs = face.links.iter().map(|link| link.src.clone()).collect();

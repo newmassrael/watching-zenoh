@@ -1576,9 +1576,13 @@ pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone +
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
     /// Step the session until the task is told to stop or the session ends.
     pub(crate) fn run(self) {
-        while self.engine.reader_run.load(Ordering::Acquire) == self.run
-            && self.engine.read(false).is_ok()
-        {}
+        // Each step blocks in the read of the session's links, so the loop waits there and spins
+        // nowhere; it ends once the engine starts another run or the session's read fails.
+        while self.engine.reader_run.load(Ordering::Acquire) == self.run {
+            if self.engine.read(false).is_err() {
+                break;
+            }
+        }
     }
 }
 

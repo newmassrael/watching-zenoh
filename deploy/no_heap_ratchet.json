@@ -4,19 +4,19 @@
   "tolerance": 0.05,
   "families": {
     "advanced-put": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "advanced-subscriber-history": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "advanced-subscriber-receive": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "config-clone": {
       "allocs_per_round": 0,
@@ -29,149 +29,149 @@
       "debt": null
     },
     "decl-watch": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "delete": {
-      "allocs_per_round": 4,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "e2e": {
-      "allocs_per_round": 24,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "e2e-sender-demux": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "e2e-supervision": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "get": {
-      "allocs_per_round": 17,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "group-receive": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-TBD"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "idle": {
-      "allocs_per_round": 0.06,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "instance-key": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "keyexpr-declare": {
-      "allocs_per_round": 8.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "link-udp": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "liveliness-get": {
-      "allocs_per_round": 17,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "liveliness-subscriber": {
-      "allocs_per_round": 18.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "liveliness-token": {
-      "allocs_per_round": 14.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "matching-listener": {
-      "allocs_per_round": 4,
+      "allocs_per_round": 0.01,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "message-payload": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "publisher-declare": {
-      "allocs_per_round": 3,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "publisher-put": {
-      "allocs_per_round": 2,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "put-batch": {
-      "allocs_per_round": 4,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "put-encoded": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-encoding-schema-heap"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "put-small": {
-      "allocs_per_round": 4,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "put-timestamped": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-encoding-schema-heap"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "querier-declare": {
-      "allocs_per_round": 14.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "querier-get": {
-      "allocs_per_round": 19,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "queryable-declare": {
-      "allocs_per_round": 20.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "queryable-reply": {
-      "allocs_per_round": 14,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "replay": {
-      "allocs_per_round": 2,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "shared-key-ids": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "subscriber-declare": {
-      "allocs_per_round": 18.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "subscriber-receive-batch": {
       "allocs_per_round": 0,
@@ -184,9 +184,9 @@
       "debt": null
     },
     "transport-events-listener": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     }
   },
   "capabilities": {

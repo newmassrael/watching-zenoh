@@ -335,6 +335,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/group.rs` | S7 | |
 | `crates/wz-capi-port/src/held_key.rs` | S7 | |
 | `crates/wz-capi-port/src/held_slab.rs` | S7 | |
+| `crates/wz-capi-port/src/face_rows.rs` | S7 | |
 | `crates/wz-capi-port/src/lib.rs` | S7 | |
 | `crates/wz-capi-port/src/listeners.rs` | S7 | |
 | `crates/wz-capi-port/src/lodge.rs` | S7 | |
