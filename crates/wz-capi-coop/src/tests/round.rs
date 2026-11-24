@@ -1025,7 +1025,7 @@ fn hearing(tag: u8, heard: &Heard) -> Hearing {
     let heard = heard.clone();
     Hearing {
         row: Box::new(crate::engine::LivelinessRow::new(
-            WireKey::literal(),
+            WireKey::literal().into_holds(),
             wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
                 heard
                     .lock()
