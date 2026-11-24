@@ -102,9 +102,11 @@ impl<'a> LeafPush<'a> {
 
     /// The bytes [`Self::to_push`]'s message encodes to, made without making the message.
     ///
-    /// The received Push is encoded by the writer a session frames its own Push with
-    /// (`frame_encode::push_body`), into the buffer the bytes are kept in, behind the head a literal
-    /// key needs; its own head and its routing source are then taken out in place. The Push's
+    /// The received Push is encoded by its owned writer through the codec's vector sink, as
+    /// `frame_encode::encode_frame_with_push` frames one, into the buffer the bytes are kept in,
+    /// behind the head a literal key needs; its own head and its routing source are then taken out
+    /// in place. The vector refuses no write and an owned Push is a value its writer cannot refuse,
+    /// so the encode has no failure. The Push's
     /// writer is generic over the source it reads, so writing the leaf's message from a source of
     /// its own would link a second writer into every router, and routing the session's own send
     /// through that source would grow every build that sends a Push, which have no fan-out. The
@@ -143,10 +145,9 @@ impl<'a> LeafPush<'a> {
                 Err(never) => match never {},
             }
         }
-        {
-            let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
-            crate::frame_encode::push_body(push)(&mut sink)
-                .expect("a Vec grows, so its sink is infallible");
+        match push.encode(&mut VecSink::new(&mut bytes)) {
+            Ok(()) => {}
+            Err(never) => match never {},
         }
         let tail_at = match self.key {
             LeafKey::Own => {

@@ -13884,7 +13884,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         declare: &crate::transport_profile::owned::DeclareOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::declare_body(declare);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14025,7 +14025,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // and an express message leaves its batch at once
         // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
         let qos = crate::declare_ext_qos::read_request_qos(request);
-        let encode_body = crate::frame_encode::request_body(request);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14085,7 +14085,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // answered in the `Data` band. A non-QoS session still clamps the band
         // downstream.
         let qos = crate::declare_ext_qos::read_response_qos(response);
-        let encode_body = crate::frame_encode::response_body(response);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14138,7 +14138,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // final built with `QosLevel::DEFAULT` carries no ext and lands on the
         // DEFAULT band exactly as before.
         let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
-        let encode_body = crate::frame_encode::response_final_body(response_final);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14191,7 +14191,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest: &crate::transport_profile::owned::InterestOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::interest_body(interest);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]

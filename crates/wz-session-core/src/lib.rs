@@ -1196,8 +1196,6 @@ pub mod tx_lease;
 /// profiles. Owned `Vec` output, so alloc-gated like `inbound` /
 /// `network_message`.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-017 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod frame_encode;
 
 /// Outbound transport-handshake / close / keepalive frame encoders
@@ -1288,8 +1286,6 @@ pub mod push_build;
 // output (alloc-gated) and `codec-push` gated, as `push_build` is. A plain comment, not an
 // outer doc: the module documents itself, and rustdoc would resolve its own links from here.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-// Totality debt TD-044 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod encoded_push;
 
 /// A literal-keyexpr `Put` as the codec's BORROWED `Push` over the caller's own text

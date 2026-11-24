@@ -37,6 +37,8 @@ use alloc::vec::Vec;
     all(feature = "codec-fragment", feature = "reassembly")
 ))]
 use sce_forge_runtime::codec::CodecError;
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::VecSink;
 // The chain of a Frame header with its QoS extension, and of a Fragment header.
 #[cfg(any(
     feature = "transport-qos",
@@ -327,27 +329,30 @@ where
     Ok(wire)
 }
 
-/// [`encode_frame_envelope`] of an owned message, whose writer is a value it cannot refuse: what
-/// is left is the vector's write, which the buffer seam still types as one that can refuse.
+/// The frame of one owned message: the head [`begin_frame`] writes, then `body`, written through
+/// the codec's own vector sink. An owned message is a value its writer cannot refuse and the vector
+/// refuses no write, so the frame has no failure; a body that can refuse its message is framed by
+/// [`encode_frame_envelope`].
 #[cfg(feature = "alloc")]
-fn owned_frame_envelope<P>(
+fn owned_frame(
     sn: u64,
     parent_flags: u8,
     worst_case_payload: usize,
     ext_qos: Option<Priority>,
-    payload_encode: P,
-) -> Vec<u8>
-where
-    P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
-{
-    encode_frame_envelope(
-        sn,
-        parent_flags,
-        worst_case_payload,
-        ext_qos,
-        payload_encode,
-    )
-    .expect("an owned message is written whole into a vector")
+    body: impl FnOnce(&mut VecSink<'_>) -> Result<(), core::convert::Infallible>,
+) -> Vec<u8> {
+    // +2 for a possible ext_qos ([0x31][VLE(priority)]), as the envelope reserves.
+    let mut wire = Vec::with_capacity(worst_case_payload.saturating_add(13));
+    let mut sink = VecSink::new(&mut wire);
+    let written = match write_frame_head(&mut sink, sn, parent_flags, ext_qos) {
+        Ok(()) => body(&mut sink),
+        Err(never) => match never {},
+    };
+    match written {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
+    wire
 }
 
 /// The same envelope, written into a destination the caller chose: a heap
@@ -386,18 +391,29 @@ where
     payload_encode(&mut sink)
 }
 
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice), and by a
-/// router's leaf encoding (`encoded_push::LeafPush::encode`), so that a router
-/// links one Push writer.
-#[cfg(all(feature = "codec-push", feature = "alloc"))]
+/// R311jq — the Push body encoder the session's sends share: the unicast dispatch
+/// (`SessionLinkActions`, `Fn` and not `FnOnce` because the batch-overflow retry encodes
+/// twice), the group's send and the lend-only count ([`push_capacity_hint`]), so each links
+/// one Push writer over the transmit sink. Gated by those callers: a build that frames a Push
+/// only through `encode_frame_with_push` writes it with the vector's own sink.
+#[cfg(all(
+    feature = "codec-push",
+    feature = "alloc",
+    any(
+        test,
+        feature = "tx-lend-only",
+        all(feature = "storage-profile", feature = "session-unicast"),
+        all(
+            feature = "session-multicast",
+            feature = "codec-frame",
+            feature = "storage-profile"
+        )
+    )
+))]
 pub(crate) fn push_body(
     push: &PushOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    // Written straight from the owned fields, as `request_body` is. A borrowed projection holds its
+    // Written straight from the owned fields. A borrowed projection holds its
     // lists as the owner's profile holds them, so at `Heap` it would allocate a vector for the
     // extension chain on every send (measured: one allocation and 40 bytes a subscriber on the
     // router's forward).
@@ -416,8 +432,8 @@ pub(crate) fn push_body(
 ///
 /// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`), the
 /// multicast group send (`multicast_tx_push`, behind `session-multicast`) and a router's leaf
-/// encoding (`encoded_push::LeafPush::encode`), which frames the Push it receives with this send's
-/// own writer.
+/// encoding (`encoded_push::LeafPush::encode`), which sizes the vector it writes the Push it
+/// receives into.
 ///
 /// In the lend-only build (`tx-lend-only`) the count is [`push_body`]'s own run into a buffer that
 /// keeps nothing ([`crate::tx_buf::encoded_len`]), so the Push's encoder is compiled once, over the
@@ -444,12 +460,10 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
 ///
 /// R311y578 (G7) — `session-unicast` joined the gate, and the reason is the
 /// general rule rather than this one symbol: **a helper's cfg must include
-/// the gate of every module that calls it.** `oam_body` is the only body
-/// encoder in this module with NO in-module caller — every sibling
-/// ([`push_body`], [`declare_body`], [`request_body`], [`response_body`],
-/// [`response_final_body`], [`interest_body`]) is also reached from an
-/// `encode_frame_with_*` wrapper here, so they stay live on their own. Its
-/// sole consumer is `session_actions::dispatch_oam`, and `session_actions`
+/// the gate of every module that calls it.** `oam_body` and [`push_body`] are the body
+/// encoders this module keeps as functions: the other owned messages are written where they are
+/// sent, and the `encode_frame_with_*` wrappers here write them through the vector's own sink.
+/// `oam_body`'s sole consumer is `session_actions::dispatch_oam`, and `session_actions`
 /// is `all(alloc, session-unicast)`-gated at the `lib.rs` declaration. Select
 /// `codec-linkstate` + `codec-push` WITHOUT `session-unicast` and the
 /// function is genuinely unreachable, which `-D warnings` correctly rejects.
@@ -487,70 +501,6 @@ pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(),
     }
 }
 
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
-pub(crate) fn declare_body(
-    declare: &DeclareOwned,
-) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| declare.encode(sink)
-}
-
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-pub(crate) fn request_body(
-    request: &RequestOwned,
-) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    // Written straight from the owned fields (SCE `{Codec}Owned::encode`, the bytes the borrowed
-    // projection and its `encode` write): the record over a kilobyte that the projection builds,
-    // its extension vectors inline, is never made. An extension list past the bound is an error
-    // here, as the projection refused it; wz builders do not emit one.
-    move |sink| request.encode(sink)
-}
-
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
-pub(crate) fn response_body(
-    response: &ResponseOwned,
-) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| response.encode(sink)
-}
-
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-pub(crate) fn response_final_body(
-    response_final: &ResponseFinalOwned,
-) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| response_final.encode(sink)
-}
-
-/// R311jq — per-type network-message body encoder: the single home of
-/// the owned message's `encode(sink)`, shared by the
-/// immediate-path `encode_frame_with_*` reference wrapper and the
-/// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "alloc")]
-pub(crate) fn interest_body(
-    interest: &InterestOwned,
-) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| interest.encode(sink)
-}
-
 /// R121j-3 — build the wire bytes for a `Frame` transport-message
 /// carrying a single `Response` network-message in its payload.
 /// Mirror of the other `encode_frame_with_*` helpers (PUSH /
@@ -579,12 +529,12 @@ pub fn encode_frame_with_response_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::response::ResponseWire::measure(&response).len(),
         ext_qos,
-        response_body(&response),
+        |sink| response.encode(sink),
     )
 }
 
@@ -619,12 +569,12 @@ pub fn encode_frame_with_response_final_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len(),
         ext_qos,
-        response_final_body(&response_final),
+        |sink| response_final.encode(sink),
     )
 }
 
@@ -641,12 +591,12 @@ pub fn encode_frame_with_response_final_qos(
 /// that pass `reliable=false` accept that risk explicitly.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::request::RequestWire::measure(&request).len(),
         None,
-        request_body(&request),
+        |sink| request.encode(sink),
     )
 }
 
@@ -667,12 +617,12 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
 /// the unknown id — useful only for fuzz / negative tests.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::declare::DeclareWire::measure(&declare).len(),
         None,
-        declare_body(&declare),
+        |sink| declare.encode(sink),
     )
 }
 
@@ -695,12 +645,12 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
 /// fuzz / negative tests.
 #[cfg(feature = "alloc")]
 pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::interest::InterestWire::measure(&interest).len(),
         None,
-        interest_body(&interest),
+        |sink| interest.encode(sink),
     )
 }
 
@@ -758,12 +708,12 @@ pub fn encode_frame_with_push_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    owned_frame_envelope(
+    owned_frame(
         sn,
         frame_flags(reliable),
         wz_codecs::push::PushWire::measure(&push).len(),
         ext_qos,
-        push_body(&push),
+        |sink| push.encode(sink),
     )
 }
 
@@ -1859,7 +1809,7 @@ mod tests {
         {
             let declare = build_declare_kexpr(7, "demo/test").unwrap();
             assert_eq!(
-                encoded_len(&declare_body(&declare)),
+                encoded_len(&|sink: &mut TxSink<'_>| declare.encode(sink)),
                 wz_codecs::declare::DeclareWire::measure(&declare).len()
             );
         }
@@ -1871,7 +1821,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                encoded_len(&request_body(&request)),
+                encoded_len(&|sink: &mut TxSink<'_>| request.encode(sink)),
                 wz_codecs::request::RequestWire::measure(&request).len()
             );
         }
@@ -1884,7 +1834,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                encoded_len(&response_body(&response)),
+                encoded_len(&|sink: &mut TxSink<'_>| response.encode(sink)),
                 wz_codecs::response::ResponseWire::measure(&response).len()
             );
         }
@@ -1892,7 +1842,7 @@ mod tests {
         {
             let response_final = build_response_final(42, crate::sample::QosLevel::DEFAULT);
             assert_eq!(
-                encoded_len(&response_final_body(&response_final)),
+                encoded_len(&|sink: &mut TxSink<'_>| response_final.encode(sink)),
                 wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len()
             );
         }
