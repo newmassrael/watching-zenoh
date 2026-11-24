@@ -2222,6 +2222,19 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
     now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
 }
 
+/// The generation the next link, or the next join of a group, answers its queries under: the
+/// counter's next value. The counter wraps as `fetch_add` does, and a value equal to
+/// `query::LOCAL_QUERY`, which names the session's own queries and no link's, is stepped over.
+#[cfg(feature = "queryable")]
+fn next_generation(counter: &AtomicU64) -> u64 {
+    loop {
+        let generation = counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if generation != query::LOCAL_QUERY {
+            return generation;
+        }
+    }
+}
+
 /// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2630,7 +2643,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
         let link = self.transport.place_gate(gate, endpoint)?;
         #[cfg(feature = "queryable")]
-        let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = next_generation(&self.session.plane.generation);
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
             face,
@@ -3143,7 +3156,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A member's query is held, and answered, under the group's own generation, as a link's
         // is under its; each join of the group is a generation of its own.
         #[cfg(feature = "queryable")]
-        let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = next_generation(&self.session.plane.generation);
         #[cfg(feature = "queryable")]
         let dispatch = group::dispatch(
             self.session.registry.clone(),
@@ -8025,5 +8038,34 @@ mod leg_deadline_tests {
             leg_deadline_ms(u64::MAX, u32::MAX),
             18_446_744_073_709_552 + 4_294_967_295
         );
+    }
+}
+
+#[cfg(all(test, feature = "queryable"))]
+mod generation_tests {
+    //! The generations a session's links and groups answer their queries under.
+    use super::{next_generation, query};
+    use core::sync::atomic::Ordering;
+    use portable_atomic::AtomicU64;
+
+    /// A link's generation is the counter's next value, and where the counter wraps the
+    /// session's own queries' generation is stepped over.
+    ///
+    /// # Control
+    ///
+    /// Returning the wrapped value without the step over `query::LOCAL_QUERY` reds the second
+    /// assertion.
+    #[test]
+    fn a_links_generation_is_never_the_sessions_own() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(next_generation(&counter), 1);
+        let counter = AtomicU64::new(query::LOCAL_QUERY.wrapping_sub(1));
+        let after = query::LOCAL_QUERY.wrapping_add(1);
+        assert_eq!(
+            next_generation(&counter),
+            after,
+            "LOCAL_QUERY is stepped over"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), after);
     }
 }
