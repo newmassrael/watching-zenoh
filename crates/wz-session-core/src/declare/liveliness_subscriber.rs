@@ -176,6 +176,20 @@ pub trait LocalLivelinessSubscribers {
 pub trait LivelinessDelivered<X, Id>: Sized {
     /// Tell `row`, the row `id`, one sample through `cx`.
     fn tell(cx: &mut X, id: Id, row: RowAccess<'_, Self>, sample: LivelinessSample<'_>);
+
+    /// [`Self::tell`] of a sample whose keyexpr is the whole text of `held`, a key of the
+    /// session's key arena, when it is one: a context that keeps the sample past the call may hold
+    /// the key's block rather than copy the key. The provided form tells it as `tell` does.
+    fn tell_held(
+        cx: &mut X,
+        id: Id,
+        row: RowAccess<'_, Self>,
+        sample: LivelinessSample<'_>,
+        held: Option<&crate::key_arena::KeyRef>,
+    ) {
+        let _ = held;
+        Self::tell(cx, id, row, sample);
+    }
 }
 
 impl<Row: LivelinessSampleSink, Id> LivelinessDelivered<(), Id> for Row {
@@ -191,12 +205,14 @@ impl<X, Id> LivelinessDelivered<X, Id> for () {
     fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
 }
 
-/// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many.
+/// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many. `held` is the
+/// key of the session's key arena `keyexpr` is the whole text of, when it is one.
 fn tell_reached<L: LocalLivelinessSubscribers, X>(
     subs: &mut L,
     cx: &mut X,
     kind: LivelinessSampleKind,
     keyexpr: &str,
+    held: Option<&crate::key_arena::KeyRef>,
     token_id: u64,
     historical: bool,
 ) -> usize
@@ -204,7 +220,7 @@ where
     L::Sink: LivelinessDelivered<X, L::RowId>,
 {
     subs.fire_matching(keyexpr, historical, |id, row| {
-        L::Sink::tell(
+        L::Sink::tell_held(
             cx,
             id,
             row,
@@ -213,6 +229,7 @@ where
                 keyexpr,
                 token_id,
             },
+            held,
         )
     })
 }
@@ -1007,7 +1024,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // The BORROWED fan is the live plane by construction: it carries no
         // envelope, so there is no `interest_id` that could make it a CURRENT
         // answer. `false` is the derived value here, not a default.
-        tell_reached(self, &mut (), kind, keyexpr, token_id, false)
+        tell_reached(self, &mut (), kind, keyexpr, None, token_id, false)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -1481,11 +1498,17 @@ impl<P: Storage> PeerTokens<P> {
         {
             return;
         }
+        // The row now holds the key, which a context that keeps the sample may hold too.
+        let held = self
+            .table
+            .find(id)
+            .and_then(crate::bounded::KeyBacking::held);
         tell_reached(
             subs,
             cx,
             LivelinessSampleKind::Put,
             resolved,
+            held,
             id,
             historical,
         );
@@ -1579,6 +1602,7 @@ impl<P: Storage> PeerTokens<P> {
             cx,
             LivelinessSampleKind::Delete,
             resolved,
+            removed.as_ref().and_then(crate::bounded::KeyBacking::held),
             id,
             historical,
         );
@@ -1615,6 +1639,7 @@ impl<P: Storage> PeerTokens<P> {
                     cx,
                     LivelinessSampleKind::Delete,
                     keyexpr.as_ref(),
+                    crate::bounded::KeyBacking::held(&keyexpr),
                     id,
                     false,
                 );

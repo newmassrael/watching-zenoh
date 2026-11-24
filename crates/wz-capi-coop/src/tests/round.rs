@@ -945,9 +945,9 @@ fn the_tokens_of_a_round_are_handed_in_order() {
     };
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.offer_liveliness(first.call(), &put(lying, 1)) };
-    unsafe { round.offer_liveliness(second.call(), &put(lying, 1)) };
-    unsafe { round.offer_liveliness(first.call(), &put("demo/t/2", 2)) };
+    unsafe { round.offer_liveliness(first.call(), &put(lying, 1), None) };
+    unsafe { round.offer_liveliness(second.call(), &put(lying, 1), None) };
+    unsafe { round.offer_liveliness(first.call(), &put("demo/t/2", 2), None) };
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());
@@ -960,6 +960,37 @@ fn the_tokens_of_a_round_are_handed_in_order() {
         ]
     );
     assert_eq!(round.counts(), RoundCounts::default());
+}
+
+/// A token whose key is a key of the session's key arena, as the retraction of a lost face's token
+/// names it, is read where the key's block lies after the row let go of it: the round holds a count
+/// until the lock holder settles it after the delivery. Turned red by a round that copies the key
+/// or keeps the block past the settle.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_token_named_by_a_held_key_is_read_where_its_block_lies() {
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let keys = key_space();
+    let round = round_reading(keys);
+    let heard: Heard = Arc::default();
+    let first = hearing(1, &heard);
+    let row = keys.key("demo/t/held").expect("room");
+    let retracted = LivelinessSample {
+        kind: LivelinessSampleKind::Delete,
+        keyexpr: row.as_str(),
+        token_id: 3,
+    };
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.offer_liveliness(first.call(), &retracted, Some(&row)) };
+    drop(row);
+    assert!(keys.counts().used > 0, "the round holds the token's block");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(*heard.lock().unwrap(), [(1, "demo/t/held".to_owned(), 3)]);
+    assert!(keys.counts().used > 0, "it waits for the lock holder");
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "settled, the block is back");
 }
 
 /// What a leg's callback a test holds is handed: the request id, the key, the payload and where
@@ -1058,6 +1089,58 @@ fn a_reply_is_handed_where_it_lies_or_from_the_round() {
         elsewhere.as_ptr() as usize,
         "written into the round, not read where the view held it"
     );
+}
+
+/// A reply whose key is a key of the session's key arena is read where its block lies, the round
+/// holding a count past the row's own until it is settled after the delivery. Turned red by a
+/// round that copies a reply's held key or never hands its count back.
+#[cfg(feature = "query")]
+#[test]
+fn a_reply_named_by_a_held_key_is_read_where_its_block_lies() {
+    struct HeldReply<'k> {
+        key: &'k KeyRef,
+    }
+
+    impl wz_session_core::reply_sink::ReplyView for HeldReply<'_> {
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            5
+        }
+
+        fn keyexpr(&self) -> &str {
+            self.key.as_str()
+        }
+
+        fn keyexpr_held(&self) -> Option<&KeyRef> {
+            Some(self.key)
+        }
+
+        fn kind(&self) -> wz_session_core::reply_sink::ReplyKind {
+            wz_session_core::reply_sink::ReplyKind::Put
+        }
+
+        fn payload(&self) -> &[u8] {
+            b"r"
+        }
+
+        fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+            None
+        }
+    }
+
+    let keys = key_space();
+    let round = round_reading(keys);
+    let answers: Answers = Arc::default();
+    let callback = answering(&answers);
+    let row = keys.key("demo/answer/held").expect("room");
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_reply(&callback, &HeldReply { key: &row }) };
+    drop(row);
+    assert!(keys.counts().used > 0, "the round holds the reply's block");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(answers.lock().unwrap()[0].1, "demo/answer/held");
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "settled, the block is back");
 }
 
 /// The build's area holds the sample of the build's largest rejoined message on its longest key,

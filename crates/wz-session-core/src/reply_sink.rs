@@ -77,6 +77,14 @@ pub trait ReplyView {
     fn rid(&self) -> crate::wire_id::RequestId;
     /// Resolved keyexpr literal the reply is bound to.
     fn keyexpr(&self) -> &str;
+    /// The key of the session's key arena whose whole text [`Self::keyexpr`] is, when the view
+    /// read it out of a row that keeps it there: as [`SampleView::keyexpr_held`]. Defaults to
+    /// `None`.
+    ///
+    /// [`SampleView::keyexpr_held`]: crate::sink::SampleView::keyexpr_held
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        None
+    }
     /// Put / Del / Err discriminant.
     fn kind(&self) -> ReplyKind;
     /// Payload bytes. Empty for a Del reply; the error blob for an Err.

@@ -890,6 +890,22 @@ pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
     resolve_wireexpr_view(&body, spaces, out)
 }
 
+/// [`resolve_wireexpr_viewed`], with the key of the session's key arena the answer is the whole
+/// text of, when it is one ([`resolve_wireexpr_view_held_over`]).
+#[cfg(any(feature = "codec-request", feature = "codec-response"))]
+pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    use wz_codecs::wireexpr::WireexprViewVariant as V;
+    let body = match body {
+        V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
+        V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
+    };
+    resolve_wireexpr_view_held_over(&body, spaces, None, out)
+}
+
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
 /// interest or a message decoded into its owned form carries. The rule is the
 /// same arm for arm and the answer is the same shape, a `&str` lent from the
