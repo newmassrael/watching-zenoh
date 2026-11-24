@@ -88,7 +88,12 @@ impl<'a> RequestWriter<'a> {
             return Err(CodecError::LengthOutOfRange);
         }
         let parameters = sent_parameters(&query);
-        if parameters.is_some_and(|bytes| u32::try_from(bytes.len()).is_err()) {
+        if parameters.is_some_and(
+            |(stated, suffix)| match stated.len().checked_add(suffix.len()) {
+                Some(len) => u32::try_from(len).is_err(),
+                None => true,
+            },
+        ) {
             return Err(CodecError::LengthOutOfRange);
         }
         let [value, source_info, attachment] = body_extensions(&query);
@@ -152,9 +157,10 @@ impl<'a> RequestWriter<'a> {
         if let Some(mode) = query.consolidation {
             sink.write_vle_u64(u64::from(mode.wire_byte()))?;
         }
-        if let Some(bytes) = parameters {
-            sink.write_vle_u64(widen(bytes.len()))?;
-            sink.write_bytes(bytes)?;
+        if let Some((stated, suffix)) = parameters {
+            sink.write_vle_u64(widen(stated.len().saturating_add(suffix.len())))?;
+            sink.write_bytes(stated)?;
+            sink.write_bytes(suffix)?;
         }
         let mut entries = body.iter().flatten().peekable();
         while let Some((extension, len)) = entries.next() {
@@ -176,10 +182,17 @@ const fn continued(header: u8, more: bool) -> u8 {
     }
 }
 
-/// The parameters the Query carries: none when they are empty, and none in a build that does not
-/// compose them, as the owned builder's metadata path reads them (`query-selector-parameters`).
-fn sent_parameters<'a>(query: &QueryParts<'a>) -> Option<&'a [u8]> {
-    Some(query.parameters).filter(|bytes| PARAMETERS_RIDE && !bytes.is_empty())
+/// The parameters the Query carries, as the bytes stated and the flag written after them
+/// (`QueryParts::anyke`): none when both are empty, and none in a build that does not compose
+/// them, as the owned builder's metadata path reads them (`query-selector-parameters`).
+fn sent_parameters<'a>(query: &QueryParts<'a>) -> Option<(&'a [u8], &'static [u8])> {
+    let suffix = if query.anyke {
+        crate::selector_params::anyke_suffix(query.parameters)
+    } else {
+        &[]
+    };
+    Some((query.parameters, suffix))
+        .filter(|(stated, suffix)| PARAMETERS_RIDE && !(stated.is_empty() && suffix.is_empty()))
 }
 
 /// The envelope's extensions, in the owned builder's order: the QoS unless it is the default, the
@@ -496,6 +509,42 @@ mod tests {
             }
         }
         assert_eq!(compared, 4 * 6 * 3 * 3);
+    }
+
+    /// A get whose parameters are followed by the reply-keyexpr-any flag is written as the owned
+    /// path writes it, and as a get whose parameters spell the flag themselves: the same bytes,
+    /// the flag written after the stated ones with nothing copied. Turned red by a suffix written
+    /// in another form, or a length that leaves it out.
+    #[test]
+    fn a_get_that_appends_anyke_is_written_as_one_that_spells_it() {
+        let cases: [(&[u8], &[u8]); 2] = [(b"", b"_anyke"), (b"_sn=7..", b"_sn=7..;_anyke")];
+        let mut compared = 0usize;
+        for (stated, spelled) in cases {
+            for key in keys() {
+                let appended = GetParts {
+                    rid: 7,
+                    key,
+                    query: QueryParts {
+                        parameters: stated,
+                        anyke: true,
+                        ..QueryParts::PLAIN
+                    },
+                };
+                let written = GetParts {
+                    rid: 7,
+                    key,
+                    query: QueryParts {
+                        parameters: spelled,
+                        ..QueryParts::PLAIN
+                    },
+                };
+                let lent = lent_bytes(appended).expect("written");
+                assert_eq!(lent, lent_bytes(written).expect("written"), "{appended:?}");
+                assert_eq!(lent, owned_bytes(&appended).expect("built"), "{appended:?}");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 2 * keys().len());
     }
 
     /// A key past the protocol's `u16` length is refused before a byte is written.

@@ -146,7 +146,7 @@ use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
 use crate::refusal::{refusal_code, Door};
-use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
+use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
@@ -497,7 +497,7 @@ unsafe impl Sync for CReplyClosure {}
 /// This is the RECEIVE half of `accept_replies`, and it is on by default:
 /// `_anyke` is false unless the caller asked for `Z_REPLY_KEYEXPR_ANY`
 /// (`primitives.c:575-578`), and the default is `Z_REPLY_KEYEXPR_MATCHING_QUERY`
-/// (`api/constants.h:291`). [`transmit_parameters`] is the SEND half; a getter
+/// (`api/constants.h:291`). [`appends_anyke`] is the SEND half; a getter
 /// with only the send half would still surface a reply on a key disjoint from
 /// its query, which pico silently drops.
 ///
@@ -971,10 +971,11 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// `unsafe impl Sync for CReplyClosure` above for what each arm means for the
 /// reply callback.
 ///
-/// The parameters are `parameters`, the ones the get transmits ([`transmit_parameters`] of
-/// `ask`'s). They, the value, its encoding and the attachment are lent for the call, read where
-/// the caller and the moved objects hold them, so a get copies none of them.
-fn get_options<'a>(ask: &GetAsk<'a>, parameters: &'a [u8]) -> QueryOptionsOf<'a> {
+/// The parameters are `ask`'s, followed by pico's implicit `_anyke` when `anyke`
+/// ([`appends_anyke`]). They, the value, its encoding and the attachment are lent for the call,
+/// read where the caller and the moved objects hold them, so a get copies none of them.
+fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
+    let parameters = ask.parameters;
     let GetAsk {
         target,
         consolidation,
@@ -1069,8 +1070,8 @@ fn get_options<'a>(ask: &GetAsk<'a>, parameters: &'a [u8]) -> QueryOptionsOf<'a>
         ));
     }
 
-    if !parameters.is_empty() {
-        opts = opts.with_parameters_lent(parameters);
+    if !parameters.is_empty() || anyke {
+        opts = opts.with_parameters_lent_anyke(parameters, anyke);
     }
     if let Some(payload) = payload {
         opts = opts.with_payload_lent(payload.as_slice());
@@ -1099,35 +1100,22 @@ fn parameters_has_time_selector(parameters: &[u8]) -> bool {
         .any(|window| window == SELECTOR_TIME)
 }
 
-/// The selector parameters to transmit, applying pico's implicit-`_anyke`
-/// append (`src/net/primitives.c:575-578` + `codec/message.c:413-425`).
+/// Whether a get sends pico's implicit `_anyke` after its parameters
+/// (`src/net/primitives.c:575-578` + `codec/message.c:413-425`).
 ///
 /// `accept_replies == Z_REPLY_KEYEXPR_ANY` is not a wire field: pico transmits
 /// it by APPENDING `_anyke` to the parameter list (with a `;` separator when the
 /// list is non-empty), and the responder recovers it by parsing the list — which
 /// is exactly what R3a's [`crate::query::parameters_has_anyke`] does on the
-/// receive side. Reproducing the append here therefore makes wz's plain
-/// `parameters` bytes byte-identical to pico's encoded ones, with no
-/// `implicit_anyke` concept needed in the wz encoder.
+/// receive side. The flag is written after the caller's parameters where the get
+/// is written (`QueryOptionsOf::with_parameters_lent_anyke`), so the bytes are
+/// pico's and the caller's parameters are not copied to append it.
 ///
 /// The `!_anyke_in_parameters` guard is pico's own ("extra _anyke parameter only
 /// if it's not already in the parameters list"), so a caller that wrote `_anyke`
 /// by hand AND asked for ANY does not get it twice.
-fn transmit_parameters(
-    parameters: &[u8],
-    accept_replies: z_reply_keyexpr_t,
-) -> alloc::borrow::Cow<'_, [u8]> {
-    let anyke_option = accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
-    if !anyke_option || parameters_has_anyke(parameters) {
-        // What the caller wrote goes out as it is, read where the caller holds it.
-        return alloc::borrow::Cow::Borrowed(parameters);
-    }
-    let mut out = parameters.to_vec();
-    if !out.is_empty() {
-        out.push(PARAM_SEPARATOR);
-    }
-    out.extend_from_slice(ANYKE_PARAM);
-    alloc::borrow::Cow::Owned(out)
+fn appends_anyke(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> bool {
+    accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY && !parameters_has_anyke(parameters)
 }
 
 // --- z_get -----------------------------------------------------------------
@@ -1403,25 +1391,24 @@ pub(crate) fn issue_get(
     token: Option<TokenRef>,
     target_peer: Option<Vec<u8>>,
 ) -> ZResult {
-    let params = transmit_parameters(ask.parameters, ask.accept_replies);
+    let anyke = appends_anyke(ask.parameters, ask.accept_replies);
 
     // pico's `pen_qry->_anyke` is the OR of the option and the selector the
     // caller wrote by hand: `_anyke_in_parameters || _anyke_option`
-    // (`~/zenoh-pico/src/net/primitives.c:575-582`). Read off `params` -- which
-    // `transmit_parameters` has already normalised -- so the receive gate and
-    // the transmitted bytes cannot disagree.
+    // (`~/zenoh-pico/src/net/primitives.c:575-582`). The flag the get appends is
+    // one of the two, so the receive gate and the transmitted bytes agree.
     // The gate holds the key the get asked under, kept where the session keeps its keys, and the
     // get is sent naming the gate's: one text. A key the session has no room for refuses the get,
     // the closure dropped, so it is reported over.
     let gate = match crate::keyexpr::KeyText::of_session(engine, keyexpr) {
         Ok(query_keyexpr) => ReplyGate {
             query_keyexpr,
-            anyke: parameters_has_anyke(&params),
+            anyke: anyke || parameters_has_anyke(ask.parameters),
         },
         Err(code) => return code,
     };
 
-    let opts = get_options(ask, &params);
+    let opts = get_options(ask, anyke);
 
     // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
@@ -2181,7 +2168,7 @@ mod tests {
             is_express: true,
             destination: Locality::Remote,
         };
-        let opts = get_options(&GetAsk { qos, ..asking(&[]) }, &[]);
+        let opts = get_options(&GetAsk { qos, ..asking(&[]) }, false);
         let packed = opts.qos.expect("the QoS trio reaches QueryOptions");
         assert_eq!(packed.priority(), Priority::RealTime, "priority");
         assert_eq!(packed.congestion(), CongestionControl::Drop, "congestion");
@@ -2191,7 +2178,7 @@ mod tests {
         // request-side default is BLOCK, which is NOT the wire DEFAULT byte, so
         // a default `z_get` legitimately carries a QoS ext. Leaving it unset
         // would downgrade every default query to Drop.
-        let defaulted = get_options(&asking(&[]), &[]);
+        let defaulted = get_options(&asking(&[]), false);
         let packed = defaulted
             .qos
             .expect("the options-default QoS reaches QueryOptions too");
@@ -2213,14 +2200,6 @@ mod tests {
             schema: Some(&schema),
         };
         let params_in = b"a=1".as_slice();
-        let params = transmit_parameters(
-            params_in,
-            crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
-        );
-        assert!(
-            matches!(params, alloc::borrow::Cow::Borrowed(_)),
-            "parameters that need no _anyke are not copied"
-        );
         let ask = GetAsk {
             payload: Some(&value),
             attachment: Some(&attachment),
@@ -2230,7 +2209,7 @@ mod tests {
             },
             ..asking(params_in)
         };
-        let opts = get_options(&ask, &params);
+        let opts = get_options(&ask, false);
         let lent = |slot: Option<&alloc::borrow::Cow<'_, [u8]>>| {
             slot.is_some_and(|bytes| matches!(bytes, alloc::borrow::Cow::Borrowed(_)))
         };
@@ -2248,6 +2227,31 @@ mod tests {
                 .map(wz_session_core::sample::CarriedEncoding::view),
             Some(encoding)
         );
+        // A get that accepts any key lends the same bytes: the flag is written after them where the
+        // get is written, and only a reader that asks for them in one piece copies them.
+        let any = GetAsk {
+            accept_replies: crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY,
+            ..asking(params_in)
+        };
+        let opts = get_options(&any, appends_anyke(params_in, any.accept_replies));
+        assert!(lent(opts.parameters.as_ref()), "the parameters are lent");
+        assert_eq!(
+            opts.parameters.as_deref().map(<[u8]>::as_ptr),
+            Some(params_in.as_ptr())
+        );
+        assert_eq!(opts.sent_parameters().as_deref(), Some(&b"a=1;_anyke"[..]));
+    }
+
+    /// The parameters a get with `parameters` and `accept_replies` sends, in one piece.
+    fn sent(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> Vec<u8> {
+        let ask = GetAsk {
+            accept_replies,
+            ..asking(parameters)
+        };
+        get_options(&ask, appends_anyke(parameters, accept_replies))
+            .sent_parameters()
+            .map(alloc::borrow::Cow::into_owned)
+            .unwrap_or_default()
     }
 
     /// `accept_replies = ANY` is transmitted by APPENDING `_anyke` to the
@@ -2259,37 +2263,31 @@ mod tests {
         let matching = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 
         // Empty selector → the bare key (pico's no-params encoder arm).
-        assert_eq!(transmit_parameters(b"", any), b"_anyke".to_vec());
+        assert_eq!(sent(b"", any), b"_anyke".to_vec());
         // Non-empty → `;`-separated (pico's has_params arm).
-        assert_eq!(transmit_parameters(b"a=1", any), b"a=1;_anyke".to_vec());
+        assert_eq!(sent(b"a=1", any), b"a=1;_anyke".to_vec());
         // MATCHING_QUERY (the DEFAULT) appends nothing.
-        assert_eq!(transmit_parameters(b"a=1", matching), b"a=1".to_vec());
-        assert_eq!(transmit_parameters(b"", matching), b"".to_vec());
+        assert_eq!(sent(b"a=1", matching), b"a=1".to_vec());
+        assert_eq!(sent(b"", matching), b"".to_vec());
         // pico's own guard: don't append when the caller already wrote it.
-        assert_eq!(transmit_parameters(b"_anyke", any), b"_anyke".to_vec());
-        assert_eq!(
-            transmit_parameters(b"a=1;_anyke", any),
-            b"a=1;_anyke".to_vec()
-        );
+        assert_eq!(sent(b"_anyke", any), b"_anyke".to_vec());
+        assert_eq!(sent(b"a=1;_anyke", any), b"a=1;_anyke".to_vec());
         // ...but a DECOY is not the flag, so the append still happens (the
         // boundary rules R3a ported are what make this the right answer).
-        assert_eq!(
-            transmit_parameters(b"no_anyke", any),
-            b"no_anyke;_anyke".to_vec()
-        );
+        assert_eq!(sent(b"no_anyke", any), b"no_anyke;_anyke".to_vec());
     }
 
     /// The querier-side round-trip that pins R3a against R3b: what
-    /// `transmit_parameters` emits is what `parameters_has_anyke` reads back.
+    /// a get sends is what `parameters_has_anyke` reads back.
     #[test]
     fn transmitted_anyke_is_recovered_by_the_responder_parse() {
         for selector in [&b""[..], b"a=1", b"a=1;b=2", b"no_anyke", b"_anykey=1"] {
-            let sent = transmit_parameters(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
+            let sent = sent(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
             assert!(
                 parameters_has_anyke(&sent),
                 "an ANY get's selector {sent:?} must parse as _anyke on the responder"
             );
-            let sent = transmit_parameters(
+            let sent = sent(
                 selector,
                 crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
             );
@@ -2315,7 +2313,7 @@ mod tests {
         // The default is MATCHING_QUERY, so the gate is ON by default.
         let gate = |ke: &str, accept| ReplyGate {
             query_keyexpr: crate::keyexpr::KeyText::owned(ke),
-            anyke: parameters_has_anyke(&transmit_parameters(b"", accept)),
+            anyke: parameters_has_anyke(&sent(b"", accept)),
         };
 
         let g = gate("a/**", matching);
@@ -2354,7 +2352,7 @@ mod tests {
         // opens the gate even under MATCHING_QUERY.
         let g = ReplyGate {
             query_keyexpr: crate::keyexpr::KeyText::owned("a/**"),
-            anyke: parameters_has_anyke(&transmit_parameters(b"_anyke", matching)),
+            anyke: parameters_has_anyke(&sent(b"_anyke", matching)),
         };
         assert!(g.anyke, "a hand-written _anyke selector must open the gate");
     }
@@ -2392,7 +2390,7 @@ mod tests {
 
     /// The consolidation an AUTO `z_get` is given, for `parameters`.
     fn auto_get_consolidation(parameters: &str) -> Option<ConsolidationMode> {
-        get_options(&asking(parameters.as_bytes()), parameters.as_bytes()).consolidation
+        get_options(&asking(parameters.as_bytes()), false).consolidation
     }
 
     /// The C ABI and the Rust API resolve AUTO by ONE rule: on every selector
@@ -2446,7 +2444,7 @@ mod tests {
                 consolidation: mode,
                 ..asking(parameters.as_bytes())
             };
-            get_options(&ask, parameters.as_bytes()).consolidation
+            get_options(&ask, false).consolidation
         };
         assert_eq!(
             named(Z_CONSOLIDATION_MODE_MONOTONIC, "_time=[..]"),

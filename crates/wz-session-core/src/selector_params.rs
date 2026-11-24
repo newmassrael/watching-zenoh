@@ -70,6 +70,24 @@ pub const PARAM_FIELD_SEPARATOR: char = '=';
 /// `"_anyke;_filter;_time=[now(-2s)..now(2s)];_timetrick"` (`selector.rs:381`).
 pub const ANYKE_PARAM: &str = "_anyke";
 
+/// The flag alone, as it follows an empty parameter list.
+const ANYKE_BARE: &[u8] = ANYKE_PARAM.as_bytes();
+
+/// The separator and the flag, as they follow a parameter list that is not empty.
+const ANYKE_SEPARATED: &[u8] = b";_anyke";
+
+/// What follows `parameters` when a get appends [`ANYKE_PARAM`] to them: the bare flag after an
+/// empty list, the separator and the flag after any other, the bytes [`anyke_params`] and zenoh's
+/// `set_reply_key_expr_any` write. The list and this are written one after the other where the
+/// list is sent, so appending the flag copies nothing.
+pub const fn anyke_suffix(parameters: &[u8]) -> &'static [u8] {
+    if parameters.is_empty() {
+        ANYKE_BARE
+    } else {
+        ANYKE_SEPARATED
+    }
+}
+
 /// The time-range token (zenoh `TIME_RANGE_KEY`, `zenoh/src/api/selector.rs:145`;
 /// pico `_Z_QUERY_PARAMS_KEY_TIME`, `query_params.h`). Unlike [`ANYKE_PARAM`] it
 /// carries a value — `_time=[now(-3s)..]` — but the consolidation carve-out that
@@ -247,6 +265,22 @@ mod tests {
             anyke_params(&["_max=5".to_string(), "_time=[now(-3s)..]".to_string()]),
             "_max=5;_time=[now(-3s)..];_anyke"
         );
+    }
+
+    /// The flag appended after a list is the separator and the flag, and after an empty one the
+    /// flag alone: the bytes the owned join writes. Turned red by a suffix that drifts from the
+    /// separator or the flag.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_anyke_suffix_is_what_the_join_appends() {
+        assert_eq!(anyke_suffix(b""), ANYKE_PARAM.as_bytes());
+        let mut separated = alloc::string::String::from(PARAM_LIST_SEPARATOR);
+        separated.push_str(ANYKE_PARAM);
+        assert_eq!(anyke_suffix(b"_sn=7.."), separated.as_bytes());
+        let mut joined = b"_sn=7..".to_vec();
+        let suffix = anyke_suffix(&joined);
+        joined.extend_from_slice(suffix);
+        assert_eq!(joined, anyke_params(&["_sn=7..".to_string()]).into_bytes());
     }
 
     /// Round-trip: what a querier BUILDS is what a responder READS. The two sides

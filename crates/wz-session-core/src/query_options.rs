@@ -308,6 +308,10 @@ pub struct QueryOptionsOf<'a> {
     /// Whether the matching status of a querier made with these options counts a queryable of a
     /// peer only when its key includes the querier's: see [`Self::with_remote_inclusion`].
     remote_inclusion: bool,
+    /// Whether the reply-keyexpr-any flag is sent after [`Self::parameters`], written where they
+    /// are written so that lent parameters are not copied to append it
+    /// (`with_parameters_lent_anyke`). The parameters the get sends are [`Self::sent_parameters`].
+    anyke: bool,
 }
 
 /// The options a holder keeps past the call they were made for: every slot its own
@@ -318,6 +322,8 @@ impl<'a> QueryOptionsOf<'a> {
     /// These options with every slot their own: what a holder that keeps them past the call they
     /// were made for keeps. Lent slots are copied; owned ones move.
     pub fn into_owned(self) -> QueryOptions {
+        // An owned holder keeps the parameters as they are sent, the flag written into them.
+        let parameters = self.sent_parameters().map(Cow::into_owned);
         let Self {
             allowed_destination,
             links,
@@ -327,7 +333,7 @@ impl<'a> QueryOptionsOf<'a> {
             payload,
             encoding,
             attachment,
-            parameters,
+            parameters: _,
             source_info,
             timeout_ms,
             qos,
@@ -339,6 +345,7 @@ impl<'a> QueryOptionsOf<'a> {
             reply_arrival,
             expose_timestamp,
             remote_inclusion,
+            anyke: _,
         } = self;
         QueryOptionsOf {
             allowed_destination,
@@ -349,7 +356,7 @@ impl<'a> QueryOptionsOf<'a> {
             payload: payload.map(|payload| Cow::Owned(payload.into_owned())),
             encoding: encoding.map(CarriedEncoding::into_owned),
             attachment: attachment.map(|attachment| Cow::Owned(attachment.into_owned())),
-            parameters: parameters.map(|parameters| Cow::Owned(parameters.into_owned())),
+            parameters: parameters.map(Cow::Owned),
             source_info,
             timeout_ms,
             qos,
@@ -361,7 +368,25 @@ impl<'a> QueryOptionsOf<'a> {
             reply_arrival,
             expose_timestamp,
             remote_inclusion,
+            anyke: false,
         }
+    }
+
+    /// The parameters as the get sends them: those stated, followed by the reply-keyexpr-any flag
+    /// when `with_parameters_lent_anyke` asked for it. Only a reader that needs the two in one
+    /// piece copies them here (an owned holder, the session's own queryables); a link's get writes
+    /// them one after the other (`query_parts`).
+    pub fn sent_parameters(&self) -> Option<Cow<'_, [u8]>> {
+        let stated = self.parameters.as_deref();
+        if !self.anyke {
+            return stated.map(Cow::Borrowed);
+        }
+        let stated = stated.unwrap_or_default();
+        let suffix = crate::selector_params::anyke_suffix(stated);
+        let mut sent = Vec::with_capacity(stated.len().saturating_add(suffix.len()));
+        sent.extend_from_slice(stated);
+        sent.extend_from_slice(suffix);
+        Some(Cow::Owned(sent))
     }
 
     /// A copy of these options with every slot its own, for an engine that keeps them past the
@@ -638,6 +663,20 @@ impl<'a> QueryOptionsOf<'a> {
         self
     }
 
+    /// [`Self::with_parameters_lent`], and with `anyke` the reply-keyexpr-any flag sent after
+    /// them, as [`Self::with_accept_replies`] would have written it into a copy: the flag is
+    /// written where the parameters are, so nothing is copied. The caller has read that the
+    /// parameters do not carry the flag already (pico's `implicit_anyke = _anyke_option &&
+    /// !_anyke_in_parameters`, `vendor/zenoh-pico/src/net/primitives.c:575-578`), so the get
+    /// sends it once. The parameters are one state still: every reading of them goes through
+    /// [`Self::sent_parameters`], `effective_accept_replies` or `query_parts`.
+    #[cfg(feature = "query-selector-parameters")]
+    pub fn with_parameters_lent_anyke(mut self, parameters: &'a [u8], anyke: bool) -> Self {
+        self.parameters = Some(Cow::Borrowed(parameters));
+        self.anyke = anyke;
+        self
+    }
+
     /// R311y833 — opt out of (or back into) the matching-reply guarantee.
     ///
     /// zenoh: "By default, `get` guarantees that it will only receive replies
@@ -872,8 +911,15 @@ impl<'a> QueryOptionsOf<'a> {
     /// carries the selector-parameter gate because writing the flag is a wire
     /// act; this accessor must read whatever the `pub` field holds on any build
     /// that has a getter at all.
+    ///
+    /// The one bit kept beside the field, `anyke`, is not a second state: it is the flag's bytes,
+    /// written after the lent parameters where they are sent (`with_parameters_lent_anyke`), and
+    /// it is read here and in [`Self::sent_parameters`] as part of them.
     #[cfg(feature = "query-get")]
     pub fn effective_accept_replies(&self) -> ReplyKeyExpr {
+        if self.anyke {
+            return ReplyKeyExpr::Any;
+        }
         ReplyKeyExpr::from_parameter_bytes(self.parameters.as_deref())
     }
 
@@ -1000,7 +1046,7 @@ impl<'a> QueryOptionsOf<'a> {
             // transmits what it resolved (`api/session.rs:2316`).
             consolidation: self.wire_consolidation(),
             attachment: self.attachment.as_deref().map(<[u8]>::to_vec),
-            parameters: self.parameters.as_deref().map(<[u8]>::to_vec),
+            parameters: self.sent_parameters().map(Cow::into_owned),
             source_info: self.source_info.clone(),
             // R311y250 — collapse the two ergonomic QueryOptions slots
             // (`payload` / `encoding`, each independently optional) into the
@@ -1042,6 +1088,7 @@ impl<'a> QueryOptionsOf<'a> {
     pub fn query_parts(&self) -> crate::query_parts::QueryParts<'_> {
         crate::query_parts::QueryParts {
             parameters: self.parameters.as_deref().unwrap_or(&[]),
+            anyke: self.anyke,
             consolidation: self.wire_consolidation(),
             target: self.effective_target(),
             timeout_ms: self.effective_timeout_ms(),
@@ -1126,6 +1173,43 @@ mod tests {
         let mut opts = QueryOptions::get();
         opts.allowed_destination = Locality::Remote;
         assert_eq!(opts.remote_finals(0), 0, "a group with no member owes none");
+    }
+
+    /// Lent parameters with the reply-keyexpr-any flag appended are one state: the parts a link's
+    /// get is written from carry the caller's bytes and the flag, and the metadata, the owned
+    /// options and the reply acceptance read the parameters as sent, the bytes the owned setter
+    /// writes. Turned red by a reader that leaves the flag out.
+    #[cfg(feature = "query-selector-parameters")]
+    #[test]
+    fn lent_parameters_with_the_anyke_flag_read_as_sent() {
+        let stated: &[u8] = b"_sn=7..";
+        let joined: &[u8] = b"_sn=7..;_anyke";
+        let opts = QueryOptionsOf::get().with_parameters_lent_anyke(stated, true);
+        let parts = opts.query_parts();
+        assert_eq!(parts.parameters, stated, "the caller's bytes, not a copy");
+        assert!(parts.anyke);
+        assert_eq!(opts.sent_parameters().as_deref(), Some(joined));
+        assert_eq!(opts.query_metadata().parameters.as_deref(), Some(joined));
+        assert_eq!(opts.effective_accept_replies(), ReplyKeyExpr::Any);
+        let owned = opts.to_owned_options();
+        assert_eq!(owned.parameters.as_deref(), Some(joined));
+        assert!(
+            !owned.query_parts().anyke,
+            "an owned holder keeps the flag in its bytes"
+        );
+        assert_eq!(owned.effective_accept_replies(), ReplyKeyExpr::Any);
+        let spelled = QueryOptions::get()
+            .with_parameters(stated.to_vec())
+            .with_accept_replies(ReplyKeyExpr::Any);
+        assert_eq!(spelled.parameters.as_deref(), Some(joined));
+        let bare = QueryOptionsOf::get().with_parameters_lent_anyke(&[], true);
+        assert_eq!(bare.sent_parameters().as_deref(), Some(&b"_anyke"[..]));
+        let plain = QueryOptionsOf::get().with_parameters_lent_anyke(stated, false);
+        assert_eq!(plain.sent_parameters().as_deref(), Some(stated));
+        assert_eq!(
+            plain.effective_accept_replies(),
+            ReplyKeyExpr::MatchingQuery
+        );
     }
 
     /// The parts a link's `get` is written from are the metadata the owned path is handed, slot
