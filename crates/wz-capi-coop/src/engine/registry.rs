@@ -1367,11 +1367,15 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
+        #[cfg(not(feature = "rx-lent-only"))]
+        let round = crate::round::Round::leaked_with_area(1024, 4);
+        #[cfg(feature = "rx-lent-only")]
+        let round = crate::round::Round::leaked(4);
         #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(crate::round::Round::leaked(1024, 4));
+        let delivery = RoundDelivery::new(round);
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
-            crate::round::Round::leaked(1024, 4),
+            round,
             alloc::sync::Arc::new(super::super::query::QueryPlane::holding(1)),
         );
         let registry = Registry::new(

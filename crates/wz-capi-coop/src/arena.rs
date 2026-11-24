@@ -46,7 +46,8 @@
 //!   the rows lent when the session opens, first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
-//!   state's tables (`SessionRows::lane_bytes`);
+//!   state's tables (`SessionRows::lane_bytes`); none in a build that reads every record where it
+//!   lies (`rx-lent-only`);
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
 //!   each reliability a peer has a chain open in, and one for the rejoined message the round
@@ -170,9 +171,9 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The delivery lane's flag and its area, and the round's records, the callbacks they owe and
-/// its keys.
-const LANE_ROWS: usize = 5;
+/// The delivery lane's flag and its area, none in a build that keeps no area (`rx-lent-only`), and
+/// the round's records, the callbacks they owe and its keys.
+const LANE_ROWS: usize = 3 + 2 * cfg!(not(feature = "rx-lent-only")) as usize;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The application's tables apart from the session's one table set: liveliness tokens
@@ -597,7 +598,9 @@ impl TransportRows {
 /// its faces' peers write and are owed, and the key arena every keyed row keeps its key in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRows {
-    /// The bytes of the session's round of deliveries (`crate::round`).
+    /// The bytes of the session's round of deliveries (`crate::round`); none in a build that keeps
+    /// no area for it (`rx-lent-only`).
+    #[cfg(not(feature = "rx-lent-only"))]
     lane_bytes: usize,
     /// The rows of the round's tables.
     round: RoundRowCounts,
@@ -616,6 +619,7 @@ pub struct SessionRows {
 impl SessionRows {
     /// The bytes of the delivery lane's area (`DELIVERY_LANE_BYTES`): one table of one buffer,
     /// claimed for the session's life (`ArenaPlan::claim_lane_and_handle`).
+    #[cfg(not(feature = "rx-lent-only"))]
     pub fn lane_bytes(&self) -> usize {
         self.lane_bytes
     }
@@ -774,11 +778,14 @@ impl ArenaPlan {
                 )
                 .min(links);
         }
-        plan.session.lane_bytes = plan.lent(
-            "DELIVERY_LANE_BYTES",
-            Quota::at_most(limits.delivery_lane_bytes()),
-            caps::DELIVERY_LANE_BYTES,
-        );
+        #[cfg(not(feature = "rx-lent-only"))]
+        {
+            plan.session.lane_bytes = plan.lent(
+                "DELIVERY_LANE_BYTES",
+                Quota::at_most(limits.delivery_lane_bytes()),
+                caps::DELIVERY_LANE_BYTES,
+            );
+        }
         plan.session.round = RoundRowCounts {
             records: plan.lent(
                 "DELIVERY_LANE_EVENTS",
@@ -841,6 +848,7 @@ impl ArenaPlan {
             LentByteCells::FLAG_BYTES,
         );
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
+        #[cfg(not(feature = "rx-lent-only"))]
         plan.put_table(
             ["delivery lane flag", "delivery lane"],
             "DELIVERY_LANE_BYTES",
@@ -1043,6 +1051,7 @@ impl ArenaPlan {
     /// one. The claims are never given back: what holds a buffer holds it until the session is
     /// let go, and a buffer dropped then would write its cell's flag into an arena given back
     /// before it. Refused as an arena with no room for a table lent no buffer.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) fn claim_lane_and_handle(
         &self,
         lane: LentByteCells,
@@ -1063,6 +1072,28 @@ impl ArenaPlan {
             }),
             (None, _) | (_, Some(None)) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
                 asked: Some(self.session.lane_bytes.max(self.places.handle_bytes)),
+                left: 0,
+            })),
+        }
+    }
+
+    /// The one buffer of `handle`, a table of one buffer the plan's lender lent whole
+    /// ([`PlaceTables::handle`]), claimed for the session's life as `claim_lane_and_handle`
+    /// claims it, in a build that keeps no delivery area
+    /// (`rx-lent-only`): the handle's place when the plan holds one. Refused as an arena with no
+    /// room for a table lent no buffer.
+    #[cfg(feature = "rx-lent-only")]
+    pub(crate) fn claim_handle(
+        &self,
+        handle: Option<LentByteCells>,
+    ) -> Result<ClaimedPlaces, ArenaRefused> {
+        match handle.map(claimed) {
+            None => Ok(ClaimedPlaces { handle: None }),
+            Some(Some((base, bytes))) => Ok(ClaimedPlaces {
+                handle: Some(HandlePlace { base, bytes }),
+            }),
+            Some(None) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
+                asked: Some(self.places.handle_bytes),
                 left: 0,
             })),
         }
@@ -1790,8 +1821,10 @@ impl EntityPlaces {
 /// (`ArenaPlan::claim_lane_and_handle`).
 pub(crate) struct ClaimedPlaces {
     /// Where the delivery lane's area starts.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) lane_area: NonNull<u8>,
     /// The bytes of the lane's area.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) lane_bytes: usize,
     /// The place of the ABI's handle, `None` for a plan with no place.
     pub(crate) handle: Option<HandlePlace>,

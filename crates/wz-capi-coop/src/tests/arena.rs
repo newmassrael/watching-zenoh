@@ -531,20 +531,25 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
         plan.reserved_bytes() < built.reserved_bytes(),
         "the lowered limits lower the arena"
     );
-    let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
-    let lane = parts
-        .iter()
-        .position(|part| *part == "delivery lane")
-        .expect("the plan has the lane");
-    assert_eq!(
-        parts[lane + 1..lane + 4],
-        ["delivery records", "delivery callbacks", "delivery keys"]
-    );
+    // The round's tables follow its area, where the build keeps one.
+    #[cfg(not(feature = "rx-lent-only"))]
+    {
+        let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
+        let lane = parts
+            .iter()
+            .position(|part| *part == "delivery lane")
+            .expect("the plan has the lane");
+        assert_eq!(
+            parts[lane + 1..lane + 4],
+            ["delivery records", "delivery callbacks", "delivery keys"]
+        );
+    }
 }
 
 /// The delivery lane's area is the `DELIVERY_LANE_BYTES` the session's limits state, one buffer
 /// and its flag: a lowered value lowers it, and one over the build's refuses the plan, naming the
 /// limit and both values.
+#[cfg(not(feature = "rx-lent-only"))]
 #[test]
 fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
     let built =
@@ -572,6 +577,23 @@ fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
             })
         );
     }
+}
+
+/// A build that keeps no delivery area (`rx-lent-only`) lays out none: the plan has no lane and no
+/// flag of one, and the round's tables are its first rows of the session's state. Turned red by a
+/// lent-only plan that still reserves the area.
+#[cfg(feature = "rx-lent-only")]
+#[test]
+fn a_lent_only_plan_lays_out_no_delivery_lane() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let parts: Vec<&str> = built.rows().iter().map(|row| row.part).collect();
+    assert!(!parts.contains(&"delivery lane"));
+    assert!(!parts.contains(&"delivery lane flag"));
+    assert!(
+        parts.contains(&"delivery records"),
+        "CONTROL: the round's tables are laid out"
+    );
 }
 
 /// The key arena is the `KEY_ARENA_BYTES` the session's limits state, one area with its state: a
@@ -1573,6 +1595,7 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
 /// The pico preset's delivery lane is the least lane the build accepts at the preset's other
 /// values: one record of the larger of the batch and the largest message the session rejoins, with
 /// the most a sample adds to it, so a read always finds room for the record it takes next.
+#[cfg(not(feature = "rx-lent-only"))]
 #[test]
 fn the_pico_presets_lane_holds_one_record() {
     let presets = pico_preset();

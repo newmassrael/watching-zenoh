@@ -33,7 +33,7 @@ const BLOCK: u8 = 0x05 | 0x08;
 
 /// A round over an area of `bytes`, holding `events` records at once, which outlives the test.
 fn round(bytes: usize, events: usize) -> Arc<Round> {
-    Round::leaked(bytes, events)
+    Round::leaked_with_area(bytes, events)
 }
 
 /// A subscriber row a test hands samples to, boxed so it lies where it is while a call of it runs,
