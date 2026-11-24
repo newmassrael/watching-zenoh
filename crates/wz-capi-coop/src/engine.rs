@@ -84,7 +84,7 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next, Phase, Signals, Turn};
+use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
@@ -93,7 +93,8 @@ use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
-    Dial, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRead, FaceRecord, FaceSession, HandshakeEnd,
+    IdleWait, Link, LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -507,6 +508,16 @@ pub enum Refusal {
     /// The group's endpoint is longer than the row a member's link is reported in,
     /// `MAX_GROUP_ENDPOINT_LEN` bytes.
     GroupEndpointTooLong,
+}
+
+impl From<HandshakeEnd> for Refusal {
+    fn from(end: HandshakeEnd) -> Self {
+        match end {
+            HandshakeEnd::Closed(reason) => Refusal::HandshakeClosed(reason),
+            HandshakeEnd::Ended => Refusal::HandshakeEnded,
+            HandshakeEnd::NoAnswerInTime => Refusal::NoAnswerInTime,
+        }
+    }
 }
 
 impl core::fmt::Display for EndpointRefusal {
@@ -1429,18 +1440,6 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 }
 
-/// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
-/// still being made.
-type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
-
-/// What the session read of a face at a step (`Core::read_face`): where its link stands, what it
-/// did since, and the answer of its dial, kept for the link it made.
-struct FaceRead<P> {
-    phase: Phase,
-    signals: Signals,
-    answer: DialAnswer<P>,
-}
-
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
 struct Publication<'a> {
     keyexpr: &'a str,
@@ -1828,6 +1827,10 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
 
     fn end(&self) {
         self.actions.send_close_with_reason(CloseReason::Generic);
+    }
+
+    fn close_reason(&self) -> Option<CloseReason> {
+        self.actions.close_reason()
     }
 }
 
@@ -3118,7 +3121,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         if let Some(actions) = up {
             if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
-                self.abort_link(at);
+                self.transport.links.abort_link(at);
                 self.run_tasks();
             }
         }
@@ -3133,7 +3136,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             phase,
             signals,
             answer,
-        } = self.read_face(at, id);
+        } = self.transport.links.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         // A dial that is over is let go of now, with what it held for its link (a socket, the
@@ -3148,46 +3151,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.carry_out(at, &life, effect, answer, redial_ms, now_us)
     }
 
-    /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
-    /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
-    /// made.
-    fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
-        let phase = self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| face.link.phase());
-        let mut signals = Signals::default();
-        let mut answer = None;
-        match self
-            .transport
-            .links
-            .faces_mut()
-            .get_mut(at)
-            .map(|face| &mut face.link)
-        {
-            Some(Link::Up(wire)) => signals.ended = wire.finished(),
-            Some(Link::Opening { wire, .. }) => {
-                signals.ended = wire.finished();
-                signals.established = wire.established();
-            }
-            Some(Link::Dialing { dial, .. }) => {
-                answer = dial.answer();
-                signals.dial = answer.as_ref().map(Result::is_ok);
-            }
-            _ => {}
-        }
-        if let Phase::Held { node } = &phase {
-            signals.node_held = self.transport.links.node_is_held(node.as_slice(), id);
-        }
-        FaceRead {
-            phase,
-            signals,
-            answer,
-        }
-    }
-
     /// The node a handshake that is over reached, when another face holds it or brings a link to
     /// it up: what the dial role's face stands by for. Read before the link's task is ended.
     #[cfg(feature = "listen")]
@@ -3195,11 +3158,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if !matches!(turn, Turn::HandshakeOver { .. }) {
             return None;
         }
-        let node = self.transport.links.faces().get(at)?.link.wire()?.node()?;
-        if !self.transport.links.node_is_held(&node, id) {
-            return None;
-        }
-        SessionZid::new(&node).ok()
+        self.transport.links.held_node(at, id)
     }
 
     /// A session that takes no face besides its dial never finds its node held by another.
@@ -3245,8 +3204,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.follow(at, then, OpenError::NoEndpoint, redial_ms)
             }
             FaceEffect::Fail { then } => {
-                let why = self.handshake_end(at);
-                self.abort_link(at);
+                let why = Refusal::from(self.transport.links.handshake_end(at));
+                self.transport.links.abort_link(at);
                 self.run_tasks();
                 self.transport
                     .links
@@ -3367,40 +3326,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.report_face(FaceEventKind::Down, snapshot);
     }
 
-    /// Why the handshake of the face at `at` ended: the Close its peer sent, its task's end, or
-    /// its deadline.
-    fn handshake_end(&self, at: usize) -> Refusal {
-        match self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .and_then(|face| face.link.wire())
-        {
-            Some(wire) => match (wire.actions.close_reason(), wire.finished()) {
-                (Some(reason), _) => Refusal::HandshakeClosed(reason),
-                (None, true) => Refusal::HandshakeEnded,
-                (None, false) => Refusal::NoAnswerInTime,
-            },
-            None => Refusal::HandshakeEnded,
-        }
-    }
-
-    /// End the task of the link of the face at `at`, if it holds one.
-    /// Out of line: a face poll and the bring-up of a link end a link in three places.
-    #[inline(never)]
-    fn abort_link(&self, at: usize) {
-        if let Some(wire) = self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .and_then(|face| face.link.wire())
-        {
-            wire.abort();
-        }
-    }
-
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
     /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
     /// What the application asks for when it holds that a peer lost declarations the session made.
@@ -3447,7 +3372,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         let actions = wire.actions.clone();
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
-            self.abort_link(at);
+            self.transport.links.abort_link(at);
         }
         let snapshot = self.face_of(&actions);
         self.transport.links.establish(at);
