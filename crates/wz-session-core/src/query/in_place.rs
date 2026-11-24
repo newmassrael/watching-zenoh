@@ -134,7 +134,7 @@ fn lent_projection<'q, 'f: 'q>(
         // A build with no heap does not project a query's value (its encoding is an
         // owned hint), nor a value or attachment held as shareable bytes.
         #[cfg(all(feature = "alloc", feature = "query-value"))]
-        plain_value: crate::query_value_ext::decode_query_value_ext_in(walked(
+        plain_value: crate::query_value_ext::decode_query_value_ext_parts_in(walked(
             query.extensions.as_deref(),
         )),
         #[cfg(all(feature = "alloc", not(feature = "query-value")))]

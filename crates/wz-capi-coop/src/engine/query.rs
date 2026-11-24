@@ -1042,8 +1042,9 @@ mod round_tests {
     use core::num::NonZeroU32;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
-    /// where they lie, and the generation it came in under.
-    type Noted = std::sync::Mutex<Vec<(String, Option<Vec<u8>>, usize, u64)>>;
+    /// where they lie, the generation it came in under, and its encoding's packed id with where
+    /// its schema lies.
+    type Noted = std::sync::Mutex<Vec<(String, Option<Vec<u8>>, usize, u64, Option<(u32, usize)>)>>;
 
     /// An engine stand-in that notes what it is asked to answer.
     struct Noting(Noted);
@@ -1057,14 +1058,21 @@ mod round_tests {
                     .parameters()
                     .map_or(0, |parameters| parameters.as_ptr() as usize),
                 generation,
+                query.encoding_parts().map(|(packed_id, schema)| {
+                    (
+                        packed_id,
+                        schema.map_or(0, |schema| schema.as_ptr() as usize),
+                    )
+                }),
             ));
         }
     }
 
-    /// A query whose key and parameters lie where the test lends them.
+    /// A query whose key, parameters and encoding lie where the test lends them.
     struct Asked<'d> {
         key: &'d str,
         parameters: &'d [u8],
+        encoding: Option<(u32, Option<&'d [u8]>)>,
     }
 
     impl QueryView for Asked<'_> {
@@ -1078,6 +1086,10 @@ mod round_tests {
 
         fn attachment(&self) -> Option<&[u8]> {
             None
+        }
+
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            self.encoding
         }
 
         fn rid(&self) -> wz_session_core::wire_id::RequestId {
@@ -1106,9 +1118,10 @@ mod round_tests {
     const DATAGRAM: [u8; 10] = *b"demo/q?a=1";
 
     /// A query that lies in a lent datagram is held in the round and handed, on its delivery, to
-    /// the engine that answers it, its key and parameters read where they lie and its link's
-    /// generation with it; the round ends its call, so the row has none running after. Turned red
-    /// by a round that copies the query's parts or keeps its call.
+    /// the engine that answers it, its key, parameters and encoding's schema read where they lie
+    /// and its link's generation with it; the round ends its call, so the row has none running
+    /// after. Turned red by a round that copies the query's parts, drops its encoding or keeps
+    /// its call.
     #[test]
     fn a_query_is_handed_where_its_parts_lie_and_its_call_ended() {
         let datagram = DATAGRAM;
@@ -1120,9 +1133,11 @@ mod round_tests {
         let (row, handle) = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
         unsafe { round.set_lending(Some(&datagram[..])) };
+        // The schema is a range of the datagram as a frame's would be: here, its key's first part.
         let asked = Asked {
             key,
             parameters: &datagram[7..],
+            encoding: Some((0x0B, Some(&datagram[..4]))),
         };
         assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
         unsafe { round.set_lending(None) };
@@ -1134,9 +1149,10 @@ mod round_tests {
                 "demo/q".to_owned(),
                 Some(b"a=1".to_vec()),
                 datagram[7..].as_ptr() as usize,
-                7
+                7,
+                Some((0x0B, datagram.as_ptr() as usize))
             )],
-            "handed where its parameters lie, under its link's generation"
+            "handed where its parameters and schema lie, under its link's generation"
         );
         assert!(row.retire(), "the round ended the call");
     }
@@ -1154,6 +1170,7 @@ mod round_tests {
         let asked = Asked {
             key,
             parameters: &datagram[7..],
+            encoding: None,
         };
         assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
         unsafe { round.set_lending(None) };

@@ -1973,8 +1973,10 @@ impl Round {
         let parameters = part(view.parameters())?;
         let payload = part(view.payload())?;
         let attachment = part(view.attachment())?;
-        let encoding = match view.encoding() {
-            Some(hint) => Some((hint.packed_id, part(hint.schema.as_deref())?)),
+        // Its encoding where the dispatcher read it, so a schema that lies in the datagram is read
+        // there and not out of the hint the dispatcher made.
+        let encoding = match view.encoding_parts() {
+            Some((packed_id, schema)) => Some((packed_id, part(schema)?)),
             None => None,
         };
         Some(HeldQuery {
@@ -2397,6 +2399,12 @@ impl QueryView for RoundQuery<'_> {
             packed_id,
             schema: schema.map(|span| self.table.bytes(span).to_vec()),
         }))
+    }
+
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.query
+            .encoding
+            .map(|(packed_id, schema)| (packed_id, schema.map(|span| self.table.bytes(span))))
     }
 
     fn rid(&self) -> wz_session_core::wire_id::RequestId {

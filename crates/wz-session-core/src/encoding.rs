@@ -186,12 +186,24 @@ pub fn id_for_mime(mime: &str) -> Option<EncodingId> {
 /// rather than each re-deriving where the encoding ends.
 #[cfg(feature = "alloc")]
 pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
+    let (packed_id, schema, payload) = split_value_body_parts(value)?;
+    let hint = EncodingHint {
+        packed_id,
+        schema: schema.map(<[u8]>::to_vec),
+    };
+    Some((hint, payload))
+}
+
+/// [`split_value_body`] read where the value lies: the encoding's packed id and its schema's
+/// bytes, a slice of `value` as the payload is, so a reader that keeps them past the call reads
+/// them there instead of a copy an owned hint makes.
+pub fn split_value_body_parts(value: &[u8]) -> Option<(u32, Option<&[u8]>, &[u8])> {
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(value);
     let encoding = wz_codecs::lent::Encoding::decode(&mut cursor).ok()?;
     // The bytes the encoding consumed are what the cursor no longer holds.
     let consumed = value.len().saturating_sub(cursor.remaining());
-    let hint = EncodingHint::from_codec(&encoding.try_into_owned().ok()?);
-    Some((hint, value.get(consumed..)?))
+    let schema = encoding.schema.map(|schema| schema.into_inner());
+    Some((encoding.packed_id, schema, value.get(consumed..)?))
 }
 
 /// Parse a MIME string into an [`EncodingHint`] (zenoh `Encoding::from_str`,
