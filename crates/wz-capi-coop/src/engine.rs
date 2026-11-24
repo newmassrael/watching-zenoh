@@ -56,6 +56,8 @@ use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
     KeyexprHandle, RowCallbacks, SessionTables, SubscriberHandle,
@@ -241,7 +243,7 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
-pub(crate) use get::{Ended, LegSink};
+pub(crate) use get::{Ended, LegHold, LegSink};
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
@@ -696,6 +698,9 @@ struct SessionLent {
     registry: Registry,
     #[cfg(feature = "query")]
     ended: EndedLegs,
+    /// The rows the gets that consolidate hold their replies in (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: HeldReplies<u64, Lent>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
     /// The places of the publishes the session keeps for its other faces, the engine's.
@@ -798,6 +803,10 @@ fn lend_session(
     let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
+    // The rows the gets that consolidate hold their replies in, lent beside the round's.
+    #[cfg(feature = "query")]
+    let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
+        .map_err(ArenaRefused::Lend)?;
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
@@ -845,6 +854,8 @@ fn lend_session(
         registry,
         #[cfg(feature = "query")]
         ended: EndedLegs::over(legs),
+        #[cfg(feature = "query")]
+        held_replies,
         handle_place,
         places,
         #[cfg(any(feature = "listen", feature = "group"))]
@@ -4212,7 +4223,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
-            gets: Arc::new(GetPlane::new(lent.ended)),
+            gets: Arc::new(GetPlane::new(lent.ended, lent.held_replies)),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: lent.samples,
@@ -7099,9 +7110,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             // The leg's callback, shared by the entry's sink and the table of callbacks.
             let callback = Arc::new(leg());
-            let sink = ConsolidatingSink::new(
+            let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
                 get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegHold::new(leg_id, &self.gets),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
@@ -7208,9 +7220,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 None => continue,
             }
             let callback = Arc::new(leg());
-            let sink = ConsolidatingSink::new(
+            let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
                 get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegHold::new(leg_id, &self.gets),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
             let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
@@ -7265,9 +7278,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld += 1;
             } else {
                 let callback = Arc::new(leg());
-                let sink = ConsolidatingSink::new(
+                let sink = ConsolidatingSink::with_hold(
                     opts.resolved_consolidation(),
                     get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                    get::LegHold::new(leg_id, &self.gets),
                 );
                 let registered = core.registry.borrow_mut().local.replies.register_sink(
                     rid,

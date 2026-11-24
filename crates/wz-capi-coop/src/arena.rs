@@ -135,12 +135,14 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-#[cfg(feature = "query")]
-use crate::engine::LegSink;
 use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(feature = "query")]
+use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReplies;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,9 +194,9 @@ const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) 
 /// The application's tables apart from the session's one table set: liveliness tokens
 /// (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
-/// nothing holds no table of gets.
-const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
+/// a build that asks (`query`): one that asks nothing holds no table of gets.
+const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -415,7 +417,7 @@ impl GetTables {
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
 #[cfg(feature = "query")]
-type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -665,6 +667,10 @@ pub struct SessionRows {
     /// (`ADVANCED_CACHE_BYTES`), none for no ring.
     #[cfg(feature = "advanced-cache")]
     cache_bytes: usize,
+    /// The replies the gets that consolidate hold to their Finals, a row each, shared by every get
+    /// of the session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: usize,
 }
 
 impl SessionRows {
@@ -696,6 +702,13 @@ impl SessionRows {
     #[cfg(feature = "advanced-cache")]
     pub fn cache_bytes(&self) -> usize {
         self.cache_bytes
+    }
+
+    /// How many replies the gets that consolidate hold to their Finals at once, of every get of the
+    /// session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    pub fn held_replies(&self) -> usize {
+        self.held_replies
     }
 }
 
@@ -1067,6 +1080,20 @@ impl ArenaPlan {
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
             );
+        }
+        // The replies the gets that consolidate hold to their Finals: one table of rows shared by
+        // every get, tagged with its leg (`engine::get::LegHold`).
+        #[cfg(feature = "query")]
+        {
+            plan.session.held_replies = plan.lent(
+                "MAX_PENDING_REPLIES",
+                limits.max_pending_replies(),
+                caps::MAX_PENDING_REPLIES,
+            );
+            let held = plan.sized(HeldReplies::<u64, Lent>::arena_bytes(
+                plan.session.held_replies,
+            ));
+            plan.put("held replies", "MAX_PENDING_REPLIES", 1, held);
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.

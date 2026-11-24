@@ -33,10 +33,10 @@ use wz_session_core::bounded::{BoundedVec, Lent};
 
 use alloc::collections::VecDeque;
 
-#[cfg(feature = "local-queryable")]
 use wz_capi_port::sync::Lock;
 use wz_capi_port::ReplyCallback;
 use wz_session_core::reply::InboundReply;
+use wz_session_core::reply_hold::{HeldReplies, HoldRefused, ReplyHold};
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
 use wz_session_core::wire_id::RequestId;
 
@@ -103,6 +103,10 @@ pub(super) struct GetPlane {
     /// The replies the entries of legs held to their ends, each with its leg, in the order they
     /// gave them up: handed to the leg's callback before its end, and before its timeout.
     held: Queued<VecDeque<(u64, InboundReply)>>,
+    /// The replies the gets that consolidate hold to their Finals, each tagged with its leg
+    /// ([`LegHold`]): rows the session's arena lent (`MAX_PENDING_REPLIES`), shared by every get
+    /// of the session and reached only from the sinks, under the session's lock.
+    replies: Lock<HeldReplies<u64, Lent>>,
     /// Whether a thread that holds the session's lock takes the callback the answer it makes
     /// reaches ([`Self::capture`]).
     #[cfg(feature = "local-queryable")]
@@ -110,11 +114,13 @@ pub(super) struct GetPlane {
 }
 
 impl GetPlane {
-    /// A plane with nothing ended, its ends waiting in `ended`.
-    pub(super) fn new(ended: EndedLegs) -> Self {
+    /// A plane with nothing ended, its ends waiting in `ended` and the replies its gets hold in
+    /// `replies`.
+    pub(super) fn new(ended: EndedLegs, replies: HeldReplies<u64, Lent>) -> Self {
         Self {
             ended: Queued::new(ended),
             held: Queued::new(VecDeque::new()),
+            replies: Lock::new(replies),
             #[cfg(feature = "local-queryable")]
             capture: Lock::new(Capture::Off),
         }
@@ -301,6 +307,54 @@ impl ReplySink for LegSink {
     }
 }
 
+/// What a consolidating get holds of its replies until its Final: rows of the session's
+/// ([`GetPlane::replies`]), tagged with the leg, so a held reply is copied into the session's
+/// memory and takes none of its own. A full table refuses the reply, as a fixed room does, and
+/// counts it. A leg that ends with replies still held (cancelled, or its face gone) lets them go.
+pub(crate) struct LegHold {
+    leg: u64,
+    plane: Arc<GetPlane>,
+}
+
+impl LegHold {
+    /// The hold of leg `leg` in `plane`'s rows.
+    pub(super) fn new(leg: u64, plane: &Arc<GetPlane>) -> Self {
+        Self {
+            leg,
+            plane: Arc::clone(plane),
+        }
+    }
+}
+
+impl ReplyHold for LegHold {
+    fn displaces(&self, reply: &dyn ReplyView) -> bool {
+        self.plane
+            .replies
+            .with(|replies| replies.of(self.leg).displaces(reply))
+    }
+
+    fn hold(&mut self, reply: &dyn ReplyView, whole: bool) -> Result<(), HoldRefused> {
+        let leg = self.leg;
+        self.plane
+            .replies
+            .with(|replies| replies.of(leg).hold(reply, whole))
+    }
+
+    fn drain(&mut self, each: &mut dyn FnMut(&dyn ReplyView)) {
+        let leg = self.leg;
+        self.plane
+            .replies
+            .with(|replies| replies.of(leg).drain(each));
+    }
+}
+
+impl Drop for LegHold {
+    fn drop(&mut self) {
+        let leg = self.leg;
+        self.plane.replies.with(|replies| replies.forget(leg));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The ends of the legs wait in rows an arena lent, each handed out once.
@@ -326,6 +380,77 @@ mod tests {
             ends: EndedLegs::over(legs),
             _arena: arena,
         }
+    }
+
+    /// A reply of key `key` and payload `payload`.
+    struct Answer {
+        key: &'static str,
+        payload: &'static [u8],
+    }
+
+    impl ReplyView for Answer {
+        fn rid(&self) -> RequestId {
+            4
+        }
+        fn keyexpr(&self) -> &str {
+            self.key
+        }
+        fn kind(&self) -> wz_session_core::reply_sink::ReplyKind {
+            wz_session_core::reply_sink::ReplyKind::Put
+        }
+        fn payload(&self) -> &[u8] {
+            self.payload
+        }
+        fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+            None
+        }
+    }
+
+    /// Each leg's hold keeps its replies in the plane's rows apart from another leg's, hands them
+    /// out whole at its drain, refuses one past the rows, and lets go of what it still holds when
+    /// it goes.
+    #[test]
+    fn a_legs_hold_keeps_its_replies_in_the_planes_rows() {
+        let mut arena =
+            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+        let legs = arena.arena_mut().lend(4).expect("the arena has the rows");
+        let replies = HeldReplies::lent(arena.arena_mut(), 2).expect("the arena has the rows");
+        let plane = Arc::new(GetPlane::new(EndedLegs::over(legs), replies));
+        let (mut one, mut two) = (LegHold::new(1, &plane), LegHold::new(2, &plane));
+        let first = Answer {
+            key: "demo/a",
+            payload: b"first",
+        };
+        assert_eq!(one.hold(&first, true), Ok(()));
+        assert_eq!(
+            two.hold(
+                &Answer {
+                    key: "demo/a",
+                    payload: b"other",
+                },
+                true
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            one.hold(
+                &Answer {
+                    key: "demo/b",
+                    payload: b"past",
+                },
+                true
+            ),
+            Err(HoldRefused::Full),
+            "two rows hold two replies"
+        );
+        let mut drained = std::vec::Vec::new();
+        one.drain(&mut |reply| drained.push(reply.payload().to_vec()));
+        assert_eq!(drained, [b"first".to_vec()], "a leg drains its own");
+        drop(two);
+        assert!(
+            plane.replies.with(|replies| replies.is_empty()),
+            "a leg that goes lets go of what it held"
+        );
     }
 
     /// The end of leg `leg`, which no timeout ended.
