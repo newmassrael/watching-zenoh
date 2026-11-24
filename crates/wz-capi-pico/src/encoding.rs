@@ -204,9 +204,13 @@ impl HeldEncoding {
     /// in, and write the state that reads it there. Refused with nothing written when the schema is
     /// longer than the room, so a held encoding keeps the one it had.
     ///
+    /// One body out of line for the encoding placed and the schema set, so that neither holds a
+    /// copy of the write of the room.
+    ///
     /// # Safety
     /// `at` is the place of a `HeldEncoding`, holding one or none, that does not move while it is
     /// held and that nothing else reads while this runs.
+    #[inline(never)]
     unsafe fn write_at(at: *mut HeldEncoding, encoding: EncodingRef<'_>) -> Result<(), NoRoom> {
         // SAFETY: the caller's; a kept encoding has no drop, so its room is written over whatever
         // it held, and is left holding a whole one or untouched.
