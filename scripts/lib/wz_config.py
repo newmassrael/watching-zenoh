@@ -3437,8 +3437,8 @@ def policy_kconfig(pol: dict, requires: str | None = None) -> list[str]:
     upstream's. Each help ends with what upstream does. With `requires` the symbol (the choice,
     for a choice) `depends on` it, so a profile that does not run the policy's code has no symbol
     to set."""
-    help_text = pol["help"].strip().splitlines() + textwrap.wrap(
-        f"Upstream: {pol['upstream'].strip()}", width=78)
+    help_text = pol["help"].strip().splitlines() + wrap_prose(
+        f"Upstream: {pol['upstream'].strip()}", 78)
     depends = [f"\tdepends on {requires}"] if requires else []
     if pol["kind"] == "bool":
         out = [f"config {pol['kconfig']}", f'\tbool "{pol["id"]}"', "\tdefault n"] + depends + ["\thelp"]
@@ -3512,9 +3512,32 @@ def emit_image_policies(decl: dict, image: str) -> str:
     return "\n".join(out) + "\n"
 
 
+#: Stands in for a space inside a code span while the text is wrapped, so that the span is one
+#: word to `textwrap`; a private-use character, which no declaration writes.
+_SPAN_SPACE = chr(0xE000)
+
+
+def wrap_prose(text: str, width: int, initial_indent: str = "",
+               subsequent_indent: str = "") -> list[str]:
+    """`text` wrapped to `width`, broken only at the spaces between words: never inside a
+    backtick code span, never after a hyphen, never inside a word longer than the line, which
+    overflows instead. A span quotes something exactly -- a path, an identifier, a needle a
+    citation gate looks for whole -- and a line break inside it makes it another string."""
+    if _SPAN_SPACE in text:
+        raise ValueError(f"wrap_prose: the text already carries U+E000: {text[:60]!r}")
+    parts = text.split("`")
+    closed = len(parts) % 2 == 1
+    held = "`".join(
+        p.replace(" ", _SPAN_SPACE) if i % 2 and (closed or i < len(parts) - 1) else p
+        for i, p in enumerate(parts))
+    lines = textwrap.wrap(held, width=width, initial_indent=initial_indent,
+                          subsequent_indent=subsequent_indent,
+                          break_on_hyphens=False, break_long_words=False)
+    return [line.replace(_SPAN_SPACE, " ") for line in lines]
+
+
 def rust_doc(text: str, indent: str) -> list[str]:
-    return textwrap.wrap(text, width=92, initial_indent=f"{indent}/// ",
-                         subsequent_indent=f"{indent}/// ")
+    return wrap_prose(text, 92, f"{indent}/// ", f"{indent}/// ")
 
 
 def emit_rust_policies(decl: dict) -> str:
@@ -5125,6 +5148,24 @@ def cmd_selftest() -> int:
                              "CONFIG_WZ_CAP_GROUP=n\nCONFIG_OTHER=y\n") == {"query"})
     expect("a pico header reads 1 and not 0",
            read_config(decl, "#define Z_FEATURE_QUERY 1\n#define Z_FEATURE_QUERYABLE 0\n") == {"query"})
+    # The wrap of generated docs and Kconfig help: a code span is one word whatever spaces it
+    # holds, and a hyphenated word is not broken after its hyphen. The control is textwrap's
+    # own wrap of the same text, which breaks both.
+    prose = ("one two three `a-b/c-d.c` @ `ret = f(a, b == c);` and-a-hyphenated-word four "
+             "`left open")
+    whole = ["`a-b/c-d.c`", "`ret = f(a, b == c);`", "and-a-hyphenated-word"]
+    wrapped = wrap_prose(prose, 20, "/// ", "/// ")
+    expect("a wrap keeps each code span and hyphenated word on one line, and loses no text",
+           all(any(w in line for line in wrapped) for w in whole)
+           and " ".join(line[len("/// "):] for line in wrapped) == prose)
+    expect("textwrap alone breaks the spans the wrap keeps (the control)",
+           not all(any(w in line for line in textwrap.wrap(prose, 20)) for w in whole))
+    try:
+        wrap_prose("a " + chr(0xE000) + " b", 10)
+        refused = False
+    except ValueError:
+        refused = True
+    expect("a text carrying the span placeholder is refused, not restored wrongly", refused)
     expect("an off-by-default capability is `default n` in the Kconfig and reachable by its switch",
            "config WZ_CAP_ADMIN_SPACE\n\tbool \"admin-space\"\n\tdefault n"
            in emit_kconfig_capabilities(decl)
