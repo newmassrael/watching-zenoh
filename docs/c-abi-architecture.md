@@ -215,7 +215,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (125) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (124) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -248,7 +248,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
-| TD-042 | `wz-session-core` | `serial_link` | `expect_used` | 20 | open |
 | TD-044 | `wz-session-core` | `encoded_push` | `expect_used` | 19 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
 | TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
@@ -350,10 +349,7 @@ TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen by
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse. TD-042 (`serial_link`) keeps the
-two `expect`s of the handshake, which frames an `INIT` and an `INIT|ACK` of no payload through
-`encode_frame`: that answers a `Result` for any payload, and an empty one is always within the
-MTU. A frame of fixed bytes made when the build is compiled would pay them. TD-108
+through `Bounded::new`, over a sink that cannot refuse. TD-108
 (`query_options::loopback_query`) builds the loopback's Query body (`QueryBuilder`), whose
 bounded copies answer a `Result`: a value form moves its callers in the cooperative engine and
 the tokio session, and is made with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits

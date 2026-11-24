@@ -657,8 +657,6 @@ pub mod facilities;
 // Consumes the R311ns serial framing codecs (serial_envelope / cobs /
 // crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
 #[cfg(feature = "transport-link-serial")]
-// Totality debt TD-042 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod serial_link;
 
 // R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
