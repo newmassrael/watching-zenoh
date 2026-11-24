@@ -307,10 +307,11 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .unwrap()
         .row
         .is_none());
-    assert!(matches!(
-        tables.undeclare_matching_listener(listener),
-        Some(Removal::AfterCalls)
-    ));
+    assert!(tables
+        .undeclare_matching_listener(listener)
+        .unwrap()
+        .row
+        .is_none());
     assert!(matches!(
         tables.end_get(get.handle),
         Some(Removal::AfterCalls)
@@ -497,7 +498,12 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
         .unwrap();
     assert!(querier.interest.is_some_and(|id| id != asked));
     assert_eq!(tables.interests().len(), 2);
-    let interest = tables.write_filters().get(first.handle).unwrap().interest();
+    let interest = tables
+        .write_filters()
+        .get(first.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
     assert_eq!(tables.interest_key(interest), Some("k"));
     assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
@@ -506,7 +512,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             .get(listener)
             .unwrap()
             .interest(),
-        interest,
+        Some(interest),
         "a listener reads its filter's Interest"
     );
     // The Interest's Final goes with its last holder; the listener goes with its filter.
@@ -2049,4 +2055,168 @@ fn a_token_reaches_the_table_sets_liveliness_subscribers_by_the_registrys_rule()
     assert!(!complete(&tables));
     tables.liveliness_subscribers.mark_history_complete(id);
     assert!(complete(&tables));
+}
+
+/// A filter that asks the peers nothing holds no Interest and spends no id, and is judged on its
+/// own key; a listener on it reads that key, and goes with it. Turned red by a filter that still
+/// holds an Interest, or a listener that finds no key without one.
+#[test]
+fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
+    let mut tables = Tables::new();
+    let before = tables.next_entity_id();
+    let quiet = tables
+        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
+        .unwrap();
+    assert_eq!(quiet.interest, None);
+    assert_eq!(tables.interests().len(), 0, "no Interest held");
+    assert_eq!(tables.next_entity_id(), before, "no id spent");
+    let row = tables.write_filters().get(quiet.handle).unwrap();
+    assert_eq!((row.interest(), row.key()), (None, "q"));
+    let peers = Peers::default();
+    peers.declares.set(true);
+    assert_eq!(tables.write_filter_open(quiet.handle, &peers), Some(true));
+    let listener = tables.declare_matching_listener(quiet.handle, 4).unwrap();
+    let mut cursor = 0;
+    assert_eq!(
+        tables.next_matching_change(&mut cursor, &peers),
+        Some((listener, true)),
+        "the listener reads the filter's key"
+    );
+    let mut gone = Vec::new();
+    let unwatched = tables
+        .undeclare_write_filter(quiet.handle, |handle, _| gone.push(handle))
+        .unwrap();
+    assert_eq!(unwatched.interest_final, None);
+    assert_eq!(gone, [listener]);
+}
+
+/// A listener declared on a key holds an Interest of its own on the key whole, shared with one open
+/// on the same key and kind, and its undeclaration hands back that Interest's Final when it held it
+/// last; it is told its changes as one on a filter is. Turned red by a listener that holds no hold
+/// of its own, sends a second Interest for a key asked already, or keeps the Interest open.
+#[test]
+fn a_listener_on_a_key_holds_an_interest_of_its_own() {
+    let mut tables = Tables::new();
+    let alone = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", true, 6)
+        .unwrap();
+    let asked = alone.interest.expect("a new Interest");
+    let interest = tables
+        .matching_listeners()
+        .get(alone.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
+    let row = tables.interests().get(interest).unwrap();
+    assert_eq!(
+        (row.mapping_id(), row.suffix(), row.aggregate()),
+        (0, Some("m"), false)
+    );
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "m", false)
+        .unwrap();
+    assert_eq!(
+        filter.interest, None,
+        "the filter shares the listener's Interest"
+    );
+    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
+    let sub = subscribe(&mut tables, "m", Locality::Any, 1);
+    let mut cursor = 0;
+    assert_eq!(
+        tables.next_matching_change(&mut cursor, &NoPeers),
+        Some((alone.handle, true))
+    );
+    let _ = tables.undeclare_subscriber(sub.handle);
+    let first = tables.undeclare_matching_listener(alone.handle).unwrap();
+    assert_eq!(first.interest_final, None, "the filter still holds it");
+    assert!(first.row.is_some());
+    let again = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", false, 7)
+        .unwrap();
+    let _ = tables.undeclare_write_filter(filter.handle, |_, _| {});
+    assert_eq!(
+        tables
+            .undeclare_matching_listener(again.handle)
+            .unwrap()
+            .interest_final,
+        Some(asked),
+        "the last holder ends it"
+    );
+    assert_eq!(tables.interests().len(), 0);
+}
+
+/// An Interest keeps the rest of the key it names as a range of its own key: the tail where the
+/// rest ends the key, the place inside the key where it lies elsewhere, and the key whole by no
+/// declaration where it lies nowhere in the key, which names the same key. Turned red by a rest
+/// read from the wrong range, or one refused.
+#[test]
+fn an_interest_names_its_rest_by_a_range_of_its_key() {
+    let rest = |text: &str| Some(std::string::String::from(text));
+    let mut tables = Tables::new();
+    let named = |tables: &mut Tables, key: &str, suffix: &str| {
+        let filter = tables
+            .declare_write_filter_as(
+                Plane::Subscribers,
+                key,
+                false,
+                Some(InterestName {
+                    mapping_id: 5,
+                    suffix: Some(suffix),
+                    aggregate: true,
+                }),
+            )
+            .unwrap();
+        let interest = tables
+            .write_filters()
+            .get(filter.handle)
+            .unwrap()
+            .interest()
+            .unwrap();
+        let row = tables.interests().get(interest).unwrap();
+        (
+            row.mapping_id(),
+            row.suffix().map(std::string::String::from),
+            row.aggregate(),
+        )
+    };
+    assert_eq!(
+        named(&mut tables, "a/b/c", "/c"),
+        (5, rest("/c"), true),
+        "the tail"
+    );
+    assert_eq!(
+        named(&mut tables, "x/y/x/y", "x/y"),
+        (5, rest("x/y"), true),
+        "the tail, where the rest lies twice"
+    );
+    assert_eq!(
+        named(&mut tables, "p/q/r", "q"),
+        (5, rest("q"), true),
+        "inside the key"
+    );
+    assert_eq!(
+        named(&mut tables, "s/t", "u"),
+        (0, rest("s/t"), true),
+        "nowhere in the key: the key whole"
+    );
+    let plain = tables
+        .declare_write_filter_as(
+            Plane::Subscribers,
+            "n",
+            false,
+            Some(InterestName {
+                mapping_id: 9,
+                suffix: None,
+                aggregate: false,
+            }),
+        )
+        .unwrap();
+    let interest = tables
+        .write_filters()
+        .get(plain.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
+    let row = tables.interests().get(interest).unwrap();
+    assert_eq!((row.mapping_id(), row.suffix()), (9, None), "no rest");
 }
