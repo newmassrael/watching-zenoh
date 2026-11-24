@@ -2023,7 +2023,7 @@ mod in_place {
     }
 
     /// Member `member`'s beacon, which says its first frame is numbered 0.
-    fn beacon(member: u8) -> Vec<u8> {
+    pub(super) fn beacon(member: u8) -> Vec<u8> {
         let params = params(member);
         encode_join(
             &params,
@@ -2047,7 +2047,7 @@ mod in_place {
 
     /// Hand `datagram` to `to`'s session as its stack hands in what the group carries, from
     /// `from`'s address.
-    fn hand_in(network: &Network, to: u8, from: u8, datagram: &[u8]) {
+    pub(super) fn hand_in(network: &Network, to: u8, from: u8, datagram: &[u8]) {
         let (link, transport) = {
             let joined = network.joined.lock().unwrap();
             let to = joined
@@ -2138,8 +2138,9 @@ mod in_place {
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole.
-    #[cfg(not(feature = "transport-stats"))]
+    /// by its sequence number once, until the datagram is read whole. A build whose group reads
+    /// owned batches reads each datagram whole whatever the host's room.
+    #[cfg(not(any(feature = "transport-stats", feature = "multicast-declarations")))]
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2257,5 +2258,112 @@ mod in_place {
         );
         assert_eq!(stopped, None);
         assert_eq!(whole.keys, keys);
+    }
+}
+
+/// The keyexprs the members of a group declare, read member by member (`multicast-declarations`):
+/// two members number their keyexprs from the same counter, as two zenoh-pico sessions do, and
+/// each one's keys reach the session as that member declared them.
+#[cfg(feature = "multicast-declarations")]
+mod member_keyexprs {
+    use std::sync::Arc;
+
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_session_core::declare_build::{build_declare_kexpr, build_declare_subscriber};
+    use wz_session_core::frame_encode::{encode_frame_with_declare, encode_frame_with_push};
+    use wz_session_core::push_build::build_push_aliased;
+
+    use super::in_place::{beacon, hand_in};
+    use super::{eventually, member_config, open_member, subscribe, Network, GROUP};
+
+    /// The two members, and the key each declares under the keyexpr id 1.
+    const MEMBERS: [(u8, &str); 2] = [(9, "demo/alias/a"), (8, "demo/alias/b")];
+
+    /// Each of [`MEMBERS`] comes to member 1's session behind its beacon, with its key declared
+    /// under the id 1 in its frame numbered 0.
+    fn declare_one_id_for_two_keys(network: &Network) {
+        for (member, key) in MEMBERS {
+            let mut datagram = beacon(member);
+            datagram.extend_from_slice(&encode_frame_with_declare(
+                0,
+                build_declare_kexpr(1, key).expect("a keyexpr"),
+                true,
+            ));
+            hand_in(network, 1, member, &datagram);
+        }
+    }
+
+    /// Each member puts by the id 1, the payload its own key: each put reaches the subscriber of
+    /// the key its member declared, and only that one.
+    #[test]
+    fn a_put_by_a_members_id_reaches_the_key_that_member_declared() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let on_a = subscribe(&session, "demo/alias/a");
+        let on_b = subscribe(&session, "demo/alias/b");
+        declare_one_id_for_two_keys(&network);
+        for (member, key) in MEMBERS {
+            let push = build_push_aliased(1, None, key.as_bytes()).expect("a put by the id");
+            hand_in(&network, 1, member, &encode_frame_with_push(1, push, true));
+        }
+        eventually("each member's put on its own key", || {
+            !on_a.lock().unwrap().is_empty() && !on_b.lock().unwrap().is_empty()
+        });
+        assert!(
+            on_a.lock()
+                .unwrap()
+                .iter()
+                .all(|payload| payload == b"demo/alias/a"),
+            "the subscriber of the first member's key heard only that member's put"
+        );
+        assert!(
+            on_b.lock()
+                .unwrap()
+                .iter()
+                .all(|payload| payload == b"demo/alias/b"),
+            "the subscriber of the second member's key heard only that member's put"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// Each member declares a subscriber by the id 1: each opens the session's write filter on
+    /// the key its own member declared.
+    #[test]
+    fn a_subscriber_by_a_members_id_opens_the_filter_on_the_key_that_member_declared() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let filter = |key: &str| {
+            session
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    key,
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+        };
+        let (on_a, on_b) = (filter("demo/alias/a"), filter("demo/alias/b"));
+        assert!(
+            session.write_filter_active(on_a) && session.write_filter_active(on_b),
+            "CONTROL: no member holds a subscriber yet"
+        );
+        declare_one_id_for_two_keys(&network);
+        for (member, _) in MEMBERS {
+            let subscriber = build_declare_subscriber(2, 1, None).expect("a subscriber by the id");
+            hand_in(
+                &network,
+                1,
+                member,
+                &encode_frame_with_declare(1, subscriber, true),
+            );
+        }
+        eventually(
+            "each member's subscriber to open the filter on its own key",
+            || !session.write_filter_active(on_a) && !session.write_filter_active(on_b),
+        );
+        SessionDrive::close(&*session);
     }
 }
