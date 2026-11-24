@@ -1925,6 +1925,7 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
 /// its table of pending gets, and the ends of their legs, their callbacks and the session's note
 /// of each.
+#[cfg(feature = "listen")]
 const FACE_PARTS: [&str; 5] = [
     "peer tables",
     "pending gets",
@@ -1942,14 +1943,17 @@ const POOL_PARTS: [&str; 3] = [
 ];
 
 /// The parts of an arena held once for each link: its place among the session's links.
+#[cfg(feature = "listen")]
 const LINK_PARTS: [&str; 1] = ["link places"];
 
 /// The parts of the pool of receive buffers the links share (`RX_POOL_BUFFERS`, at most one for
 /// each link).
+#[cfg(feature = "listen")]
 const RX_PARTS: [&str; 2] = ["link receive flags", "link receive buffers"];
 
 /// The parts of the pool of outbound slots the links share (`TX_POOL_SLOTS`, at most one for each
 /// link).
+#[cfg(feature = "listen")]
 const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 
 /// The pico preset holds a session's faces to zenoh-pico's own bounds: ten peers on a listener

@@ -5783,7 +5783,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
     fn hold_leg(
         &self,
-        core: &mut Core<L, C>,
+        now_us: u64,
+        registry: &mut Registry,
         ask: &mut LegAsk<'_, '_>,
         face: FaceId,
         leg_id: u64,
@@ -5793,15 +5794,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let timeout_ms = ask.opts.effective_timeout_ms();
         // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
         // before its timeout.
-        let deadline_ms =
-            (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
+        let deadline_ms = (timeout_ms > 0).then(|| leg_deadline_ms(now_us, timeout_ms));
         // A get no row holds is refused before its leg's callback is minted.
-        match core
-            .session
-            .registry
-            .gets_mut(face)
-            .map(|gets| gets.replies.has_room())
-        {
+        match registry.gets_mut(face).map(|gets| gets.replies.has_room()) {
             Some(true) => {}
             Some(false) => return LegHeld::NoRoom,
             None => return LegHeld::Gone,
@@ -5820,7 +5815,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             get::LegHold::new(leg_id, &self.gets),
         );
         let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
-        let registered = core.session.registry.gets_mut(face).map(|gets| {
+        let registered = registry.gets_mut(face).map(|gets| {
             gets.replies
                 .register_sink(rid, finals, deadline_ms, accept, sink)
         });
@@ -7335,7 +7330,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let rid = actions.alloc_next_request_id();
             // One Final: the face's peer's. Held before the request goes out, so no answer can
             // arrive before its entry.
-            match self.hold_leg(core, &mut ask, face, leg_id, rid, 1) {
+            match self.hold_leg(
+                core.clock.now_us(),
+                &mut core.session.registry,
+                &mut ask,
+                face,
+                leg_id,
+                rid,
+                1,
+            ) {
                 LegHeld::Held => {}
                 LegHeld::Gone => continue,
                 LegHeld::NoRoom => {
@@ -7428,7 +7431,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
             // Held before the query is queued, as a link's leg is before it is sent.
-            match self.hold_leg(core, &mut ask, face, leg_id, rid, finals) {
+            match self.hold_leg(
+                core.clock.now_us(),
+                &mut core.session.registry,
+                &mut ask,
+                face,
+                leg_id,
+                rid,
+                finals,
+            ) {
                 LegHeld::Held => {}
                 LegHeld::Gone => continue,
                 LegHeld::NoRoom => {
@@ -7474,7 +7485,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let core = &mut guard.0;
             let rid = own.rid();
-            match self.hold_leg(core, &mut ask, LOCAL_FACE, leg_id, rid, 1) {
+            match self.hold_leg(
+                core.clock.now_us(),
+                &mut core.session.registry,
+                &mut ask,
+                LOCAL_FACE,
+                leg_id,
+                rid,
+                1,
+            ) {
                 LegHeld::Held => {
                     if !core.session.note_pending(PendingGet {
                         face: LOCAL_FACE,
