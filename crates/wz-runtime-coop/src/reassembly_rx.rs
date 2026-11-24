@@ -106,6 +106,14 @@ pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
 /// `_z_wbuf_t _dbuf_best_effort;`).
 pub const LENT_CHAINS: usize = crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize;
 
+/// How many buffers a session's chain table holds: one for each chain its links stage at once
+/// ([`LENT_CHAINS`]) and one for the rejoined message the session reads where it lies until its
+/// records are handed out, the buffer kept out of the table meanwhile
+/// ([`ChainStaging::keep`](wz_session_core::chain_staging::ChainStaging::keep)). Without the one
+/// more, a chain that starts while that buffer is kept would find none free and be refused, which
+/// a chain whose message was read before its buffer went back is not.
+pub const SESSION_CHAIN_BUFFERS: usize = LENT_CHAINS + 1;
+
 /// The staging of a Router whose chains lie in buffers a session's arena lent
 /// ([`LentStaging`]), each claimed when its chain starts and at most the build's
 /// `PICO_FRAG_MAX_BYTES` long.
@@ -893,6 +901,98 @@ mod tests {
             );
         });
         assert_eq!(router.staging_available(), LENT_CHAINS);
+    }
+
+    /// Two chains assembling while a third rejoined message is kept, its records not yet handed
+    /// out: over a table of `SESSION_CHAIN_BUFFERS` the chain that starts meanwhile begins, as it
+    /// does when the message is only borrowed for its call over `LENT_CHAINS` buffers, so keeping
+    /// refuses no fragment that borrowing took. The CONTROL is the kept message over
+    /// `LENT_CHAINS` buffers, where that chain is refused; and the kept buffer is the table's again
+    /// once it drops.
+    #[test]
+    fn a_kept_message_refuses_no_chain_that_starts_before_it_is_let_go() {
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::Arena;
+        use wz_session_core::byte_cells::{KeptBytes, LentByteCells};
+        use wz_session_core::reassembly_dispatch::{ChainBytes, RefuseReason};
+
+        #[repr(C, align(16))]
+        struct Memory([u8; 256]);
+
+        /// Chain A best-effort and chain C reliable open, C completes, kept or borrowed, and chain
+        /// B reliable starts: B's outcome, the kept message, and the buffers lent after it.
+        fn run(
+            memory: &mut Memory,
+            buffers: usize,
+            keep: bool,
+        ) -> (IngestOutcome, Option<KeptBytes>, usize, LentByteCells) {
+            // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by
+            // nothing else, and the caller's, which outlives the table and every buffer of it.
+            let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), 256) };
+            let cells = arena
+                .lend_byte_cells(16, buffers)
+                .expect("the memory holds the table");
+            let mut router = session_reassembly(
+                &SessionPolicy::defaults(),
+                SessionChains::over(&cells, LENT_CHAINS),
+            );
+            let best_effort = |sn: u64, more: u8, payload: &'static [u8]| Fragment {
+                reliable: false,
+                ..frag(sn, more, payload)
+            };
+            assert_eq!(
+                router.ingest(best_effort(1, 1, b"a"), MASK, 0, |_| {}),
+                IngestOutcome::Begun
+            );
+            assert_eq!(
+                router.ingest(frag(10, 1, b"c-"), MASK, 0, |_| {}),
+                IngestOutcome::Begun
+            );
+            let mut kept = None;
+            let completed = if keep {
+                router.ingest_keeping(frag(11, 0, b"end"), MASK, 0, |chain| {
+                    if let ChainBytes::Kept(bytes) = chain {
+                        kept = Some(bytes);
+                    }
+                })
+            } else {
+                router.ingest(frag(11, 0, b"end"), MASK, 0, |_| {})
+            };
+            assert_eq!(completed, IngestOutcome::Reassembled);
+            let started = router.ingest(frag(12, 1, b"b"), MASK, 0, |_| {});
+            let lent = cells.in_use();
+            (started, kept, lent, cells)
+        }
+
+        let mut memory = [Memory([0; 256]), Memory([0; 256]), Memory([0; 256])];
+        let [first, second, third] = &mut memory;
+        let (borrowed, _, lent, _) = run(first, LENT_CHAINS, false);
+        assert_eq!(
+            (borrowed, lent),
+            (IngestOutcome::Begun, 2),
+            "borrowed for its call, the message's buffer served the next chain"
+        );
+        let (started, kept, lent, cells) = run(second, SESSION_CHAIN_BUFFERS, true);
+        let kept = kept.expect("a lent staging keeps a completed chain");
+        assert_eq!(kept.as_slice(), b"c-end");
+        assert_eq!(
+            (started, lent),
+            (IngestOutcome::Begun, 3),
+            "kept, the message holds one buffer and the two open chains the others"
+        );
+        drop(kept);
+        assert_eq!(
+            cells.in_use(),
+            2,
+            "let go of, the kept buffer is the table's again"
+        );
+        let (refused, kept, _, _) = run(third, LENT_CHAINS, true);
+        assert!(kept.is_some());
+        assert_eq!(
+            refused,
+            IngestOutcome::Refused(RefuseReason::PoolExhausted),
+            "CONTROL: with no buffer for the kept message, the next chain finds none"
+        );
     }
 
     /// A lent Router's ceiling is the build's `PICO_FRAG_MAX_BYTES`, and its chains are bounded by

@@ -931,24 +931,31 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
 }
 
 /// The session is lent one table of reassembly buffers its links share, a buffer for each chain
-/// one peer stages at once however many links the session may hold, each as long as the
+/// one peer stages at once and one for the rejoined message the round keeps, however many links
+/// the session may hold, each as long as the
 /// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
 /// session lowers it to, and a value over the build's refuses the plan under its own name.
 #[test]
 fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length() {
-    use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
+    use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 
     let config = CoopConfig {
         max_faces: 2,
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&built, "reassembly buffers").count, LENT_CHAINS);
+    assert_eq!(
+        row(&built, "reassembly buffers").count,
+        SESSION_CHAIN_BUFFERS
+    );
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
         caps::PICO_FRAG_MAX_BYTES
     );
-    assert_eq!(built.reassembly(), (caps::PICO_FRAG_MAX_BYTES, LENT_CHAINS));
+    assert_eq!(
+        built.reassembly(),
+        (caps::PICO_FRAG_MAX_BYTES, SESSION_CHAIN_BUFFERS)
+    );
     let one_link = ArenaPlan::of(
         &CoopConfig {
             max_faces: 0,
@@ -1135,9 +1142,9 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
         .sum();
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
-    let tables = session
-        .lend_links(&plan)
-        .expect("the plan lays the links out");
+    let mut lend = session.lender();
+    let tables = plan.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
     assert_eq!(session.arena_mut().high_water(), links);
     for row in plan
         .rows()
@@ -1175,9 +1182,9 @@ fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
-    let tables = session
-        .lend_links(&plan)
-        .expect("the plan lays the links out");
+    let mut lend = session.lender();
+    let tables = plan.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
     let (rx, tx) = tables.claim().expect("the link's buffers");
     let peer = UdpSocket::bind("127.0.0.1:0").expect("a free port");
     let socket = PosixUdpSocket::bind("127.0.0.1:0".parse().expect("an address"))

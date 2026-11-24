@@ -46,13 +46,14 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlace, EntityPlaces,
-    EntityRows, HandlePlace, HeldPlaces, LinkCells, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, EntityKind, EntityPlace,
+    EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables, SessionArena,
+    SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
 use wz_session_core::caps;
-use wz_session_core::key_arena::{KeyRef, KeySpace};
+use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
     KeyexprHandle, RowCallbacks, SessionTables, SubscriberHandle,
@@ -106,7 +107,7 @@ use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
@@ -686,12 +687,44 @@ struct SessionLent {
     arena: SessionArena,
 }
 
-/// Reserve the arena `plan` lays out in `memory` and lend from it, in the order the plan laid
-/// them out, every table of the session opened with `config` under `policy`: the links'
-/// buffers and cells, the round of deliveries, the reassembly, the endpoints' rows, the tables of
-/// the session's own declarations and the application's, and the ABI's places. The first table
-/// refused refuses the open, and what was lent before it goes back with the arena. Out of line
-/// and generic over nothing: one body for every stack and source the open is made over.
+/// The plain tables of a session's state, lent by an open's one lender
+/// (`SessionRows::lent_from`): the delivery lane's area, the engine's record of the session's own
+/// declarations, the key arena, and the ends of its legs.
+struct StateTables {
+    lane: LentByteCells,
+    filters: FilterRows,
+    interests: InterestRows,
+    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
+    keys: LentKeys,
+    #[cfg(feature = "query")]
+    legs: Rows<Ended, { usize::MAX }>,
+}
+
+impl SessionRows {
+    /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
+    /// at most `longest` bytes. A count past the address space is a table the lender refuses.
+    fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
+        let entities = self.entities();
+        StateTables {
+            lane: lend.byte_cells(self.lane_bytes(), 1),
+            filters: lend.table(entities.filters().unwrap_or(usize::MAX)),
+            interests: lend.table(entities.interests().unwrap_or(usize::MAX)),
+            matches: lend.table(entities.matching_listeners),
+            keys: lend.keys(self.key_bytes(), longest),
+            #[cfg(feature = "query")]
+            legs: lend.table(self.gets().legs().unwrap_or(usize::MAX)),
+        }
+    }
+}
+
+/// Reserve the arena `plan` lays out in `memory` and lend from it every table of the session
+/// opened with `config` under `policy`. One lender lends each layer its plain tables from the
+/// rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
+/// state's lane, declarations, keys and legs, and the ABI's places; it gives the tables after a
+/// refusal no rows and is asked once, after them all. The round's tables and the application's,
+/// which their makers lend, ask their own. What was lent before a refusal goes back with the
+/// arena. Out of line and generic over nothing: one body for every stack and source the open is
+/// made over.
 #[inline(never)]
 fn lend_session(
     plan: &ArenaPlan,
@@ -700,25 +733,43 @@ fn lend_session(
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut arena = SessionArena::reserve(plan, memory)?;
-    let link_tables = arena.lend_links(plan)?;
-    let cells = arena.lend_cells(plan)?;
-    let (lane_area, lane_bytes) = arena.lend_lane(plan)?;
+    let mut lend = arena.lender();
+    let TransportTables {
+        links: link_tables,
+        cells,
+        reassembly,
+        endpoints,
+    } = plan.transport().lent_from(&mut lend);
+    // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
+    // moves the others out of one by one would need its own drop on each refusal below.
+    let StateTables {
+        lane,
+        filters,
+        interests,
+        matches,
+        keys,
+        #[cfg(feature = "query")]
+        legs,
+    } = plan
+        .session()
+        .lent_from(&mut lend, config.limits.max_keyexpr_bytes_held());
+    let PlaceTables {
+        handle,
+        entities: places,
+    } = plan.places().lent_from(&mut lend, plan.entities());
+    let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    let ClaimedPlaces {
+        lane_area,
+        lane_bytes,
+        handle: handle_place,
+    } = plan.claim_lane_and_handle(lane, handle)?;
+    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
-    let reassembly = arena.lend_reassembly(plan)?;
-    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
-    let endpoints = arena.lend_endpoints(plan)?;
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
     let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
-    // The tables of the session's own declarations, lent from the arena as the plan counts
-    // them. Declared after the arena, so a refusal drops them first.
-    let entities = plan.entities();
-    let filters = arena.lend(entities.filters().ok_or(ArenaRefused::TooLarge)?)?;
-    let interests = arena.lend(entities.interests().ok_or(ArenaRefused::TooLarge)?)?;
-    let matches = arena.lend(entities.matching_listeners)?;
-    let keys = arena.lend_keys(plan, config.limits.max_keyexpr_bytes_held())?;
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in a table the plan counts.
     #[cfg(feature = "queryable")]
@@ -735,20 +786,13 @@ fn lend_session(
         keys,
         ObserverRows {
             tables: plan.tables(),
-            local_tokens: entities.tokens,
+            local_tokens: plan.entities().tokens,
         },
         plan.gets(),
         plan.peers(),
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
-    // The ends of the session's legs wait in rows the plan counts for them.
-    #[cfg(feature = "query")]
-    let ended = EndedLegs::over(arena.lend(plan.gets().legs().ok_or(ArenaRefused::TooLarge)?)?);
-    // The ABI's handle's place, the plan's last row, and the places of the ABI's objects of the
-    // session's entities, the rows after it.
-    let handle_place = arena.lend_handle(plan)?;
-    let places = arena.lend_entity_places(plan)?;
     Ok(SessionLent {
         link_tables,
         cells,
@@ -763,7 +807,7 @@ fn lend_session(
         plane,
         registry,
         #[cfg(feature = "query")]
-        ended,
+        ended: EndedLegs::over(legs),
         handle_place,
         places,
         arena,
@@ -2280,11 +2324,16 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         registry.settle_decl_events(|| actions.peer_zid());
     }
 
-    /// A rejoined message's records are read where its chain lies for as long as the round holds
-    /// them: the gate reads no link meanwhile, so no fragment is staged over it.
-    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+    /// A rejoined message's records are read where its chain's buffer lies, which the round keeps
+    /// for as long as it holds them.
+    fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
         // SAFETY: a link's records are dispatched by the session's step, under the session's lock.
         unsafe { self.lane.lend_rejoined(message) };
+    }
+
+    fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
+        // SAFETY: as `lend_rejoined`.
+        unsafe { self.lane.end_rejoined(message) };
     }
 }
 

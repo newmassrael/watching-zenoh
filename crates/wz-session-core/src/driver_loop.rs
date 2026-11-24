@@ -1529,11 +1529,15 @@ pub trait EventSink {
         false
     }
 
-    /// The records handed from here on lie in `message`, a message rejoined from its fragments in
-    /// the buffer its chain was staged into, until the same call with `None`. A host that keeps
-    /// what it is handed past the call may read it there for as long as it lets no fragment be
-    /// staged again, which is what overwrites the buffer. Defaults to nothing.
-    fn lend_rejoined(&mut self, _message: Option<&[u8]>) {}
+    /// The records handed from here on lie in `message`, a message rejoined from its fragments and
+    /// kept in the buffer its chain was staged into, until [`Self::end_rejoined`]. Defaults to
+    /// nothing.
+    fn lend_rejoined(&mut self, _message: &crate::byte_cells::KeptBytes) {}
+
+    /// The records of `message` are handed. A host that keeps what it was handed past the call
+    /// keeps `message` with it, for as long as it reads them there: no chain is staged into its
+    /// buffer until it drops. Defaults to dropping it, which gives the buffer back at once.
+    fn end_rejoined(&mut self, _message: crate::byte_cells::KeptBytes) {}
 }
 
 impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {
@@ -1798,6 +1802,11 @@ pub fn reassembled_chain_outcome(
         ChainBytes::Borrowed(msg) => crate::network_message::parse_frame_payload_lending(msg),
         #[cfg(feature = "rx-shared-bytes")]
         ChainBytes::Lent(bytes) => crate::network_message::parse_frame_payload_in(bytes),
+        // A kept buffer is a cell of its session's table, which no message may outlive: copied
+        // once, as a borrowed chain is.
+        ChainBytes::Kept(kept) => {
+            crate::network_message::parse_frame_payload_lending(kept.as_slice())
+        }
     };
     let parsed = decoded
         .map_err(InboundParseError::Codec)
