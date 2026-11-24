@@ -1381,6 +1381,20 @@ impl RowCallbacks for CoreRows {
     type GetPresence = wz_session_core::session_tables::Present;
 }
 
+/// The declarations an entry the registry records names, each once: the one its key is named by,
+/// and the one of the entity's own key when that is another, the one the ABI states
+/// ([`WireKey::own_declaration`]) or else the one its retraction names; `0` for none.
+fn declarations_named(wire: &WireKey, retraction: Option<RetractionKey>) -> [ExprId; 2] {
+    let own = match wire.own_declaration() {
+        0 => retraction.map_or(0, |key| key.mapping_id),
+        stated => stated,
+    };
+    [
+        wire.mapping_id,
+        if own == wire.mapping_id { 0 } else { own },
+    ]
+}
+
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
 /// exactly as the others are, which is what makes a token declared before any
 /// peer connected visible to that peer when it arrives. Upstream's
@@ -3254,11 +3268,25 @@ impl SharedSession {
         }
     }
 
-    /// Give back to the session what `wire` held of its declarations ([`WireKey::into_holds`]),
-    /// the key let go of: an entry taken out of the registry, or a key the session refused. With
-    /// no lock held, since the last hold of a declaration retracts it, which takes the lock.
-    fn give_back(&self, wire: WireKey) {
-        wire.let_go(self);
+    /// Hold, for an entry the registry records from here on, each declaration it names
+    /// ([`declarations_named`]) in the session's one count of a declaration's holders, as zenoh-pico
+    /// counts its resource's `_refcount`: the key the entry was declared on holds none of its own.
+    /// One no longer declared takes none.
+    fn hold_named(guard: &mut Inner, named: [ExprId; 2]) {
+        for id in named {
+            if let Some(handle) = guard.tables.keyexpr_by_id(id) {
+                guard.tables.retain_keyexpr(handle);
+            }
+        }
+    }
+
+    /// Let go of what an entry taken out of the registry held ([`Self::hold_named`]), after its
+    /// own retraction went: with no lock held, since the last hold of a declaration retracts it,
+    /// which takes the lock.
+    fn release_named(&self, named: [ExprId; 2]) {
+        for id in named.into_iter().filter(|&id| id != 0) {
+            self.release_keyexpr(id);
+        }
     }
 
     /// The registry lock, poison-tolerant. A C callback that panics is caught
@@ -4042,16 +4070,16 @@ impl SharedSession {
                 .collect();
             (entries, copies)
         };
-        // What each entry's key held goes back with the entry, outside the lock.
+        // What each entry held goes back with the entry, outside the lock.
         let ((subs, qbls, live_subs, matches), copies) = dropped;
         for entry in subs {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, entry.retraction));
         }
         for entry in qbls {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, entry.retraction));
         }
         for entry in live_subs {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, None));
         }
         drop(matches);
         drop(copies);
@@ -5195,7 +5223,7 @@ impl SharedSession {
         let mut guard = self.lock();
         let Some(id) = guard.take_entity_id() else {
             drop(guard);
-            self.give_back(wire);
+            drop(wire);
             return None;
         };
 
@@ -5219,6 +5247,8 @@ impl SharedSession {
         // The session's own liveliness subscribers, told of the token once the registry is
         // unlocked: what they run may re-enter the session.
         let legs = self.own_liveliness_legs(&guard, &keyexpr);
+        // Its retraction names the key it was declared on, the declaration its key names.
+        Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.tokens.push(TokenEntry {
             id,
             keyexpr: keyexpr.clone(),
@@ -5274,7 +5304,7 @@ impl SharedSession {
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
         if let Some(entry) = dropped_entry {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, None));
         }
         // And the session's own liveliness subscribers, last: the token is gone from the wire
         // when they hear of it.
@@ -5337,7 +5367,7 @@ impl SharedSession {
         let mut guard = self.lock();
         let Some(id) = guard.take_entity_id() else {
             drop(guard);
-            self.give_back(wire);
+            drop(wire);
             return None;
         };
 
@@ -5374,6 +5404,7 @@ impl SharedSession {
             Vec::new()
         };
         let leg = (!history.is_empty()).then(|| sink());
+        Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.live_subs.push(LiveSubEntry {
             id,
             keyexpr,
@@ -6252,7 +6283,7 @@ impl SharedSession {
         let mut guard = self.lock();
         let Some(id) = guard.take_entity_id() else {
             drop(guard);
-            self.give_back(wire);
+            drop(wire);
             return None;
         };
         wz_runtime_tokio::route_trace(format_args!(
@@ -6307,6 +6338,10 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::subscribe_on_groups(&mut guard, &entry);
         }
+        Self::hold_named(
+            &mut guard,
+            declarations_named(&entry.wire, entry.retraction),
+        );
         guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
@@ -7096,11 +7131,11 @@ impl SharedSession {
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
         drop(dropped_group_live);
         if let Some(entry) = dropped_entry {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, entry.retraction));
         }
         drop(dropped_live);
         if let Some(entry) = dropped_live_entry {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, None));
         }
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
@@ -7258,7 +7293,7 @@ impl SharedSession {
         let mut guard = self.lock();
         let Some(id) = guard.take_entity_id() else {
             drop(guard);
-            self.give_back(wire);
+            drop(wire);
             return None;
         };
 
@@ -7298,6 +7333,10 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::answer_on_groups(&mut guard, &entry);
         }
+        Self::hold_named(
+            &mut guard,
+            declarations_named(&entry.wire, entry.retraction),
+        );
         guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
@@ -7349,7 +7388,7 @@ impl SharedSession {
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
         drop(dropped_groups);
         if let Some(entry) = dropped_entry {
-            self.give_back(entry.wire);
+            self.release_named(declarations_named(&entry.wire, entry.retraction));
         }
         if let Some(key) = local_key {
             self.refresh_local_matches(

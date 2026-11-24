@@ -44,9 +44,7 @@ use crate::abi::{
 use crate::bytes::{ByteBuf, NoRoom};
 use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::{
-    declared_of, keyexpr_str, wire_key_holding_declaration_of, wire_key_of, DeclaredKeyexpr,
-};
+use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
@@ -3320,12 +3318,11 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 // --- subscriber exports ----------------------------------------------------
 
 /// The wire form a subscriber on `keyexpr` is announced in: the CALLER's key
-/// (see the declare site for why it is not the subscription's own), keeping
-/// alive the caller's declaration when the wire names it, and the declaration
-/// of the subscription's own `key`, which its retraction names — the registry
-/// entry is the only holder a background subscriber has. Each is one hold of
-/// the engine's own count, and nothing is placed on the heap for them. The
-/// key's text is not held: nothing reads it here.
+/// (see the declare site for why it is not the subscription's own), stating
+/// the declaration of the subscription's own `key`, which its retraction
+/// names. The session's record of the subscriber holds both in the engine's
+/// own count, the one holder a background subscriber has; the wire key holds
+/// nothing, and nothing is placed on the heap for it.
 ///
 /// # Safety
 /// `keyexpr` must be null or a live loaned keyexpr.
@@ -3334,11 +3331,7 @@ unsafe fn subscriber_wire(
     shared: &Engine,
     key: &DeclaredKeyexpr,
 ) -> WireKey {
-    let wire = wire_key_holding_declaration_of(keyexpr, shared);
-    match key.declaration_hold(shared) {
-        Some(hold) => wire.holding_also(hold),
-        None => wire,
-    }
+    wire_key_of(keyexpr, shared).with_own(key.declaration_id(shared))
 }
 
 /// The traffic a subscriber declared with `options` admits: its `allowed_origin` with
@@ -3501,8 +3494,8 @@ unsafe fn declare_subscriber_in(
     let wire = subscriber_wire(keyexpr, Arc::as_ref(engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
     // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's key
-    // the announce went out on. A background subscriber's entry keeps that declaration alive
-    // through `wire`'s hold, so the id it names stays declared as long as it can retract.
+    // the announce went out on. A background subscriber's record holds that declaration
+    // (`WireKey::with_own`), so the id it names stays declared as long as it can retract.
     let retraction = key.retraction_naming_in(
         crate::write_filter::session_mode(handle),
         Arc::as_ref(engine),

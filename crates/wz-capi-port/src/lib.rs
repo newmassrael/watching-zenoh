@@ -668,16 +668,19 @@ pub enum FilteredPut {
 ///
 /// ## What keeps the id declared
 ///
-/// An entry that names `mapping_id` on the wire needs that declaration to outlive it, and the ABI
-/// that made the declaration is the one that knows what retracts it. So the key carries what it
-/// [`keeps`](Self::keeping) alive, and the entry holding the key holds that. For an entity with a
-/// handle the ABI usually holds its own reference too; for a BACKGROUND entity, which has no
-/// handle and lives as long as the session, the entry is the only holder — which is exactly the
+/// An entry that names `mapping_id` on the wire needs that declaration to outlive it. The engine
+/// that records the entry holds the declaration in its own count of the declaration's holders,
+/// under its lock, from the record to the entry's removal, as it holds the one the entry's
+/// retraction names: the key carries no hold of its own, so a declaration has one count, the
+/// engine's, as zenoh-pico's resource has one `_refcount`. For a BACKGROUND entity, which has no
+/// handle and lives as long as the session, the entry is the only holder, which is exactly the
 /// lifetime zenoh-pico gives the declaration, stored with the subscription in the session's
 /// table.
 ///
-/// Entries are always released OUTSIDE an engine's locks, so what they keep may re-enter the
-/// session as it drops (a keyexpr retraction does).
+/// An ABI whose declarations are retracted by an object of its own rather than by that count has
+/// the key [`keep`](Self::keeping) the object alive, and the entry holding the key holds it. Entries
+/// are always released OUTSIDE an engine's locks, so what they keep may re-enter the session as it
+/// drops (a keyexpr retraction does).
 #[derive(Default)]
 pub struct WireKey {
     /// The keyexpr declaration the wire names, `0` for none.
@@ -685,10 +688,10 @@ pub struct WireKey {
     /// What follows the declared prefix ([`Self::names_in`]).
     suffix: Suffix,
     keeps: Keeps,
-    /// One hold on the declaration of the key of the entity this key announces, when that is not
-    /// the declaration the wire names: the entity's retraction names it, so it is held for as long
-    /// as the entry is ([`Self::holding_also`]).
-    also: Option<KeyHold>,
+    /// The declaration of the key of the entity this key announces, when the declaring ABI made
+    /// one besides the one the wire names, `0` for none: the record of the entity holds it too
+    /// ([`Self::with_own`]).
+    own: wz_session_core::wire_id::ExprId,
 }
 
 /// The rest of a key past its declared prefix: none, a copy of its own, text that lies in what
@@ -747,8 +750,6 @@ enum Keeps {
     /// An object of the ABI's that retracts the declaration when the last holder lets it go, in a
     /// box of its own or lodged in a place of the ABI's.
     Anchor { _held: lodge::Kept },
-    /// One hold on the declaration, counted by the engine itself.
-    Hold { held: KeyHold },
 }
 
 impl core::fmt::Debug for WireKey {
@@ -757,7 +758,7 @@ impl core::fmt::Debug for WireKey {
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
             .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
-            .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
+            .field("own", &self.own)
             .finish()
     }
 }
@@ -766,10 +767,10 @@ impl core::fmt::Debug for WireKey {
 /// declaration's holders ([`KeyHolds::retain_keyexpr`], [`KeyHolds::release_keyexpr`]).
 ///
 /// It is the declaration's id and nothing else: it names no session and lets nothing go when it is
-/// dropped, so a row of a session's tables keeps it with no pointer back into the session. Whoever
-/// takes it out of the row gives it back to the session it was taken from ([`Self::release`]);
-/// it is neither copied nor cloned, so each hold is given back once, and one dropped unused is
-/// warned of where it is made.
+/// dropped, so the object of the ABI's that keeps it names its session beside it and gives it back
+/// to that session ([`Self::release`]); it is neither copied nor cloned, so each hold is given back
+/// once, and one dropped unused is warned of where it is made. What a session records holds its
+/// declarations in the same count itself, and takes no `KeyHold` ([`WireKey`]).
 #[must_use = "a hold is given back to its session (`KeyHold::release`), or its declaration stays"]
 pub struct KeyHold {
     mapping_id: wz_session_core::wire_id::ExprId,
@@ -808,42 +809,13 @@ impl KeyHold {
     }
 }
 
-/// What a key held of its session's declarations, taken out of the key that held it
-/// ([`WireKey::into_holds`]), to give back with no lock of the session held
-/// ([`Self::release`]).
-#[must_use = "what a key held is given back to its session (`WireHolds::release`)"]
-pub struct WireHolds {
-    keeps: Keeps,
-    also: Option<KeyHold>,
-}
-
-impl WireHolds {
-    /// Give each hold back to `session`, the session the key's declaration was made on, and let
-    /// go of the rest the key kept. Each release may retract a declaration, which reaches the
-    /// session, so no lock of it is held here.
-    pub fn release<H: KeyHolds + ?Sized>(self, session: &H) {
-        let Self { keeps, also } = self;
-        if let Keeps::Hold { held } = keeps {
-            held.release(session);
-        }
-        if let Some(also) = also {
-            also.release(session);
-        }
-    }
-
-    /// The hold on the declaration the key names, taken out of these holds, for a record whose
-    /// own row holds that declaration: the entity then holds it once, there, and the caller gives
-    /// this hold back. `None` for a key that holds it by an object of the ABI's, or not at all;
-    /// that object and the hold of the declaration the entity's retraction names stay here.
-    pub fn take_named(&mut self) -> Option<KeyHold> {
-        match core::mem::take(&mut self.keeps) {
-            Keeps::Hold { held } => Some(held),
-            kept => {
-                self.keeps = kept;
-                None
-            }
-        }
-    }
+/// What a key kept alive besides its name on the wire, taken out of the key that kept it
+/// ([`WireKey::into_anchor`]): an object of the ABI's that retracts a declaration when its last
+/// holder lets it go, or nothing. Dropping it lets the object go, which may reach the session, so
+/// an engine drops it, with the row that keeps it, where it holds no lock of the session.
+#[derive(Default)]
+pub struct KeyAnchor {
+    _keeps: Keeps,
 }
 
 /// A key as one link names it: the ABI's own, lent, or one the link's own form made, which holds
@@ -878,7 +850,7 @@ impl WireKey {
             mapping_id,
             suffix: suffix.map_or(Suffix::None, Suffix::Owned),
             keeps: Keeps::Nothing,
-            also: None,
+            own: 0,
         }
     }
 
@@ -905,7 +877,7 @@ impl WireKey {
             mapping_id,
             suffix,
             keeps: Keeps::Anchor { _held: kept },
-            also: None,
+            own: 0,
         }
     }
 
@@ -921,7 +893,7 @@ impl WireKey {
                 Suffix::Tail(rest_len)
             },
             keeps: Keeps::Nothing,
-            also: None,
+            own: 0,
         }
     }
 
@@ -963,55 +935,28 @@ impl WireKey {
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
     pub fn keeping(mut self, anchor: lodge::Kept) -> Self {
         self.own_suffix();
-        debug_assert!(
-            !matches!(self.keeps, Keeps::Hold { .. }),
-            "a hold is given back, not written over"
-        );
         self.keeps = Keeps::Anchor { _held: anchor };
         self
     }
 
-    /// This key, holding the declaration `hold` holds for as long as a declaration made on it
-    /// stays recorded, in the engine's own count and with nothing of its own on the heap. The
-    /// hold is given back by whoever takes the key out of what records it ([`Self::into_holds`]).
-    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
-    pub fn holding(mut self, hold: KeyHold) -> Self {
-        self.own_suffix();
-        debug_assert!(
-            !matches!(self.keeps, Keeps::Hold { .. }),
-            "a hold is given back, not written over"
-        );
-        self.keeps = Keeps::Hold { held: hold };
+    /// This key, naming besides what goes on the wire `mapping_id`, the declaration of the key of
+    /// the entity it announces, which the entity's record holds for as long as it stands, as
+    /// zenoh-pico's subscription keeps its own declared key: the key takes no hold of it itself.
+    pub fn with_own(mut self, mapping_id: wz_session_core::wire_id::ExprId) -> Self {
+        self.own = mapping_id;
         self
     }
 
-    /// This key, holding besides what it names the declaration `hold` holds, of the key of the
-    /// entity it announces, which the entity's retraction names: one more hold in the engine's own
-    /// count, with nothing of its own on the heap.
-    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
-    pub fn holding_also(mut self, hold: KeyHold) -> Self {
-        debug_assert!(
-            self.also.is_none(),
-            "a hold is given back, not written over"
-        );
-        self.also = Some(hold);
-        self
+    /// The declaration of the key of the entity this key announces ([`Self::with_own`]), `0`
+    /// for none.
+    pub fn own_declaration(&self) -> wz_session_core::wire_id::ExprId {
+        self.own
     }
 
-    /// What the key holds of its session's declarations, the key let go of: the one place a hold
-    /// leaves a key, so whoever takes a key out of what records it gives its holds back.
-    pub fn into_holds(self) -> WireHolds {
-        WireHolds {
-            keeps: self.keeps,
-            also: self.also,
-        }
-    }
-
-    /// Let go of the key, giving back to `session`, the session it was made for, what it holds of
-    /// its declarations: [`Self::into_holds`] and [`WireHolds::release`] in one, for a key let go
-    /// of with no lock of the session held.
-    pub fn let_go<H: KeyHolds + ?Sized>(self, session: &H) {
-        self.into_holds().release(session);
+    /// What the key kept alive, the key let go of: the one place an anchor leaves a key, so the
+    /// row that records an entity keeps it, and lets it go with the row.
+    pub fn into_anchor(self) -> KeyAnchor {
+        KeyAnchor { _keeps: self.keeps }
     }
 
     /// Whether the key goes on the wire as its literal, naming no declaration.
@@ -1241,15 +1186,27 @@ mod tests {
         assert!(!WireKey::aliased(3, None).is_literal());
     }
 
+    /// A key names the declaration of its entity's own key apart from what goes on the wire, and
+    /// keeps it through `keeping`. Turned red by a `with_own` that writes the wire's id, or by a
+    /// `keeping` that drops it.
+    #[test]
+    fn a_key_names_its_entitys_own_declaration_apart_from_the_wire() {
+        assert_eq!(WireKey::literal().own_declaration(), 0);
+        let key = WireKey::literal().with_own(5);
+        assert!(key.is_literal(), "the wire still names no declaration");
+        assert_eq!(key.own_declaration(), 5);
+        let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
+        assert_eq!(kept.own_declaration(), 5);
+    }
+
     /// A tail is read against the key the wire key is handed with: the end of it, of the length
     /// the key was made with, and the whole key under no declaration when the key cannot give it
-    /// (shorter, or cut inside a character). Holding a declaration leaves the tail a tail.
+    /// (shorter, or cut inside a character).
     ///
     /// # Control
     ///
     /// A `names_in` that reads the tail from the front of the key reds the first assertion; one
-    /// that cuts a key it cannot give reds the "shorter" and "cut inside a character" ones; a
-    /// `holding` that drops the tail reds the last.
+    /// that cuts a key it cannot give reds the "shorter" and "cut inside a character" ones.
     #[test]
     fn a_tail_is_the_end_of_the_key_it_is_handed_with() {
         let key = WireKey::aliased_tail(9, "/rest".len());
@@ -1265,9 +1222,6 @@ mod tests {
             WireKey::literal().names_in("demo/data"),
             (0, Some("demo/data"))
         );
-        let held = key.holding(KeyHold::taken(9));
-        assert_eq!(held.names_in("demo/data/rest"), (9, Some("/rest")));
-        held.let_go(&CountedHolds::default());
     }
 
     /// A rest that lies in what the key keeps is lent, not copied, to the key; keeping something
@@ -1299,17 +1253,18 @@ mod tests {
         );
     }
 
-    /// A kept anchor lives as long as the key, and as what the key held once it is let go of,
-    /// until that is given back. Turned red by holds that leave the anchor behind with the key.
+    /// A kept anchor lives as long as the key, and as what the key kept once it is let go of,
+    /// until that is dropped. Turned red by an `into_anchor` that leaves the anchor behind with
+    /// the key.
     #[test]
-    fn a_kept_anchor_lives_until_what_the_key_held_is_given_back() {
+    fn a_kept_anchor_lives_until_what_the_key_kept_is_dropped() {
         let anchor: Arc<dyn Send + Sync> = Arc::new(());
         let key = WireKey::aliased(7, Some(String::from("rest")))
             .keeping(crate::lodge::Kept::shared(anchor.clone()));
         assert_eq!(Arc::strong_count(&anchor), 2);
-        let holds = key.into_holds();
-        assert_eq!(Arc::strong_count(&anchor), 2, "the holds keep it");
-        holds.release(&CountedHolds::default());
+        let kept = key.into_anchor();
+        assert_eq!(Arc::strong_count(&anchor), 2, "what the key kept keeps it");
+        drop(kept);
         assert_eq!(Arc::strong_count(&anchor), 1);
     }
 
@@ -1353,72 +1308,20 @@ mod tests {
         }
     }
 
-    /// A key that holds the declaration it names and the one its entity retracts by gives each
-    /// back once, to the session it is handed, when it is let go of; a share is one more hold of
-    /// the session's count. Turned red by `WireHolds::release` leaving `also` unreleased (the
-    /// second id missing), or by `KeyHold::share` taking no hold of the session (`retained`
-    /// empty).
+    /// A hold shared is one more hold of the session's count, and each hold is given back once,
+    /// to the session it is handed. Turned red by `KeyHold::share` taking no hold of the session
+    /// (`retained` empty), or by `KeyHold::release` giving none back.
     #[test]
-    fn a_key_gives_each_hold_back_once_to_its_session() {
+    fn a_hold_is_shared_and_given_back_once_to_its_session() {
         let session = CountedHolds::default();
         let named = KeyHold::taken(4);
-        let own = KeyHold::taken(6);
         let shared = named.share(&session);
         assert_eq!(session.retained.read(), [4]);
-        let key = WireKey::aliased(4, None).holding(shared).holding_also(own);
-        let holds = key.into_holds();
-        assert!(
-            session.released.read().is_empty(),
-            "nothing goes before the release"
-        );
-        holds.release(&session);
-        assert_eq!(session.released.read(), [4, 6]);
+        assert_eq!(shared.mapping_id(), 4);
+        shared.release(&session);
+        assert_eq!(session.released.read(), [4]);
         named.release(&session);
-        assert_eq!(session.released.read(), [4, 6, 4]);
-    }
-
-    /// The hold of the declaration a key names comes out of its holds once, and the hold of the
-    /// declaration its entity retracts by stays, given back with the rest; a key that keeps an
-    /// object of the ABI's in place of a hold hands none out and keeps the object. Turned red by
-    /// `WireHolds::take_named` leaving the hold in place (released twice, `[4, 4, 6]`) or taking
-    /// the anchor out (`kept` let go of before the release).
-    #[test]
-    fn the_named_hold_comes_out_of_a_keys_holds_once_and_the_rest_stay() {
-        let session = CountedHolds::default();
-        let mut holds = WireKey::aliased(4, None)
-            .holding(KeyHold::taken(4))
-            .holding_also(KeyHold::taken(6))
-            .into_holds();
-        let named = holds.take_named().expect("the key held what it names");
-        assert_eq!(named.mapping_id(), 4);
-        assert!(holds.take_named().is_none(), "taken once");
-        named.release(&session);
-        holds.release(&session);
-        assert_eq!(session.released.read(), [4, 6]);
-
-        let kept = Arc::new(());
-        let mut anchored = WireKey::literal()
-            .keeping(crate::lodge::Kept::shared(kept.clone()))
-            .into_holds();
-        assert!(anchored.take_named().is_none(), "an anchor is no hold");
-        assert_eq!(Arc::strong_count(&kept), 2, "and stays with the holds");
-        anchored.release(&session);
-        assert_eq!(Arc::strong_count(&kept), 1, "let go of with them");
-        assert_eq!(
-            session.released.read(),
-            [4, 6],
-            "an anchor gives no hold back"
-        );
-    }
-
-    /// A key that keeps nothing of a session gives nothing back.
-    #[test]
-    fn a_key_that_holds_nothing_gives_nothing_back() {
-        let session = CountedHolds::default();
-        WireKey::literal().let_go(&session);
-        WireKey::aliased(3, Some(String::from("rest"))).let_go(&session);
-        assert!(session.released.read().is_empty());
-        assert!(session.retained.read().is_empty());
+        assert_eq!(session.released.read(), [4, 4]);
     }
 
     /// An engine's periodic jobs as a test counts them: the ids it gave and the jobs it stopped.

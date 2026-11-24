@@ -1774,7 +1774,7 @@ mod tests {
                 false,
                 KeyForm::default(),
                 super::super::LivelinessRow::new(
-                    WireKey::literal().into_holds(),
+                    WireKey::literal().into_anchor(),
                     LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
                         if sample.kind == LivelinessSampleKind::Delete {
                             into.lock()
