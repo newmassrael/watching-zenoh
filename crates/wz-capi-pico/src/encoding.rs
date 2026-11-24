@@ -521,17 +521,12 @@ pub unsafe extern "C" fn z_encoding_to_string(
         if string.is_null() {
             return Z_ERR_NULL;
         }
-        let rendered = match encoding_view(encoding) {
-            Some(view) => {
-                wz_session_core::encoding_hint::parts_to_bytes(view.packed_id, view.schema)
-            }
-            None => ENCODING_ID_TO_STR
-                .get(usize::from(ENCODING_ID_DEFAULT))
-                .copied()
-                .unwrap_or_default()
-                .as_bytes()
-                .to_vec(),
+        // The null encoding is rendered as the default it reads as, through the one rendering.
+        let (packed_id, schema) = match encoding_view(encoding) {
+            Some(view) => (view.packed_id, view.schema),
+            None => (u32::from(ENCODING_ID_DEFAULT) << 1, None),
         };
+        let rendered = wz_session_core::encoding_hint::parts_to_bytes(packed_id, schema);
         store_owned_string(string, &rendered)
     })
 }
@@ -1319,5 +1314,31 @@ mod tests {
             assert_eq!(rendered(&parsed(s)), s);
         }
         assert_eq!(rendered(&parsed("text/plain;utf8")), "text/plain;utf8");
+    }
+
+    /// The null encoding renders as the default it reads as, and a null string to write into is
+    /// refused. Turned red by a null encoding rendered as anything but `zenoh/bytes`.
+    #[test]
+    fn a_null_encoding_renders_as_the_default() {
+        // SAFETY: a null encoding and a string of this test's own, let go of before it ends.
+        unsafe {
+            let mut out = z_owned_string_t::null_value();
+            assert_eq!(z_encoding_to_string(core::ptr::null(), &mut out), Z_OK);
+            let view = crate::bytes::z_string_loan(&out);
+            let text = core::slice::from_raw_parts(
+                crate::bytes::z_string_data(view).cast::<u8>(),
+                crate::bytes::z_string_len(view),
+            );
+            assert_eq!(text, b"zenoh/bytes");
+            assert_eq!(
+                text,
+                ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)].as_bytes()
+            );
+            crate::bytes::z_string_drop(crate::bytes::z_string_move(&mut out));
+            assert_eq!(
+                z_encoding_to_string(core::ptr::null(), core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+        }
     }
 }
