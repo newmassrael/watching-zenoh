@@ -19,6 +19,8 @@
 //!    callback fires from the read task, the `drop` from teardown — never
 //!    concurrently).
 
+// A closure's own latch is an allocation, made only where a closure is adopted with one.
+#[cfg(any(test, feature = "connectivity", feature = "advanced"))]
 use alloc::sync::Arc;
 
 use wz_capi_port::os::{Condvar, Mutex};
@@ -66,6 +68,7 @@ pub(crate) struct CClosure<C> {
 /// ([`OpenClosures`]), which takes no memory of its own.
 enum Released {
     /// A latch of the closure's own ([`CClosure::new`]).
+    #[cfg(any(test, feature = "connectivity", feature = "advanced"))]
     Latch(Arc<ReleaseLatch>),
     /// The owner it is counted in, none while it is counted in none
     /// ([`CClosure::uncounted`], [`CClosure::count_in`]).
@@ -142,7 +145,9 @@ impl Drop for HeldIn {
 impl<C> CClosure<C> {
     /// Adopt a moved C closure's fields. The caller nulls the source (pico's
     /// consume-on-all-paths contract): from here this value owns the
-    /// responsibility to run `drop(context)`.
+    /// responsibility to run `drop(context)`. Its holders are the connectivity listeners and the
+    /// advanced plane's, so it exists where they do.
+    #[cfg(any(test, feature = "connectivity", feature = "advanced"))]
     pub(crate) fn new(
         context: *mut core::ffi::c_void,
         call: C,
@@ -210,6 +215,7 @@ impl<C> Drop for CClosure<C> {
             });
         }
         match &mut self.released {
+            #[cfg(any(test, feature = "connectivity", feature = "advanced"))]
             Released::Latch(latch) => latch.open(),
             // The hold is let go of after the drop above has run, and may give back the place the
             // count lies in.
@@ -295,12 +301,14 @@ impl OpenClosures {
 /// run. Zenoh-pico's undeclare waits for the callbacks in flight and then runs the closure's
 /// drop before it returns (`_z_sync_group_wait`), so a program may free what the callback reads
 /// the moment an undeclare returns; this is what gives a call here the same word.
+#[cfg(any(test, feature = "connectivity", feature = "advanced"))]
 #[derive(Default)]
 pub(crate) struct ReleaseLatch {
     open: Mutex<bool>,
     opened: Condvar,
 }
 
+#[cfg(any(test, feature = "connectivity", feature = "advanced"))]
 impl ReleaseLatch {
     fn open(&self) {
         *self.open.lock() = true;
