@@ -881,14 +881,17 @@ impl Registry {
             app,
             delivery,
             sets,
+            // Only the others of a face read who holds each set; a build that holds one face has
+            // none.
+            #[cfg(any(feature = "listen", feature = "group", test))]
             holders,
             ..
         } = self;
-        let holders: &[FaceId] = &holders[..];
         #[cfg(any(feature = "listen", feature = "group", test))]
         let (face, others) = {
             let (before, rest) = sets.split_at_mut_checked(at)?;
             let (face, after) = rest.split_first_mut()?;
+            let holders: &[FaceId] = &holders[..];
             let (held_before, rest) = holders.split_at_checked(at)?;
             let others = Others {
                 before: &*before,

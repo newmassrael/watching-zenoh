@@ -121,6 +121,12 @@ impl CoreDrive {
     pub fn engine_ref(&self) -> &dyn SessionEngine {
         &*self.engine
     }
+
+    /// The session's own hold of the engine, borrowed for the length of one call: a caller that
+    /// keeps the engine clones it where it keeps it, and one that only reaches it counts nothing.
+    pub fn engine_hold(&self) -> &Arc<dyn SessionEngine> {
+        &self.engine
+    }
 }
 
 impl core::ops::Deref for CoreDrive {

@@ -483,10 +483,9 @@ impl FrameLendCounts {
     }
 }
 
-/// The frame a lent slot opens with (`SessionLinkActions::open_lent_batch`): its SN, its
+/// The frame a lent slot is written with (`SessionLinkActions::lend_frame`): its SN, its
 /// reliability and its `ext_qos`, and the budget the frame must fit.
 #[cfg(all(
-    feature = "transport-batching",
     feature = "transport-tx-lend",
     any(
         feature = "codec-push",
@@ -514,6 +513,7 @@ struct LentFrameHead {
 /// for a reason of its own.
 #[cfg(all(
     feature = "transport-tx-lend",
+    any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -2181,7 +2181,7 @@ pub struct HandshakeFacts {
     /// window governs alone.
     ///
     /// R2782 — captured once the Open frame is ADMITTED
-    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack_in`; code spans,
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
     /// because a field doc's `Self` is this struct, which has neither), no
     /// longer at parse time: a replayed Open frame after `Established` used
     /// to rewrite it.
@@ -2329,7 +2329,7 @@ impl HandshakeFacts {
     }
 }
 
-/// What an OpenAck's admission answered (`SessionLinkActions::admit_open_ack_in`).
+/// What an OpenAck's admission answered (`SessionLinkActions::admit_open_ack`).
 #[cfg(feature = "codec-open-body")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenAckAdmission {
@@ -5750,39 +5750,125 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     {
         // The same keys `emit_frame_or_fragments` hands `send_wire`, so the slot
         // is lent by the link that heap path would have written to.
-        let reliability = Reliability::from_reliable_bool(emit.reliable);
         let priority = emit.ext_qos.unwrap_or(Priority::DEFAULT);
         // Room for the widest prefix and a possible ext_qos, as the heap path
         // reserves for the same frame.
         let want = worst_case_payload.saturating_add(1 + 10 + 2);
-        let lent = self.send_lent(reliability, priority, want, |slot| {
-            // Over a slot that holds the whole budget a frame that crosses it is
-            // past the budget; over a shorter one the slot may be what is short,
-            // and the heap decides.
-            match fill_lent_frame(
-                slot,
-                emit.mtu,
-                emit.sn,
-                emit.reliable,
-                emit.ext_qos,
-                encode_body,
-            ) {
-                LentFill::Fits => Ok(()),
-                LentFill::PastBudget => Err(FrameLend::PastMtu),
-                LentFill::ShortSlot => Err(FrameLend::Heap),
-                LentFill::Refused(refused) => Err(FrameLend::Refused(refused)),
-            }
-        });
-        match lent {
-            Lend::Sent => FrameLend::Sent,
-            Lend::NoSlot => FrameLend::Heap,
-            Lend::Refused(why) => why,
+        let head = LentFrameHead {
+            sn: emit.sn,
+            reliable: emit.reliable,
+            ext_qos: emit.ext_qos,
+            mtu: emit.mtu,
+        };
+        // Over a slot that holds the whole budget a frame that crosses it is past the budget;
+        // over a shorter one the slot may be what is short, and the heap decides.
+        match self.lend_frame(
+            #[cfg(feature = "transport-batching")]
+            None,
+            head,
+            priority,
+            want,
+            encode_body,
+        ) {
+            Some(LentFill::Fits) => FrameLend::Sent,
+            Some(LentFill::PastBudget) => FrameLend::PastMtu,
+            None | Some(LentFill::ShortSlot) => FrameLend::Heap,
+            Some(LentFill::Refused(refused)) => FrameLend::Refused(refused),
         }
     }
 
-    /// The lend, once, for every path that has a frame to put on a conduit's
-    /// link: ask the link `send_wire` would route to for a slot, let `fill`
-    /// write the frame into it, and send the slot through [`Self::emit_on_link`].
+    /// One `Frame` written into a slot its conduit's link lends, and the slot sent, or kept
+    /// open as the conduit's batch window when `window` holds the batch (a batching build's):
+    /// what a frame sent whole (`send_frame_lent`) and a window's opening (`open_lent_batch`)
+    /// both do, so the lend, the fill and the send are one site for the two. What the fill came to ([`fill_lent_frame`]), `Fits` once the slot is sent or
+    /// kept; `None` when the link lent no slot. A window asks for the whole budget and refuses
+    /// a slot short of it before a byte is written; a frame sent whole asks `want`, and the fill
+    /// finds a slot that is short. Any slot not sent or kept goes back by the lease's drop.
+    ///
+    /// Out of line: the send of one message reaches both callers, and each inlined carried the
+    /// lend and the fill again.
+    #[cfg(all(
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline(never)]
+    fn lend_frame<P>(
+        &self,
+        #[cfg(feature = "transport-batching")] window: Option<&mut BatchTx>,
+        head: LentFrameHead,
+        priority: Priority,
+        want: usize,
+        encode_body: &P,
+    ) -> Option<LentFill>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        let LentFrameHead {
+            sn,
+            reliable,
+            ext_qos,
+            mtu,
+        } = head;
+        let reliability = Reliability::from_reliable_bool(reliable);
+        self.with_conduit_link(reliability, priority, |link| {
+            let mut slot = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)?;
+            #[cfg(feature = "transport-batching")]
+            if window.is_some() && slot.capacity() < mtu {
+                return Some(LentFill::ShortSlot);
+            }
+            let filled = fill_lent_frame(&mut slot, mtu, sn, reliable, ext_qos, encode_body);
+            if filled != LentFill::Fits {
+                return Some(filled);
+            }
+            #[cfg(feature = "transport-batching")]
+            if let Some(batch) = window {
+                let idx = TxConduits::<R>::conduit_index(priority);
+                if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
+                    // A record with no open frame naming it: the stage and the
+                    // link disagree, which the shared conduit lock rules out. Give
+                    // the slot back rather than lose it, and say so.
+                    link.link_driver().tx_slot_abort(stale);
+                    batch.lend.lost = batch.lend.lost.wrapping_add(1);
+                }
+                batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
+                // A link whose slots come from a pool the session's other links share keeps none
+                // past this message while the pool has no other free: the frame leaves now with
+                // this message alone, as the window's flush would send it, and the next link that
+                // asks for a slot finds one.
+                #[cfg(feature = "session-unicast-accept")]
+                let keeps = link.link_driver().tx_slot_spare();
+                #[cfg(not(feature = "session-unicast-accept"))]
+                let keeps = true;
+                if keeps {
+                    let open = slot.keep_open();
+                    if let Some(record) = link.batch_slots.get(idx) {
+                        record.hold(open.slot());
+                    }
+                    batch.stage.lent = Some(open);
+                    batch.stage.count = 1;
+                    return Some(LentFill::Fits);
+                }
+                batch.stage.count = 0;
+            }
+            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+            Some(LentFill::Fits)
+        })
+    }
+
+    /// The lend for a path that writes its own frame (a lean frame, a fragment): ask the link
+    /// `send_wire` would route to for a slot, let `fill` write the frame into it, and send the
+    /// slot through [`Self::emit_on_link`]. A `Frame`'s lend is [`Self::lend_frame`].
     ///
     /// `fill` answers whether the slot now holds a frame to send. `Err(why)`
     /// abandons the slot (the lease's drop gives it back) and the caller encodes
@@ -5792,6 +5878,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// path, and the slot, the routing and the single send funnel do not.
     #[cfg(all(
         feature = "transport-tx-lend",
+        any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5877,57 +5964,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        let idx = TxConduits::<R>::conduit_index(priority);
-        let LentFrameHead {
-            sn,
-            reliable,
-            ext_qos,
-            mtu,
-        } = head;
-        let reliability = Reliability::from_reliable_bool(reliable);
-        self.with_conduit_link(reliability, priority, |link| {
-            let Some(mut slot) =
-                crate::tx_lease::TxLease::acquire(link.link_driver(), mtu, priority)
-            else {
-                return LentBatchOpen::Heap(HeapStage::NoSlot);
-            };
-            // Dropping the lease on any refusal below gives the slot back.
-            if slot.capacity() < mtu {
-                return LentBatchOpen::Heap(HeapStage::ShortSlot);
-            }
+        match self.lend_frame(Some(batch), head, priority, head.mtu, encode_body) {
+            Some(LentFill::Fits) => LentBatchOpen::Opened,
+            None => LentBatchOpen::Heap(HeapStage::NoSlot),
+            Some(LentFill::ShortSlot) => LentBatchOpen::Heap(HeapStage::ShortSlot),
             // A message its encoder refuses takes the oversize path too, which
             // measures it again and answers the refusal (`emit_fragments_encoded`).
-            if fill_lent_frame(&mut slot, mtu, sn, reliable, ext_qos, encode_body) != LentFill::Fits
-            {
-                return LentBatchOpen::Heap(HeapStage::PastBudget);
+            Some(LentFill::PastBudget | LentFill::Refused(_)) => {
+                LentBatchOpen::Heap(HeapStage::PastBudget)
             }
-            if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
-                // A record with no open frame naming it: the stage and the
-                // link disagree, which the shared conduit lock rules out. Give
-                // the slot back rather than lose it, and say so.
-                link.link_driver().tx_slot_abort(stale);
-                batch.lend.lost = batch.lend.lost.wrapping_add(1);
-            }
-            // A link whose slots come from a pool the session's other links share keeps none
-            // past this message while the pool has no other free: the frame leaves now with this
-            // message alone, as the window's flush would send it, and the next link that asks
-            // for a slot finds one.
-            #[cfg(feature = "session-unicast-accept")]
-            if !link.link_driver().tx_slot_spare() {
-                self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
-                batch.stage.count = 0;
-                batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
-                return LentBatchOpen::Opened;
-            }
-            let open = slot.keep_open();
-            if let Some(record) = link.batch_slots.get(idx) {
-                record.hold(open.slot());
-            }
-            batch.stage.lent = Some(open);
-            batch.stage.count = 1;
-            batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
-            LentBatchOpen::Opened
-        })
+        }
     }
 
     /// ARCHITECTURE section 9.1 -- append one message to the frame open in a
@@ -9094,16 +9140,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// @ `other_bound: match open_syn.ext_remote_bound {`). A refused value
     /// leaves the slot untouched.
     pub fn admit_peer_remote_bound(&self, extensions: &[ExtEntryOwned]) -> bool {
-        self.admit_peer_remote_bound_in(extensions)
+        self.admit_read_peer_remote_bound(crate::extbound::peer_remote_bound(extensions))
     }
 
-    /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRead`).
-    pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
+    /// [`Self::admit_peer_remote_bound`] over the bound as the walk of the chain answered it
+    /// (`crate::inbound::ExtChainRead::remote_bound`), held or read where its message lies.
+    pub fn admit_read_peer_remote_bound(
         &self,
-        extensions: impl IntoIterator<Item = E>,
+        bound: Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>,
     ) -> bool {
-        match crate::extbound::peer_remote_bound_in(extensions) {
+        match bound {
             Ok(bound) => {
                 self.fact_peer_remote_bound(|s| *s = bound);
                 true
@@ -10551,7 +10597,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// frame at `initial_sn` passes), on the ring the negotiated caps in `facts` give.
     ///
     /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
-    /// [`Self::admit_open_ack_in`], inside the hold in which they write the rest of what
+    /// [`Self::admit_open_ack`], inside the hold in which they write the rest of what
     /// an admitted Open takes, and by nothing at parse time.
     #[cfg(feature = "codec-open-body")]
     fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
@@ -10597,7 +10643,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2782 — the initiator's admission predicate for an OpenAck: one is
     /// awaited only between sending the OpenSyn and taking an OpenAck. A
-    /// question, so it only reads; `admit_open_ack_in` (crate-private, so a
+    /// question, so it only reads; `admit_open_ack` (crate-private, so a
     /// code span rather than a link) asks it again in the hold in which it
     /// takes the OpenAck.
     pub fn open_ack_awaited(&self) -> bool {
@@ -10717,13 +10763,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is awaited (`open_ack_awaited`'s question) or when its `0x7` REMOTE-BOUND is present and
     /// invalid (`admit_peer_remote_bound`'s refusal). Its bound is taken with the rest.
     #[cfg(feature = "codec-open-body")]
-    pub(crate) fn admit_open_ack_in<E: crate::ext_view::ExtEntryView>(
+    pub(crate) fn admit_open_ack(
         &self,
         lease: u64,
         initial_sn: u64,
-        extensions: impl IntoIterator<Item = E>,
+        bound: Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>,
     ) -> OpenAckAdmission {
-        let bound = crate::extbound::peer_remote_bound_in(extensions);
         self.with_facts(|f| {
             if !f.handshake.awaiting_open_ack {
                 return OpenAckAdmission::NotAwaited;
@@ -10946,7 +10991,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // R2782 — an OpenAck takes nothing at parse time. Its RX SN seed
             // and lease used to be applied here, on every OpenAck; they are
-            // now [`Self::admit_open_ack_in`]'s, applied only to the one OpenAck
+            // now [`Self::admit_open_ack`]'s, applied only to the one OpenAck
             // the initiator is awaiting.
             _ => {}
         }

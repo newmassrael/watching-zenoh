@@ -419,7 +419,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // complete (`vendor/zenoh-pico/src/api/api.c` @
         // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
         let filtered = match FilteredKey::declare(
-            &session,
+            session,
             FilterPlane::Queryables {
                 complete_required: shape.target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },

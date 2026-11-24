@@ -49,7 +49,7 @@ use crate::refusal::{refusal_code, Door};
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
-use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
 
 /// The peer declared an entity.
 pub const WZ_EXT_DECL_DECLARED: u8 = 0;
@@ -234,14 +234,14 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         if handle.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        let engine = engine_of(handle);
-        let Some(place) = Slot::<WatchPlace>::take_entity(&engine, Kind::DeclWatch) else {
+        let engine = engine_held(handle);
+        let Some(place) = Slot::<WatchPlace>::take_entity(engine, Kind::DeclWatch) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let object = place
             .fill(Answering::keeping(
                 WatchState {
-                    engine: Arc::clone(&engine),
+                    engine: Arc::clone(engine),
                     id: 0,
                 },
                 WatchKept { closure, entity },
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         let kept = kept_at::<WatchState, WatchKept>(object);
         count_in_entity::<WatchState, WatchKept, _>(object, &mut (*kept).closure);
         match wz_capi_port::SessionEngine::declare_decl_watch(
-            Arc::as_ref(&engine),
+            Arc::as_ref(engine),
             plane,
             watch_sink_at(object),
         ) {
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn a_watch_holds_a_place_of_its_session_until_it_is_dropped() {
         use crate::session::{
-            listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            engine_of, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
         static DROPS: AtomicUsize = AtomicUsize::new(0);

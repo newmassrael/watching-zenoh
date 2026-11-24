@@ -607,13 +607,19 @@ pub(crate) struct PicoSessionHandle {
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
+    /// What an entity declared on the session needs of it, made once by the open and lent to each
+    /// declaring door (`crate::write_filter::PicoSession::of`), so no door makes its own copy and
+    /// lets it go on each of its ways out.
+    pub(crate) pico: crate::write_filter::PicoSession,
 }
 
 impl PicoSessionHandle {
     pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
+        let pico = crate::write_filter::PicoSession::over(drive.engine(), &ext);
         Self {
             drive,
             ext,
+            pico,
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -853,6 +859,13 @@ pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 /// the port's, which would instantiate the engine's drop glue a second time here.
 pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> {
     handle.drive.engine()
+}
+
+/// The engine behind a session handle as the session holds it, for the length of one call: a door
+/// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
+/// so has none to let go of on each of its ways out.
+pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &alloc::sync::Arc<Engine> {
+    handle.drive.engine_hold()
 }
 
 /// The engine behind a session handle, for the length of one call: a put or a delete reaches the
@@ -1618,7 +1631,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 &zid,
                 policy,
                 limits,
-                &drive.engine(),
+                drive.engine_hold(),
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
@@ -2073,7 +2086,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         &zid,
         policy,
         limits,
-        &drive.engine(),
+        drive.engine_hold(),
     );
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
@@ -3732,6 +3745,30 @@ mod session_place_tests {
             z_session_drop(z_session_move(&mut copy));
             assert!(copy._val.is_null(), "dropping the copy lets go of nothing");
             drop(engine);
+        }
+    }
+
+    /// The engine a door reaches for one call is the session's own: the engine one kept is, the
+    /// same each time it is asked. Turned red by a hold that hands out an engine other than the one
+    /// the session's entities keep.
+    #[test]
+    fn the_engine_held_for_a_call_is_the_one_its_entities_keep() {
+        // SAFETY: the session is live and owned by this frame, and let go of once at the end.
+        unsafe {
+            let mut session = listening_on_loopback();
+            let handle =
+                session_handle(z_session_loan(&session)).expect("an open session has its handle");
+            let kept = engine_of(handle);
+            assert!(
+                alloc::sync::Arc::ptr_eq(&kept, engine_held(handle)),
+                "the engine kept is the one held"
+            );
+            assert!(
+                core::ptr::eq(engine_held(handle), engine_held(handle)),
+                "the session's own hold, the same each time"
+            );
+            drop(kept);
+            z_session_drop(z_session_move(&mut session));
         }
     }
 

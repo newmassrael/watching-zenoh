@@ -734,44 +734,14 @@ pub enum ArenaRefused {
 /// values of their limits the open resolved, under the build's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EntityRows {
-    /// The subscribers (`MAX_SUBSCRIPTIONS`).
-    pub subscribers: usize,
-    /// The queryables (`MAX_QUERYABLES`); none in a build without `queryable`.
-    pub queryables: usize,
-    /// The liveliness tokens (`MAX_LOCAL_TOKENS`); none in a build without `liveliness`.
-    pub tokens: usize,
-    /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`); none in a build without
-    /// `liveliness`.
-    pub liveliness_subscribers: usize,
+    /// The rows of each kind an ABI's place may be for, at the kind's place in
+    /// [`EntityKind::ALL`], each the value of the kind's limit (named on [`EntityKind`]): none for
+    /// a kind the build has not. The advanced publishers and subscribers are the ABI's places only,
+    /// which the engine keeps no row of. A kind is read at its place, so what reads a count by kind
+    /// asks no question of the kind first.
+    kinds: [usize; ENTITY_KINDS],
     /// The key expressions declared (`MAX_DECLARED_KEYEXPRS`).
     pub keyexprs: usize,
-    /// The publishers' write filters (`MAX_PUBLISHERS`).
-    pub publishers: usize,
-    /// The queriers' write filters (`MAX_QUERIERS`).
-    pub queriers: usize,
-    /// The matching listeners (`MAX_MATCHING_LISTENERS`).
-    pub matching_listeners: usize,
-    /// The gets pending at once (`MAX_PENDING_QUERIES`), each a row of every table of pending
-    /// gets; none in a build without `query`.
-    pub pending_gets: usize,
-    /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
-    /// without `liveliness-get`.
-    pub pending_liveliness_gets: usize,
-    /// The declaration watches (`MAX_DECL_WATCHES`); none in a build with neither
-    /// `remote-declaration-watch` nor `declarations-synced-event`.
-    pub decl_watches: usize,
-    /// The transport events listeners (`MAX_TRANSPORT_EVENTS_LISTENERS`); none in a build
-    /// without `connectivity`.
-    pub transport_events_listeners: usize,
-    /// The advanced publishers (`MAX_ADVANCED_PUBLISHERS`), which the engine keeps no row of: the
-    /// ABI's places of them only; none in a build without `advanced`.
-    pub advanced_publishers: usize,
-    /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
-    /// advanced publishers; none in a build without `advanced`.
-    pub advanced_subscribers: usize,
-    /// The link events listeners (`MAX_LINK_EVENTS_LISTENERS`); none in a build without
-    /// `connectivity`.
-    pub link_events_listeners: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -853,34 +823,24 @@ impl FacePeers {
 impl EntityRows {
     /// The rows the engine keeps of `kind`, each of which an ABI's place of the kind is for.
     pub const fn of_kind(&self, kind: EntityKind) -> usize {
-        match kind {
-            EntityKind::Publisher => self.publishers,
-            EntityKind::Subscriber => self.subscribers,
-            EntityKind::Queryable => self.queryables,
-            EntityKind::Token => self.tokens,
-            EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
-            EntityKind::Querier => self.queriers,
-            EntityKind::PendingGet => self.pending_gets,
-            EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
-            EntityKind::MatchingListener => self.matching_listeners,
-            EntityKind::DeclWatch => self.decl_watches,
-            EntityKind::TransportEventsListener => self.transport_events_listeners,
-            EntityKind::AdvancedPublisher => self.advanced_publishers,
-            EntityKind::AdvancedSubscriber => self.advanced_subscribers,
-            EntityKind::LinkEventsListener => self.link_events_listeners,
+        // Every kind has its place among `kinds`, so the read always finds one.
+        match self.kinds.split_at_checked(kind as usize) {
+            Some((_, [rows, ..])) => *rows,
+            _ => 0,
         }
     }
 
     /// The rows of the write filters' one table: a publisher's and a querier's each.
     pub const fn filters(&self) -> Option<usize> {
-        self.publishers.checked_add(self.queriers)
+        self.of_kind(EntityKind::Publisher)
+            .checked_add(self.of_kind(EntityKind::Querier))
     }
 
     /// The rows of the Interests the session holds open: a write filter or a matching listener
     /// opens at most one, and one that finds its key already asked opens none.
     pub const fn interests(&self) -> Option<usize> {
         match self.filters() {
-            Some(filters) => filters.checked_add(self.matching_listeners),
+            Some(filters) => filters.checked_add(self.of_kind(EntityKind::MatchingListener)),
             None => None,
         }
     }
@@ -1719,14 +1679,16 @@ impl ArenaPlan {
     /// The rows of the session's one table set: those of the kinds moved onto it, none of the
     /// others.
     pub fn tables(&self) -> TableRows {
+        let rows = &self.session.entities;
         TableRows {
-            keyexprs: self.session.entities.keyexprs,
-            subscribers: self.session.entities.subscribers,
-            queryables: self.session.entities.queryables,
-            tokens: self.session.entities.tokens,
-            liveliness_subscribers: self.session.entities.liveliness_subscribers,
-            write_filters: self.session.entities.filters().unwrap_or(usize::MAX),
-            matching_listeners: self.session.entities.matching_listeners,
+            keyexprs: rows.keyexprs,
+            subscribers: rows.of_kind(EntityKind::Subscriber),
+            queryables: rows.of_kind(EntityKind::Queryable),
+            tokens: rows.of_kind(EntityKind::Token),
+            liveliness_subscribers: rows.of_kind(EntityKind::LivelinessSubscriber),
+            publishers: rows.of_kind(EntityKind::Publisher),
+            queriers: rows.of_kind(EntityKind::Querier),
+            matching_listeners: rows.of_kind(EntityKind::MatchingListener),
             ..TableRows::default()
         }
     }
@@ -1975,106 +1937,115 @@ fn link_batch<E>(config: &CoopConfig<E>, limits: &SessionLimits) -> Result<usize
 
 /// The rows of each table of the engine's record of the session's declarations, under `limits`.
 fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
+    let subscribers = lent::<{ caps::MAX_SUBSCRIPTIONS }>(
+        ArenaLimit::MaxSubscriptions,
+        limits.max_subscriptions(),
+    )?;
+    let queryables = if cfg!(feature = "queryable") {
+        lent::<{ caps::MAX_QUERYABLES }>(ArenaLimit::MaxQueryables, limits.max_queryables())?
+    } else {
+        0
+    };
+    let tokens = if cfg!(feature = "liveliness") {
+        lent::<{ caps::MAX_LOCAL_TOKENS }>(ArenaLimit::MaxLocalTokens, limits.max_local_tokens())?
+    } else {
+        0
+    };
+    let liveliness_subscribers = if cfg!(feature = "liveliness") {
+        lent::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
+            ArenaLimit::MaxLivelinessSubscriptions,
+            limits.max_liveliness_subscriptions(),
+        )?
+    } else {
+        0
+    };
+    let keyexprs = lent::<{ caps::MAX_DECLARED_KEYEXPRS }>(
+        ArenaLimit::MaxDeclaredKeyexprs,
+        limits.max_declared_keyexprs(),
+    )?;
+    let publishers =
+        lent::<{ caps::MAX_PUBLISHERS }>(ArenaLimit::MaxPublishers, limits.max_publishers())?;
+    let queriers = lent::<{ caps::MAX_QUERIERS }>(ArenaLimit::MaxQueriers, limits.max_queriers())?;
+    let matching_listeners = lent::<{ caps::MAX_MATCHING_LISTENERS }>(
+        ArenaLimit::MaxMatchingListeners,
+        limits.max_matching_listeners(),
+    )?;
+    // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
+    // holds pending takes one row of every face's table, so no more are pending at once.
+    let pending_gets = if cfg!(feature = "query") {
+        lent::<{ caps::MAX_PENDING_QUERIES }>(
+            ArenaLimit::MaxPendingQueries,
+            limits.max_pending_queries(),
+        )?
+    } else {
+        0
+    };
+    let pending_liveliness_gets = if cfg!(feature = "liveliness-get") {
+        lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+            ArenaLimit::MaxPendingLivelinessGets,
+            limits.max_pending_liveliness_gets(),
+        )?
+    } else {
+        0
+    };
+    let decl_watches = if cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )) {
+        lent::<{ caps::MAX_DECL_WATCHES }>(ArenaLimit::MaxDeclWatches, limits.max_decl_watches())?
+    } else {
+        0
+    };
+    let transport_events_listeners = if cfg!(feature = "connectivity") {
+        lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+            ArenaLimit::MaxTransportEventsListeners,
+            limits.max_transport_events_listeners(),
+        )?
+    } else {
+        0
+    };
+    let advanced_publishers = if cfg!(feature = "advanced") {
+        lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            ArenaLimit::MaxAdvancedPublishers,
+            limits.max_advanced_publishers(),
+        )?
+    } else {
+        0
+    };
+    let advanced_subscribers = if cfg!(feature = "advanced") {
+        lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            ArenaLimit::MaxAdvancedSubscribers,
+            limits.max_advanced_subscribers(),
+        )?
+    } else {
+        0
+    };
+    let link_events_listeners = if cfg!(feature = "connectivity") {
+        lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+            ArenaLimit::MaxLinkEventsListeners,
+            limits.max_link_events_listeners(),
+        )?
+    } else {
+        0
+    };
     Ok(EntityRows {
-        subscribers: lent::<{ caps::MAX_SUBSCRIPTIONS }>(
-            ArenaLimit::MaxSubscriptions,
-            limits.max_subscriptions(),
-        )?,
-        queryables: if cfg!(feature = "queryable") {
-            lent::<{ caps::MAX_QUERYABLES }>(ArenaLimit::MaxQueryables, limits.max_queryables())?
-        } else {
-            0
-        },
-        tokens: if cfg!(feature = "liveliness") {
-            lent::<{ caps::MAX_LOCAL_TOKENS }>(
-                ArenaLimit::MaxLocalTokens,
-                limits.max_local_tokens(),
-            )?
-        } else {
-            0
-        },
-        liveliness_subscribers: if cfg!(feature = "liveliness") {
-            lent::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
-                ArenaLimit::MaxLivelinessSubscriptions,
-                limits.max_liveliness_subscriptions(),
-            )?
-        } else {
-            0
-        },
-        keyexprs: lent::<{ caps::MAX_DECLARED_KEYEXPRS }>(
-            ArenaLimit::MaxDeclaredKeyexprs,
-            limits.max_declared_keyexprs(),
-        )?,
-        publishers: lent::<{ caps::MAX_PUBLISHERS }>(
-            ArenaLimit::MaxPublishers,
-            limits.max_publishers(),
-        )?,
-        queriers: lent::<{ caps::MAX_QUERIERS }>(ArenaLimit::MaxQueriers, limits.max_queriers())?,
-        matching_listeners: lent::<{ caps::MAX_MATCHING_LISTENERS }>(
-            ArenaLimit::MaxMatchingListeners,
-            limits.max_matching_listeners(),
-        )?,
-        // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
-        // holds pending takes one row of every face's table, so no more are pending at once.
-        pending_gets: if cfg!(feature = "query") {
-            lent::<{ caps::MAX_PENDING_QUERIES }>(
-                ArenaLimit::MaxPendingQueries,
-                limits.max_pending_queries(),
-            )?
-        } else {
-            0
-        },
-        pending_liveliness_gets: if cfg!(feature = "liveliness-get") {
-            lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
-                ArenaLimit::MaxPendingLivelinessGets,
-                limits.max_pending_liveliness_gets(),
-            )?
-        } else {
-            0
-        },
-        decl_watches: if cfg!(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        )) {
-            lent::<{ caps::MAX_DECL_WATCHES }>(
-                ArenaLimit::MaxDeclWatches,
-                limits.max_decl_watches(),
-            )?
-        } else {
-            0
-        },
-        transport_events_listeners: if cfg!(feature = "connectivity") {
-            lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
-                ArenaLimit::MaxTransportEventsListeners,
-                limits.max_transport_events_listeners(),
-            )?
-        } else {
-            0
-        },
-        advanced_publishers: if cfg!(feature = "advanced") {
-            lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
-                ArenaLimit::MaxAdvancedPublishers,
-                limits.max_advanced_publishers(),
-            )?
-        } else {
-            0
-        },
-        advanced_subscribers: if cfg!(feature = "advanced") {
-            lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
-                ArenaLimit::MaxAdvancedSubscribers,
-                limits.max_advanced_subscribers(),
-            )?
-        } else {
-            0
-        },
-        link_events_listeners: if cfg!(feature = "connectivity") {
-            lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
-                ArenaLimit::MaxLinkEventsListeners,
-                limits.max_link_events_listeners(),
-            )?
-        } else {
-            0
-        },
+        kinds: [
+            publishers,
+            subscribers,
+            queryables,
+            tokens,
+            liveliness_subscribers,
+            queriers,
+            pending_gets,
+            pending_liveliness_gets,
+            matching_listeners,
+            decl_watches,
+            transport_events_listeners,
+            advanced_publishers,
+            advanced_subscribers,
+            link_events_listeners,
+        ],
+        keyexprs,
     })
 }
 
@@ -2658,6 +2629,47 @@ mod tests {
         }
         assert_eq!(LAST.entities[ENTITY_KINDS - 1], Some(PLACE));
         assert_eq!(LAST.entities[..ENTITY_KINDS - 1], [None; ENTITY_KINDS - 1]);
+    }
+
+    /// Each kind's places are laid out under the kind's own part, as many as the rows the session
+    /// keeps of that kind and as large as the layout given for it, and a kind's rows are read at
+    /// its own index. Turned red by a count read at a neighbour's index, or a kind's places laid
+    /// out under another kind's part.
+    #[test]
+    fn each_kinds_places_take_its_own_rows_and_part() {
+        const NAMES: [&str; ENTITY_KINDS] = [
+            "publisher places",
+            "subscriber places",
+            "queryable places",
+            "token places",
+            "liveliness subscriber places",
+            "querier places",
+            "pending get places",
+            "pending liveliness get places",
+            "matching listener places",
+            "declaration watch places",
+            "transport events listener places",
+            "advanced publisher places",
+            "advanced subscriber places",
+            "link events listener places",
+        ];
+        let mut plan = empty_plan();
+        let mut held = HeldPlaces::NONE;
+        for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
+            plan.session.entities.kinds[at] = at + 1;
+            let place = Layout::from_size_align(8 * (at + 1), 8).expect("a small layout");
+            held = held.with_entity(kind, place);
+        }
+        plan.holding(&held).expect("the places fit");
+        for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
+            assert_eq!(plan.entities().of_kind(kind), at + 1, "{kind:?}");
+            let laid = plan
+                .rows()
+                .find(|row| row.part() == NAMES[at])
+                .map(|row| (row.count, row.entry_bytes));
+            assert_eq!(laid, Some((at + 1, 8 * (at + 1))), "{kind:?}");
+            assert_eq!(plan.entity_bytes(kind), 8 * (at + 1), "{kind:?}");
+        }
     }
 
     /// The ABI's handle is laid out on the plan where the plan lies, once: its flag before its

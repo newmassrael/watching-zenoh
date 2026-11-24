@@ -187,15 +187,22 @@ pub fn peer_region_in<E: crate::ext_view::ExtEntryView>(
 pub fn region_of_entry<E: crate::ext_view::ExtEntryView>(
     ext: &E,
 ) -> Option<Result<RegionName, RegionNameError>> {
-    if ext.eid() != crate::ext_header::ext_eid(REGION_NAME_EXT_HEADER) {
+    if !is_region_entry(ext) {
         return None;
     }
-    let value = ext.plain_zbuf()?;
-    Some(
-        core::str::from_utf8(value)
-            .map_err(|_| RegionNameError::NotUtf8)
-            .and_then(RegionName::new),
-    )
+    Some(region_of_value(ext.plain_zbuf()?))
+}
+
+/// Whether the entry is the region extension, by its identity.
+pub fn is_region_entry<E: crate::ext_view::ExtEntryView>(ext: &E) -> bool {
+    ext.eid() == crate::ext_header::ext_eid(REGION_NAME_EXT_HEADER)
+}
+
+/// The region name a region entry's plain ZBuf body says, or why it is none.
+pub fn region_of_value(value: &[u8]) -> Result<RegionName, RegionNameError> {
+    core::str::from_utf8(value)
+        .map_err(|_| RegionNameError::NotUtf8)
+        .and_then(RegionName::new)
 }
 
 /// The patch level ([`crate::extpatch::peer_patch_in`]) and the region identity
