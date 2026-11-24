@@ -42,7 +42,6 @@
 use alloc::sync::{Arc, Weak};
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
-use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
@@ -1159,22 +1158,6 @@ unsafe impl<C: RoundCalls> Send for Round<C> {}
 unsafe impl<C: RoundCalls> Sync for Round<C> {}
 
 impl<C: RoundCalls> Round<C> {
-    /// The session's round over `rows`, built where the allocation that shares it keeps it: its
-    /// table's rows are kilobytes, which a value of the whole would lay in the frame of the
-    /// session's open once for each move.
-    #[inline(never)]
-    pub fn shared_over(rows: RoundRows<C>) -> Arc<Self> {
-        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
-        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
-        let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
-        // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
-        // is valid and nothing else reads or writes it while it is written.
-        unsafe { Self::write_in((*raw).as_mut_ptr(), rows) };
-        // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
-        // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
-        unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
-    }
-
     /// The session's round over `rows`, built where `arena` places it ([`Arena::place_with`]): in
     /// the session's own memory, owned by one owner and reached by handles that count nothing.
     /// Refused, taking nothing, past what the arena has left.

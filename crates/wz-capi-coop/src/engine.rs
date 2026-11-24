@@ -58,6 +58,7 @@ use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
+use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
@@ -632,7 +633,6 @@ struct SessionLent {
     /// The transport's tables, held as they were lent: taken apart here, they would be moved
     /// once into the open's frame and once more into this value.
     transport: TransportTables,
-    samples: Arc<Round>,
     router: SessionReassembly,
     keys: KeySpace,
     #[cfg(feature = "queryable")]
@@ -656,6 +656,9 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
+    /// The session's round of deliveries, which lies in the arena: after the registry, which
+    /// holds a handle of it, and before the arena.
+    samples: Placed<Round>,
     arena: SessionArena,
 }
 
@@ -785,14 +788,16 @@ fn lend_session(
         held_replies,
         LegRows::over(leg_rows),
     ));
-    let mut samples = Round::shared_over(round_rows);
-    // The round is not shared yet: it reads the keys a peer's aliases keep in the session's key
-    // arena where they lie.
-    if let Some(round) = Arc::get_mut(&mut samples) {
-        round.reads_keys_in(keys);
-        #[cfg(feature = "query")]
-        round.calls_legs_of(gets.clone());
-    }
+    // The round lies in the arena beside its tables, owned by the session's state and reached by
+    // handles that count nothing.
+    let mut samples =
+        Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
+    // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
+    // session's key arena where they lie.
+    let round = samples.get_mut();
+    round.reads_keys_in(keys);
+    #[cfg(feature = "query")]
+    round.calls_legs_of(gets.clone());
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
@@ -800,10 +805,14 @@ fn lend_session(
         held_finals,
         refused_finals,
     )));
+    // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
+    // both are held (`SessionLent`, and the session's state, whose round is its last field); the
+    // owner changes the round no more.
+    let lane = unsafe { samples.share() };
     #[cfg(feature = "queryable")]
-    let delivery = RoundDelivery::new(samples.clone(), plane.clone());
+    let delivery = RoundDelivery::new(lane, plane.clone());
     #[cfg(not(feature = "queryable"))]
-    let delivery = RoundDelivery::new(samples.clone());
+    let delivery = RoundDelivery::new(lane);
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
     let registry = Registry::new(
@@ -983,8 +992,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the session delivered under the lock, handed out after it: the records for its
     /// callbacks, in the order they arrived, in the session's round of deliveries
     /// (`crate::round`). A change of a matching status takes no record's room: it is owed in the
-    /// listener's row (`SessionTables::take_owed_matching`).
-    samples: Arc<Round>,
+    /// listener's row (`SessionTables::take_owed_matching`). A handle of the round the session's
+    /// state owns, used last in the engine's drop, before `core` is dropped.
+    samples: PlacedRef<Round>,
     /// Whether a read of the matching listeners found a change since a walk of their rows last
     /// found none owed, written under the session's lock: a delivery that reads it clear takes no
     /// lock to look for one.
@@ -1760,8 +1770,9 @@ impl SessionParts for CoopSession {
     type Gets = Arc<GetPlane>;
     #[cfg(not(feature = "query"))]
     type Gets = ();
-    /// Asked by every link's gate before it reads a record (`crate::round::RoundGate`).
-    type Lane = Arc<Round>;
+    /// Asked by every link's gate before it reads a record (`crate::round::RoundGate`): owned
+    /// here, in the session's arena, and reached by the gates through handles of it.
+    type Lane = Placed<Round>;
     #[cfg(feature = "shared-key-ids")]
     type KeyIds = Option<SharedKeyIds>;
     #[cfg(not(feature = "shared-key-ids"))]
@@ -2054,7 +2065,7 @@ impl SubscriberCall {
 /// the query is handed to its callback. The registry holds it and hands it to each dispatch, so no
 /// row keeps a reference to either.
 pub(crate) struct RoundDelivery {
-    round: Arc<Round>,
+    round: PlacedRef<Round>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
 }
@@ -2062,13 +2073,13 @@ pub(crate) struct RoundDelivery {
 impl RoundDelivery {
     /// Deliveries into `round`.
     #[cfg(not(feature = "queryable"))]
-    fn new(round: Arc<Round>) -> Self {
+    fn new(round: PlacedRef<Round>) -> Self {
         Self { round }
     }
 
     /// Deliveries into `round`, and queries into `plane`, which only the engine reaches.
     #[cfg(feature = "queryable")]
-    fn new(round: Arc<Round>, plane: Arc<QueryPlane>) -> Self {
+    fn new(round: PlacedRef<Round>, plane: Arc<QueryPlane>) -> Self {
         Self { round, plane }
     }
 }
@@ -2491,7 +2502,7 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     generation: u64,
     /// The session's round of deliveries: told where a rejoined message lies while its records are
     /// dispatched, and, in a debug build, that what is offered waited for room (`Gated`).
-    lane: Arc<Round>,
+    lane: PlacedRef<Round>,
 }
 
 impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
@@ -2773,11 +2784,12 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         #[cfg(feature = "listen")]
         {
             // SAFETY: a link is made under the session's lock, and its gate asked by the step
-            // alone.
+            // alone; the gate is held by the link's cells, which the session's transport holds,
+            // dropped before its state (`Core`'s fields), whose round's owner changes it no more.
             unsafe {
                 RoundGate::new(
                     AdmissionGate::new(pump, actions.clone()),
-                    self.session.lane.clone(),
+                    self.session.lane.share(),
                     record_room,
                 )
             }
@@ -2786,8 +2798,9 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         {
             let _ = actions;
             // SAFETY: a link is made under the session's lock, and its gate asked by the step
-            // alone.
-            unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) }
+            // alone; the gate is held by the link's cells, which the session's transport holds,
+            // dropped before its state (`Core`'s fields), whose round's owner changes it no more.
+            unsafe { RoundGate::new(pump, self.session.lane.share(), record_room) }
         }
     }
 
@@ -2808,7 +2821,10 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
             plane: self.session.plane.clone(),
             #[cfg(feature = "queryable")]
             generation,
-            lane: self.session.lane.clone(),
+            // SAFETY: the dispatch is held by the link's session, which the session's transport
+            // holds, dropped before its state (`Core`'s fields), whose round's owner changes it no
+            // more.
+            lane: unsafe { self.session.lane.share() },
         };
         // The wire keeps a handle on the gates to admit the link through them.
         #[cfg(not(feature = "listen"))]
@@ -3406,9 +3422,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             { caps::MAX_SUBSCRIPTIONS },
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
         >(resolve_limits(&self.config));
-        // SAFETY: a group's transport is driven by the session's step alone, under its lock.
+        // SAFETY: a group's transport is driven by the session's step alone, under its lock; the
+        // gate is held by the group, which the session's tasks hold, all dropped before its state
+        // (`Core`'s fields), whose round's owner changes it no more.
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
-            crate::round::takes_a_group_read(self.session.lane.clone(), record_room)
+            crate::round::takes_a_group_read(self.session.lane.share(), record_room)
         });
         let group = GroupFace::join(
             &self.local,
@@ -3417,7 +3435,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 join,
                 transport,
                 input_gate,
-                lane: self.session.lane.clone(),
+                // SAFETY: as the input gate's.
+                lane: unsafe { self.session.lane.share() },
                 params,
                 policy: self.policy,
                 limits: *resolve_limits(&self.config),
@@ -4097,7 +4116,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "advanced-cache")]
             cache,
         } = apart;
-        let samples = core.session.lane.clone();
+        // SAFETY: the engine holds the handle beside the `Core` it owns and uses it last in its
+        // own drop, before its fields, `core` among them, are dropped; the round's owner changes it
+        // no more.
+        let samples = unsafe { core.session.lane.share() };
         let wire = core.transport.wire_zid;
         #[cfg(feature = "queryable")]
         let plane = core.session.plane.clone();
@@ -4511,7 +4533,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         Some(LiveCore {
             core: core::mem::ManuallyDrop::new(guard),
-            lane: self.samples.as_ref(),
+            lane: &self.samples,
         })
     }
 
@@ -4553,7 +4575,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 return ToPublish::Live(LiveCore {
                     core: core::mem::ManuallyDrop::new(guard),
-                    lane: self.samples.as_ref(),
+                    lane: &self.samples,
                 });
             }
             let room = self
@@ -5677,8 +5699,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return LegHeld::NoRoom;
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
-        // reaches under its lock alone, and is handed its replies there.
-        let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
+        // reaches under its lock alone, and is handed its replies there; the table is the
+        // registry's, dropped before the round's owner, the session state's last field.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, self.samples) };
         let sink = ConsolidatingSink::with_hold(
             ask.opts.resolved_consolidation(),
             leg_sink,
@@ -7433,8 +7456,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             };
             // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
+            // reaches under its lock alone, and is handed its replies there; the table is the
+            // registry's, dropped before the round's owner, the session state's last field.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, self.samples) };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core

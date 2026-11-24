@@ -708,8 +708,9 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
 }
 
 /// The plan lays out no delivery area: every record is read where it lies, so the plan has no lane
-/// and no flag of one, and the round's tables are laid out next to each other. Turned red by a plan
-/// that reserves the area again.
+/// and no flag of one, and the round's tables are laid out next to each other, the round itself
+/// after them, one of it. Turned red by a plan that reserves the area again, or that lays out no
+/// place for the round the open places in the arena (`lend_session`).
 #[test]
 fn the_plan_lays_out_no_delivery_lane() {
     let built =
@@ -722,8 +723,18 @@ fn the_plan_lays_out_no_delivery_lane() {
         .position(|part| *part == "delivery records")
         .expect("CONTROL: the round's tables are laid out");
     assert_eq!(
-        parts[records..records + 3],
-        ["delivery records", "delivery callbacks", "delivery keys"]
+        parts[records..records + 4],
+        [
+            "delivery records",
+            "delivery callbacks",
+            "delivery keys",
+            "delivery round"
+        ]
+    );
+    let round = row(&built, "delivery round");
+    assert_eq!(
+        (round.count, round.entry_bytes),
+        (1, core::mem::size_of::<crate::round::Round>())
     );
 }
 

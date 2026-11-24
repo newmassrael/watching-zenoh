@@ -15,6 +15,8 @@
 //! matching listeners were last read) is this crate's.
 
 use core::cell::Cell;
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+use core::ops::Deref;
 
 use crate::bounded::Storage;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -197,7 +199,8 @@ where
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<P, C> SessionState<P>
 where
-    P: SessionParts<Lane = alloc::sync::Arc<Round<C>>>,
+    P: SessionParts,
+    P::Lane: Deref<Target = Round<C>>,
     C: RoundCalls,
 {
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
@@ -293,9 +296,10 @@ mod tests {
         retracts_into: Option<(TestLane, alloc::sync::Arc<crate::round::tests::Log>)>,
     }
 
-    /// The round of a test's session: a real one, of the calls the round's own tests make.
+    /// The round of a test's session: a handle of a real one, of the calls the round's own tests
+    /// make, which the test owns.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    type TestLane = alloc::sync::Arc<Round<crate::round::tests::Kept>>;
+    type TestLane = crate::placed::PlacedRef<Round<crate::round::tests::Kept>>;
 
     impl SessionFaces for Registry {
         fn end_leg(&mut self, face: u64, kind: GetKind) {
@@ -511,9 +515,12 @@ mod tests {
     #[test]
     fn the_state_retracts_what_the_round_takes_and_says_what_is_owed() {
         const OWED: usize = 64;
-        let lane: TestLane = crate::round::tests::round();
+        let round = crate::round::tests::round();
+        // SAFETY: the state and the registry use the handles only while `round`, declared first,
+        // lives, and nothing changes the round through its owner meanwhile.
+        let lane: TestLane = unsafe { round.share() };
         let log = alloc::sync::Arc::new(crate::round::tests::Log::default());
-        let mut state = new_state_with::<Rounds>(lane.clone());
+        let mut state = new_state_with::<Rounds>(lane);
         state.registry.owed_tokens = OWED;
         state.registry.retracts_into = Some((lane, log.clone()));
         let one = ReadRoom { callbacks: 1 };

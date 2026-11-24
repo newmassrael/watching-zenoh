@@ -34,11 +34,15 @@ impl<T> Placed<T> {
         unsafe { self.at.as_mut() }
     }
 
-    /// A handle of the value that counts nothing.
+    /// A handle of the value that counts nothing: a shared borrow of it whose lifetime the caller
+    /// answers for, where the compiler cannot.
     ///
     /// # Safety
-    /// The caller uses no handle after this owner is dropped, nor while a reference
-    /// [`Self::get_mut`] gave is in use.
+    /// For this handle and every copy of it, on whichever thread:
+    /// - none is dereferenced once this owner is dropped: a value that holds one may be dropped
+    ///   later only if its drop does not dereference it;
+    /// - none is dereferenced while a reference [`Self::get_mut`] gave is in use, and no such
+    ///   reference is taken while one dereferenced is.
     pub unsafe fn share(&self) -> PlacedRef<T> {
         PlacedRef { at: self.at }
     }

@@ -24,7 +24,6 @@
 //! leaves.
 
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
@@ -57,6 +56,7 @@ use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
+use wz_session_core::placed::PlacedRef;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
 #[cfg(feature = "queryable")]
@@ -384,7 +384,7 @@ struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
-    lane: Arc<Round>,
+    lane: PlacedRef<Round>,
 }
 
 impl Drop for Watched {
@@ -508,7 +508,7 @@ pub(super) struct GroupJoining {
     pub(super) input_gate: GroupInputGate,
     /// The session's round of deliveries, which reads what the group's transport lends where it
     /// lies and keeps the buffer it gives back while a record still reads it.
-    pub(super) lane: Arc<Round>,
+    pub(super) lane: PlacedRef<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
