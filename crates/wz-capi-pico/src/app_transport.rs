@@ -38,7 +38,7 @@ use wz_session_core::app_link_table::AppLinkTable;
 use wz_session_core::app_link_table::{
     AppLinkKind, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
+use wz_session_core::app_transport::{AppPort, AppTransport, LockedCall, TableLock};
 
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
@@ -212,8 +212,8 @@ impl AppPort for ProgramPort {
 struct PortLock(wz_capi_port::sync::Lock<AppLinkTable>);
 
 impl TableLock for PortLock {
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-        self.0.with(f);
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+        self.0.with(f)
     }
 }
 

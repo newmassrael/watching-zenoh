@@ -1631,13 +1631,13 @@ mod tests {
     use alloc::vec;
     use std::sync::Mutex;
     use wz_session_core::app_link_table::{AppLinkTable, ProgramEvent, ProgramOpen, ProgramSend};
-    use wz_session_core::app_transport::{AppPort, TableLock};
+    use wz_session_core::app_transport::{AppPort, LockedCall, TableLock};
 
     struct HostLock(Mutex<AppLinkTable>);
 
     impl TableLock for HostLock {
-        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-            f(&mut self.0.lock().unwrap());
+        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+            f(&mut self.0.lock().unwrap())
         }
     }
 

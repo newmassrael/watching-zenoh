@@ -2564,8 +2564,6 @@ pub mod app_link_table;
 // behind the lock the ABI gives it, and the calls the program makes into it. Gated as the table
 // is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "app-link")]
-// Totality debt TD-132 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod app_transport;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]

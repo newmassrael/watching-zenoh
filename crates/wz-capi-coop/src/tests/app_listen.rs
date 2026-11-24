@@ -11,7 +11,9 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
+use wz_session_core::app_transport::{
+    AppPort, AppTransport, LockedCall, SessionTransport, TableLock,
+};
 
 use super::client_config;
 use crate::app_link::AppLinks;
@@ -21,8 +23,8 @@ use crate::{CoopConfig, CoopEngine};
 struct Table(Mutex<AppLinkTable>);
 
 impl TableLock for Table {
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-        f(&mut self.0.lock().unwrap());
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+        f(&mut self.0.lock().unwrap())
     }
 }
 
