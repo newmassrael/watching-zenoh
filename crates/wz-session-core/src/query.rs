@@ -8586,13 +8586,13 @@ mod shm_reply_tests {
 
     /// The same reply with its payload as plain bytes, built from the staged one so every
     /// other field is the same.
-    // Without `query-reply-err` a `QueryReply` has one variant, and the pattern is
-    // irrefutable; with it, it is not. One spelling serves both.
-    #[allow(irrefutable_let_patterns)]
     fn as_plain_bytes(reply: &QueryReply) -> QueryReply {
         let mut plain = reply.clone();
-        if let QueryReply::Reply { body, .. } = &mut plain {
-            *body = ReplyBody::Put(BYTES.to_vec());
+        match &mut plain {
+            QueryReply::Reply { body, .. } => *body = ReplyBody::Put(BYTES.to_vec()),
+            // An Err has no payload to make plain.
+            #[cfg(feature = "query-reply-err")]
+            _ => {}
         }
         plain
     }
@@ -8619,13 +8619,14 @@ mod shm_reply_tests {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
-    // As `as_plain_bytes`: the `else` is unreachable exactly when the Err variant is compiled out.
-    #[allow(irrefutable_let_patterns)]
     #[test]
     fn a_reply_answered_with_a_buffer_is_staged_as_the_buffer_not_as_a_copy() {
         let (shared, _) = handle();
-        let QueryReply::Reply { body, .. } = staged(&shared) else {
-            panic!("a data reply");
+        let body = match staged(&shared) {
+            QueryReply::Reply { body, .. } => body,
+            // The Err variant is compiled with `query-reply-err` alone.
+            #[cfg(feature = "query-reply-err")]
+            _ => panic!("a data reply"),
         };
         assert_eq!(
             body,

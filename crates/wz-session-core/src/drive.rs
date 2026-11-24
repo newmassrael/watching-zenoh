@@ -3092,11 +3092,7 @@ where
     let priority = head.priority();
     let markers = head.markers();
     let crate::inbound::FragmentHead {
-        reliable,
-        sn,
-        more,
-        has_ext,
-        ..
+        reliable, sn, more, ..
     } = head;
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
     // reaches the hand-off, which clears the channel's chain, and whose report is
@@ -3109,9 +3105,7 @@ where
         return DatagramPath::FragmentInPlace;
     }
     on_event.event(IterationEvent::InPlaceFragment(
-        crate::driver_loop::InPlaceFragment::new(
-            unit, payload_at, reliable, sn, more, has_ext, priority, markers,
-        ),
+        crate::driver_loop::InPlaceFragment::of_head(unit, payload_at, &head),
     ));
     // Armed from the negotiated patch level, as the copying hand-off arms it,
     // and bounded by the session's configuration the same way.
