@@ -49,7 +49,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, WireKey};
+use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryableSink, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -59,7 +59,7 @@ use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::query::QueryResponder;
 #[cfg(feature = "local-queryable")]
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
@@ -86,22 +86,27 @@ pub(crate) struct QueryableRow {
     /// session held. A build without groups reads none of it and holds it for that alone.
     #[cfg_attr(not(feature = "group"), allow(dead_code))]
     wire: WireKey,
-    /// The program's callback, minted once the tables took the row ([`Self::mint`]), so a refused
-    /// declaration mints none. Called where the row lies, one call at a time, as it is `FnMut`.
-    call: Mutex<Option<QueryCallback>>,
+    /// The program's callback, called where the row lies through a shared borrow, with the holder
+    /// of the face each query came in on; a refused declaration lets it go with the row.
+    sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
 }
 
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it, its
-    /// callback not minted yet.
-    pub(super) fn new(id: QblId, retraction: Option<RetractionKey>, wire: WireKey) -> Self {
+    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
+    /// answering through `sink`.
+    pub(super) fn new(
+        id: QblId,
+        retraction: Option<RetractionKey>,
+        wire: WireKey,
+        sink: QueryableSink,
+    ) -> Self {
         Self {
             id,
             retraction,
             wire,
-            call: Mutex::new(None),
+            sink,
             latch: CallLatch::new(),
         }
     }
@@ -117,21 +122,14 @@ impl QueryableRow {
         &self.wire
     }
 
-    /// Hold `call`, the callback the program's sink minted for this row once the tables took it.
-    pub(super) fn mint(&self, call: QueryCallback) {
-        *lock(&self.call) = Some(call);
-    }
-
-    /// Hand `query` to the callback, its replies made through `responder`, unless the queryable
-    /// was undeclared since the call was begun: the one place a query is handed to a queryable's
-    /// callback.
-    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
+    /// Hand `query` to the callback, its replies made through `responder` and its holds taken
+    /// through `holder`, unless the queryable was undeclared since the call was begun: the one
+    /// place a query is handed to a queryable's callback.
+    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut, holder: &dyn QueryHolder) {
         if self.latch.retired() {
             return;
         }
-        if let Some(call) = lock(&self.call).as_mut() {
-            call(query, responder);
-        }
+        self.sink.call(query, responder, holder);
     }
 
     /// Declare this queryable, on `key`, answering for the whole of it when `complete`, over
@@ -200,7 +198,7 @@ pub(super) struct QueryableCall {
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for threads: its latch, and its
-// callback behind its mutex, a callback that is `Send`. The row lies in the session's arena, which
+// callback, which is `Send + Sync` and called through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
 
@@ -225,9 +223,15 @@ impl QueryableCall {
         self.row().latch.retired()
     }
 
-    /// Hand `query` to the queryable's callback, its replies made through `responder`.
-    pub(super) fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
-        self.row().ask(query, responder);
+    /// Hand `query` to the queryable's callback, its replies made through `responder` and its
+    /// holds taken through `holder`.
+    pub(super) fn ask(
+        &self,
+        query: &dyn QueryView,
+        responder: &mut dyn ReplyOut,
+        holder: &dyn QueryHolder,
+    ) {
+        self.row().ask(query, responder, holder);
     }
 
     /// End the call: the handle of its row when it was the last call of an undeclared queryable,
@@ -542,9 +546,11 @@ impl Drop for OwnFinalHold<'_> {
 #[cfg(feature = "local-queryable")]
 pub(super) struct OwnGet<'a> {
     keyexpr: &'a str,
-    opts: &'a QueryOptions,
-    /// The value's encoding when the get carries a value and states no encoding of its own.
-    default_encoding: Option<EncodingHint>,
+    opts: &'a QueryOptionsOf<'a>,
+    /// The value's encoding as the view hands it to a queryable of the session: the one the get
+    /// states, else the default one when it carries a value. A view hands an encoding out as a
+    /// hint, so a lent one is copied for the session's own queryables.
+    encoding: Option<EncodingHint>,
     carries_value: bool,
     rid: wz_session_core::wire_id::RequestId,
     qos: QosLevel,
@@ -554,20 +560,23 @@ pub(super) struct OwnGet<'a> {
 impl<'a> OwnGet<'a> {
     pub(super) fn of(
         keyexpr: &'a str,
-        opts: &'a QueryOptions,
+        opts: &'a QueryOptionsOf<'a>,
         rid: wz_session_core::wire_id::RequestId,
     ) -> Self {
         let payload = opts.payload.as_deref().unwrap_or_default();
-        let stated = opts
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.packed_id >> 1 != 0 || encoding.schema.is_some());
-        let carries_value = !payload.is_empty() || stated;
+        let stated = opts.encoding.as_ref().map(|encoding| encoding.view());
+        let names_one = |encoding: wz_session_core::sample::EncodingRef<'_>| {
+            encoding.packed_id >> 1 != 0 || encoding.schema.is_some()
+        };
+        let carries_value = !payload.is_empty() || stated.is_some_and(names_one);
         Self {
             keyexpr,
             opts,
-            default_encoding: (carries_value && opts.encoding.is_none())
-                .then(EncodingHint::default),
+            encoding: carries_value.then(|| {
+                stated
+                    .map(|encoding| encoding.to_hint())
+                    .unwrap_or_default()
+            }),
             carries_value,
             rid,
             qos: opts.qos.unwrap_or(QosLevel::DEFAULT),
@@ -600,13 +609,7 @@ impl QueryView for OwnGet<'_> {
             .then(|| self.opts.payload.as_deref().unwrap_or_default())
     }
     fn encoding(&self) -> Option<&EncodingHint> {
-        if !self.carries_value {
-            return None;
-        }
-        self.opts
-            .encoding
-            .as_ref()
-            .or(self.default_encoding.as_ref())
+        self.encoding.as_ref()
     }
     fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
@@ -873,6 +876,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
             answer(&mut responder);
         }
         engine.answer(generation, rid, false);
+    }
+
+    fn session_closed(&self) -> bool {
+        self.engine
+            .upgrade()
+            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
     }
 }
 

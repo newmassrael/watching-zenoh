@@ -92,6 +92,10 @@ pub struct wz_ext_object_pool_counts_t {
     /// Key expressions of each session the program holds declared (`z_declare_keyexpr`), at most
     /// its `MAX_DECLARED_KEYEXPRS`.
     pub keyexprs: usize,
+    /// Encodings (`z_owned_encoding_t`), each with room for a schema of
+    /// `MAX_ENCODING_SCHEMA_BYTES`, from `z_encoding_from_str` or `z_encoding_clone` to its move
+    /// into the call it describes or its drop; a declared publisher keeps the one it was given.
+    pub encodings: usize,
 }
 
 impl wz_ext_object_pool_counts_t {
@@ -113,6 +117,7 @@ impl wz_ext_object_pool_counts_t {
             queriers: self.queriers,
             keyexprs: self.keyexprs,
             payload_bytes: self.payload_bytes,
+            encodings: self.encodings,
         }
     }
 }
@@ -302,6 +307,7 @@ mod tests {
             payload_bytes: 13,
             queriers: 14,
             keyexprs: 15,
+            encodings: 16,
         };
         assert_eq!(
             stated.counts(),
@@ -321,6 +327,7 @@ mod tests {
                 queriers: 14,
                 keyexprs: 15,
                 payload_bytes: 13,
+                encodings: 16,
             }
         );
     }

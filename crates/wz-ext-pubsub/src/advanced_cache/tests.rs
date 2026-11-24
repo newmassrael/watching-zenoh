@@ -77,7 +77,8 @@ impl ReplyOut for Rec {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.metas.push((
-            meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+            meta.encoding
+                .map(|e| (e.packed_id, e.schema.map(<[u8]>::to_vec))),
             meta.attachment.map(<[u8]>::to_vec),
         ));
         // Delegate the identity bookkeeping to the arm the pre-y562 tests
@@ -86,7 +87,9 @@ impl ReplyOut for Rec {
         self.reply_keyed_sourced(
             keyexpr,
             payload,
-            meta.encoding,
+            meta.encoding
+                .map(wz_session_core::sample::EncodingRef::to_hint)
+                .as_ref(),
             meta.timestamp.expect("the cache always stamps a timestamp"),
             meta.source_info,
         )
@@ -97,7 +100,8 @@ impl ReplyOut for Rec {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.metas.push((
-            meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+            meta.encoding
+                .map(|e| (e.packed_id, e.schema.map(<[u8]>::to_vec))),
             meta.attachment.map(<[u8]>::to_vec),
         ));
         self.reply_keyed_del_sourced(
@@ -536,7 +540,7 @@ fn the_query_handler_reads_now_from_the_host_and_from_nothing_else() {
     }
     let clock = Arc::new(AtomicU64::new(100u64 << 32));
     let host_clock = Arc::clone(&clock);
-    let mut handler = store.query_handler(move || host_clock.load(Ordering::SeqCst));
+    let handler = store.query_handler(move || host_clock.load(Ordering::SeqCst));
     let asked = query(Some(b"_time=[now(-30s)..]"));
 
     let mut out = Rec::default();

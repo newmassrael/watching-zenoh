@@ -30,7 +30,7 @@ use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
@@ -436,11 +436,18 @@ impl SessionEngine for RouterState {
     ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        // The node's queries are held through the node itself, which the one sink is called with.
+        let holder = self.query_holder();
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
             allowed_origin,
-            Box::new(sink(self.query_holder())),
+            Box::new(
+                move |query: &dyn wz_session_core::query_sink::QueryView,
+                      out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                    sink.call(query, out, &*holder);
+                },
+            ),
         );
         self.engine
             .queryables
@@ -521,13 +528,15 @@ impl SessionEngine for RouterState {
         &self,
         keyexpr: &str,
         _wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
         // A get limited to some links or addressed to one node is refused by that statement: the
         // router reads neither, and asking every link would widen it.
         StatementNotHonoured::of_query(opts)?;
+        // The node keeps the query's options past the call: the slots the caller lent are copied.
+        let opts = &opts.to_owned_options();
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
@@ -554,13 +563,15 @@ impl SessionEngine for RouterState {
         &self,
         keyexpr: &str,
         _wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
         // Refused when it states what the router does not read, as `get_on_wire` is.
         StatementNotHonoured::of_query(opts)?;
+        // The node keeps the query's options past the call: the slots the caller lent are copied.
+        let opts = &opts.to_owned_options();
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).

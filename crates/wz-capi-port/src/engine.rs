@@ -26,7 +26,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -433,7 +433,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     fn batch_all(&self, step: BatchStep) -> usize;
 
     /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
-    /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`
+    /// answering the queries `allowed_origin` admits through `sink`, which the queryable's row keeps
+    /// and calls with the holder of the face each query came in on. `retraction`
     /// is the key its undeclaration names beside its id, when the declaring ABI's reference
     /// library names one. Refused as [`Self::declare_subscriber_on_wire`] is, and with
     /// [`Refusal::NotBuilt`] by an engine with no queryable in this build, which is the provided
@@ -535,7 +536,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
@@ -554,13 +555,12 @@ pub trait SessionEngine: Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
-        let mut opts = opts.clone();
-        opts.payload = Some(value.bytes().to_vec());
+        let opts = opts.clone().with_payload_lent(value.bytes());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
     }
 

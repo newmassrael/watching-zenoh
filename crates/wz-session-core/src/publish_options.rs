@@ -24,8 +24,6 @@
 //! are features of this crate; the runtime's features of the same names forward to them, so the
 //! answer in a tokio build is the answer it always was.
 
-use alloc::borrow::Cow;
-
 use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
@@ -33,7 +31,10 @@ use crate::metadata::PushMetadata;
 #[cfg(feature = "pubsub-qos")]
 use crate::qos::CongestionControl;
 use crate::qos::Priority;
-use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
+// A hint is the owned encoding the setters of a build with `pubsub-encoding` take.
+#[cfg(feature = "pubsub-encoding")]
+use crate::sample::EncodingHint;
+use crate::sample::{EncodingRef, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
 use crate::send_wire_error::SendWireError;
 
 /// Options bundle for a publish. Carries the locality routing predicate
@@ -94,9 +95,10 @@ pub struct PublishOptions<'a> {
     /// propagation is built (R233, `gated_encoding_field` on the Put body, gated
     /// `pubsub-encoding`) and foreign-proven — R311y207 (`wz_encoding_to_pico_zsub`,
     /// `text/plain` decoded by pico); loopback honours it from R232. Lent by a holder that keeps
-    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`]), or
-    /// owned ([`Self::with_encoding`]).
-    pub encoding: Option<Cow<'a, EncodingHint>>,
+    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`], an
+    /// encoding object of a C ABI, [`Self::with_encoding_ref`]), or owned
+    /// ([`Self::with_encoding`]).
+    pub encoding: Option<PublishEncoding<'a>>,
     /// R232 — body-level source identification propagated to `Sample.source_info`. Cooperates
     /// with the R231 self-echo dedup: when the dispatcher fires on a wire-arrived Push whose
     /// `source_info.zid` matches the session's own zid, the dedup suppresses the duplicate fire so
@@ -145,6 +147,11 @@ pub struct PublishOptions<'a> {
     stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
 }
 
+/// The encoding a publish carries: read where a holder keeps it for as long as the publish runs,
+/// or the options' own, which options kept past the call they were made for hold. The one carried
+/// encoding of the crate, which a query's options carry too.
+pub type PublishEncoding<'a> = crate::sample::CarriedEncoding<'a>;
+
 impl<'a> PublishOptions<'a> {
     /// These options without their attachment, and the attachment they borrowed: what a holder
     /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
@@ -177,7 +184,7 @@ impl<'a> PublishOptions<'a> {
                 reliability,
                 kind,
                 timestamp,
-                encoding: encoding.map(|encoding| Cow::Owned(encoding.into_owned())),
+                encoding: encoding.map(PublishEncoding::into_owned),
                 source_info,
                 attachment: None,
                 qos,
@@ -292,7 +299,7 @@ impl<'a> PublishOptions<'a> {
     /// stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
-        self.encoding = Some(Cow::Owned(encoding));
+        self.encoding = Some(PublishEncoding::Owned(encoding));
         self
     }
 
@@ -300,7 +307,16 @@ impl<'a> PublishOptions<'a> {
     /// a publisher's declared encoding is lent to each put that names none, and copied nowhere.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding_lent(mut self, encoding: &'a EncodingHint) -> Self {
-        self.encoding = Some(Cow::Borrowed(encoding));
+        self.encoding = Some(PublishEncoding::Lent(encoding.view()));
+        self
+    }
+
+    /// [`Self::with_encoding`] with an encoding read where its holder keeps it for as long as the
+    /// publish runs, whatever holds it: an encoding object a program moved into the call is sent
+    /// from its own bytes, and nothing is allocated for it.
+    #[cfg(feature = "pubsub-encoding")]
+    pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
+        self.encoding = Some(PublishEncoding::Lent(encoding));
         self
     }
 
@@ -498,7 +514,7 @@ impl<'a> PublishOptions<'a> {
     pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.as_ref()),
-            encoding: gated_encoding(self.encoding.as_deref()),
+            encoding: gated_encoding(self.encoding.as_ref().map(PublishEncoding::view)),
             source_info: gated_source_info(self.source_info.clone()),
             attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
@@ -531,7 +547,7 @@ impl<'a> PublishOptions<'a> {
         }
         if self.kind == SampleKind::Put {
             if let Some(encoding) = meta.encoding {
-                sample = sample.with_encoding(encoding.clone());
+                sample = sample.with_encoding(encoding.to_hint());
             }
         }
         if let Some(source_info) = meta.source_info {
@@ -809,7 +825,7 @@ macro_rules! metadata_gated {
 }
 
 metadata_gated!(gated_timestamp, "pubsub-timestamp", &TimestampHint);
-metadata_gated!(gated_encoding, "pubsub-encoding", &EncodingHint);
+metadata_gated!(gated_encoding, "pubsub-encoding", EncodingRef<'_>);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
 metadata_gated!(gated_attachment, "pubsub-attachment", &[u8]);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
@@ -828,13 +844,40 @@ mod plain_put_tests {
             schema: Some(alloc::vec![b's']),
         };
         let lent = PublishOptions::put().with_encoding_lent(&declared);
-        assert!(matches!(lent.encoding, Some(Cow::Borrowed(_))));
-        assert_eq!(lent.push_metadata().encoding, Some(&declared));
+        assert!(matches!(lent.encoding, Some(PublishEncoding::Lent(_))));
+        assert_eq!(lent.push_metadata().encoding, Some(declared.view()));
         let (kept, _) = lent.into_owned_parts();
-        assert!(matches!(kept.encoding, Some(Cow::Owned(_))));
-        assert_eq!(kept.encoding.as_deref(), Some(&declared));
+        assert_eq!(
+            kept.encoding,
+            Some(PublishEncoding::Owned(declared.clone()))
+        );
         let owned = PublishOptions::put().with_encoding(declared.clone());
-        assert!(matches!(owned.encoding, Some(Cow::Owned(_))));
+        assert!(matches!(owned.encoding, Some(PublishEncoding::Owned(_))));
+    }
+
+    /// An encoding read where its holder keeps it is carried as it lies: the wire's metadata reads
+    /// the holder's own bytes, and nothing is copied until the options are kept past the call.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn an_encoding_read_where_it_lies_is_sent_from_its_holders_bytes() {
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let opts = PublishOptions::put().with_encoding_ref(held);
+        let sent = opts
+            .push_metadata()
+            .encoding
+            .expect("the encoding is carried");
+        assert_eq!(sent, held);
+        assert_eq!(
+            sent.schema.map(<[u8]>::as_ptr),
+            Some(schema.as_ptr()),
+            "the metadata reads the holder's bytes, not a copy"
+        );
+        let (kept, _) = opts.into_owned_parts();
+        assert_eq!(kept.encoding, Some(PublishEncoding::Owned(held.to_hint())));
     }
 
     /// The constant the engine's tests read the build from is the answer of the function it

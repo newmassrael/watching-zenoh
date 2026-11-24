@@ -343,7 +343,11 @@ fn flush_one(
             ))]
             let shared = reply_buffer(&payload, promotion);
             let meta = ReplyMeta::new()
-                .with_encoding(encoding.as_ref())
+                .with_encoding(
+                    encoding
+                        .as_ref()
+                        .map(wz_runtime_tokio::sample::EncodingHint::view),
+                )
                 .with_timestamp(timestamp.as_ref())
                 .with_source_info(source_info.as_ref())
                 .with_attachment(attachment.as_deref())

@@ -63,7 +63,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, SessionEngine};
+use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine};
 use wz_session_core::face::FaceSnapshot;
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::link::LinkKind;
@@ -163,12 +163,11 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             session: Arc::downgrade(&handle.drive.engine()),
             identity,
         });
-        let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-            let answerer = Arc::clone(&answerer);
-            Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+        let sink = QueryableSink::shared(
+            move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answerer.answer(query, out)
-            }) as QueryCallback
-        });
+            },
+        );
         let pico = match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink)
         {
             Ok(queryable) => queryable,
@@ -198,9 +197,8 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
 fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQueryable, ZResult> {
     let key = wz_session_core::wz_root::snapshot_key(zid);
     let declared = key.clone();
-    let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-        let key = key.clone();
-        Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+    let sink = QueryableSink::shared(
+        move |_query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
             // The queryable is declared on this one key, so every query it is handed reaches it.
             if let Some(body) = crate::snapshot::latest_json() {
                 let _ = out.reply_keyed_encoded(
@@ -209,8 +207,8 @@ fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQuerya
                     Some(&EncodingHint::APPLICATION_JSON),
                 );
             }
-        }) as QueryCallback
-    });
+        },
+    );
     PlainQueryable::declare(&PicoSession::of(handle), &declared, None, false, sink)
 }
 

@@ -243,7 +243,7 @@ pub(crate) use get::{Ended, LegSink};
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
-    wz_session_core::query_options::QueryOptions,
+    wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
     wz_session_core::reply_sink::{timeout_reply, ConsolidatingSink, ReplyView},
@@ -4692,7 +4692,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.qos(),
                 &mut onward,
             );
-            call.ask(query, &mut responder);
+            // The queries the callback keeps are held through the session, as the face's holder.
+            let holder = CoopHolder {
+                engine: self.this.clone(),
+            };
+            call.ask(query, &mut responder, &holder);
         }
         self.answer(generation, query.rid(), true);
     }
@@ -5718,7 +5722,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core: &mut Core<L, C>,
         own: query::OwnFinalHold<'_>,
         keyexpr: &str,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
     ) -> query::Asked {
         let rid = own.rid();
         let qos = opts.qos.unwrap_or(QosLevel::DEFAULT);
@@ -6731,7 +6735,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .next_entity_id()
             .ok_or(Declined::NoEntityId)?;
         let form = core.key_form(&wire, retraction.is_some());
-        let row = QueryableRow::new(id, retraction, wire);
+        let row = QueryableRow::new(id, retraction, wire, sink);
         let declared = tables_mut(&core.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -6753,14 +6757,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             declared.id, id,
             "the tables number a row as they said they would"
         );
-        // The callback `sink` mints runs when the deliveries are handed out (`query`), never under
-        // the session's lock; it is minted once the tables took the row.
-        let callback = sink(Arc::new(CoopHolder {
-            engine: self.this.clone(),
-        }));
-        if let Some(row) = tables(&core.registry).queryables().get(declared.handle) {
-            row.callback().mint(callback);
-        }
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce_queryable(declared.handle);
         #[cfg(feature = "group")]
@@ -6795,7 +6791,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Declined> {

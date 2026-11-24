@@ -20,14 +20,13 @@
 //! below produce and consume exactly that, so the schema-present flag can never disagree with the
 //! schema actually stored.
 
-use alloc::borrow::ToOwned;
 use alloc::string::String;
 
 use wz_codecs::encoding_ids::{
     lookup_id, ENCODING_ID_DEFAULT, ENCODING_ID_TO_STR, ENCODING_ID_UNKNOWN, SCHEMA_SEPARATOR,
 };
 
-use crate::sample::EncodingHint;
+use crate::sample::{EncodingHint, EncodingRef};
 
 /// Which upstream's encoding string rules to apply.
 ///
@@ -68,10 +67,16 @@ pub fn hint_from_parts(id: u16, schema: &str) -> EncodingHint {
 /// what the wire carries and zenoh-pico's setter takes
 /// (`z_encoding_set_schema_from_substr` copies the bytes it is handed).
 pub fn hint_from_schema_bytes(id: u16, schema: &[u8]) -> EncodingHint {
+    ref_from_schema_bytes(id, schema).to_hint()
+}
+
+/// [`hint_from_schema_bytes`] read where the schema lies: nothing is copied, so a C ABI that keeps
+/// the encoding in room of its own builds it with no allocation.
+pub fn ref_from_schema_bytes(id: u16, schema: &[u8]) -> EncodingRef<'_> {
     let has_schema = !schema.is_empty();
-    EncodingHint {
+    EncodingRef {
         packed_id: (u32::from(id) << 1) | u32::from(has_schema),
-        schema: has_schema.then(|| schema.to_owned()),
+        schema: has_schema.then_some(schema),
     }
 }
 
@@ -97,18 +102,31 @@ pub fn hint_from_str(s: &str) -> EncodingHint {
 /// not UTF-8 names no id and the whole input is the schema under the default
 /// id, which is the fallback a text input that names no id takes too.
 pub fn hint_from_bytes(s: &[u8]) -> EncodingHint {
-    if let Ok(text) = core::str::from_utf8(s) {
-        return hint_from_str(text);
-    }
+    ref_from_bytes(s).to_hint()
+}
+
+/// [`hint_from_bytes`] read where the bytes lie: the id the prefix names and the schema as a
+/// part of `s`, so the label is parsed with no allocation. The rule is the text one: the split is
+/// on the first separator, a prefix the table names takes its id, and otherwise the whole input is
+/// the schema under the default id.
+pub fn ref_from_bytes(s: &[u8]) -> EncodingRef<'_> {
     let mut sep = [0u8; 4];
     let sep = SCHEMA_SEPARATOR.encode_utf8(&mut sep).as_bytes();
-    if let Some(pos) = s.windows(sep.len()).position(|w| w == sep) {
-        let (prefix, rest) = s.split_at(pos);
-        if let Some(id) = core::str::from_utf8(prefix).ok().and_then(lookup_id) {
-            return hint_from_schema_bytes(id, rest.get(sep.len()..).unwrap_or_default());
+    let named = |prefix: &[u8]| core::str::from_utf8(prefix).ok().and_then(lookup_id);
+    match s.windows(sep.len()).position(|w| w == sep) {
+        Some(pos) => {
+            let (prefix, rest) = s.split_at(pos);
+            if let Some(id) = named(prefix) {
+                return ref_from_schema_bytes(id, rest.get(sep.len()..).unwrap_or_default());
+            }
+        }
+        None => {
+            if let Some(id) = named(s) {
+                return ref_from_schema_bytes(id, &[]);
+            }
         }
     }
-    hint_from_schema_bytes(ENCODING_ID_DEFAULT, s)
+    ref_from_schema_bytes(ENCODING_ID_DEFAULT, s)
 }
 
 /// [`hint_from_str`] in an explicit dialect.
@@ -230,6 +248,40 @@ pub fn parts_to_bytes_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A label read where it lies names the encoding the text rule names, and its schema is the
+    /// part of the label after the separator, not a copy of it.
+    #[test]
+    fn a_label_read_where_it_lies_names_what_the_text_rule_names() {
+        for label in [
+            "text/plain",
+            "text/plain;utf8",
+            "zenoh/string;",
+            "custom_id;custom_schema",
+            "wz/unknown",
+            "",
+        ] {
+            let read = ref_from_bytes(label.as_bytes());
+            assert_eq!(read.to_hint(), hint_from_str(label), "{label}");
+            if let Some(schema) = read.schema {
+                let start = schema.as_ptr() as usize - label.as_ptr() as usize;
+                assert!(
+                    start + schema.len() <= label.len(),
+                    "{label}: lies in the label"
+                );
+            }
+        }
+        let not_text = [
+            b't', b'e', b'x', b't', b'/', b'p', b'l', b'a', b'i', b'n', b';', 0xff,
+        ];
+        assert_eq!(
+            ref_from_bytes(&not_text),
+            EncodingRef {
+                packed_id: (4 << 1) | 1,
+                schema: Some(&[0xff][..]),
+            }
+        );
+    }
 
     /// The one entry every witness in this repo keys off: `text/plain` is id 4,
     /// so the wire word is 8. Both ABIs' `text/plain` constant resolves through

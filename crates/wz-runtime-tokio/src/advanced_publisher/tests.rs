@@ -65,7 +65,9 @@ fn adv_recovery_get_options() -> crate::session::QueryOptions {
     use wz_session_core::locality::Locality;
 
     let mut opts = QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
-    opts.parameters = Some(wz_session_core::selector_params::anyke_params(&[]).into_bytes());
+    opts.parameters = Some(std::borrow::Cow::Owned(
+        wz_session_core::selector_params::anyke_params(&[]).into_bytes(),
+    ));
     opts.consolidation = Some(wz_session_core::query_mode::ConsolidationMode::None);
     opts
 }
