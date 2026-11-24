@@ -139,10 +139,21 @@ impl FaceTables {
     #[inline(never)]
     fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
         let at = place.as_mut_ptr();
+        // A field added to the set and not written below would be read uninitialised. This names
+        // every field with no `..`, so adding one without naming it here (and so without writing
+        // it below) does not compile.
+        let _every_field_is_written = |set: &Self| {
+            let Self {
+                peer: _,
+                gets: _,
+                #[cfg(feature = "liveliness")]
+                    retracting: _,
+            } = set;
+        };
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
         // pointer to it, the peer's tables by `init_in`, which writes them whole (a
-        // `MaybeUninit<T>` has the layout of `T`). `every_field_is_written` names every field, so
-        // the set is whole when it is lent.
+        // `MaybeUninit<T>` has the layout of `T`). The list above names every field, so the set is
+        // whole when it is lent.
         let set = unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
             #[cfg(feature = "liveliness")]
@@ -152,19 +163,6 @@ impl FaceTables {
         };
         set.peer.limit_to(limits);
         set
-    }
-
-    /// A field added to [`FaceTables`] and not written by [`Self::rowless_in`] would be read
-    /// uninitialised. This destructures the set with no `..`, so adding a field without naming it
-    /// here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(set: Self) {
-        let Self {
-            peer: _,
-            gets: _,
-            #[cfg(feature = "liveliness")]
-                retracting: _,
-        } = set;
     }
 
     /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its

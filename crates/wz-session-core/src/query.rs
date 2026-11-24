@@ -457,7 +457,7 @@ fn extract_query_value_parts(query: &QueryOwned) -> Option<(u32, Option<&[u8]>, 
     #[cfg(feature = "query-value")]
     {
         let exts = query.extensions.as_deref()?;
-        crate::query_value_ext::decode_query_value_ext_parts_in(exts)
+        crate::query_value_ext::decode_query_value_ext_parts(exts)
     }
 }
 

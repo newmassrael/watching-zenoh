@@ -1266,9 +1266,63 @@ impl Round {
     /// area `rows` was given is as [`RoundRows::writing_into`] asks.
     #[inline(never)]
     unsafe fn write_in(at: *mut Self, rows: RoundRows) {
+        // A field added to the round or its table and not written below would be read
+        // uninitialised. These name every field of both with no `..`, so adding one without naming
+        // it here (and so without writing it below) does not compile.
+        let _every_field_is_written = |round: &Self| {
+            let Self {
+                state: _,
+                table: _,
+                lends: _,
+                owes: _,
+                lending: _,
+                rejoining: _,
+                kept: _,
+                #[cfg(feature = "group")]
+                    reading: _,
+                #[cfg(feature = "group")]
+                    kept_rx: _,
+                #[cfg(feature = "local-subscriber")]
+                    capturing: _,
+                released: _,
+                #[cfg(feature = "queryable")]
+                    answering: _,
+                dropped: _,
+                held_over: _,
+                unplaced: _,
+                #[cfg(debug_assertions)]
+                    gated: _,
+                #[cfg(all(test, feature = "std"))]
+                    rounds: _,
+                #[cfg(all(test, feature = "std"))]
+                    samples: _,
+                #[cfg(all(test, feature = "std"))]
+                    lent_samples: _,
+            } = round;
+        };
+        let _every_table_field_is_written = |table: &Table| {
+            let Table {
+                datagram: _,
+                rejoined: _,
+                key_space: _,
+                spent: _,
+                entries: _,
+                callbacks: _,
+                keys: _,
+                longest_key: _,
+                key: _,
+                fan: _,
+                #[cfg(not(feature = "rx-lent-only"))]
+                    area: _,
+                #[cfg(not(feature = "rx-lent-only"))]
+                    area_bytes: _,
+                #[cfg(not(feature = "rx-lent-only"))]
+                    written: _,
+            } = table;
+        };
         // SAFETY: the caller's contract; an `UnsafeCell<T>` is laid out as the `T` it holds, and
-        // each field is written once through a pointer to it. `every_field_is_written` names
-        // every field, so the round is whole when it is shared.
+        // each field is written once through a pointer to it. The lists above name every field, so
+        // the round is whole when it is shared.
         unsafe {
             ptr::write(addr_of_mut!((*at).state), AtomicU8::new(EMPTY));
             let table = addr_of_mut!((*at).table).cast::<Table>();
@@ -1325,60 +1379,6 @@ impl Round {
     /// once, before the round is shared; a round never told copies every key.
     pub(crate) fn reads_keys_in(&mut self, keys: KeySpace) {
         self.table.get_mut().key_space = Some(keys);
-    }
-
-    /// A field added to [`Round`] or its table and not written by [`Self::write_in`] would be
-    /// read uninitialised. This destructures both with no `..`, so adding a field without naming
-    /// it here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(round: Self) {
-        let Self {
-            state: _,
-            table,
-            lends: _,
-            owes: _,
-            lending: _,
-            rejoining: _,
-            kept: _,
-            #[cfg(feature = "group")]
-                reading: _,
-            #[cfg(feature = "group")]
-                kept_rx: _,
-            #[cfg(feature = "local-subscriber")]
-                capturing: _,
-            released: _,
-            #[cfg(feature = "queryable")]
-                answering: _,
-            dropped: _,
-            held_over: _,
-            unplaced: _,
-            #[cfg(debug_assertions)]
-                gated: _,
-            #[cfg(all(test, feature = "std"))]
-                rounds: _,
-            #[cfg(all(test, feature = "std"))]
-                samples: _,
-            #[cfg(all(test, feature = "std"))]
-                lent_samples: _,
-        } = round;
-        let Table {
-            datagram: _,
-            rejoined: _,
-            key_space: _,
-            spent: _,
-            entries: _,
-            callbacks: _,
-            keys: _,
-            longest_key: _,
-            key: _,
-            fan: _,
-            #[cfg(not(feature = "rx-lent-only"))]
-                area: _,
-            #[cfg(not(feature = "rx-lent-only"))]
-                area_bytes: _,
-            #[cfg(not(feature = "rx-lent-only"))]
-                written: _,
-        } = table.into_inner();
     }
 
     /// The table, to write, while it is empty or filling: `None` once it is sealed or handed out.
@@ -2345,6 +2345,7 @@ impl Round {
 
     /// A round holding `events` records at once, its tables lent from an arena the test leaks, given
     /// no area: what a build that keeps none (`rx-lent-only`) makes.
+    #[cfg(any(feature = "rx-lent-only", all(feature = "std", feature = "queryable")))]
     pub(crate) fn leaked(events: usize) -> Arc<Self> {
         Self::shared_over(Self::leaked_rows(events))
     }

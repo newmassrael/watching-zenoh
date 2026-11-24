@@ -72,7 +72,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::prelude::*;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
-    z_owned_subscriber_t, CClosure, SubscriberState,
+    z_owned_subscriber_t, CClosure,
 };
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
@@ -1449,7 +1449,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         }
         // Consume the moved closure FIRST.
         let owned = &mut (*callback)._this;
-        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
+        let closure = CClosure::uncounted(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
         if liveliness_subscriber.is_null() {
@@ -1479,36 +1479,20 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let key = match crate::keyexpr::DeclaredKeyexpr::declare(&engine, &ke, None) {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        let wire = key.wire(Arc::as_ref(&engine));
-        let released = cclosure.release_latch();
-        let id = match engine.declare_liveliness_subscriber_on_wire(
-            &ke,
-            wire,
-            history,
-            crate::liveliness::sample_sink(cclosure),
+        // Its closure lies in the place, as a session's own liveliness subscriber's does, and its
+        // handle is let go of as that one's is.
+        match crate::liveliness::declare_liveliness_subscriber_in(
+            &engine, slot, &ke, None, closure, history, None,
         ) {
-            Ok(id) => id,
-            Err(refused) => {
-                return crate::result::refusal_code(refused, crate::result::Door::Entity)
+            Ok(placed) => {
+                *liveliness_subscriber = z_owned_subscriber_t {
+                    handle: placed as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 3],
+                };
+                Z_OK
             }
-        };
-        let placed = slot.fill(SubscriberState {
-            shared: engine,
-            id,
-            key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            released,
-        });
-        (*placed).bind();
-        *liveliness_subscriber = z_owned_subscriber_t {
-            handle: placed as *mut c_void,
-            _pad: [core::ptr::null_mut(); 3],
-        };
-        Z_OK
+            Err(code) => code,
+        }
     })
 }
 
@@ -1839,17 +1823,16 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
             return Z_ERR_NULL;
         };
         let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(&state.keyexpr);
+        // An advanced subscriber's state keeps the engine and not the session handle the close
+        // waits through; the wait for this form comes with the advanced plane's turn of
+        // `z_api_callback_drop_on_undeclare_test`, which this program reaches last of the planes
+        // it covers.
         crate::liveliness::declare_background_liveliness_subscriber(
             &state.engine,
             &detection,
             None,
             callback,
             options,
-            // An advanced subscriber's state keeps the engine and not the session handle the
-            // close waits through; the wait for this form comes with the advanced plane's turn of
-            // `z_api_callback_drop_on_undeclare_test`, which this program reaches last of the
-            // planes it covers.
-            &|_| {},
         )
     })
 }
