@@ -1070,8 +1070,6 @@ struct Declaring<'a, P: Storage> {
 
 impl<P: Storage> Declaring<'_, P> {
     /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be.
-    // Out of line: the declaration of every kind of entity names its key through it.
-    #[inline(never)]
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
         let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
         let prefix = form.prefix.filter(|&prefix| {
@@ -1103,6 +1101,9 @@ impl<P: Storage> Declaring<'_, P> {
     /// Declare an entity on `text` into `table`: the row `make` builds of its id, its key and
     /// `callback`, or the refusal with `callback` back (`back` takes it out of a row the table
     /// refused).
+    // Out of line: the declaration of each kind measured smaller with the row built and placed
+    // apart from the caller that hands it its parts.
+    #[inline(never)]
     fn declare<K, R, C, const N: usize>(
         mut self,
         table: &mut SlotMap<K, R, N, P>,
@@ -1407,6 +1408,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     // ---- entities --------------------------------------------------------------------------
 
     /// Declare a subscriber on `key`, hearing what `origin` admits.
+    // Out of line, as `Declaring::declare` is: measured smaller apart from the engine's caller.
+    #[inline(never)]
     pub fn declare_subscriber(
         &mut self,
         key: &str,

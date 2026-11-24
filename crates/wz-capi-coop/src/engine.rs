@@ -1497,6 +1497,8 @@ pub(crate) struct SubscriberRow {
 impl SubscriberRow {
     /// Subscriber `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
     /// handing what it hears to `sink`, the timestamp shown when `expose`.
+    // Out of line: measured smaller apart from the declaration that builds the row.
+    #[inline(never)]
     pub(crate) fn new(
         id: SubId,
         retraction: Option<RetractionKey>,
