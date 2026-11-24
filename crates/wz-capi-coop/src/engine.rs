@@ -3097,47 +3097,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Signals,
         Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
     ) {
+        let phase = self
+            .links
+            .faces()
+            .get(at)
+            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| face.link.phase());
         let mut signals = Signals::default();
         let mut answer = None;
-        let phase = match self
+        match self
             .links
             .faces_mut()
             .get_mut(at)
             .map(|face| &mut face.link)
         {
-            Some(Link::Up(wire)) => {
-                signals.ended = wire.finished();
-                Phase::Up
-            }
-            Some(Link::Opening {
-                wire,
-                next,
-                deadline_us,
-            }) => {
+            Some(Link::Up(wire)) => signals.ended = wire.finished(),
+            Some(Link::Opening { wire, .. }) => {
                 signals.ended = wire.finished();
                 signals.established = wire.established();
-                Phase::Opening {
-                    next: *next,
-                    deadline_us: *deadline_us,
-                }
             }
-            Some(Link::Dialing {
-                dial,
-                next,
-                deadline_us,
-            }) => {
+            Some(Link::Dialing { dial, .. }) => {
                 answer = dial.answer();
                 signals.dial = answer.as_ref().map(Result::is_ok);
-                Phase::Dialing {
-                    endpoint: dial.endpoint().clone(),
-                    next: *next,
-                    deadline_us: *deadline_us,
-                }
             }
-            Some(Link::Waiting { at_us }) => Phase::Waiting { at_us: *at_us },
-            Some(Link::Held { zid }) => Phase::Held { node: *zid },
-            None => Phase::Waiting { at_us: u64::MAX },
-        };
+            _ => {}
+        }
         if let Phase::Held { node } = &phase {
             signals.node_held = self.links.node_is_held(node.as_slice(), id);
         }

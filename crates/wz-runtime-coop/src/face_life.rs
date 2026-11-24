@@ -73,6 +73,26 @@ pub enum Phase {
     },
 }
 
+impl Phase {
+    /// When a face whose link stands here is next to be looked at though its link brings no
+    /// input: a face waiting to dial again at its time, a dial under way at the next look
+    /// (`DIAL_LOOK_MS` from now) or at its deadline when that is sooner, and a handshake at its
+    /// deadline, which ends it. `None` for a link that is up and a face standing by, which only
+    /// input or another face moves on. `now_us` reads the clock, which only a dial asks.
+    pub fn wake_at(&self, now_us: impl FnOnce() -> u64) -> Option<u64> {
+        match self {
+            Phase::Waiting { at_us } => Some(*at_us),
+            Phase::Dialing { deadline_us, .. } => Some(
+                now_us()
+                    .saturating_add(DIAL_LOOK_MS.saturating_mul(1000))
+                    .min(*deadline_us),
+            ),
+            Phase::Opening { deadline_us, .. } => Some(*deadline_us),
+            Phase::Up | Phase::Held { .. } => None,
+        }
+    }
+}
+
 /// What the executor read of a face's link at a step.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Signals {
@@ -276,22 +296,10 @@ impl FaceLife {
         }
     }
 
-    /// When the face is next to be looked at though its link brings no input: a face waiting to
-    /// dial again at its time, a dial under way at the next look (`DIAL_LOOK_MS` from `now_us`)
-    /// or at its deadline when that is sooner, and a handshake at its deadline, which ends it.
-    /// `None` for a link that is up and a face standing by, which only input or another face moves
-    /// on.
+    /// When the face is next to be looked at though its link brings no input
+    /// ([`Phase::wake_at`]).
     pub fn wake_at(&self, now_us: u64) -> Option<u64> {
-        match &self.phase {
-            Phase::Waiting { at_us } => Some(*at_us),
-            Phase::Dialing { deadline_us, .. } => Some(
-                now_us
-                    .saturating_add(DIAL_LOOK_MS.saturating_mul(1000))
-                    .min(*deadline_us),
-            ),
-            Phase::Opening { deadline_us, .. } => Some(*deadline_us),
-            Phase::Up | Phase::Held { .. } => None,
-        }
+        self.phase.wake_at(|| now_us)
     }
 
     /// What follows a link of this face that failed before it was up, the dial role going on
@@ -550,5 +558,38 @@ mod tests {
         life.set(Phase::Waiting { at_us: NOW });
         assert_eq!(life.phase(), &Phase::Waiting { at_us: NOW });
         assert_eq!((life.id(), life.role()), (0, FaceRole::Dial));
+    }
+
+    /// A phase reads the clock only for a dial, whose next look is counted from now: a waiting
+    /// face and a handshake have times of their own, and a link that is up or a face standing by
+    /// none. Turned red by a clock read for a phase that has no use for it, which a read's wait
+    /// over faces that are all up would pay at every step.
+    #[test]
+    fn a_phase_reads_the_clock_only_for_a_dial() {
+        let mut reads = 0;
+        let mut read = |now: u64| {
+            reads += 1;
+            now
+        };
+        assert_eq!(Phase::Up.wake_at(|| read(0)), None);
+        assert_eq!(Phase::Held { node: node() }.wake_at(|| read(0)), None);
+        assert_eq!(Phase::Waiting { at_us: 7 }.wake_at(|| read(0)), Some(7));
+        assert_eq!(opening().wake_at(|| read(0)), Some(NOW + 10));
+        let dialing = Phase::Dialing {
+            endpoint: DialEndpoint::Listed(0),
+            next: 1,
+            deadline_us: 100_000,
+        };
+        assert_eq!(
+            dialing.wake_at(|| read(50)),
+            Some(50 + DIAL_LOOK_MS * 1000),
+            "the next look"
+        );
+        assert_eq!(
+            dialing.wake_at(|| read(99_999)),
+            Some(100_000),
+            "the deadline when it is sooner"
+        );
+        assert_eq!(reads, 2, "only the dial read the clock");
     }
 }
