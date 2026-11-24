@@ -788,7 +788,7 @@ pub(crate) fn acceptor_params(
         // spelling of the cookie (a `Vec` on the growable backing, a fixed buffer under
         // `bounded-heapless`), so the same fixture serves both profiles.
         zid: const { SessionZid::from_array([0x0A, 0x0B, 0x0C, 0x0D]) },
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,

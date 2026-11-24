@@ -185,7 +185,7 @@ fn profile() -> GroupProfile {
         lease_ms: 10_000,
         join_interval_ms: 100,
         max_sessions: None,
-        seq_num_res: 0x02,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,

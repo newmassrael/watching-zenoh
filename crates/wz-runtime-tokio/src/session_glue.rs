@@ -4376,7 +4376,7 @@ mod derived_initial_sn_tests {
 
     fn params_with_res2() -> wz_session_core::session_init_params::SessionInitParams {
         let mut params = fixture_session_init_params();
-        params.seq_num_res = 2;
+        params.seq_num_res = crate::policy::SnResolution::Bits32;
         params
     }
 
@@ -8403,7 +8403,7 @@ mod init_advertisement_tests {
     fn an_initsyn_offers_each_width_its_params_carry() {
         for code in 0..=3u8 {
             let mut params = fixture_session_init_params();
-            params.seq_num_res = code;
+            params.seq_num_res = crate::policy::SnResolution::from_wire_code(code);
             params.req_id_res = 2;
             let wire = encode_init(&params, false, &[], None).expect("encode InitSyn");
             let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own InitSyn")

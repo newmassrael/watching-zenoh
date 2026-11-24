@@ -6921,7 +6921,7 @@ async fn run_router_hat_until(
                 beacon: wz::runtime_tokio::multicast_glue::GroupBeacon {
                     lease_ms: 5_000,
                     join_interval_ms: 100,
-                    seq_num_res: params.seq_num_res,
+                    seq_num_res: params.seq_num_res.wire_code(),
                     req_id_res: 0x02,
                     batch_size: 2_048,
                 },

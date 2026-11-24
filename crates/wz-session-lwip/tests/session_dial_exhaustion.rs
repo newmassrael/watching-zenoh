@@ -101,7 +101,7 @@ fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,

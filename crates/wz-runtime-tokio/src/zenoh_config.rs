@@ -8881,12 +8881,23 @@ impl ZenohNodeConfig {
         const SN_RESOLUTION: &str = "transport/link/tx/sequence_number_resolution";
         const SN_RESOLUTION_EXPECTED: &str = "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"";
         if let Some(text) = want_string(&doc, SN_RESOLUTION, SN_RESOLUTION_EXPECTED)? {
-            out.sn_resolution = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
+            let width = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
                 ConfigIngestError::WrongType {
                     path: SN_RESOLUTION,
                     expected: SN_RESOLUTION_EXPECTED,
                 },
             )?;
+            // The key stands in for the `sn-resolution` policy, so it is held to the policy's
+            // domain: a width the build leaves out is one its sessions hold no word for
+            // (`wz_session_core::sn::Sn`), and is refused here rather than run on a narrower ring.
+            use wz_session_core::policy_binding::PolicyValue;
+            if !<crate::policy::SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                return Err(ConfigIngestError::OutOfRange {
+                    path: SN_RESOLUTION,
+                    value: text,
+                });
+            }
+            out.sn_resolution = width;
             named.push(SN_RESOLUTION);
         }
         if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
@@ -9499,6 +9510,34 @@ mod tests {
     /// Item 751 — read one `gateway/south` value the way an operator writes it.
     fn south(text: &str) -> Result<SouthPartition, ConfigIngestError> {
         gateway_south_of(&wz_session_core::json5::parse(text).expect("the value is JSON5"))
+    }
+
+    /// The width `transport/link/tx/sequence_number_resolution` states is held to the build's
+    /// `sn-resolution` domain as the policy is: each width the domain holds is read, and each it
+    /// leaves out is refused at the key by name, so it never reaches a session.
+    #[test]
+    fn a_sequence_number_width_outside_the_domain_is_refused_at_the_key() {
+        use crate::policy::SnResolution;
+        use wz_session_core::policy_binding::PolicyValue;
+        for width in SnResolution::WIDTHS {
+            let doc = format!(
+                r#"{{ "transport": {{ "link": {{ "tx": {{ "sequence_number_resolution": "{}" }} }} }} }}"#,
+                width.zenoh_name()
+            );
+            let read = ZenohNodeConfig::from_json5(&doc).map(|ingest| ingest.config.sn_resolution);
+            if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                assert_eq!(read, Ok(width), "{doc}");
+            } else {
+                assert_eq!(
+                    read,
+                    Err(ConfigIngestError::OutOfRange {
+                        path: "transport/link/tx/sequence_number_resolution",
+                        value: width.zenoh_name().into(),
+                    }),
+                    "{doc}"
+                );
+            }
+        }
     }
 
     /// Item 751 — the preset, in each spelling the pinned zenohd starts on, and

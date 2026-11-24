@@ -16,7 +16,7 @@ use wz_session_core::wire_id::EntityId;
 
 use crate::WireKey;
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::policy::SessionPolicy;
+use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::WhatAmI;
@@ -185,8 +185,9 @@ pub struct GroupProfile {
     /// `transport/multicast/max_sessions`, or `None` for no cap of its own (zenoh-pico has none).
     /// Not beaconed: it bounds what this session admits.
     pub max_sessions: Option<usize>,
-    /// The 2-bit wire code of the sequence number resolution.
-    pub seq_num_res: u8,
+    /// The width of the sequence numbers the session's beacon states, a value of the
+    /// `sn-resolution` policy; the Join carries its two-bit code.
+    pub seq_num_res: SnResolution,
     /// The 2-bit wire code of the request id resolution.
     pub req_id_res: u8,
     /// The largest batch the session sends on the group.
@@ -232,7 +233,7 @@ impl GroupProfile {
             zid,
             lease_ms,
             join_interval_ms,
-            seq_num_res,
+            seq_num_res: seq_num_res.wire_code(),
             req_id_res,
             batch_size,
             is_qos,
@@ -340,7 +341,7 @@ mod tests {
             lease_ms: 7_000,
             join_interval_ms: 300,
             max_sessions: Some(5),
-            seq_num_res: 0x01,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits16,
             req_id_res: 0x03,
             batch_size: 1_500,
             is_qos: true,

@@ -27,7 +27,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::session_zid::SessionZid::from_array([0x11; 16]),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 1,
         batch_size: 1472,
         lease_ms: 10_000,

@@ -140,6 +140,7 @@ use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
+use wz_session_core::policy_binding::OutsideDomain;
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::push_build;
 use wz_session_core::sample::{QosLevel, SampleKind};
@@ -155,6 +156,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
+use wz_session_core::sn::sn_resolution_admitted;
 use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -473,6 +475,16 @@ pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
+/// Whether a session may run the widths of sequence numbers `config` states, its own and each
+/// group's: each is held to the build's `sn-resolution` domain
+/// (`wz_session_core::sn::sn_resolution_admitted`), the first one refused is the open's refusal.
+fn admit_sn_widths<E>(config: &CoopConfig<E>) -> Result<(), OpenError> {
+    sn_resolution_admitted(config.sn_resolution).map_err(OpenError::SnResolution)?;
+    config.groups.iter().try_for_each(|group| {
+        sn_resolution_admitted(group.profile.seq_num_res).map_err(OpenError::SnResolution)
+    })
+}
+
 /// The session limits a session `CoopEngine::open` opens from `config` holds its tables to: the
 /// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, read
 /// where the config holds it: only a value that owns limits of its own (a link's parameters, a
@@ -522,6 +534,10 @@ pub enum OpenError {
     /// at most the build's `MAX_TASKS`, and every one was taken, or none fits the task. Nothing of
     /// the link or the group stays.
     NoTask(SpawnRefusal),
+    /// A width of sequence numbers the config states, the session's or a group's, is one the
+    /// build's `sn-resolution` domain leaves out: the build holds no word for its ring. Nothing
+    /// was reserved, bound, joined or dialled.
+    SnResolution(OutsideDomain<SnResolution>),
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -2917,7 +2933,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let params = SessionInitParams {
             whatami: self.config.whatami,
             zid: self.transport.wire_zid,
-            seq_num_res: self.config.sn_resolution.wire_code(),
+            seq_num_res: self.config.sn_resolution,
             req_id_res: 2,
             batch_size: self.config.batch_size,
             lease_ms: self.config.lease_ms,
@@ -4005,6 +4021,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plan: from,
         } = storage;
         let (config, write_endpoints) = source.into_parts();
+        admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]

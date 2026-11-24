@@ -166,7 +166,7 @@ impl InitCaps {
     /// What `params` advertises as it stands, as an InitSyn does.
     pub fn of(params: &SessionInitParams) -> Self {
         Self {
-            seq_num_res: params.seq_num_res,
+            seq_num_res: params.seq_num_res.wire_code(),
             req_id_res: params.req_id_res,
             // R311kj — the wire NEVER carries the internal 0 = "unset"
             // sentinel (a pico peer would adopt it and size a 0-byte TX
@@ -1061,7 +1061,7 @@ mod tests {
         crate::session_init_params::SessionInitParams {
             whatami: WhatAmI::Peer,
             zid: crate::session_zid::SessionZid::from_array([0x01; 4]),
-            seq_num_res: 0,
+            seq_num_res: crate::policy::SnResolution::Bits8,
             req_id_res: 0,
             batch_size: 0,
             lease_ms,

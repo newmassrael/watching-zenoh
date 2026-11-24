@@ -5687,6 +5687,7 @@ id = "sn-resolution"
 kind = "choice"
 kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
+wire_codes = { bits-32 = 2, bits-8 = 0, bits-16 = 1, bits-64 = 3 }
 default = "bits-32"
 upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
 scope = "session"
