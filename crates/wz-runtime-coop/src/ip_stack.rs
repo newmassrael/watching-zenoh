@@ -31,7 +31,7 @@ use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
+    BoxedLinkDriver, LinkEnds, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
     TxSlotGrant,
 };
 #[cfg(feature = "alloc")]
@@ -209,8 +209,8 @@ where
         either!(self, link => link.close_blocking())
     }
 
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        either!(self, link => link.link_endpoints())
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
+        either!(self, link => link.link_ends())
     }
 
     /// The kind of link it is, which a connectivity plane reports (whether the link is streamed,
@@ -1266,6 +1266,8 @@ mod tests {
     use core::ffi::c_int;
     #[cfg(feature = "session-slot")]
     use wz_session_core::byte_cells::ByteCells;
+    #[cfg(any(feature = "alloc", feature = "session-slot"))]
+    use wz_session_core::link::LinkEndsText;
 
     use core::net::{Ipv4Addr, Ipv6Addr};
 
@@ -1590,7 +1592,7 @@ mod tests {
         assert!(matches!(udp, IpDriver::Udp(_)));
         assert!(!udp.batch_length_prefixed());
         assert_eq!(
-            udp.link_endpoints().map(|ends| ends.dst.as_str()),
+            udp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("udp/10.0.0.1:7447")
         );
         drop(udp);
@@ -1598,7 +1600,7 @@ mod tests {
         assert!(matches!(tcp, IpDriver::Tcp(_)));
         assert!(tcp.batch_length_prefixed(), "a stream frames its batches");
         assert_eq!(
-            tcp.link_endpoints().map(|ends| ends.dst.as_str()),
+            tcp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("tcp/10.0.0.1:7447")
         );
         assert_eq!(tcp.link_rx_capacity(), 66);
@@ -1632,7 +1634,7 @@ mod tests {
         drop(udp);
         let tcp = stack.bind(Locator::tcp(ROUTER_V6)).expect("a stream link");
         assert_eq!(
-            tcp.link_endpoints().map(|ends| ends.src.as_str()),
+            tcp.link_endpoints().as_ref().map(|ends| ends.src.as_str()),
             Some("tcp/[::1]:40002")
         );
         drop(tcp);
@@ -1869,7 +1871,7 @@ mod tests {
         assert_eq!(kind(&udp), Some(wz_session_core::link::LinkKind::Udp));
         assert!(!udp.batch_length_prefixed());
         assert_eq!(
-            udp.link_endpoints().map(|ends| ends.dst.as_str()),
+            udp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("udp/10.0.0.1:7447")
         );
         let tcp = links
@@ -1879,7 +1881,7 @@ mod tests {
         assert_eq!(kind(&tcp), Some(wz_session_core::link::LinkKind::Tcp));
         assert!(tcp.batch_length_prefixed(), "a stream frames its batches");
         assert_eq!(
-            tcp.link_endpoints().map(|ends| ends.dst.as_str()),
+            tcp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("tcp/10.0.0.1:7447")
         );
         assert_eq!(
@@ -2112,7 +2114,7 @@ mod tests {
             .expect("a stream link")
             .sink;
         assert_eq!(
-            tcp.link_endpoints().map(|ends| ends.dst.as_str()),
+            tcp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("tcp/[fd00::1]:7447")
         );
 
@@ -2142,7 +2144,7 @@ mod tests {
             .sink;
         assert_eq!(kind(&tls), Some(wz_session_core::link::LinkKind::Tls));
         assert_eq!(
-            tls.link_endpoints().map(|ends| ends.dst.as_str()),
+            tls.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("tls/10.0.0.1:7447")
         );
         assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
@@ -2273,7 +2275,7 @@ mod tests {
             .sink;
         assert_eq!(kind(&tls), Some(wz_session_core::link::LinkKind::Tls));
         assert_eq!(
-            tls.link_endpoints().map(|ends| ends.dst.as_str()),
+            tls.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
             Some("tls/10.0.0.1:7447")
         );
         assert_eq!(tls.peer_credential_zid(), Some(PROVEN));

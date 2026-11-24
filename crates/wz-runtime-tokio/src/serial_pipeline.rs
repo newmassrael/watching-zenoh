@@ -112,13 +112,13 @@ use tokio::io::{
 };
 use tokio_serial::SerialStream;
 
-use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::link_interfaces::{addressless_link_ends, addressless_link_subject};
 use crate::sync::Mutex;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{KeptLinkEnds, LinkKind, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
-use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame_stuffing, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameError,
@@ -952,7 +952,7 @@ pub fn wire_serial_stream(
     // The one upstream behaviour deliberately NOT reproduced is its LISTENER side,
     // which puts a random UUIDv4 in `dst` (`unicast.rs:329-333`). That string is
     // not a locator anything can dial, which violates the contract on
-    // `BoxedLinkDriver::link_endpoints`; and wz has no wired serial acceptor to
+    // `BoxedLinkDriver::link_ends`; and wz has no wired serial acceptor to
     // apply it to anyway (`session_open.rs:2048` — a serial accept is a tty open,
     // not a listen bind).
     let locator = endpoint.locator_address_with_config();
@@ -963,11 +963,7 @@ pub fn wire_serial_stream(
         // it can upstream. See [`serial_interface_names`] for why this is the
         // link's device rather than the whole system's port list.
         addressless_link_subject(LinkKind::Serial, serial_interface_names(endpoint)),
-        Some(addressless_link_endpoints(
-            LinkKind::Serial,
-            &locator,
-            &locator,
-        )),
+        Some(addressless_link_ends(LinkKind::Serial, &locator, &locator)),
     ));
     (inbound, outbound, writer_handle)
 }
@@ -1152,7 +1148,7 @@ pub struct SerialWriteDriver {
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
-    endpoints: Option<LinkEndpoints>,
+    endpoints: Option<KeptLinkEnds>,
 }
 
 /// R3239 — the outbound queue a serial link's write half and its
@@ -1180,7 +1176,7 @@ impl SerialWriteDriver {
     pub fn new(
         tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
-        endpoints: Option<LinkEndpoints>,
+        endpoints: Option<KeptLinkEnds>,
     ) -> Self {
         Self {
             tx,
@@ -1207,8 +1203,10 @@ impl BoxedLinkDriver for SerialWriteDriver {
     }
 
     // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.as_ref()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.endpoints
+            .as_ref()
+            .map(wz_session_core::link::KeptLinkEnds::ends)
     }
 
     // The writer queue stamps the end of every write; see the stream driver.

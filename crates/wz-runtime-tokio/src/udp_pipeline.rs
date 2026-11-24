@@ -97,12 +97,12 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 // re-export hop. The link pipeline is transport-agnostic (a multicast deploy
 // binds a UDP multicast socket too), so it must not depend on the
 // `transport-unicast`-gated `session_glue`.
-use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_interfaces::{ip_link_ends, ip_link_subject};
 use crate::link_socket::LinkSocket;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{KeptLinkEnds, LinkKind, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
-use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -779,7 +779,7 @@ pub fn wire_udp_socket(
     // every outbound datagram is addressed to, so the DST is known exactly; the
     // SRC is this face's own socket. Both ends known means no `None` arm here
     // beyond a failed `local_addr` syscall.
-    let endpoints = ip_link_endpoints(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
+    let endpoints = ip_link_ends(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
     // Item 902 — a write that fails is a lost link: the writer trips the latch,
     // the read driver reports it.
     let (fault, watch) = DatagramWriteFault::channel();
@@ -823,7 +823,7 @@ pub fn wire_udp_demuxed(
     // R311y474 — the adminspace `{src,dst}` pair. The SRC is the SHARED listener
     // socket's address (every demux face reports the same one, which is the truth:
     // they are one socket), and the DST is this face's own demultiplexed peer.
-    let endpoints = ip_link_endpoints(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
+    let endpoints = ip_link_ends(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
     // Item 902 — one latch per FACE, not per listener: the faces share a socket
     // and a pump, and a write that failed to this peer is this peer's loss.
     let (fault, watch) = DatagramWriteFault::channel();
@@ -1147,7 +1147,7 @@ pub struct UdpWriteDriver {
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
-    endpoints: Option<LinkEndpoints>,
+    endpoints: Option<KeptLinkEnds>,
     /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy` (ARCHITECTURE section 9.1: the session encodes a
     /// datagram straight into the slot the writer sends).
@@ -1162,7 +1162,7 @@ impl UdpWriteDriver {
     pub fn new(
         tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
-        endpoints: Option<LinkEndpoints>,
+        endpoints: Option<KeptLinkEnds>,
     ) -> Self {
         Self {
             tx,
@@ -1181,8 +1181,10 @@ impl BoxedLinkDriver for UdpWriteDriver {
     }
 
     // R311y474 — the adminspace `{src,dst}` pair resolved at open. A field read.
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.as_ref()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.endpoints
+            .as_ref()
+            .map(wz_session_core::link::KeptLinkEnds::ends)
     }
 
     // The writer queue stamps the end of every write; see the stream driver.

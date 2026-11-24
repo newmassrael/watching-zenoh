@@ -45,7 +45,7 @@ pub use wz_session_core::app_transport::{
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::link::LinkKind;
 
-use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::link_interfaces::{addressless_link_ends, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 
@@ -357,9 +357,7 @@ pub fn wire_app_stream(
     // The adminspace `{src,dst}` pair, when the program named both ends (an accepted stream);
     // a dialled one has no local address this side knows.
     let endpoints = match (stream.local_address(), stream.remote_address()) {
-        (Some(local), Some(remote)) => {
-            Some(addressless_link_endpoints(LinkKind::Tcp, local, remote))
-        }
+        (Some(local), Some(remote)) => Some(addressless_link_ends(LinkKind::Tcp, local, remote)),
         _ => None,
     };
     let (reader, writer) = stream.into_split();
