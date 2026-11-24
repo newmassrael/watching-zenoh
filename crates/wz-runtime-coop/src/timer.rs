@@ -193,6 +193,20 @@ impl TimerQueue {
         ))))
     }
 
+    /// The table of a runtime made for `timers` deadlines at once: a table of no entries for 0,
+    /// made with no reservation at all, and [`Self::reserved`] otherwise. Always inlined, so a
+    /// runtime whose maker states its count as a constant links only the making of that count: a
+    /// build in which no task sleeps reserves no entry and links no reservation of entries.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[inline(always)]
+    pub(crate) fn of_rows(timers: usize) -> Self {
+        if timers == 0 {
+            Self::over(Slots::Owned(Mutex::new(RefCell::new(Vec::new()))))
+        } else {
+            Self::reserved(timers)
+        }
+    }
+
     /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
     /// runs no code but this module's: a waker it takes out is woken or dropped after.
     fn with_slots<R>(&self, cs: CriticalSection<'_>, f: impl FnOnce(&mut [TimerSlot]) -> R) -> R {
@@ -445,6 +459,25 @@ mod tests {
         assert!(growing.register(2, noop_waker()));
         assert_eq!((growing.capacity(), growing.refusals()), (2, 0));
         assert_eq!(growing.pending_count(), 2);
+    }
+
+    /// A table made for no deadline has no entry and refuses a sleep one, counted, which then ends
+    /// by polling; one made for some has as many.
+    ///
+    /// # Control
+    ///
+    /// A making that reserved entries for a count of 0 reds the capacity of the first.
+    #[test]
+    fn a_table_made_for_no_deadline_has_no_entry_and_refuses_a_sleep_one() {
+        let none = TimerQueue::of_rows(0);
+        assert_eq!(none.capacity(), 0);
+        assert!(!none.register(5, noop_waker()));
+        assert_eq!(none.refusals(), 1);
+        assert_eq!(none.next_deadline_us(), None);
+        let some = TimerQueue::of_rows(3);
+        assert_eq!(some.capacity(), 3);
+        assert!(some.register(5, noop_waker()));
+        assert_eq!(some.next_deadline_us(), Some(5));
     }
 
     /// A queue no deadline was placed in walks no table: a pass and a look ahead answer at once,

@@ -3507,8 +3507,10 @@ help = '''
 The most timers a runtime holds: a ceiling on the timer table a
 fixed-memory image declares, checked as the task ceiling is, and the entries
 of the timer table a session of the C ABI's cooperative engine reserves when
-it opens. A sleep past them is refused an entry and counted, and ends by
-polling.
+it opens in a build with a feature whose task sleeps on the session's runtime.
+A session keeps its own deadlines, and no feature of that engine spawns a task
+that sleeps, so its sessions reserve no entry. A sleep past them is refused an
+entry and counted, and ends by polling.
 '''
 
 [limit.upstream]

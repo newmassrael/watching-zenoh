@@ -3,7 +3,8 @@
 
 //! The tables a session's runtime reserves when it opens (`RuntimeTables`): a task cell for each
 //! link the config admits, in the bytes a link's session task takes, held with the groups' cells to
-//! the build's `MAX_TASKS`; and the build's `MAX_TIMERS` deadlines.
+//! the build's `MAX_TASKS`; and the deadlines a task of the build that sleeps places
+//! (`RUNTIME_TIMERS`): none in a build none of whose tasks sleeps.
 
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::CoopLocalSet;
@@ -11,7 +12,7 @@ use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
 use super::client_config;
-use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables};
+use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIMERS};
 use crate::CoopConfig;
 
 /// A read's waits are reserved at the open for every link the session may wait on at once: each
@@ -53,7 +54,30 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.groups, 0, "the config joins no group");
     assert_eq!(tables.rows.task_bytes, link_task_bytes::<PosixClock>());
     assert!(tables.rows.task_bytes > 0, "a session's task has bytes");
-    assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
+    assert_eq!(tables.rows.timers, RUNTIME_TIMERS);
+}
+
+/// The timer table a session's runtime reserves is the build's `MAX_TIMERS` entries only where a
+/// feature spawns a task that sleeps on the runtime, and none otherwise: a session keeps its own
+/// deadlines, so a table no task places a deadline in is not reserved.
+///
+/// # Control
+///
+/// A runtime made of a hand count of timers, the build's `MAX_TIMERS` in a build none of whose
+/// tasks sleeps, reds the capacity of its table.
+#[test]
+fn a_sessions_runtime_reserves_timers_only_for_a_task_that_sleeps() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    });
+    let runtime = tables.runtime(PosixClock);
+    assert_eq!(runtime.timers().capacity(), RUNTIME_TIMERS);
+    assert_eq!(runtime.timers().next_deadline_us(), None);
+    assert_eq!(
+        RUNTIME_TIMERS, 0,
+        "no feature of this engine spawns a task that sleeps"
+    );
 }
 
 /// A listener reserves a cell for each face it admits, a link in its handshake among them, and for

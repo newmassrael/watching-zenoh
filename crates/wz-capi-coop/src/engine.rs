@@ -2625,6 +2625,19 @@ pub(crate) fn read_wait_room(config: &CoopConfig<impl EndpointList>) -> usize {
         .saturating_add(config.groups.len())
 }
 
+/// The deadlines a session's runtime holds at once: the entries of its timer table, which only a
+/// task that sleeps or times out on the runtime (`CoopTime`'s `sleep` and `timeout`) places a
+/// deadline in. A session keeps its own deadlines (the lease, the keep-alive, the next dial, the idle
+/// wait) in places of its own and reads them off the clock at each step, so the table is the
+/// build's `MAX_TIMERS` entries only in a build with a feature whose task sleeps on the runtime,
+/// and none otherwise, with no making of a table linked.
+pub(crate) const RUNTIME_TIMERS: usize = if TASKS_SLEEP { caps::MAX_TIMERS } else { 0 };
+
+/// Whether a feature of the build spawns a task that sleeps or times out on the session's runtime.
+/// The `cfg` names every such feature, and no feature of this engine is one: a feature that
+/// spawns such a task names itself here.
+const TASKS_SLEEP: bool = cfg!(any());
+
 /// What a session's runtime reserves when the session opens (`Self::runtime`), from the build's
 /// limits and the faces its config admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2632,7 +2645,7 @@ pub(crate) struct RuntimeTables {
     /// Reserved at once: a task cell for each face the session may hold at once (the dial role's
     /// when it dials, and each `max_faces` admits, a link in its handshake among them: a link
     /// taken off a port past them is closed before it has a task), in the bytes a link's session task takes
-    /// (`link_task_bytes`), and `MAX_TIMERS` deadlines.
+    /// (`link_task_bytes`), and `RUNTIME_TIMERS` deadlines.
     pub(crate) rows: RuntimeRows,
     /// The cells the open may add, one for each group it joins: a group's task is a future no
     /// type names, so its cell takes the bytes the task has when the open spawns it.
@@ -2652,7 +2665,7 @@ impl RuntimeTables {
             rows: RuntimeRows {
                 tasks: links,
                 task_bytes: link_task_bytes::<C>(),
-                timers: caps::MAX_TIMERS,
+                timers: RUNTIME_TIMERS,
             },
             groups,
         }
@@ -2667,15 +2680,21 @@ impl RuntimeTables {
     /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
     /// walk of a table of many cells.
     pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
+        // The timers are stated as the constant they are, so the making of the timer table is that
+        // of the build's count alone (`CoopRuntime::reserved`).
+        let rows = RuntimeRows {
+            timers: RUNTIME_TIMERS,
+            ..self.rows
+        };
         #[cfg(feature = "group")]
         {
-            CoopRuntime::opening(clock, self.rows, self.groups)
+            CoopRuntime::opening(clock, rows, self.groups)
         }
         #[cfg(not(feature = "group"))]
         {
             let rows = RuntimeRows {
-                tasks: self.rows.tasks.saturating_add(self.groups),
-                ..self.rows
+                tasks: rows.tasks.saturating_add(self.groups),
+                ..rows
             };
             #[cfg(feature = "listen")]
             {

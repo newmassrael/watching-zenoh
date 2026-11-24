@@ -568,7 +568,9 @@ pub const MAX_TASKS: usize = generated::MAX_TASKS;
 /// The most timers a fixed-memory machine's runtime may hold (the deploy
 /// `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
 /// `TIMERS`, held the same way as [`MAX_TASKS`]; and the entries of the timer table a session
-/// of the C ABI's cooperative engine reserves when it opens.
+/// of the C ABI's cooperative engine reserves when it opens in a build with a feature whose task
+/// sleeps on the session's runtime, which none of that engine's features is, so its sessions
+/// reserve none.
 pub const MAX_TIMERS: usize = generated::MAX_TIMERS;
 
 /// The periodic jobs a session of the C ABI's cooperative engine runs at once (the deploy
