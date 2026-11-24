@@ -35,7 +35,7 @@ use super::super::options::{
     AdvancedSubscriberOptions, DeclarationForms, EntityForm, HistoryConfig, RecoveryConfig,
     SubscriberDetection,
 };
-use super::super::state::{Delivery, MissHandlers, State};
+use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
 use super::{EngineSubscriber, HostError};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
@@ -990,6 +990,15 @@ fn shared_on(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
 ) -> Arc<super::Shared<dyn SessionEngine>> {
+    shared_on_key(script, delivered, "demo/data")
+}
+
+/// [`shared_on`] subscribing to `base`.
+fn shared_on_key(
+    script: &Arc<Script>,
+    delivered: &Arc<Mutex<Vec<u8>>>,
+    base: &str,
+) -> Arc<super::Shared<dyn SessionEngine>> {
     let d = Arc::clone(delivered);
     let state = State::new(
         Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
@@ -1000,7 +1009,7 @@ fn shared_on(
     Arc::new(super::Shared::new(
         Arc::downgrade(&engine(script)),
         state,
-        "demo/data".into(),
+        base.into(),
         Locality::SessionLocal,
         1_000,
     ))
@@ -1149,5 +1158,159 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     assert_eq!(
         opts.sent_parameters().as_deref(),
         Some(crate::advanced_subscriber::plans::history_selector(Some(4), Some(1.5)).as_bytes()),
+    );
+}
+
+/// The keys of a history get and of a source's get are written where the issuer keeps them: no
+/// memory is taken, and each is the text the owned spelling builds.
+#[test]
+fn a_gets_key_is_written_in_place_and_takes_no_memory() {
+    let before = allocations();
+    let history = super::history_key("demo/data");
+    let recovery = super::recovery_key("demo/data", &[0x02], 7);
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "writing a get's key allocates nothing");
+    assert_eq!(
+        history.finish().ok(),
+        Some(crate::advanced_ke::history_get_ke("demo/data").as_str())
+    );
+    assert_eq!(
+        recovery.finish().ok(),
+        Some(crate::advanced_ke::recovery_get_ke("demo/data", &publisher_hex(), 7).as_str())
+    );
+}
+
+/// A subscription whose history key is longer than any key a session stores asks no get: the
+/// get is over before it starts, which hands on what the history held back.
+#[test]
+fn a_history_get_whose_key_does_not_fit_ends_at_once() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let base = "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES);
+    let shared = shared_on_key(&script, &delivered, &base);
+    let mut live = sample(0, 10);
+    live.keyexpr = base.clone();
+    assert!(
+        shared.lock().handle_live(&live, 1).is_none(),
+        "a live sample during the history asks nothing"
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "a live sample is held while the history is in flight"
+    );
+
+    super::issue_history_query(&shared, None, None);
+
+    assert_eq!(script.get_count(), 0, "no get is asked of the engine");
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [10],
+        "the history's end handed on what it held"
+    );
+}
+
+/// What the lent callbacks of a machine saw.
+#[derive(Default)]
+struct Seen {
+    samples: AtomicU64,
+    last: AtomicU64,
+    missed: AtomicU64,
+    dropped: AtomicU64,
+}
+
+/// # Safety
+/// `context` is a live `Seen`.
+unsafe fn seen_sample(context: *mut core::ffi::c_void, sample: Delivery<'_>) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.samples.fetch_add(1, Ordering::SeqCst);
+    seen.last
+        .store(u64::from(sample.view().payload()[0]), Ordering::SeqCst);
+}
+
+/// # Safety
+/// As [`seen_sample`]'s.
+unsafe fn seen_miss(context: *mut core::ffi::c_void, miss: Miss) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.missed
+        .fetch_add(u64::from(miss.nb()), Ordering::SeqCst);
+}
+
+/// # Safety
+/// As [`seen_sample`]'s.
+unsafe fn seen_drop(context: *mut core::ffi::c_void) {
+    // SAFETY: the caller's.
+    let seen = unsafe { &*context.cast_const().cast::<Seen>() };
+    seen.dropped.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A machine whose sample callback and first miss listener are lent takes no memory for them: it
+/// calls each through its context, the lent listener hears a miss before one registered after it,
+/// retracting the lent listener lets its context go, and dropping the machine lets the sample
+/// callback's go, each once.
+#[test]
+fn lent_callbacks_take_no_memory_and_are_let_go_once() {
+    let seen = Seen::default();
+    let context = core::ptr::from_ref(&seen)
+        .cast_mut()
+        .cast::<core::ffi::c_void>();
+    let registered = Arc::new(Mutex::new(Vec::new()));
+
+    let before = allocations();
+    // SAFETY: `seen` outlives the machine, and every call is made on this thread.
+    let mut state = unsafe {
+        State::delivering_to(
+            OnSample::lent(seen_sample, context, Some(seen_drop)),
+            MissHandlers::lent(seen_miss, context, Some(seen_drop)),
+        )
+    };
+    let during = allocations() - before;
+    assert_eq!(during, 0, "lent callbacks allocate nothing");
+
+    let r = Arc::clone(&registered);
+    let second = state.miss_handlers().register(Box::new(move |miss: Miss| {
+        r.lock().unwrap().push(miss.nb());
+    }));
+    assert_ne!(second, 0, "the lent listener keeps its own id");
+    assert!(state.handle_live(&sample(0, 10), 1).is_none());
+    assert!(state.handle_live(&sample(2, 12), 2).is_none());
+    assert_eq!(
+        seen.samples.load(Ordering::SeqCst),
+        2,
+        "both samples delivered"
+    );
+    assert_eq!(seen.last.load(Ordering::SeqCst), 12);
+    assert_eq!(
+        seen.missed.load(Ordering::SeqCst),
+        1,
+        "the lent listener heard the hole"
+    );
+    assert_eq!(
+        *registered.lock().unwrap(),
+        [1],
+        "and so did the registered one"
+    );
+
+    state.miss_handlers().unregister(0);
+    assert_eq!(
+        seen.dropped.load(Ordering::SeqCst),
+        1,
+        "retracting it let it go"
+    );
+    assert!(state.handle_live(&sample(4, 14), 3).is_none());
+    assert_eq!(
+        seen.missed.load(Ordering::SeqCst),
+        1,
+        "a retracted listener hears nothing"
+    );
+    assert_eq!(*registered.lock().unwrap(), [1, 1]);
+
+    drop(state);
+    assert_eq!(
+        seen.dropped.load(Ordering::SeqCst),
+        2,
+        "the machine's drop let the sink go"
     );
 }
