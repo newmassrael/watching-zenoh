@@ -77,6 +77,10 @@ pub(crate) enum Kind {
         feature = "declarations-synced-event"
     ))]
     DeclWatch = 18,
+    /// A transport events listener, held while its session's hub can reach it
+    /// (`crate::connectivity::TransportPlace`).
+    #[cfg(feature = "connectivity")]
+    TransportEventsListener = 19,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -312,6 +316,11 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::DeclWatch,
             InSession::<crate::decl_watch::WatchPlace>::LAYOUT,
         )),
+        #[cfg(feature = "connectivity")]
+        Kind::TransportEventsListener => Some((
+            EntityKind::TransportEventsListener,
+            InSession::<crate::connectivity::TransportPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -351,6 +360,10 @@ const DECL_WATCH: Option<Kind> = Some(Kind::DeclWatch);
     ))
 ))]
 const DECL_WATCH: Option<Kind> = None;
+#[cfg(all(not(feature = "engine-tokio"), feature = "connectivity"))]
+const TRANSPORT_EVENTS: Option<Kind> = Some(Kind::TransportEventsListener);
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "connectivity")))]
+const TRANSPORT_EVENTS: Option<Kind> = None;
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
@@ -369,6 +382,7 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         LIVELINESS_GET,
         Some(Kind::MatchingListener),
         DECL_WATCH,
+        TRANSPORT_EVENTS,
     ]
     .into_iter()
     .flatten()

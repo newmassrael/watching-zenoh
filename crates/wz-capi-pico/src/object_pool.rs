@@ -62,8 +62,8 @@ pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 /// How many of each object the program holds at once, as it states them to reserve the pools.
 ///
 /// The entity counts (`publishers` to `liveliness_subscribers`, `queriers`, `keyexprs`, `gets`,
-/// `liveliness_gets`, `matching_listeners` and `decl_watches`) are per session; the rest are for all sessions
-/// together. Zero is read as the module says: the bound of the session's limit where one bounds
+/// `liveliness_gets`, `matching_listeners`, `decl_watches` and `transport_events_listeners`) are
+/// per session; the rest are for all sessions together. Zero is read as the module says: the bound of the session's limit where one bounds
 /// the object, none where none does. Every field is a `usize`, so the struct has no padding and a
 /// count lies whole before `struct_size` or past it.
 #[repr(C)]
@@ -121,6 +121,9 @@ pub struct wz_ext_object_pool_counts_t {
     /// Declaration watches of each session, at most its `MAX_DECL_WATCHES`; none taken in a build
     /// without the declaration watch.
     pub decl_watches: usize,
+    /// Transport events listeners of each session, at most its `MAX_TRANSPORT_EVENTS_LISTENERS`;
+    /// none taken in a build without `connectivity`.
+    pub transport_events_listeners: usize,
 }
 
 /// The bytes of the counts every program states, `struct_size` to `encodings`: the struct as it was
@@ -152,6 +155,7 @@ impl Default for wz_ext_object_pool_counts_t {
             liveliness_gets: 0,
             matching_listeners: 0,
             decl_watches: 0,
+            transport_events_listeners: 0,
         }
     }
 }
@@ -180,6 +184,7 @@ impl wz_ext_object_pool_counts_t {
             liveliness_gets: self.liveliness_gets,
             matching_listeners: self.matching_listeners,
             decl_watches: self.decl_watches,
+            transport_events_listeners: self.transport_events_listeners,
         }
     }
 }
@@ -411,6 +416,7 @@ mod tests {
             liveliness_gets: 18,
             matching_listeners: 19,
             decl_watches: 20,
+            transport_events_listeners: 21,
         };
         assert_eq!(
             stated.counts(),
@@ -435,6 +441,7 @@ mod tests {
                 liveliness_gets: 18,
                 matching_listeners: 19,
                 decl_watches: 20,
+                transport_events_listeners: 21,
             }
         );
     }
@@ -464,6 +471,7 @@ mod tests {
             liveliness_gets: 18,
             matching_listeners: 19,
             decl_watches: 20,
+            transport_events_listeners: 21,
         }
     }
 
@@ -473,7 +481,7 @@ mod tests {
         assert_eq!(COUNTS_BASE_BYTES, 17 * size_of::<usize>());
         assert_eq!(
             size_of::<wz_ext_object_pool_counts_t>(),
-            COUNTS_BASE_BYTES + 4 * size_of::<usize>()
+            COUNTS_BASE_BYTES + 5 * size_of::<usize>()
         );
         assert_eq!(
             wz_ext_object_pool_counts_t::default().struct_size,
@@ -483,7 +491,7 @@ mod tests {
 
     /// A program compiled before `gets` was added hands a struct that ends at `encodings`: its
     /// counts are read, and the bytes past its size, which are not its struct's, are not, so the
-    /// four later counts read as zero (their limits' bounds).
+    /// five later counts read as zero (their limits' bounds).
     #[test]
     fn an_older_struct_has_only_its_own_counts_read() {
         let older = every_count(COUNTS_BASE_BYTES);
@@ -496,10 +504,11 @@ mod tests {
                 liveliness_gets: 0,
                 matching_listeners: 0,
                 decl_watches: 0,
+                transport_events_listeners: 0,
                 ..every_count(COUNTS_BASE_BYTES)
             }
         );
-        // One count past the base: `gets` is the program's, the three after it are not.
+        // One count past the base: `gets` is the program's, the four after it are not.
         let one_more = COUNTS_BASE_BYTES + size_of::<usize>();
         // SAFETY: as above.
         let read = unsafe { stated(&every_count(one_more)) }.expect("read");

@@ -1979,15 +1979,16 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers, queriers,
- * keyexprs, gets, liveliness_gets, matching_listeners and decl_watches) are
- * per session and are multiplied by sessions; the rest are for all sessions
- * together. A session's subscribers, queryables, liveliness tokens,
- * liveliness subscribers, queriers, declared key expressions, pending gets
- * and liveliness gets, matching listeners and declaration watches are bounded
- * by the limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES,
- * MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS,
- * MAX_DECLARED_KEYEXPRS, MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS,
- * MAX_MATCHING_LISTENERS, MAX_DECL_WATCHES): a count of
+ * keyexprs, gets, liveliness_gets, matching_listeners, decl_watches and
+ * transport_events_listeners) are per session and are multiplied by sessions;
+ * the rest are for all sessions together. A session's subscribers,
+ * queryables, liveliness tokens, liveliness subscribers, queriers, declared
+ * key expressions, pending gets and liveliness gets, matching listeners,
+ * declaration watches and transport events listeners are bounded by the
+ * limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
+ * MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS, MAX_DECLARED_KEYEXPRS,
+ * MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS, MAX_MATCHING_LISTENERS,
+ * MAX_DECL_WATCHES, MAX_TRANSPORT_EVENTS_LISTENERS): a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
@@ -2047,6 +2048,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t liveliness_gets;
   size_t matching_listeners;
   size_t decl_watches;
+  size_t transport_events_listeners;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

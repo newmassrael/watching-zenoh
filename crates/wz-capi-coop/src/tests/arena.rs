@@ -2264,6 +2264,39 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
     assert_eq!(plan.entities().of_kind(EntityKind::DeclWatch), rows);
 }
 
+/// The ABI's places of transport events listeners are as many as
+/// `MAX_TRANSPORT_EVENTS_LISTENERS` admits in a build with `connectivity`, and none without it.
+/// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+#[test]
+fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::TransportEventsListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().transport_events_listeners;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "transport events listener places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(feature = "connectivity") {
+        assert!(
+            rows > 0,
+            "the build's limits admit transport events listeners"
+        );
+        assert_eq!(laid, Some(("MAX_TRANSPORT_EVENTS_LISTENERS", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without connectivity holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(
+        plan.entities().of_kind(EntityKind::TransportEventsListener),
+        rows
+    );
+}
+
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
 /// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
 /// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does

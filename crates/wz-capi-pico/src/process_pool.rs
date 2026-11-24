@@ -115,6 +115,8 @@ pub(crate) struct Counts {
     pub(crate) matching_listeners: usize,
     /// Declaration watches of each session.
     pub(crate) decl_watches: usize,
+    /// Transport events listeners of each session.
+    pub(crate) transport_events_listeners: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -188,6 +190,7 @@ pub(crate) struct Bounds {
     liveliness_gets: Option<usize>,
     matching_listeners: Option<usize>,
     decl_watches: Option<usize>,
+    transport_events_listeners: Option<usize>,
 }
 
 impl Bounds {
@@ -205,6 +208,7 @@ impl Bounds {
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
             matching_listeners: limits.max_matching_listeners().most(),
             decl_watches: limits.max_decl_watches().most(),
+            transport_events_listeners: limits.max_transport_events_listeners().most(),
         }
     }
 }
@@ -332,12 +336,18 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.decl_watches,
             bounds.decl_watches,
         )),
+        transport_events_listeners: planned!(bounded(
+            cfg!(feature = "connectivity"),
+            sessions,
+            stated.transport_events_listeners,
+            bounds.transport_events_listeners,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 19;
+const KINDS: usize = 20;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,6 +444,13 @@ impl Plan {
         {
             plan =
                 plan.with::<crate::decl_watch::WatchPlace>(Kind::DeclWatch, objects.decl_watches);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        {
+            plan = plan.with::<crate::connectivity::TransportPlace>(
+                Kind::TransportEventsListener,
+                objects.transport_events_listeners,
+            );
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -955,6 +972,9 @@ const fn built_counts() -> Result<Counts, Unplanned> {
             limits.max_matching_listeners(),
         ),
         decl_watches: each::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches()),
+        transport_events_listeners: each::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+            limits.max_transport_events_listeners(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -982,6 +1002,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_gets: 0,
         matching_listeners: 0,
         decl_watches: 0,
+        transport_events_listeners: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1227,6 +1248,7 @@ mod tests {
         liveliness_gets: Some(9),
         matching_listeners: Some(10),
         decl_watches: Some(11),
+        transport_events_listeners: Some(12),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1240,6 +1262,7 @@ mod tests {
         liveliness_gets: None,
         matching_listeners: None,
         decl_watches: None,
+        transport_events_listeners: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1340,6 +1363,7 @@ mod tests {
             liveliness_gets: 1,
             matching_listeners: 1,
             decl_watches: 1,
+            transport_events_listeners: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1767,6 +1791,12 @@ mod tests {
             Kind::DeclWatch,
             core::mem::size_of::<crate::decl_watch::WatchPlace>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        row(
+            "transport_events_listener",
+            Kind::TransportEventsListener,
+            core::mem::size_of::<crate::connectivity::TransportPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1960,6 +1990,8 @@ mod tests {
             )
         ))]
         check(Kind::DeclWatch);
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        check(Kind::TransportEventsListener);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1987,6 +2019,10 @@ mod tests {
             limits.max_matching_listeners().most()
         );
         assert_eq!(bounds.decl_watches, limits.max_decl_watches().most());
+        assert_eq!(
+            bounds.transport_events_listeners,
+            limits.max_transport_events_listeners().most()
+        );
     }
 
     /// The free blocks of `order`, by their offsets, first to last.

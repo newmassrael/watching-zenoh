@@ -228,8 +228,8 @@ const HANDLE_ROWS: usize = 2;
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
 /// (`query`) and pending liveliness gets (`liveliness-get`), matching listeners, and declaration
-/// watches (`remote-declaration-watch` or `declarations-synced-event`), as many as the ABI asks
-/// places of, at most these.
+/// watches (`remote-declaration-watch` or `declarations-synced-event`), and transport events
+/// listeners (`connectivity`), as many as the ABI asks places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
     * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
@@ -238,7 +238,8 @@ const ENTITY_PLACE_ROWS: usize = 2
         + cfg!(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
-        )) as usize);
+        )) as usize
+        + cfg!(feature = "connectivity") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -311,6 +312,11 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "declaration watch place flags",
             "declaration watch places",
             "MAX_DECL_WATCHES",
+        ),
+        EntityKind::TransportEventsListener => (
+            "transport events listener place flags",
+            "transport events listener places",
+            "MAX_TRANSPORT_EVENTS_LISTENERS",
         ),
     }
 }
@@ -438,6 +444,9 @@ pub struct EntityRows {
     /// The declaration watches (`MAX_DECL_WATCHES`); none in a build with neither
     /// `remote-declaration-watch` nor `declarations-synced-event`.
     pub decl_watches: usize,
+    /// The transport events listeners (`MAX_TRANSPORT_EVENTS_LISTENERS`); none in a build
+    /// without `connectivity`.
+    pub transport_events_listeners: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -528,6 +537,7 @@ impl EntityRows {
             EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
             EntityKind::MatchingListener => self.matching_listeners,
             EntityKind::DeclWatch => self.decl_watches,
+            EntityKind::TransportEventsListener => self.transport_events_listeners,
         }
     }
 
@@ -1753,6 +1763,14 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             feature = "declarations-synced-event"
         )) {
             lent::<{ caps::MAX_DECL_WATCHES }>("MAX_DECL_WATCHES", limits.max_decl_watches())?
+        } else {
+            0
+        },
+        transport_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+                "MAX_TRANSPORT_EVENTS_LISTENERS",
+                limits.max_transport_events_listeners(),
+            )?
         } else {
             0
         },
