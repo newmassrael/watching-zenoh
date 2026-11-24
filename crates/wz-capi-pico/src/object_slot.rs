@@ -61,6 +61,12 @@ pub(crate) enum Kind {
     Keyexpr = 13,
     /// An encoding the program holds (`z_owned_encoding_t`), its schema in the slot.
     Encoding = 14,
+    /// A get the program issued, held until its last leg ends (`crate::get::GetPlace`).
+    #[cfg(feature = "query")]
+    Get = 15,
+    /// A liveliness get the program issued, held as a get is.
+    #[cfg(feature = "liveliness-get")]
+    LivelinessGet = 16,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -252,7 +258,7 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
         )),
         Kind::Subscriber => Some((
             EntityKind::Subscriber,
-            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
         )),
         #[cfg(feature = "queryable")]
         Kind::Queryable => Some((
@@ -267,12 +273,22 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
         #[cfg(feature = "liveliness")]
         Kind::LivelinessSubscriber => Some((
             EntityKind::LivelinessSubscriber,
-            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
         )),
         #[cfg(feature = "query")]
         Kind::Querier => Some((
             EntityKind::Querier,
             InSession::<Answering<crate::querier::QuerierState>>::LAYOUT,
+        )),
+        #[cfg(feature = "query")]
+        Kind::Get => Some((
+            EntityKind::PendingGet,
+            InSession::<crate::get::GetPlace>::LAYOUT,
+        )),
+        #[cfg(feature = "liveliness-get")]
+        Kind::LivelinessGet => Some((
+            EntityKind::PendingLivelinessGet,
+            InSession::<crate::get::GetPlace>::LAYOUT,
         )),
         _ => None,
     }
@@ -290,22 +306,29 @@ const LIVELINESS: [Option<Kind>; 2] = [
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness")))]
 const LIVELINESS: [Option<Kind>; 2] = [None, None];
 #[cfg(all(not(feature = "engine-tokio"), feature = "query"))]
-const QUERIER: Option<Kind> = Some(Kind::Querier);
+const QUERIER: [Option<Kind>; 2] = [Some(Kind::Querier), Some(Kind::Get)];
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "query")))]
-const QUERIER: Option<Kind> = None;
+const QUERIER: [Option<Kind>; 2] = [None, None];
+#[cfg(all(not(feature = "engine-tokio"), feature = "liveliness-get"))]
+const LIVELINESS_GET: Option<Kind> = Some(Kind::LivelinessGet);
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness-get")))]
+const LIVELINESS_GET: Option<Kind> = None;
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
 #[cfg(not(feature = "engine-tokio"))]
 fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
     let [token, liveliness_subscriber] = LIVELINESS;
+    let [querier, get] = QUERIER;
     [
         Some(Kind::Publisher),
         Some(Kind::Subscriber),
         QUERYABLE,
         token,
         liveliness_subscriber,
-        QUERIER,
+        querier,
+        get,
+        LIVELINESS_GET,
     ]
     .into_iter()
     .flatten()
@@ -325,28 +348,21 @@ pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::H
 }
 
 /// An entity's object, the count of the program's closures it answers for (a querier's gets, a
-/// queryable's closure), and what those closures keep in the place past the object (`K`: a
-/// queryable's C closure, which its row calls), inline in the entity's place. The handle of the
+/// queryable's or a subscriber's closure), and what those closures keep in the place past the
+/// object (`K`: the C closure a queryable's or a subscriber's row calls), inline in the entity's
+/// place. The handle of the
 /// object is the place itself, the object first, so a handle read as a `T` reads the object. The
 /// owner's release lets go of the object and leaves the place, with the count and what is kept in
 /// it, to the last closure still held ([`retire_entity`]), so a closure let go of after its owner
 /// (an undeclare made from inside its own callback) finds both standing, and no closure takes
 /// memory of its own.
-///
-/// Its holders are the entities whose closures are counted so, so it exists where they do.
-#[cfg(any(feature = "query", feature = "queryable"))]
 #[repr(C)]
 pub(crate) struct Answering<T, K = ()> {
     value: core::mem::ManuallyDrop<T>,
     open: crate::ffi::OpenClosures,
-    #[cfg(feature = "queryable")]
     kept: core::mem::ManuallyDrop<K>,
-    // Only a queryable's closure keeps something in its place.
-    #[cfg(not(feature = "queryable"))]
-    kept: core::marker::PhantomData<K>,
 }
 
-#[cfg(feature = "queryable")]
 impl<T, K> Answering<T, K> {
     /// `value`, keeping `kept` for its closures, with none counted yet.
     pub(crate) fn keeping(value: T, kept: K) -> Self {
@@ -365,10 +381,7 @@ impl<T> Answering<T> {
         Self {
             value: core::mem::ManuallyDrop::new(value),
             open: crate::ffi::OpenClosures::default(),
-            #[cfg(feature = "queryable")]
             kept: core::mem::ManuallyDrop::new(()),
-            #[cfg(not(feature = "queryable"))]
-            kept: core::marker::PhantomData,
         }
     }
 }
@@ -378,7 +391,6 @@ impl<T> Answering<T> {
 ///
 /// # Safety
 /// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`].
-#[cfg(any(feature = "query", feature = "queryable"))]
 pub(crate) unsafe fn closures_of<'a, T, K>(object: *const T) -> &'a crate::ffi::OpenClosures {
     // SAFETY: the caller's: the count stands while the place does.
     unsafe { &(*object.cast::<Answering<T, K>>()).open }
@@ -389,7 +401,6 @@ pub(crate) unsafe fn closures_of<'a, T, K>(object: *const T) -> &'a crate::ffi::
 /// # Safety
 /// As [`closures_of`]; what is kept there is read and taken out only as the entity's closures
 /// say.
-#[cfg(feature = "queryable")]
 pub(crate) unsafe fn kept_at<T, K>(object: *const T) -> *mut K {
     let at = object.cast::<Answering<T, K>>().cast_mut();
     // SAFETY: the caller's: the place holds an `Answering<T, K>`; a `ManuallyDrop<K>` is a `K`.
@@ -402,7 +413,6 @@ pub(crate) unsafe fn kept_at<T, K>(object: *const T) -> *mut K {
 /// # Safety
 /// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`],
 /// whose owner has not let go of it.
-#[cfg(any(feature = "query", feature = "queryable"))]
 pub(crate) unsafe fn count_in_entity<T, K, C>(
     object: *const T,
     closure: &mut crate::ffi::CClosure<C>,
@@ -429,7 +439,6 @@ pub(crate) unsafe fn count_in_entity<T, K, C>(
 /// # Safety
 /// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`],
 /// let go of once, here, and not used again.
-#[cfg(any(feature = "query", feature = "queryable"))]
 pub(crate) unsafe fn retire_entity<T, K>(object: *mut T) {
     let at = object.cast::<Answering<T, K>>();
     // SAFETY: the caller's: the place holds an `Answering<T, K>` its owner lets go of once, here;
@@ -447,7 +456,6 @@ pub(crate) unsafe fn retire_entity<T, K>(object: *mut T) {
 /// # Safety
 /// `place` is an [`Answering<T, K>`]'s place whose object was dropped by [`retire_entity`], what
 /// it kept taken out by its closures, and in which no closure is counted; called once.
-#[cfg(any(feature = "query", feature = "queryable"))]
 unsafe fn give_back_answering<T, K>(place: NonNull<core::ffi::c_void>) {
     // SAFETY: the caller's: its count is all that is left to drop, and the place goes back once.
     unsafe { release_entity(place.cast::<Answering<T, K>>().as_ptr()) };

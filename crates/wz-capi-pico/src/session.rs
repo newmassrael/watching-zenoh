@@ -714,9 +714,10 @@ pub(crate) struct PicoSessionHandle {
     pub(crate) drive: HeldDrive,
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
-    /// The release latches of the closures the program declared with no handle to undeclare them
-    /// by (`z_declare_background_*`). A close waits on them, as an undeclare waits on its own; the
-    /// gets the session issued are counted beside the handle instead ([`SessionTail`]).
+    /// The release latches of the closures of an advanced subscriber run in the background
+    /// (`ze_declare_background_advanced_subscriber`). A close waits on them, as an undeclare waits
+    /// on its own; the gets the session issued and the background entities whose closures lie in
+    /// a place of the session's are counted beside the handle instead ([`SessionTail`]).
     background: crate::ffi::LatchList,
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
@@ -748,6 +749,7 @@ impl PicoSessionHandle {
     }
 
     /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
+    #[cfg(feature = "advanced")]
     pub(crate) fn keep_background(&self, latch: alloc::sync::Arc<crate::ffi::ReleaseLatch>) {
         self.background.keep(latch);
     }
@@ -848,7 +850,6 @@ unsafe fn session_tail<'a>(zs: *const z_loaned_session_t) -> &'a SessionTail {
 /// # Safety
 /// `zs` names a session [`open_session_handle`] read, whose handle is not let go of before what is
 /// counted is.
-#[cfg(any(feature = "query", feature = "queryable"))]
 pub(crate) unsafe fn session_count(zs: *const z_loaned_session_t) -> crate::ffi::CountIn {
     // SAFETY: the caller's: the session's place stands, as its handle is held.
     let tail = unsafe { session_tail(zs) };
@@ -2972,7 +2973,7 @@ pub unsafe extern "C" fn z_subscriber_id(
             crate::pubsub::z_loaned_subscriber_t,
             crate::pubsub::SubscriberState,
         >(subscriber)
-        .map(|s| (s.shared.zid(), s.id)),
+        .and_then(|s| Some((s.shared.zid(), s.id()?))),
     )
 }
 

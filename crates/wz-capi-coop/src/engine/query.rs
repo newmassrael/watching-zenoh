@@ -87,9 +87,14 @@ pub(crate) struct QueryableRow {
     retraction: Option<RetractionKey>,
     /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
     /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
-    /// session held. A build without groups reads none of it and holds it for that alone.
-    #[cfg_attr(not(feature = "group"), allow(dead_code))]
+    /// session held.
+    #[cfg(feature = "group")]
     wire: WireKey,
+    /// The key as the ABI named it, held for what it keeps alive alone (the declaration the ABI
+    /// made it on): a build without groups tells no one the key, and the declaration goes with
+    /// the row, let go of with no lock of the session held.
+    #[cfg(not(feature = "group"))]
+    _keeps: WireKey,
     /// The program's callback, called where the row lies through a shared borrow, with the holder
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
@@ -109,7 +114,10 @@ impl QueryableRow {
         Self {
             id,
             retraction,
+            #[cfg(feature = "group")]
             wire,
+            #[cfg(not(feature = "group"))]
+            _keeps: wire,
             sink,
             latch: CallLatch::new(),
         }

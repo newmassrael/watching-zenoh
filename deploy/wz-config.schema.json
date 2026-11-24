@@ -546,7 +546,7 @@
               "x-wz-wire": "none"
             },
             "MAX_QUERYABLES": {
-              "description": "The queryables a session holds at once.",
+              "description": "The queryables a session holds at once, a background one included until the session closes.",
               "oneOf": [
                 {
                   "type": "integer",
