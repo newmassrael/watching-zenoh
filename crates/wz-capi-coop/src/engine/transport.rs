@@ -7,6 +7,11 @@
 //! the session's to carry out ([`Core`]).
 
 use super::*;
+use wz_runtime_coop::face_life::{FaceRole, Turn};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::faces::Accepted;
+use wz_runtime_coop::faces::FaceRead;
+use wz_runtime_coop::session_drive::PendingDial;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_mcu::dial::parse_locator;
@@ -57,6 +62,23 @@ pub(super) struct TransportState<L: SessionLinks + 'static, C: ClockSource + 'st
     /// Where the session lends its Router to its links' receives, each link's task holding the
     /// place: lent for the length of a pass of the tasks and at no other time.
     pub(super) lend: RouterLend<SessionReassembly>,
+}
+
+/// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
+/// value, what the session does about its link, and the answer of its dial when one was asked.
+pub(super) struct FaceStep<P> {
+    pub(super) life: FaceLife,
+    pub(super) effect: FaceEffect,
+    pub(super) answer: DialAnswer<P>,
+}
+
+/// A dial of one of the session's endpoints, asked once as it is begun
+/// ([`TransportState::dial_row`]).
+pub(super) enum DialRow<D, P> {
+    /// Not answered yet: the steps that follow ask it.
+    Pending(Dial<D>),
+    /// Answered at once: the link it made, or why it was refused.
+    Answered(Result<OpenedLink<P>, LinkOpenError>),
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState<L, C> {
@@ -353,5 +375,124 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
             Link::Held { .. } => true,
             _ => false,
         }
+    }
+
+    /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us`, and
+    /// what the face does about it (`FaceLife`), `redials` when the session dials its endpoints
+    /// again: the session carries it out, with the answer of the dial when one was asked. A dial
+    /// that is over is let go of here, with what it held for its link (a socket, the link's
+    /// buffers), before the face is dialled anew.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn face_step(
+        &mut self,
+        at: usize,
+        id: FaceId,
+        redials: bool,
+        now_us: u64,
+    ) -> FaceStep<L::Pump> {
+        let role = if id == DIAL_FACE {
+            FaceRole::Dial
+        } else {
+            FaceRole::Taken
+        };
+        let FaceRead {
+            phase,
+            signals,
+            answer,
+        } = self.links.read_face(at, id);
+        let life = FaceLife::new(id, role, phase);
+        let turn = life.turn(now_us, signals);
+        if matches!(turn, Turn::DialOver { .. }) {
+            self.links.put_link(at, Link::Waiting { at_us: now_us });
+        }
+        let stood_by = self.stood_by(at, id, &turn);
+        let effect = life.effect(turn, redials, stood_by);
+        FaceStep {
+            life,
+            effect,
+            answer,
+        }
+    }
+
+    /// End the handshake of the face at `at` that failed, and say why: the Close its peer sent,
+    /// its task's end, or its deadline. Its task is told to stop, and ends in the session's next
+    /// pass of its tasks, before [`Self::handshake_failed`] lets the link go.
+    pub(super) fn end_handshake(&self, at: usize) -> Refusal {
+        let why = Refusal::from(self.links.handshake_end(at));
+        self.links.abort_link(at);
+        why
+    }
+
+    /// Let go of the link of the face at `at`, whose handshake failed for `why` and whose task
+    /// ended, the face waiting from `now_us`: the reason the face's next step (`then`) goes on
+    /// with, which names the endpoint dialled last when the face dials the next one.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn handshake_failed(
+        &mut self,
+        at: usize,
+        then: &Next,
+        why: Refusal,
+        now_us: u64,
+    ) -> OpenError {
+        self.links.put_link(at, Link::Waiting { at_us: now_us });
+        match then {
+            Next::DialFrom { from } => OpenError::Unreachable(EndpointRefusal::new(
+                self.endpoints.dial_text(from.saturating_sub(1)),
+                why,
+            )),
+            _ => OpenError::NoEndpoint,
+        }
+    }
+
+    /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
+    /// answered yet is handed back under way, and one answered at once with its answer.
+    /// [`OpenError::Unreachable`] when the endpoint does not parse or the network refuses the
+    /// dial at once.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn dial_row(&self, at: usize) -> Result<DialRow<L::Dial, L::Pump>, OpenError> {
+        let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
+        Ok(match pending.poll() {
+            None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
+            Some(answer) => DialRow::Answered(answer),
+        })
+    }
+
+    /// End the chains the peer of the face at `at` has under way in the session's Router, as its
+    /// link is lost: the Router the session's links share would otherwise splice the fragments of
+    /// the peer's next link onto them.
+    pub(super) fn end_peer_chains(&mut self, at: usize) {
+        let peer = self
+            .links
+            .faces()
+            .get(at)
+            .and_then(|face| face.link.wire())
+            .and_then(|wire| wire.actions.peer_zid());
+        if let Some(zid) = peer {
+            self.router.abort_peer(&zid);
+        }
+    }
+
+    /// The next connection that waits on the ports the session listens on, from port `*at` on,
+    /// with the endpoint its port is stated for. A port that had no socket or buffer for one just
+    /// now is passed, and looked at again on the next step; one that is broken for good is let
+    /// go of, and the port after it is at `*at` then. `None` once every port was looked at.
+    #[cfg(feature = "listen")]
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn next_accepted(
+        &mut self,
+        at: &mut usize,
+    ) -> Option<(OpenedLink<L::Pump>, Option<DialEndpoint>)> {
+        while let Some(accepted) = self.links.accept_at(*at) {
+            match accepted {
+                Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),
+                Accepted::Idle => *at += 1,
+                Accepted::Broken => {}
+            }
+        }
+        None
     }
 }
