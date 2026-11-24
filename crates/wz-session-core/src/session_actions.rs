@@ -6440,12 +6440,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-close",
         )
     ))]
+    // The writer is handed over as a trait object, so the lease, the refusals and the send are
+    // compiled once for every message this sends, and not once for each writer.
+    #[inline(never)]
     fn send_control_lent(
         &self,
         reliability: Reliability,
         priority: Priority,
         want: usize,
-        fill: impl FnOnce(
+        fill: &mut dyn FnMut(
             &mut crate::tx_buf::EncodeBuf<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     ) -> Result<(), crate::link::LinkDropCause> {
@@ -6550,7 +6553,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 cookie_override,
             )
         });
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, &mut |buf| {
             let start = buf.len();
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::handshake_encode::encode_init_into(
@@ -6611,7 +6614,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             open_head_len(&self.params, initial_sn, is_ack, None)
         };
         let want = head_len.saturating_add(chain_len);
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, &mut |buf| {
             let start = buf.len();
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
@@ -6645,9 +6648,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
     fn send_close_lent(&self, reason: u8) -> Result<(), crate::link::LinkDropCause> {
         const WANT: usize = 1 + wz_codecs::close::Close::MAX_ENCODED_BYTES;
-        self.send_control_lent(Reliability::Reliable, Priority::Background, WANT, |buf| {
-            crate::handshake_encode::encode_close_into(buf, reason, self.close_scope_is_session())
-        })
+        self.send_control_lent(
+            Reliability::Reliable,
+            Priority::Background,
+            WANT,
+            &mut |buf| {
+                crate::handshake_encode::encode_close_into(
+                    buf,
+                    reason,
+                    self.close_scope_is_session(),
+                )
+            },
+        )
     }
 
     /// The one write of a Close of `reason` on this link, counted as the close it is: the
@@ -10174,7 +10186,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if len == 0 {
                 return false;
             }
-            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
+            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, &mut |buf| {
                 R::with_mutex_mut(slot, |held| {
                     if held.is_empty() {
                         return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
