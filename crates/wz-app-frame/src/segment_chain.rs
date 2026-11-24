@@ -72,7 +72,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::segment_profile::{CrcReading, Misplaced, Piece, SegmentProfile};
+use crate::segment_profile::{self, CrcReading, Misplaced, Piece, SegmentProfile};
 
 /// The most bytes every open transfer together may hold.
 pub const MAX_OPEN_BYTES: usize = 256 * 1024 * 1024;
@@ -467,7 +467,7 @@ impl SegmentLedger {
             verdict.unjoined = Some(Unjoined::CrcMismatch);
             return verdict;
         }
-        let (total, offset) = match profile.place(piece) {
+        let (total, offset) = match segment_profile::place(profile, piece) {
             Ok(placed) => placed,
             Err(why) => {
                 verdict.unjoined = Some(Unjoined::Misplaced(why));

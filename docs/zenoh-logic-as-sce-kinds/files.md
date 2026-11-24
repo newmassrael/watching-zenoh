@@ -68,7 +68,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/e2e_crc.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_frame.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_judge.rs` | S10, S11 | |
-| `crates/wz-app-frame/src/e2e_profile.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_receiver.rs` | S11 | |
 | `crates/wz-app-frame/src/e2e_rules_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/e2e_stream_sender.rs` | S11 | |
@@ -92,6 +91,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/segment_sender.rs` | S10 | |
 | `crates/wz-app-schema/src/catalog_plan.rs` | S11 | |
 | `crates/wz-app-schema/src/crc_table.rs` | S10 | |
+| `crates/wz-app-schema/src/e2e_profile.rs` | S10 | |
 | `crates/wz-app-schema/src/json_doc.rs` | S11 | |
 | `crates/wz-app-schema/src/judge_config.rs` | S10 | |
 | `crates/wz-app-schema/src/lib.rs` | S11 | |
@@ -99,6 +99,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-schema/src/proto_lex.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_parse.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_schema.rs` | S11 | |
+| `crates/wz-app-schema/src/segment_profile.rs` | S10 | |
 | `crates/wz-auth/src/lib.rs` | S6 | |
 | `crates/wz-auth/src/usrpwd.rs` | S6 | |
 | `crates/wz-capi-c/src/abi.rs` | S8 | |

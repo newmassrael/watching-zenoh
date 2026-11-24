@@ -236,6 +236,14 @@ impl Judge {
         }
     }
 
+    /// A judge for one stream of `profile`'s frames, configured from its counter
+    /// rules. A stream is the caller's to define, so the caller keeps one judge
+    /// per stream.
+    #[cfg(feature = "alloc")]
+    pub fn for_profile(profile: &crate::e2e_profile::Profile) -> Self {
+        Self::with_rules(profile.judge_config(), profile.counter_rules())
+    }
+
     /// What the judge is configured with.
     pub fn config(&self) -> JudgeConfig {
         self.config

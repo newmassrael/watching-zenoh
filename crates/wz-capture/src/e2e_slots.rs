@@ -292,7 +292,7 @@ impl SlotLedger {
         let judge = self
             .judges
             .entry(slot.clone())
-            .or_insert_with(|| profile.judge());
+            .or_insert_with(|| Judge::for_profile(profile));
         let counter = frame.counter(profile);
         // Read BEFORE the judge moves anything: what the frame is judged
         // against, and how far it is from it.

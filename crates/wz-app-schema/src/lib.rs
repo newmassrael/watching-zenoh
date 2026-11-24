@@ -11,6 +11,8 @@
 //! |---|---|---|
 //! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
 //! | `crc_table` | the parameters of a CRC, checked, and the table derived from them once | always |
+//! | `e2e_profile` | the profile of an end-to-end protection header: its data model and its reader | `alloc` |
+//! | `segment_profile` | the profile of the header in front of each piece of a split message: its data model and its reader | `alloc` |
 //! | `judge_config` | what a receiver's judge of a stream of frames is configured with | always |
 //! | `json_doc` | a JSON document read under a bound on its nesting, the pointer a reader walks it with, and the refusal at that pointer | `alloc` |
 //! | `catalog_plan` | the reader of a message catalog: every rule judged in the order a refusal is reported, the catalog resolved into plain data | `alloc` |
@@ -32,6 +34,8 @@ extern crate alloc;
 pub mod catalog_plan;
 pub mod crc_table;
 #[cfg(feature = "alloc")]
+pub mod e2e_profile;
+#[cfg(feature = "alloc")]
 pub mod json_doc;
 pub mod judge_config;
 pub mod message_catalog_table;
@@ -41,3 +45,5 @@ pub mod proto_lex;
 pub mod proto_parse;
 #[cfg(feature = "alloc")]
 pub mod proto_schema;
+#[cfg(feature = "alloc")]
+pub mod segment_profile;

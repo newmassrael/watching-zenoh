@@ -13,7 +13,7 @@
 //! profile to the next; the CRC is taken over some of those fields and the
 //! body in an order that is FIXED by the profile and is generally not the wire
 //! order. A receiver judges each frame: CRC, then counter, then timeout
-//! ([`crate::e2e_judge`]). [`crate::e2e_frame`] builds and opens such frames.
+//! (`wz_app_frame::e2e_judge`). `wz_app_frame::e2e_frame` builds and opens such frames.
 //!
 //! # Why nothing is hard-coded
 //!
@@ -22,7 +22,7 @@
 //! every call, and the workspace's tests run on synthetic profiles whose
 //! widths, orders, masks and names are deliberately unlike any real one. The
 //! only fixed constants are the published CRC definitions in
-//! [`crate::e2e_crc`]'s tests.
+//! `wz_app_frame::e2e_crc`'s tests.
 //!
 //! # The description
 //!
@@ -67,7 +67,7 @@
 //!   accepts and the silence it tolerates. A `timeout_ms` of 0 states no limit
 //!   on the silence: a receiver never reports a timeout on a stream of the
 //!   profile, which is what a message sent on an event, with no period, needs.
-//!   A periodic message's profile states its limit (see [`crate::e2e_judge`]).
+//!   A periodic message's profile states its limit (see `wz_app_frame::e2e_judge`).
 //! * `slot` (optional) says which frames of a CAPTURE share one counter, for
 //!   the pipeline that keeps a judge per slot (`e2e_slots`, in the capture
 //!   crate); the stateless doors ignore it. A slot is the key expression the
@@ -142,6 +142,15 @@
 //! of that meaning would be a second, unchecked one. A rule that depends on a
 //! value (for instance "a result is forced to zero when the kind is a query")
 //! is the caller's: it decides the part values it passes.
+//!
+//! # Where it lives
+//!
+//! A profile is read once, when a node is handed it, so the data model and its
+//! reader are this crate's, built for size; `wz_app_frame::e2e_profile` names
+//! this module. What runs per frame under a profile (building, opening and
+//! judging a frame, the CRC digest) is `wz-app-frame`'s; the small accessors it
+//! reads the profile by are `#[inline]`, so their code is made where they are
+//! called.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -149,13 +158,12 @@ use alloc::vec::Vec;
 
 use wz_session_core::json5::Json5Value;
 
-use crate::e2e_crc::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
-use crate::e2e_judge::{CounterRules, Judge, JudgeConfig};
+use crate::crc_table::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
+use crate::judge_config::{CounterRules, JudgeConfig};
 
-// A profile is a JSON document read once, when a node is handed it: the reader of such documents,
-// the pointer a reader walks one with and the refusal it gives are `wz-app-schema`'s, built for
-// size, and stay at the paths they had here.
-pub use wz_app_schema::json_doc::{
+// The reader of such documents, the pointer a reader walks one with and the refusal it gives are
+// re-exported here, where the profile readers have always named them.
+pub use crate::json_doc::{
     array, at, check_distinct, check_keys, child, object, optional, read_bool, read_json,
     read_string, read_uint, required, DocError, Entries, Pointer, MAX_JSON_DEPTH,
 };
@@ -188,6 +196,7 @@ pub struct Derive {
 impl Derive {
     /// The value for `address`. It fits the field or part the rule is on,
     /// because the mask and the xor were refused when they did not.
+    #[inline]
     pub fn apply(&self, address: u64) -> u64 {
         (address & self.mask) ^ self.xor
     }
@@ -209,6 +218,7 @@ pub struct Part {
 
 impl Part {
     /// The largest value the part holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask(self.width)
     }
@@ -234,6 +244,7 @@ pub struct Field {
 
 impl Field {
     /// The largest value the field holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask((self.bytes * 8) as u8)
     }
@@ -242,6 +253,7 @@ impl Field {
     /// field, and the bits the parts own of a split one. A sender writes the
     /// others as the `xor` gives them and another sender may write them
     /// otherwise, so nothing that judges the field reads them.
+    #[inline]
     pub fn owned_bits(&self) -> u64 {
         if self.parts.is_empty() {
             return self.max_value();
@@ -266,7 +278,8 @@ pub enum Cover {
 pub struct CrcSpec {
     /// Index of the field the CRC is written to.
     pub field: usize,
-    /// The engine, built from the profile's parameters.
+    /// The engine, built from the profile's parameters once, when the profile
+    /// is read.
     pub engine: Crc,
     /// What is fed, in this order.
     pub cover: Vec<Cover>,
@@ -475,6 +488,7 @@ impl Profile {
     }
 
     /// The header fields in wire order.
+    #[inline]
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
@@ -485,36 +499,43 @@ impl Profile {
     }
 
     /// The header's size; the body starts at this offset.
+    #[inline]
     pub fn header_bytes(&self) -> usize {
         self.header_bytes
     }
 
     /// The CRC rules.
+    #[inline]
     pub fn crc(&self) -> &CrcSpec {
         &self.crc
     }
 
     /// The length rules.
+    #[inline]
     pub fn length(&self) -> &LengthSpec {
         &self.length
     }
 
     /// The counter rules.
+    #[inline]
     pub fn counter(&self) -> &CounterSpec {
         &self.counter
     }
 
     /// What the profile says about which frames share a counter.
+    #[inline]
     pub fn slot(&self) -> &SlotSpec {
         &self.slot
     }
 
     /// The rules a receiver judges a frame by beyond the CRC and the step.
+    #[inline]
     pub fn rules(&self) -> &JudgeRules {
         &self.rules
     }
 
     /// The message cell, when the profile names one.
+    #[inline]
     pub fn cell(&self) -> Option<&CellSpec> {
         self.cell.as_ref()
     }
@@ -544,17 +565,11 @@ impl Profile {
         }
     }
 
-    /// A judge for one stream of this profile's frames, configured from its
-    /// counter rules. A stream is the caller's to define, so the caller keeps
-    /// one judge per stream; see [`crate::e2e_judge`].
-    pub fn judge(&self) -> Judge {
-        Judge::with_rules(self.judge_config(), self.counter_rules())
-    }
-
     /// The value the length field carries for a body of `payload_bytes`.
     ///
     /// It may be larger than the length field can hold; the builder checks
     /// that and refuses with the numbers.
+    #[inline]
     pub fn length_for(&self, payload_bytes: usize) -> u64 {
         let total = (self.header_bytes + payload_bytes) as u64;
         match &self.length.counts {

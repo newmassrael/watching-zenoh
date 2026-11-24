@@ -25,7 +25,7 @@ use wz_capi_c::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EPARSE, Z_OK};
 use wz_capi_c::segment_sender::*;
 use wz_capi_c::string::{z_string_data, z_string_drop, z_string_len, z_string_loan};
 use wz_capture::segment_chain::{Carrier, KeyRef, SegmentLedger};
-use wz_capture::segment_profile::SegmentProfile;
+use wz_capture::segment_profile::{recognise, SegmentProfile};
 
 /// A made-up profile, unlike any deployed header: a fixed mark, a two-byte
 /// stream value, a one-byte transfer number, three-byte little-endian size and
@@ -195,9 +195,8 @@ fn join(pieces: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     let mut ledger = SegmentLedger::new();
     let mut joined = None;
     for (i, bytes) in pieces.iter().enumerate() {
-        let piece = profile
-            .recognise(bytes)
-            .ok_or_else(|| format!("piece {i} is not a piece"))?;
+        let piece =
+            recognise(&profile, bytes).ok_or_else(|| format!("piece {i} is not a piece"))?;
         let verdict = ledger.receive(
             &profile,
             &piece,
