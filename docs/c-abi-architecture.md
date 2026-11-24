@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (6) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (4) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -266,14 +266,14 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
 | TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
-| TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
 
-TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
-is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
-no choice spells. Its indexing is the `ALL[index]` of `policy_generated.rs`, which `wz_config.py`
-writes. A generated key table is checked the other way: the library answers `try_new`, and the
+A `WZ_POLICY_*` value no policy takes is refused with neither a panic nor an index: the helpers of
+`policy.rs` answer `None` for such a word, a policy's value is found by its word in arrays that
+share their length by type, and `policy_generated.rs`, which `wz_config.py` writes, refuses the
+`None` in a constant assertion, the form `caps.rs` refuses a misspelt `WZ_LIMIT_*` value in. A
+generated key table is checked the other way: the library answers `try_new`, and the
 image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
 
 TD-109 (`reset_generations`) is SCE output: its one `unreachable!` is the `proven_duplicate`

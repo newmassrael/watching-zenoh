@@ -85,36 +85,25 @@ impl SnResolution {
 }
 
 /// The value of a bool policy: `on` or `off` as the build states it, or `off`, which is
-/// upstream's behaviour for every bool policy, when it states none.
+/// upstream's behaviour for every bool policy, when it states none. `None` is a word that is
+/// neither, which the generated module refuses to build with.
 #[doc(hidden)]
-pub const fn policy_bool(stated: Option<&str>) -> bool {
-    let Some(text) = stated else {
-        return false;
-    };
-    if same(text, "on") {
-        true
-    } else if same(text, "off") {
-        false
-    } else {
-        panic!("a WZ_POLICY_* value of a bool policy is neither `on` nor `off`")
+pub const fn policy_bool(stated: Option<&str>) -> Option<bool> {
+    match stated {
+        None => Some(false),
+        Some(text) => on_or_off(text),
     }
 }
 
 /// Whether the build allows one value of a policy (`WZ_POLICY_<NAME>_ALLOWS_<VALUE>`): `on`
 /// allows it, `off` leaves it out of the policy's domain, and a build that states nothing gets
 /// `unstated`, which [`crate::policy_binding::Domain::from_stated`] decides by
-/// [`policy_defaults_only`].
+/// [`policy_defaults_only`]. `None` is a word that is neither `on` nor `off`.
 #[doc(hidden)]
-pub const fn policy_allows(stated: Option<&str>, unstated: bool) -> bool {
-    let Some(text) = stated else {
-        return unstated;
-    };
-    if same(text, "on") {
-        true
-    } else if same(text, "off") {
-        false
-    } else {
-        panic!("a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off`")
+pub const fn policy_allows(stated: Option<&str>, unstated: bool) -> Option<bool> {
+    match stated {
+        None => Some(unstated),
+        Some(text) => on_or_off(text),
     }
 }
 
@@ -124,39 +113,56 @@ pub const fn policy_allows(stated: Option<&str>, unstated: bool) -> bool {
 /// no operating system keeps the default alone, so an image pays for a second value only where it
 /// allows one on purpose; every other target allows every value. A target and not a cargo
 /// feature decides it: features unify across a graph, and one crate's choice would narrow the
-/// host builds of every other. Any other text stops the build.
+/// host builds of every other. `None` is any other word, which the generated module refuses to
+/// build with.
 #[doc(hidden)]
-pub const fn policy_defaults_only(stated: Option<&str>) -> bool {
+pub const fn policy_defaults_only(stated: Option<&str>) -> Option<bool> {
     let Some(text) = stated else {
-        return cfg!(target_os = "none");
+        return Some(cfg!(target_os = "none"));
     };
     if same(text, "full") {
-        false
+        Some(false)
     } else if same(text, "defaults") {
-        true
+        Some(true)
     } else {
-        panic!("WZ_POLICY_DOMAINS is neither `full` nor `defaults`")
+        None
     }
 }
 
-/// The index in `choices` of the value the build states, or `default`, the index of upstream's
-/// behaviour, when it states none. A value that is not one of the choices stops the build.
+/// The value the build states, found by its word in `choices` and taken from `values` at the
+/// same place, or `default`, upstream's behaviour, when it states none. `None` is a word that is
+/// none of the choices, which the generated module refuses to build with. The two arrays share
+/// their length by type, so every word names a value.
 #[doc(hidden)]
-pub const fn policy_choice(stated: Option<&str>, choices: &[&str], default: usize) -> usize {
+pub const fn policy_choice<T: Copy, const N: usize>(
+    stated: Option<&str>,
+    choices: &[&str; N],
+    values: &[T; N],
+    default: T,
+) -> Option<T> {
     let Some(text) = stated else {
-        return default;
+        return Some(default);
     };
-    let mut index = 0usize;
-    let mut rest = choices;
-    while let [choice, tail @ ..] = rest {
+    let (mut choices, mut values): (&[&str], &[T]) = (choices, values);
+    while let ([choice, choices_tail @ ..], [value, values_tail @ ..]) = (choices, values) {
         if same(text, choice) {
-            return index;
+            return Some(*value);
         }
-        // Below `choices.len()`: the count of the choices passed so far.
-        index = index.wrapping_add(1);
-        rest = tail;
+        choices = choices_tail;
+        values = values_tail;
     }
-    panic!("a WZ_POLICY_* value is not one of its policy's choices")
+    None
+}
+
+/// `on` as `true`, `off` as `false`, and any other word as `None`.
+const fn on_or_off(text: &str) -> Option<bool> {
+    if same(text, "on") {
+        Some(true)
+    } else if same(text, "off") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// `a == b` where the language allows it in a constant.
@@ -181,21 +187,25 @@ mod tests {
     use crate::policy_binding::{Binding, Mutability, PolicyValue, Scope, Wire};
 
     const CHOICES: [&str; 3] = ["os-default", "on", "off"];
+    const VALUES: [u8; 3] = [10, 11, 12];
 
     #[test]
     fn a_build_that_states_nothing_is_upstreams_behaviour() {
-        assert!(!policy_bool(None));
-        assert_eq!(policy_choice(None, &CHOICES, 0), 0);
-        assert_eq!(policy_choice(None, &CHOICES, 2), 2);
+        assert_eq!(policy_bool(None), Some(false));
+        assert_eq!(policy_choice(None, &CHOICES, &VALUES, 10), Some(10));
+        assert_eq!(policy_choice(None, &CHOICES, &VALUES, 12), Some(12));
     }
 
     #[test]
     fn a_stated_value_is_read_as_the_value_it_names() {
-        assert!(policy_bool(Some("on")));
-        assert!(!policy_bool(Some("off")));
-        assert_eq!(policy_choice(Some("os-default"), &CHOICES, 1), 0);
-        assert_eq!(policy_choice(Some("on"), &CHOICES, 0), 1);
-        assert_eq!(policy_choice(Some("off"), &CHOICES, 0), 2);
+        assert_eq!(policy_bool(Some("on")), Some(true));
+        assert_eq!(policy_bool(Some("off")), Some(false));
+        assert_eq!(
+            policy_choice(Some("os-default"), &CHOICES, &VALUES, 11),
+            Some(10)
+        );
+        assert_eq!(policy_choice(Some("on"), &CHOICES, &VALUES, 10), Some(11));
+        assert_eq!(policy_choice(Some("off"), &CHOICES, &VALUES, 10), Some(12));
     }
 
     #[test]
@@ -203,18 +213,34 @@ mod tests {
         assert!(!same("on", "one"));
         assert!(!same("one", "on"));
         assert!(same("", ""));
+        assert_eq!(policy_choice(Some("of"), &CHOICES, &VALUES, 10), None);
+        assert_eq!(policy_choice(Some("offf"), &CHOICES, &VALUES, 10), None);
+        assert_eq!(policy_bool(Some("o")), None);
+    }
+
+    /// A word the policy does not take is no value at all, not upstream's: the generated module
+    /// turns the `None` into a build that does not compile.
+    #[test]
+    fn a_bool_value_that_is_neither_is_no_value() {
+        assert_eq!(policy_bool(Some("yes")), None);
+        assert_eq!(policy_bool(Some("")), None);
     }
 
     #[test]
-    #[should_panic(expected = "neither `on` nor `off`")]
-    fn a_bool_value_that_is_neither_stops_the_build() {
-        policy_bool(Some("yes"));
+    fn a_choice_value_that_is_not_a_choice_is_no_value() {
+        assert_eq!(
+            policy_choice(Some("sometimes"), &CHOICES, &VALUES, 10),
+            None
+        );
+        assert_eq!(policy_choice(Some(""), &CHOICES, &VALUES, 10), None);
+        assert_eq!(policy_choice::<u8, 0>(Some("on"), &[], &[], 10), None);
     }
 
+    /// A policy with no choices names no value by any word, and takes its default when the build
+    /// states none.
     #[test]
-    #[should_panic(expected = "not one of its policy's choices")]
-    fn a_choice_value_that_is_not_a_choice_stops_the_build() {
-        policy_choice(Some("sometimes"), &CHOICES, 0);
+    fn a_policy_with_no_choices_takes_its_default_when_nothing_is_stated() {
+        assert_eq!(policy_choice::<u8, 0>(None, &[], &[], 7), Some(7));
     }
 
     /// Every width is its own two-bit code, in the order of the width, and the widths walked by
@@ -360,33 +386,33 @@ mod tests {
     /// states wins over that rule either way, so an image may widen a domain on purpose.
     #[test]
     fn a_value_the_build_does_not_name_takes_the_domain_rule() {
-        assert!(policy_allows(None, true));
-        assert!(!policy_allows(None, false));
-        assert!(policy_allows(Some("on"), false));
-        assert!(policy_allows(Some("on"), true));
-        assert!(!policy_allows(Some("off"), true));
-        assert!(!policy_allows(Some("off"), false));
+        assert_eq!(policy_allows(None, true), Some(true));
+        assert_eq!(policy_allows(None, false), Some(false));
+        assert_eq!(policy_allows(Some("on"), false), Some(true));
+        assert_eq!(policy_allows(Some("on"), true), Some(true));
+        assert_eq!(policy_allows(Some("off"), true), Some(false));
+        assert_eq!(policy_allows(Some("off"), false), Some(false));
     }
 
     #[test]
-    #[should_panic(expected = "_ALLOWS_* value is neither `on` nor `off`")]
-    fn an_allowance_that_is_neither_on_nor_off_stops_the_build() {
-        policy_allows(Some("y"), true);
+    fn an_allowance_that_is_neither_on_nor_off_is_no_value() {
+        assert_eq!(policy_allows(Some("y"), true), None);
+        assert_eq!(policy_allows(Some("y"), false), None);
     }
 
     /// `WZ_POLICY_DOMAINS` forces either rule, and a build that states nothing gets its target's:
     /// the default alone with no operating system, every value otherwise.
     #[test]
     fn the_domain_rule_is_stated_or_the_targets() {
-        assert!(!policy_defaults_only(Some("full")));
-        assert!(policy_defaults_only(Some("defaults")));
-        assert_eq!(policy_defaults_only(None), cfg!(target_os = "none"));
+        assert_eq!(policy_defaults_only(Some("full")), Some(false));
+        assert_eq!(policy_defaults_only(Some("defaults")), Some(true));
+        assert_eq!(policy_defaults_only(None), Some(cfg!(target_os = "none")));
     }
 
     #[test]
-    #[should_panic(expected = "WZ_POLICY_DOMAINS is neither `full` nor `defaults`")]
-    fn a_domain_rule_that_is_neither_stops_the_build() {
-        policy_defaults_only(Some("all"));
+    fn a_domain_rule_that_is_neither_is_no_value() {
+        assert_eq!(policy_defaults_only(Some("all")), None);
+        assert_eq!(policy_defaults_only(Some("default")), None);
     }
 
     /// The value types agree with the fields of `SessionPolicy` in whatever build the test runs:
