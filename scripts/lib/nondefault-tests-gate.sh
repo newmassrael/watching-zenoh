@@ -719,9 +719,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
     # And with the members' keyexprs read member by member (`multicast-declarations`,
     # `tests::group::member_keyexprs::`): two members that declare one keyexpr id for two keys each
-    # put on, and declare a subscriber on, the key that member declared. The group reads its
-    # datagrams into owned batches there, so the module's other tests, a get and its answer among
-    # them, run on that receive too.
+    # put on, and declare a subscriber on, the key that member declared, and one that leaves takes
+    # its keyexprs with it. The group still reads its records where the datagram lies, each under
+    # its member's tag, so the module's other tests, a get and its answer among them, run there too.
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
