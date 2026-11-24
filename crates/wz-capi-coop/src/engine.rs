@@ -2319,6 +2319,31 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
     now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
 }
 
+/// What every leg of one get is held pending with (`CoopEngine::hold_leg`): the key it was asked
+/// under, its options, whether its callbacks show a reply's timestamp, and the mint of each leg's
+/// callback.
+#[cfg(feature = "query")]
+struct LegAsk<'a, 'o> {
+    keyexpr: &'a str,
+    opts: &'a QueryOptionsOf<'o>,
+    expose: bool,
+    mint: &'a mut dyn FnMut() -> ReplyCallback,
+}
+
+/// What came of holding a leg of a get pending (`CoopEngine::hold_leg`).
+#[cfg(feature = "query")]
+enum LegHeld {
+    /// Held, owed its Finals: its request may go out.
+    Held,
+    /// The table is no longer the session's: the leg is asked of nobody.
+    Gone,
+    /// No row of the table, or of the plane's callbacks, was free: no callback was minted.
+    NoRoom,
+    /// The table refused the registration, `table_full` when for want of a row: the leg's minted
+    /// callback is to be let go of with no lock held.
+    Refused { table_full: bool },
+}
+
 /// A group member's key (`SessionEngine::next_group_member`): its group's place in the session's
 /// groups in the high half, its place in the group's member table in the low one, so the keys
 /// order by group first. Each half is a `u32`, so the two never overlap.
@@ -5569,6 +5594,69 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// Hold one leg of a get pending in the table of `face` (a link's, a group's, or the
+    /// session's own, `LOCAL_FACE`) under `rid`, owed `finals` Finals: the leg's callback minted
+    /// in a row of the plane's, and its sink registered with the deadline and the accepted key the
+    /// get states. Out of line where a get issues more than one kind of leg (to groups, or to the
+    /// session itself, besides its links), so those legs are held by one body and not by a copy
+    /// each; a build whose get asks its links alone has one caller, which keeps it inline.
+    #[cfg(feature = "query")]
+    #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
+    fn hold_leg(
+        &self,
+        core: &Core<L, C>,
+        ask: &mut LegAsk<'_, '_>,
+        face: FaceId,
+        leg_id: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        finals: u32,
+    ) -> LegHeld {
+        let timeout_ms = ask.opts.effective_timeout_ms();
+        // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
+        // before its timeout.
+        let deadline_ms =
+            (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
+        // A get no row holds is refused before its leg's callback is minted.
+        match core
+            .session
+            .registry
+            .borrow_mut()
+            .gets_mut(face)
+            .map(|gets| gets.replies.has_room())
+        {
+            Some(true) => {}
+            Some(false) => return LegHeld::NoRoom,
+            None => return LegHeld::Gone,
+        }
+        // The leg's callback, in a row of the plane's the entry's sink holds.
+        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose) else {
+            return LegHeld::NoRoom;
+        };
+        // SAFETY: the sink goes into a table of pending gets, which the session
+        // reaches under its lock alone, and is handed its replies there.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
+        let sink = ConsolidatingSink::with_hold(
+            ask.opts.resolved_consolidation(),
+            leg_sink,
+            get::LegHold::new(leg_id, &self.gets),
+        );
+        let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
+        let registered = core
+            .session
+            .registry
+            .borrow_mut()
+            .gets_mut(face)
+            .map(|gets| {
+                gets.replies
+                    .register_sink(rid, finals, deadline_ms, accept, sink)
+            });
+        match registered {
+            Some(Ok(_)) => LegHeld::Held,
+            Some(Err(RegisterError::TableFull)) => LegHeld::Refused { table_full: true },
+            Some(Err(_)) | None => LegHeld::Refused { table_full: false },
+        }
+    }
+
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto
     /// the query's link, written into the link's transmit slot under the session's lock, or to the
     /// session's own get. Refused, sending nothing, when its payload or its attachment is longer
@@ -7043,6 +7131,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // states none, applied to every leg's callback, after its replies are consolidated.
             opts.expose_timestamp_by(&guard.0.policy)
         };
+        // What every leg of this get is held with, the mint of each leg's callback among it.
+        let mut ask = LegAsk {
+            keyexpr,
+            opts,
+            expose,
+            mint: leg,
+        };
         let remote = opts.allowed_destination.allows_remote();
         let mut issued: usize = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
@@ -7066,64 +7161,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             // A request id the face's actions allocate, so its peer's answer names it.
             let rid = actions.alloc_next_request_id();
-            let timeout_ms = opts.effective_timeout_ms();
-            // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never
-            // ends before its timeout.
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            match core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| tables.gets.replies.has_room())
-            {
-                Some(true) => {}
-                Some(false) => {
+            // One Final: the face's peer's. Held before the request goes out, so no answer can
+            // arrive before its entry.
+            match self.hold_leg(core, &mut ask, face, leg_id, rid, 1) {
+                LegHeld::Held => {}
+                LegHeld::Gone => continue,
+                LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
                     continue;
                 }
-                None => continue,
-            }
-            // The leg's callback, in a row of the plane's the entry's sink holds.
-            let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld = unheld.saturating_add(1);
-                continue;
-            };
-            // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-            let sink = ConsolidatingSink::with_hold(
-                opts.resolved_consolidation(),
-                leg_sink,
-                get::LegHold::new(leg_id, &self.gets),
-            );
-            // One Final: the face's peer's. Registered before the request goes out, so no answer
-            // can arrive before its entry.
-            let registered = core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        1,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                });
-            if !matches!(registered, Some(Ok(_))) {
-                unheld = unheld.saturating_add(usize::from(matches!(
-                    registered,
-                    Some(Err(RegisterError::TableFull))
-                )));
-                // A leg no table holds is let go of with no lock held.
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
+                LegHeld::Refused { table_full } => {
+                    unheld = unheld.saturating_add(usize::from(table_full));
+                    // A leg no table holds is let go of with no lock held.
+                    drop(guard);
+                    self.end_leg_now(leg_id);
+                    continue;
+                }
             }
             // The link names the key as its own key-wire form says.
             let wire = on_link(&actions, keyexpr, wire);
@@ -7202,59 +7255,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
-            let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            match core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| tables.gets.replies.has_room())
-            {
-                Some(true) => {}
-                Some(false) => {
+            // Held before the query is queued, as a link's leg is before it is sent.
+            match self.hold_leg(core, &mut ask, face, leg_id, rid, finals) {
+                LegHeld::Held => {}
+                LegHeld::Gone => continue,
+                LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
                     continue;
                 }
-                None => continue,
-            }
-            let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld = unheld.saturating_add(1);
-                continue;
-            };
-            // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-            let sink = ConsolidatingSink::with_hold(
-                opts.resolved_consolidation(),
-                leg_sink,
-                get::LegHold::new(leg_id, &self.gets),
-            );
-            // Registered before the query is queued, as a link's leg is before it is sent.
-            let registered = core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        finals,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                });
-            if !matches!(registered, Some(Ok(_))) {
-                unheld = unheld.saturating_add(usize::from(matches!(
-                    registered,
-                    Some(Err(RegisterError::TableFull))
-                )));
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
+                LegHeld::Refused { table_full } => {
+                    unheld = unheld.saturating_add(usize::from(table_full));
+                    drop(guard);
+                    self.end_leg_now(leg_id);
+                    continue;
+                }
             }
             if !group.ask(rid, keyexpr, wire, opts.query_parts()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
@@ -7288,59 +7302,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let core = &mut guard.0;
             let rid = own.rid();
-            let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            let row = if core.session.registry.borrow().local.replies.has_room() {
-                self.gets.open_leg(leg, expose)
-            } else {
-                None
-            };
-            if let Some(row) = row {
-                // SAFETY: the sink goes into a table of pending gets, which the session
-                // reaches under its lock alone, and is handed its replies there.
-                let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-                let sink = ConsolidatingSink::with_hold(
-                    opts.resolved_consolidation(),
-                    leg_sink,
-                    get::LegHold::new(leg_id, &self.gets),
-                );
-                let registered = core
-                    .session
-                    .registry
-                    .borrow_mut()
-                    .local
-                    .replies
-                    .register_sink(
-                        rid,
-                        1,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    );
-                if registered.is_err() {
-                    // A leg no table holds is let go of with no lock held.
+            match self.hold_leg(core, &mut ask, LOCAL_FACE, leg_id, rid, 1) {
+                LegHeld::Held => {
+                    if !core.session.note_pending(PendingGet {
+                        face: LOCAL_FACE,
+                        leg: leg_id,
+                        kind: GetKind::Query(rid),
+                        fan: tag,
+                    }) {
+                        unheld = unheld.saturating_add(1);
+                    } else {
+                        // Asked once the legs to the peers were, as zenoh-pico asks it only once
+                        // the send succeeded.
+                        let asked = self.ask_own_queryables(core, own, keyexpr, opts);
+                        drop(guard);
+                        issued = issued.saturating_add(1);
+                        let _ = self.cut_short(fan, tag);
+                        self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
+                    }
+                }
+                // A leg the session's own table refused is let go of with no lock held.
+                LegHeld::Refused { .. } => {
                     drop(guard);
                     self.end_leg_now(leg_id);
-                } else if !core.session.note_pending(PendingGet {
-                    face: LOCAL_FACE,
-                    leg: leg_id,
-                    kind: GetKind::Query(rid),
-                    fan: tag,
-                }) {
-                    unheld = unheld.saturating_add(1);
-                } else {
-                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
-                    // send succeeded.
-                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                    drop(guard);
-                    issued = issued.saturating_add(1);
-                    let _ = self.cut_short(fan, tag);
-                    self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
-            } else {
-                unheld = unheld.saturating_add(1);
+                LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
