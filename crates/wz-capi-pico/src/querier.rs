@@ -251,21 +251,10 @@ pub(crate) struct QuerierState {
     /// `&querier->_encoding);  // it is safe to use alias`). Kept as it was moved in, and lent
     /// to each get that names none.
     encoding: Option<crate::encoding::OwnedEncoding>,
-    /// The closures of the gets issued through this querier, counted while they are held.
-    /// Undeclaring it waits for their reply callbacks to finish and their closures to be dropped,
-    /// as pico's `_z_sync_group_wait` does, with no latch kept for each get.
-    gets: Arc<crate::ffi::OpenClosures>,
     /// Cancels the gets this querier still has pending when it is undeclared, as pico's
     /// `_z_unregister_pending_queries_from_querier` does. Every get takes it, unless the program
     /// gave that get a token of its own.
     cancel: Arc<wz_capi_port::cancellation::CancellationToken>,
-}
-
-impl Drop for QuerierState {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.gets.wait_none();
-    }
 }
 
 impl QuerierState {
@@ -323,10 +312,18 @@ impl z_owned_querier_t {
     }
 }
 
+/// Let go of a querier: its pending gets are cancelled, as pico's
+/// `_z_unregister_pending_queries_from_querier` does, and the release waits for their reply
+/// callbacks to finish and their closures to be dropped, as pico's `_z_sync_group_wait` does. The
+/// gets' closures are counted in the querier's place (`crate::object_slot::Answering`), which goes
+/// back with the last of the querier and them.
+///
 /// # Safety
-/// `h` must be a live handle a querier's slot was filled for.
+/// `h` must be a live handle a querier's slot was filled for, let go of once.
 unsafe fn free_querier(h: *mut c_void) {
-    crate::object_slot::release_entity(h as *mut QuerierState);
+    let state = h as *mut QuerierState;
+    (*state).cancel.cancel();
+    crate::object_slot::retire_entity(state);
 }
 
 impl_handle_ownership7!(
@@ -444,7 +441,7 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(filter) => filter,
             Err(rc) => return rc,
         };
-        let state = slot.fill(QuerierState {
+        let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid,
             shared: engine,
@@ -457,9 +454,10 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
-            gets: Arc::default(),
             cancel: wz_capi_port::cancellation::CancellationToken::new(),
-        });
+        }));
+        // The querier is the first thing in its place, so the place is its handle.
+        let state = state.cast::<QuerierState>();
         (*state).bind();
         *querier = z_owned_querier_t {
             handle: state as *mut c_void,
@@ -479,8 +477,9 @@ pub unsafe extern "C" fn z_undeclare_querier(querier: *mut z_moved_querier_t) ->
         let handle = (*querier)._this.handle;
         if !handle.is_null() {
             (*querier)._this = z_owned_querier_t::null_value();
-            // The `Drop` impl retracts this querier's matching listeners; its place goes back.
-            crate::object_slot::release_entity(handle as *mut QuerierState);
+            // Its drop retracts this querier's matching listeners; its place goes back with the
+            // last of it and its gets' closures.
+            free_querier(handle);
         }
         Z_OK
     })
@@ -555,7 +554,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             // `closure` drops here, running the caller's `drop(context)`.
             None => return Z_ERR_NULL,
         };
-        closure.count_in(&state.gets);
+        // Undeclaring the querier waits for this get's closure, and its place stands until then.
+        crate::object_slot::count_in_entity(core::ptr::from_ref(state), &mut closure);
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`

@@ -58,7 +58,7 @@ use wz_session_core::session_memory::{session_tables, Captures, MemoryRow, Sessi
 
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
-use crate::session::{session_handle, z_loaned_session_t, PicoSessionHandle};
+use crate::session::{session_handle, z_loaned_session_t, SessionPlace};
 
 /// The most memory a session holds, as `wz_ext_session_memory` reports it.
 #[repr(C)]
@@ -223,7 +223,8 @@ impl MemoryBasis {
                 part: c"session handle",
                 basis: c"",
                 count: Some(1),
-                entry_bytes: core::mem::size_of::<PicoSessionHandle>(),
+                // The handle's place: the handle and the count of the session's closures beside it.
+                entry_bytes: core::mem::size_of::<SessionPlace>(),
                 enforced: true,
             },
             MemoryRow {
@@ -481,10 +482,7 @@ mod tests {
         assert_eq!(&memory.rows()[..tables.rows().len()], tables.rows());
         let handle = memory.rows()[tables.rows().len()];
         assert_eq!(handle.part, c"session handle");
-        assert_eq!(
-            handle.total(),
-            Some(core::mem::size_of::<PicoSessionHandle>())
-        );
+        assert_eq!(handle.total(), Some(core::mem::size_of::<SessionPlace>()));
         assert_eq!(memory.total(), None);
     }
 

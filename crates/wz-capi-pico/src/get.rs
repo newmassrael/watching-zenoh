@@ -1207,8 +1207,9 @@ pub(crate) unsafe fn get_inner(
         Ok(handle) => handle,
         Err(code) => return code,
     };
-    // The session's close waits for this get's closure to finish and be dropped.
-    cclosure.count_in(&handle.open);
+    // The session's close waits for this get's closure to finish and be dropped, and the place of
+    // its handle stands until then.
+    crate::session::count_in_session(zs, &mut cclosure);
     // A non-canonical / pico-unsafe keyexpr is refused up front, as the declare
     // paths refuse it: the fan is best-effort per face, so a per-face reject
     // would be swallowed and the call would report Z_OK.

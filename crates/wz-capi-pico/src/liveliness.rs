@@ -560,8 +560,9 @@ pub unsafe extern "C" fn z_liveliness_get(
             Ok(handle) => handle,
             Err(code) => return code,
         };
-        // The session's close waits for this get's closure to finish and be dropped.
-        closure.count_in(&handle.open);
+        // The session's close waits for this get's closure to finish and be dropped, and the place
+        // of its handle stands until then.
+        crate::session::count_in_session(zs, &mut closure);
         let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
             Ok(k) => k,
             Err(code) => return code,
