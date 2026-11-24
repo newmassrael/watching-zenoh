@@ -870,6 +870,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `SerialLocator`, `SerialLine`, `SerialPath`, `SERIAL_PATH_LEN` in `pub mod session_drive`),
         # selected by the pico ABI's `transport-link-serial`; sites inside a `pub mod` or an `impl`,
         # the shape `udp-listen`'s have.
+        # `unixpipe` joins: the locator of a link over a pair of named FIFOs (`Locator::Unixpipe`,
+        # `UnixpipeLocator`, `UnixpipePath`, `UNIXPIPE_PATH_LEN` in `pub mod session_drive`), selected
+        # by the pico ABI's `transport-link-unixpipe`; the shape `serial`'s have.
         frozenset(
             {
                 "alloc",
@@ -885,6 +888,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-unicast-accept",
                 "switchboard",
                 "udp-listen",
+                "unixpipe",
             }
         ),
     ),
@@ -1480,7 +1484,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `PORT_PEER_BACKLOG`) sit inside `pub mod udp_link` behind `all(udp-listen,
     # not(session-slot))`, compound and nested, which the second clause reads off the sites.
     # `serial` joins with its OFF_AXIS row: its sites sit inside `pub mod session_drive`, nested,
-    # which the second clause reads off the sites.
+    # which the second clause reads off the sites. `unixpipe` joins the same way.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
@@ -1496,6 +1500,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-unicast-accept",
             "switchboard",
             "udp-listen",
+            "unixpipe",
         }
     ),
     # R2298 — the last three, and they failed R2297's first clause on ONE
