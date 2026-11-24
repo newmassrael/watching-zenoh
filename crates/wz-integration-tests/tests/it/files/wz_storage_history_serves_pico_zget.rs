@@ -241,10 +241,7 @@ where
                 Some(QUERY_KEY),
                 value.as_bytes().to_vec(),
                 None,
-                TimestampHint {
-                    time,
-                    zid: vec![0x02],
-                },
+                TimestampHint::new(time, &[0x02]).unwrap(),
             )
             // The seam is fallible since R311y831; this fixture's backend is
             // in-memory, so an Err here is a harness fault, not a verdict.
@@ -261,13 +258,7 @@ where
         .shared_state()
         .lock()
         .expect("seed lock")
-        .process_delete(
-            Some(QUERY_KEY),
-            TimestampHint {
-                time: 4,
-                zid: vec![0x02],
-            },
-        )
+        .process_delete(Some(QUERY_KEY), TimestampHint::new(4, &[0x02]).unwrap())
         .expect("the in-memory backend commits");
     assert!(
         matches!(deleted, StorageInsertionResult::Deleted),

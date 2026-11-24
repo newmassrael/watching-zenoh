@@ -1296,7 +1296,7 @@ pub mod wire {
         use super::super::Digest;
 
         fn ts(time: u64, zid: Vec<u8>) -> TimestampHint {
-            TimestampHint { time, zid }
+            TimestampHint::new(time, &zid).unwrap()
         }
 
         fn at_secs(secs: u64) -> u64 {
@@ -1435,7 +1435,7 @@ mod tests {
     use alloc::vec;
 
     fn ts(time: u64, zid: alloc::vec::Vec<u8>) -> TimestampHint {
-        TimestampHint { time, zid }
+        TimestampHint::new(time, &zid).unwrap()
     }
 
     // -- Publication schedule (R311y829) ---------------------------------

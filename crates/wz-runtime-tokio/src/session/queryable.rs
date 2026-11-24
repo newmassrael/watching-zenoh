@@ -101,10 +101,8 @@ impl NodeStamp {
         if !self.stamps {
             return Err(StampedReplyError::NotStamping);
         }
-        let stamp = wz_session_core::sample::TimestampHint {
-            time,
-            zid: self.zid.clone(),
-        };
+        let stamp = wz_session_core::sample::TimestampHint::new(time, &self.zid)
+            .expect("a session's zid is at most sixteen bytes");
         Ok(out.reply_keyed_stamped(query.keyexpr(), payload, None, &stamp)?)
     }
 }

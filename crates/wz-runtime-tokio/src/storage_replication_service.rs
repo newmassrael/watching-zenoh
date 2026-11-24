@@ -457,10 +457,7 @@ mod tests {
             Some("demo/a"),
             vec![1, 2, 3],
             None,
-            TimestampHint {
-                time: now,
-                zid: vec![0x01],
-            },
+            TimestampHint::new(now, &[0x01]).unwrap(),
         )
         .unwrap();
         Arc::new(Mutex::new(st))
@@ -474,10 +471,7 @@ mod tests {
                 Some(key),
                 vec![i as u8],
                 None,
-                TimestampHint {
-                    time: now,
-                    zid: vec![0x01],
-                },
+                TimestampHint::new(now, &[0x01]).unwrap(),
             )
             .unwrap();
         }

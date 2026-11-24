@@ -1748,10 +1748,7 @@ mod tests {
         use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 
         let long_key = "a/".repeat(100) + "z";
-        let stamp = TimestampHint {
-            time: u64::MAX,
-            zid: vec![0xAB; 16],
-        };
+        let stamp = TimestampHint::new(u64::MAX, &[0xAB; 16]).unwrap();
         let encoded = EncodingHint {
             packed_id: u32::MAX,
             schema: Some(b"application/x-schema".repeat(3)),

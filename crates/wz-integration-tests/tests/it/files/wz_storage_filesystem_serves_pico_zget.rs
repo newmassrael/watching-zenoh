@@ -188,10 +188,7 @@ async fn wz_filesystem_storage_serves_a_durable_value_to_a_pico_zget() {
             Some(QUERY_KEY),
             STORED_VALUE.as_bytes().to_vec(),
             None,
-            TimestampHint {
-                time: 1,
-                zid: vec![0x02],
-            },
+            TimestampHint::new(1, &[0x02]).unwrap(),
         );
 
     // Assert #1 (the fs discriminator, in-process): the seed's bytes ARE the file

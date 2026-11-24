@@ -177,10 +177,7 @@ async fn wz_storage_serves_a_stored_value_to_a_pico_zget() {
             Some(QUERY_KEY),
             STORED_VALUE.as_bytes().to_vec(),
             None,
-            TimestampHint {
-                time: 1,
-                zid: vec![0x02],
-            },
+            TimestampHint::new(1, &[0x02]).unwrap(),
         );
 
     let timeouts = SessionTimeouts::spec_defaults();
