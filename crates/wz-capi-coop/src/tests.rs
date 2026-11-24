@@ -1474,7 +1474,7 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let into = log.clone();
     (
-        Arc::new(move |matching| into.lock().unwrap().push(matching)),
+        wz_capi_port::MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
         log,
     )
 }
@@ -1492,12 +1492,15 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         complete_required: false,
     };
     let (sink, told) = heard();
-    let kept = Arc::downgrade(&sink);
     assert_eq!(
         engine.declare_matching_listener(plane, "demo/q", sink, false),
         Err(wz_capi_port::Refusal::NotBuilt)
     );
-    assert!(kept.upgrade().is_none(), "the refused sink is not kept");
+    assert_eq!(
+        Arc::strong_count(&told),
+        1,
+        "the refused sink is not kept: the log is held by nothing else"
+    );
     assert_eq!(
         engine.declare_write_filter(
             plane,

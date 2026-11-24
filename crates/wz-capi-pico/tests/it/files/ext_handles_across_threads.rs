@@ -367,6 +367,15 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                     let schema = wz_ext_payload_schema_loan(schema_at.get());
                     let message = CString::new("syn.thread.Pose").unwrap();
                     let path = CString::new("serial").unwrap();
+                    // The thread's storage, which outlives its payload.
+                    let (fields, bytes) = (8, 64);
+                    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(fields, bytes)];
+                    let options = wz_ext_message_payload_options_t {
+                        storage: storage.as_mut_ptr(),
+                        storage_len: storage.len(),
+                        fields,
+                        bytes,
+                    };
                     let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
                     let rc = wz_ext_message_payload_new(
                         &mut payload,
@@ -374,6 +383,7 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                         thread % 2,
                         schema,
                         message.as_ptr(),
+                        &options,
                         std::ptr::null_mut(),
                     );
                     assert_eq!(rc, Z_OK, "thread {thread}'s payload");

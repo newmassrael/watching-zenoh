@@ -809,7 +809,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
             QuerierHandle::Registry(state) => {
                 let id = state.shared.declare_querier_matching_listener(
                     state.keyexpr.literal().to_owned(),
-                    sink,
+                    crate::matching::registry_sink(sink),
                     state.matching_needs_complete(),
                 );
                 state.attach_matching(MatchingHold::new(state.shared.clone(), id));

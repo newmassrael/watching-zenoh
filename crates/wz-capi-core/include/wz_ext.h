@@ -2264,8 +2264,18 @@ bool wz_ext_internal_message_catalog_check(
  * otherwise; a proto2 required field that is not set refuses the encoding.
  *
  * A refused call returns one of the codes below, or Z_ERR_OVERFLOW (-74) for
- * a buffer too small, and changes nothing; wz_ext_message_payload_refusal
- * gives the sentence of the last refused call on the payload.
+ * a buffer too small or a storage with no room left, and changes nothing,
+ * except a decode whose values do not fit the storage, which leaves the
+ * payload empty; wz_ext_message_payload_refusal gives the sentence of the
+ * last refused call on the payload.
+ *
+ * STORAGE. A payload keeps its values in storage the program gives when it
+ * makes the payload, the program's until the payload is dropped: fields
+ * values (each value, each element of a repeated field, each message field
+ * holding others and each field kept as the wire wrote it takes one) and
+ * bytes bytes of strings, bytes and kept fields, in
+ * wz_ext_message_payload_storage_size(fields, bytes) bytes. Setting,
+ * encoding, decoding and reading then take nothing from the heap.
  *
  * OWNERSHIP AND THREADS. A schema does not change once read and each payload
  * holds the schema it was made from, so a schema may be dropped while its
@@ -2323,15 +2333,37 @@ void wz_ext_internal_payload_schema_null(wz_ext_owned_payload_schema_t *this_);
 bool wz_ext_internal_payload_schema_check(
     const wz_ext_owned_payload_schema_t *this_);
 
+/* How a payload is made: storage_len bytes at storage (NULL when the size is
+ * 0), at least wz_ext_message_payload_storage_size(fields, bytes), the
+ * program's and untouched until the payload is dropped. */
+typedef struct wz_ext_message_payload_options_t {
+  uint8_t *storage;
+  size_t storage_len;
+  size_t fields; /* values held at once */
+  size_t bytes;  /* bytes of strings, bytes and kept fields held at once */
+} wz_ext_message_payload_options_t;
+
+/* No storage, no value and no byte. */
+void wz_ext_message_payload_options_default(
+    wz_ext_message_payload_options_t *this_);
+
+/* The storage a payload of fields values and bytes bytes takes, wherever it
+ * begins; 0 for one whose size overflows, and for no value and no byte. */
+size_t wz_ext_message_payload_storage_size(size_t fields, size_t bytes);
+
 /* An empty payload of message index of catalog, of the message type named
- * message in schema. Z_OK; Z_ERR_INVALID (-1) for a message the catalog has
- * not; _Z_ERR_CONFIG_INVALID_VALUE for a name the schema has no message of,
- * refusal saying why; Z_EINVAL for a name that is not UTF-8; Z_ERR_NULL for a
- * NULL argument. this_ holds the null state on every error. */
+ * message in schema, keeping its values in the storage options gives. Z_OK;
+ * Z_ERR_INVALID (-1) for a message the catalog has not;
+ * _Z_ERR_CONFIG_INVALID_VALUE for a name the schema has no message of, a
+ * storage shorter than wz_ext_message_payload_storage_size gives or a size
+ * that overflows, refusal saying why; Z_EINVAL for a name that is not UTF-8;
+ * Z_ERR_NULL for a NULL argument or a NULL storage of a size. this_ holds the
+ * null state on every error. */
 z_result_t wz_ext_message_payload_new(
     wz_ext_owned_message_payload_t *this_,
     const wz_ext_loaned_message_catalog_t *catalog, size_t index,
     const wz_ext_loaned_payload_schema_t *schema, const char *message,
+    const wz_ext_message_payload_options_t *options,
     z_owned_string_t *refusal);
 
 /* The key expression the payload's message is put on, valid while the
@@ -2340,8 +2372,9 @@ const char *wz_ext_message_payload_key_expr(
     const wz_ext_loaned_message_payload_t *this_);
 
 /* Set the field path names. Z_OK; WZ_EXT_ERR_PAYLOAD_PATH, _TYPE or _RANGE;
- * Z_EINVAL for a path or a string that is not UTF-8; Z_ERR_NULL for a NULL
- * argument (data may be NULL with a len of 0). */
+ * Z_ERR_OVERFLOW when the storage has no room for the value; Z_EINVAL for a
+ * path or a string that is not UTF-8; Z_ERR_NULL for a NULL argument (data
+ * may be NULL with a len of 0). */
 z_result_t wz_ext_message_payload_set_int(
     const wz_ext_loaned_message_payload_t *this_, const char *path,
     int64_t value);
@@ -2407,7 +2440,8 @@ z_result_t wz_ext_message_payload_encode(
     size_t capacity, size_t *written);
 /* Replace the payload's values with those the bytes carry.
  * WZ_EXT_ERR_PAYLOAD_WIRE for bytes that are not a message of the schema,
- * the payload then as it was. */
+ * the payload then as it was; Z_ERR_OVERFLOW for values the storage has no
+ * room for, the payload then empty. */
 z_result_t wz_ext_message_payload_decode(
     const wz_ext_loaned_message_payload_t *this_, const uint8_t *bytes,
     size_t len);

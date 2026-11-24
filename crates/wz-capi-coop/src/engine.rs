@@ -2274,9 +2274,11 @@ struct MatchEntry {
     plane: FilterPlane,
     watch: u64,
     keyexpr: RowKey,
-    /// The listener's callback, copied out of the row under the session's lock for each change of
-    /// its status and called after it; let go of with the row, with no lock held.
-    sink: MatchingSink,
+    /// The listener's callback: taken out of the row under the session's lock for each change of
+    /// its status, called after it and put back, or let go of by the thread that called it when
+    /// the row went meanwhile; let go of with the row otherwise, with no lock held. `None` while
+    /// it is out for a call.
+    sink: Option<MatchingSink>,
 }
 
 /// The locality a matching criterion carries: what the entity counts. The session's own
@@ -5053,24 +5055,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         while let Some((sink, told)) = self.decl_watches.next() {
             sink(told.event());
         }
-        while self.matching.is_pending() {
-            // Popped under the queue's lock alone, which is released before the sink runs.
-            let next = self.matching.lock().next();
-            let Some((id, matching)) = next else {
-                break;
-            };
-            handed = true;
-            // The callback is copied out of the listener's row under the session's lock and called
-            // after it; a listener undeclared since the change was found is handed nothing.
-            let sink = self.live().and_then(|core| {
-                core.0
-                    .matches
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .map(|entry| Arc::clone(&entry.sink))
-            });
-            if let Some(sink) = sink {
-                sink(matching);
+        // One thread hands the changes out at a time; another that finds it doing so leaves what
+        // it queued to it.
+        if let Some(mut turn) = self.matching.begin_handing() {
+            while let Some((id, matching)) = turn.next() {
+                handed = true;
+                // The callback is taken out of the listener's row under the session's lock and
+                // called after it; a listener undeclared since the change was found is handed
+                // nothing.
+                let sink = self.live().and_then(|mut core| {
+                    core.0
+                        .matches
+                        .iter_mut()
+                        .find(|entry| entry.id == id)
+                        .and_then(|entry| entry.sink.take())
+                });
+                let Some(sink) = sink else {
+                    continue;
+                };
+                sink.call(matching);
+                // Put back in its row, or let go of here, with no lock held, when the row went
+                // during the call (an undeclare from inside it, or the session's close).
+                let gone = match self.live() {
+                    Some(mut core) => {
+                        match core.0.matches.iter_mut().find(|entry| entry.id == id) {
+                            Some(entry) => {
+                                entry.sink = Some(sink);
+                                None
+                            }
+                            None => Some(sink),
+                        }
+                    }
+                    None => Some(sink),
+                };
+                drop(gone);
             }
         }
         let asked = self.hand_queries();
@@ -6925,7 +6943,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 plane,
                 watch,
                 keyexpr: key,
-                sink,
+                sink: Some(sink),
             },
         );
         drop(guard);

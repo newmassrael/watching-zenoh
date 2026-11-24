@@ -557,7 +557,7 @@ pub(crate) unsafe fn consume_matching_closure(
 /// own listener, or a drop of the entity that holds it, then leaves the closure to be released as
 /// the callback returns instead of waiting on itself (`ReleaseLatch::wait`).
 fn matching_sink(owned: MatchingCClosure) -> MatchingSink {
-    Arc::new(move |matching: bool| {
+    MatchingSink::shared(move |matching: bool| {
         // Named whole, so the closure captures the closure value and not its fields: the sink
         // then owns it (its drop runs the C `drop(context)` when the sink goes) and is `Send` and
         // `Sync` as the closure value is, where a captured raw context pointer is neither.
@@ -569,7 +569,7 @@ fn matching_sink(owned: MatchingCClosure) -> MatchingSink {
         let ctx = owned.context.0;
         let _in_callback = InCallback::enter();
         // SAFETY: `context` is the caller's, alive until `drop` runs, which cannot overlap this
-        // call (the `Arc` is held for its duration). An unwind out of the C callback is caught
+        // call (the sink is borrowed for its duration). An unwind out of the C callback is caught
         // here rather than crossing into the thread that delivers.
         let _ = catch(|| unsafe {
             call(&status, ctx);

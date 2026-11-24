@@ -571,7 +571,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
         .declare_matching_listener(
             FilterPlane::Subscribers,
             "wz/port/match/a",
-            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
+            wz_capi_port::MatchingSink::shared(move |matching| sink.lock().unwrap().push(matching)),
             false,
         )
         .expect("a node holds every matching listener it is asked for");

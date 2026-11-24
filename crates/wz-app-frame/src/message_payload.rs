@@ -748,11 +748,6 @@ impl<'s, 'p> Route<'s, 'p> {
             left: self.parts.saturating_sub(1),
         }
     }
-
-    /// Every step, the last included.
-    fn all(&self) -> core::iter::Chain<Inner<'s, 'p>, core::iter::Once<Step<'s>>> {
-        self.inner().chain(core::iter::once(self.last))
-    }
 }
 
 /// The steps of a [`Route`] before its last, read again from the path's text, which [`route`]

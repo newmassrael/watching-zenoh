@@ -6,7 +6,7 @@
 //! undeclaration after the close lets go of nothing more.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use wz_capi_port::{
     FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubscriberSink, WireKey,
@@ -97,6 +97,19 @@ fn a_subscribers_callback_is_dropped_once_on_close() {
     );
 }
 
+/// A matching listener's sink, and what tells whether it is still held: the sink holds the one
+/// strong count of the value the weak one reads.
+fn watched_sink() -> (MatchingSink, Weak<()>) {
+    let token = Arc::new(());
+    let alive = Arc::downgrade(&token);
+    (
+        MatchingSink::shared(move |_matching: bool| {
+            let _ = &token;
+        }),
+        alive,
+    )
+}
+
 /// The close lets go of every callback, whatever kind of declaration each was minted for: each is
 /// held by its own row, and the close empties the rows.
 #[test]
@@ -105,8 +118,7 @@ fn the_close_lets_go_of_every_rows_callback() {
     let engine = open(&router);
     let counts = Counts::default();
     declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
-    let sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let alive = Arc::downgrade(&sink);
+    let (sink, alive) = watched_sink();
     assert!(engine
         .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
         .is_ok());
@@ -160,8 +172,7 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
     };
 
-    let undeclared: MatchingSink = Arc::new(|_matching: bool| {});
-    let undeclared_alive = Arc::downgrade(&undeclared);
+    let (undeclared, undeclared_alive) = watched_sink();
     let id = listen(undeclared).expect("a row is free");
     assert!(
         undeclared_alive.upgrade().is_some(),
@@ -173,11 +184,9 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
         "undeclared, it is let go of"
     );
 
-    let held: MatchingSink = Arc::new(|_matching: bool| {});
-    let held_alive = Arc::downgrade(&held);
+    let (held, held_alive) = watched_sink();
     assert!(listen(held).is_ok());
-    let refused: MatchingSink = Arc::new(|_matching: bool| {});
-    let refused_alive = Arc::downgrade(&refused);
+    let (refused, refused_alive) = watched_sink();
     assert_eq!(listen(refused), Err(Refusal::TableFull));
     assert!(
         refused_alive.upgrade().is_none(),
@@ -187,8 +196,7 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
     SessionDrive::close(&*engine);
     assert!(held_alive.upgrade().is_none(), "closed, it is let go of");
 
-    let late: MatchingSink = Arc::new(|_matching: bool| {});
-    let late_alive = Arc::downgrade(&late);
+    let (late, late_alive) = watched_sink();
     assert_eq!(listen(late), Err(Refusal::Closed));
     assert!(
         late_alive.upgrade().is_none(),
@@ -445,4 +453,41 @@ fn a_liveliness_subscriber_undeclared_while_a_token_owes_it_a_call_is_let_go_of_
         2,
         "the subscriber still declared is let go of with the close"
     );
+}
+
+/// A matching listener undeclared from inside its own callback is called that once and let go of
+/// as the call returns, by the thread that made it: the row it was taken out of for the call is
+/// gone, so it is not put back.
+#[test]
+fn a_listener_undeclared_from_its_own_callback_is_let_go_of_after_the_call() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let token = Arc::new(());
+    let alive = Arc::downgrade(&token);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let id_at = Arc::new(std::sync::OnceLock::new());
+    let sink = {
+        let engine = Arc::clone(&engine);
+        let calls = Arc::clone(&calls);
+        let id_at = Arc::clone(&id_at);
+        MatchingSink::shared(move |_matching: bool| {
+            let _ = &token;
+            calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(&id) = id_at.get() {
+                engine.undeclare_matching_listener(id);
+            }
+        })
+    };
+    let id = engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
+        .expect("a row is free");
+    assert!(id_at.set(id).is_ok());
+    super::until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    router.send(super::Command::DeclareSubscriber(1, "demo/**"));
+    super::until(&engine, "the listener to be told and let go of", || {
+        alive.upgrade().is_none()
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "told once, then gone");
 }

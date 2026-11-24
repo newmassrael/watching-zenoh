@@ -355,7 +355,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -370,7 +370,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
