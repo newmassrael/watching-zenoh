@@ -261,6 +261,41 @@ impl SegmentSender {
         self.next = self.after(transfer);
 
         let pieces = message.len().div_ceil(chunk_bytes);
+        let mut failed = None;
+        let sent = self.write_pieces(
+            message,
+            chunk_bytes,
+            transfer,
+            &mut |piece| match emit(piece) {
+                Ok(()) => true,
+                Err(error) => {
+                    failed = Some(error);
+                    false
+                }
+            },
+        );
+        match failed {
+            Some(error) => Err(SplitError::Emit {
+                error,
+                transfer,
+                sent,
+                pieces,
+            }),
+            None => Ok(Split { transfer, pieces }),
+        }
+    }
+
+    /// Write the pieces of `message` and hand each to `emit` in order, until
+    /// `emit` answers `false`: how many it accepted. Not generic, so the
+    /// emitters of every caller share one body; [`Self::split`] is the shell
+    /// that keeps the caller's error.
+    fn write_pieces(
+        &self,
+        message: &[u8],
+        chunk_bytes: usize,
+        transfer: u64,
+        emit: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> usize {
         let header_bytes = self.profile.header_bytes();
         let fields = self.profile.fields();
         let mut piece = Vec::with_capacity(header_bytes + chunk_bytes.min(message.len()));
@@ -276,16 +311,11 @@ impl SegmentSender {
                 let crc = self.profile.crc_over(spec, header, body);
                 fields[spec.field].write(&mut piece, crc);
             }
-            if let Err(error) = emit(&piece) {
-                return Err(SplitError::Emit {
-                    error,
-                    transfer,
-                    sent,
-                    pieces,
-                });
+            if !emit(&piece) {
+                return sent;
             }
         }
-        Ok(Split { transfer, pieces })
+        message.len().div_ceil(chunk_bytes)
     }
 
     /// The number `message` would carry, once every value it needs is known
