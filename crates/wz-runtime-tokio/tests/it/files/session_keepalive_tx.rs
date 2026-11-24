@@ -247,7 +247,7 @@ mod keepalive_emitter {
             KeepAliveCheckOutcome::WithinInterval,
             "local-only window: 2_000 < 10_000/3"
         );
-        *actions.peer_open_lease_ms.lock().unwrap() = Some(3_000);
+        actions.fact_peer_open_lease_ms(|slot| *slot = Some(3_000));
         assert_eq!(
             check_keepalive_deadline(&actions, idle_check),
             KeepAliveCheckOutcome::Emitted,
@@ -283,7 +283,7 @@ mod keepalive_emitter {
 
         let zenoh = established_with(KeepAliveConf::ZENOH);
         assert_eq!(zenoh.keepalive_interval_ms(), 2_500);
-        *zenoh.peer_open_lease_ms.lock().unwrap() = Some(3_000);
+        zenoh.fact_peer_open_lease_ms(|slot| *slot = Some(3_000));
         assert_eq!(
             zenoh.keepalive_interval_ms(),
             2_500,
@@ -300,7 +300,7 @@ mod keepalive_emitter {
         // 2_500 above is the basis and not an interval nothing could have moved.
         let pico = established_with(KeepAliveConf::PICO);
         assert_eq!(pico.keepalive_interval_ms(), 3_333);
-        *pico.peer_open_lease_ms.lock().unwrap() = Some(3_000);
+        pico.fact_peer_open_lease_ms(|slot| *slot = Some(3_000));
         assert_eq!(pico.keepalive_interval_ms(), 1_000);
         let idle = pico.clock.now_monotonic_ms() + 900;
         assert_eq!(

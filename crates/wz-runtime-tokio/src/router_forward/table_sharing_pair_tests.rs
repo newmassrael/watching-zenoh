@@ -8,10 +8,8 @@
 //! value the build states.
 
 use super::*;
-use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use std::sync::mpsc;
-use wz_runtime_core::runtime::Runtime;
 
 /// The key the writer declares and the readers look for.
 const KEY: &str = "demo/pair";
@@ -30,13 +28,13 @@ fn zid(b: u8) -> Zid {
 /// A client face whose remote is `peer`, and what its link was given.
 fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let (actions, sink) = recording_actions();
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
+    actions.fact_peer_whatami(|s| *s = Some(0b10));
     (actions, sink)
 }
 

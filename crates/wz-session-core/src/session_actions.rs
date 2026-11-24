@@ -2591,6 +2591,72 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub multilink_pubkey: R::Mutex<Option<alloc::vec::Vec<u8>>>,
 }
 
+/// One door per fact the session keeps under a lock: the fact, lent to `f` for the length of the
+/// call. A caller names the fact and not the lock that guards it, so where the facts are kept is
+/// this struct's own business. `f` runs with the lock held: it must not open another door.
+macro_rules! fact_doors {
+    ($( $(#[$m:meta])* $door:ident => $field:ident: $ty:ty, )*) => {
+        impl<R: SessionRuntime, T: TimeSource> SessionCore<R, T> {
+            $(
+                $(#[$m])*
+                #[doc = concat!("The session's `", stringify!($field), "`, lent to `f` under its lock.")]
+                #[inline]
+                pub fn $door<U>(&self, f: impl FnOnce(&mut $ty) -> U) -> U {
+                    R::with_mutex_mut(&self.$field, f)
+                }
+            )*
+        }
+    };
+}
+
+fact_doors! {
+    #[cfg(feature = "transport-stats")]
+    fact_metrics => metrics: crate::stats_registry::TransportMetrics,
+    #[cfg(feature = "transport-fragmentation")]
+    fact_fragment_tx_budget => fragment_tx_budget: usize,
+    #[cfg(feature = "tx-lend-only")]
+    fact_tx_refusals => tx_refusals: TxRefusalCounts,
+    #[cfg(feature = "action-trace")]
+    fact_trace => trace: ActionTrace,
+    fact_inbound_cookie => inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
+    fact_peer_open_lease_ms => peer_open_lease_ms: Option<u64>,
+    fact_awaiting_open_ack => awaiting_open_ack: bool,
+    fact_inbound_peer_zid => inbound_peer_zid: Option<SessionZid>,
+    fact_remote_peer_zid => remote_peer_zid: Option<SessionZid>,
+    fact_peer_whatami => peer_whatami: Option<u8>,
+    fact_inbound_opensyn_cookie => inbound_opensyn_cookie: Option<SessionBytes<COOKIE_MAX>>,
+    fact_cookie_nonce => cookie_nonce: Option<u64>,
+    #[cfg(feature = "session-extauth")]
+    fact_peer_auth_id => peer_auth_id: Option<crate::auth_dispatch::AuthIdentity>,
+    fact_offer => offer: crate::transport_mode::SessionOffer,
+    #[cfg(feature = "transport-lowlatency")]
+    fact_is_lowlatency => is_lowlatency: bool,
+    fact_negotiated_patch => negotiated_patch: Option<u8>,
+    fact_local_region => local_region: Option<crate::extregion::RegionName>,
+    fact_peer_region => peer_region: Option<crate::extregion::RegionName>,
+    fact_peer_remote_bound => peer_remote_bound: Option<crate::extbound::Bound>,
+    fact_south_partition => south_partition: crate::region_partition::SouthPartition,
+    fact_local_remote_bound => local_remote_bound: Option<crate::extbound::Bound>,
+    #[cfg(feature = "transport-qos")]
+    fact_is_qos => is_qos: bool,
+    #[cfg(feature = "session-extqos")]
+    fact_qos_link => qos_link: crate::extqos::QosLinkState,
+    #[cfg(feature = "transport-compression")]
+    fact_is_compression => is_compression: bool,
+    #[cfg(feature = "transport-shm")]
+    fact_is_shm => is_shm: bool,
+    fact_inbound_peer_init_caps => inbound_peer_init_caps: Option<PeerInitCaps>,
+    fact_rx_sn => rx_sn: crate::sn::RxConduits,
+    #[cfg(feature = "routing-namespace")]
+    fact_namespace_egress => namespace_egress: Option<OwnedNonWildKeyExpr>,
+    #[cfg(feature = "routing-namespace")]
+    fact_namespace_ingress => namespace_ingress: Option<NamespaceIngress>,
+    #[cfg(feature = "transport-multilink")]
+    fact_multilink => multilink: Option<crate::extmultilink::MultiLinkDispatch>,
+    #[cfg(feature = "transport-multilink")]
+    fact_multilink_pubkey => multilink_pubkey: Option<alloc::vec::Vec<u8>>,
+}
+
 /// Where the dispatch of a datagram its link keeps goes on from on a later step
 /// ([`crate::driver_loop::EventSink::holds_datagram`]): the link lends the same bytes again, and
 /// the dispatch reads on from here instead of from the datagram's start.
@@ -5212,7 +5278,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::stats_registry::StatsRegistry::set_transport_metrics`].
     #[cfg(feature = "transport-stats")]
     pub fn stats_metrics(&self) -> crate::stats_registry::TransportMetrics {
-        R::with_mutex_mut(&self.metrics, |metrics| metrics.clone())
+        self.fact_metrics(|metrics| metrics.clone())
     }
 
     /// R2843 — the stats registry of a node that IS this session: this node's
@@ -5284,7 +5350,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// calls it before its last [`Self::stats_metrics`] of a closing session.
     #[cfg(feature = "transport-stats")]
     pub fn close_stats_links(&self) {
-        R::with_mutex_mut(&self.metrics, |metrics| metrics.close_all_links());
+        self.fact_metrics(|metrics| metrics.close_all_links());
     }
 
     /// R2825 — record on `link`'s cells in this session's partition. A link
@@ -5301,7 +5367,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = R::with_mutex_mut(&link.stats_slot, |slot| *slot) else {
             return;
         };
-        R::with_mutex_mut(&self.metrics, |metrics| record(metrics, slot));
+        self.fact_metrics(|metrics| record(metrics, slot));
     }
 
     /// R2825 — observe one data message's payload in this session's partition.
@@ -5324,7 +5390,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let shm = class.medium == crate::stats::StatMedium::Shm;
-        R::with_mutex_mut(&self.metrics, |metrics| {
+        self.fact_metrics(|metrics| {
             metrics.observe_payload_class(direction, priority, kind, shm, &payload)
         });
     }
@@ -5341,7 +5407,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), crate::stats_registry::StatsKeyFiltersError> {
         #[cfg(feature = "transport-stats")]
         {
-            R::with_mutex_mut(&self.metrics, |metrics| metrics.set_key_filters(filters));
+            self.fact_metrics(|metrics| metrics.set_key_filters(filters));
             Ok(())
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -5363,17 +5429,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         class: crate::stats::NetworkStatsClass,
         keyexpr: impl FnOnce() -> Option<K>,
     ) -> crate::stats::NetworkStatsClass {
-        if class.payload.is_none()
-            || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
+        if class.payload.is_none() || self.fact_metrics(|metrics| metrics.key_filters().is_empty())
         {
             return class;
         }
         let Some(keyexpr) = keyexpr() else {
             return class;
         };
-        let keys = R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.key_filters().matching(keyexpr.as_ref())
-        });
+        let keys = self.fact_metrics(|metrics| metrics.key_filters().matching(keyexpr.as_ref()));
         class.with_keys(keys)
     }
 
@@ -5421,7 +5484,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let size = class.payload.map_or(0, |p| p.pl_bytes as u64);
-        R::with_mutex_mut(&self.metrics, |metrics| {
+        self.fact_metrics(|metrics| {
             metrics.observe_network_message_dropped_payload(
                 crate::stats_registry::StatsDirection::Tx,
                 priority,
@@ -6755,7 +6818,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // Out of line for the same reason as `emit_on_link`: every lend-only refusal reaches it.
     #[inline(never)]
     fn refuse_tx(&self, cause: crate::link::LinkDropCause) -> crate::link::LinkDropCause {
-        R::with_mutex_mut(&self.tx_refusals, |counts| match cause {
+        self.fact_tx_refusals(|counts| match cause {
             crate::link::LinkDropCause::NoTxSlot => counts.no_slot = counts.no_slot.wrapping_add(1),
             crate::link::LinkDropCause::Oversize => {
                 counts.oversize = counts.oversize.wrapping_add(1)
@@ -6772,7 +6835,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// of a slot, by cause: see [`TxRefusalCounts`].
     #[cfg(feature = "tx-lend-only")]
     pub fn tx_refusals(&self) -> TxRefusalCounts {
-        R::with_mutex_mut(&self.tx_refusals, |counts| *counts)
+        self.fact_tx_refusals(|counts| *counts)
     }
 
     /// Fixed-memory step S4 — the lend-only InitSyn / InitAck: the Init message
@@ -6858,7 +6921,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             |buf| {
                 let start = buf.len();
                 if echo_inbound_cookie {
-                    R::with_mutex_mut(&self.inbound_cookie, |cookie| {
+                    self.fact_inbound_cookie(|cookie| {
                         encode_open_head_into(
                             buf,
                             &self.params,
@@ -6945,7 +7008,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `negotiated_axis_witness_gate` derives a body axis's result accessors from
         // the `pub fn`s that read the peer-caps slot themselves, so a private helper
         // that did the read would leave the three body axes without an accessor.
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
         let mut params = self.params.clone();
         params.seq_num_res = seq_num_res;
@@ -7008,7 +7071,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn init_caps(&self, is_ack: bool) -> crate::handshake_encode::InitCaps {
         let (seq_num_res, req_id_res, batch_size) = if is_ack {
-            let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+            let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
             self.init_ack_sizes(peer)
         } else {
             (
@@ -7040,7 +7103,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// this returns in that window. Nothing that needs the negotiated ring
     /// runs there: the acceptor's RX SN seed waits for the restore.
     pub fn negotiated_sn_mask(&self) -> u64 {
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
             self.params.seq_num_res,
             peer,
@@ -7107,9 +7170,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // The capabilities and the tag they are the capabilities OF, read in one hold: a
         // writer moves the tag in the hold that writes them.
-        let (peer, tag) = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
-            (*slot, cache.current_tag())
-        });
+        let (peer, tag) = self.fact_inbound_peer_init_caps(|slot| (*slot, cache.current_tag()));
         let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
         // Read BEFORE the envelope: a session seen established had settled the outcomes the
         // envelope reads before it became established, so they are final here.
@@ -7174,7 +7235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// to write the slot: a write that bypassed it would leave a send using limits the slot no
     /// longer says.
     pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
-        R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
+        self.fact_inbound_peer_init_caps(|slot| {
             *slot = caps;
             self.tx_limits_cache.peer_caps_changed();
             self.best_effort_tx_limits_cache.peer_caps_changed();
@@ -7191,9 +7252,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Heap profile only: it copies the zid out into a `Vec`.
     #[cfg(feature = "alloc")]
     pub fn peer_zid(&self) -> Option<Vec<u8>> {
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-            slot.as_deref().map(<[u8]>::to_vec)
-        })
+        self.fact_remote_peer_zid(|slot| slot.as_deref().map(<[u8]>::to_vec))
     }
 
     /// The remote peer's zid in its sixteen-byte form
@@ -7203,7 +7262,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `close` names a node by this value (decision D6 of
     /// `docs/session-lifecycle-intent.md`).
     pub fn peer_zid_array(&self) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+        self.fact_remote_peer_zid(|slot| {
             slot.as_deref()
                 .and_then(crate::credential_identity::zid_from_wire)
         })
@@ -7212,7 +7271,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The remote peer's zid as its INIT carried it, or `None` before the INIT exchange has named
     /// it: [`peer_zid`](Self::peer_zid) with its length and no copy on the heap, for every profile.
     pub fn peer_session_zid(&self) -> Option<SessionZid> {
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot)
+        self.fact_remote_peer_zid(|slot| *slot)
     }
 
     /// The remote peer's zid in its sixteen-byte form, when the key of this session's link
@@ -7236,7 +7295,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`peer_zid`](Self::peer_zid) — raw wire identity here, routing-form derived
     /// at the driver — keeping session-core routing-agnostic.
     pub fn peer_whatami_wire(&self) -> Option<u8> {
-        R::with_mutex_mut(&self.peer_whatami, |slot| *slot)
+        self.fact_peer_whatami(|slot| *slot)
     }
 
     /// R311kd — the session's effective outbound frame budget: the
@@ -7283,7 +7342,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // [`BoxedLinkDriver::link_mtu`]'s `DEFAULT_LINK_MTU` (65535),
         // inert against the `u16` batch advertisements, so TCP is
         // unchanged.
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         self.batch_mtu_for(peer, crate::reliability::Reliability::Reliable)
     }
 
@@ -7365,7 +7424,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// which is what its stop fragment told the peer.
     #[cfg(feature = "transport-fragmentation")]
     pub fn set_fragment_tx_budget(&self, fragments: usize) {
-        R::with_mutex_mut(&self.fragment_tx_budget, |slot| *slot = fragments);
+        self.fact_fragment_tx_budget(|slot| *slot = fragments);
     }
 
     /// Fragments this session may still emit, or `usize::MAX` when the host
@@ -7378,7 +7437,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// for the emit path to plan against.
     #[cfg(feature = "transport-fragmentation")]
     pub fn fragment_tx_budget(&self) -> usize {
-        R::with_mutex_mut(&self.fragment_tx_budget, |slot| *slot)
+        self.fact_fragment_tx_budget(|slot| *slot)
     }
 
     /// Draw ONE fragment credit, reporting whether it was available.
@@ -7415,7 +7474,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     fn take_fragment_tx_credit(&self) -> bool {
-        R::with_mutex_mut(&self.fragment_tx_budget, |slot| {
+        self.fact_fragment_tx_budget(|slot| {
             if *slot == usize::MAX {
                 return true;
             }
@@ -7562,7 +7621,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-open-body")]
     fn open_initial_sn(&self) -> Option<u64> {
         let mask = self.negotiated_sn_mask();
-        let initial_sn = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+        let initial_sn = self.fact_remote_peer_zid(|slot| {
             slot.as_deref()
                 .map(|peer| crate::initial_sn::derive_initial_sn(&self.params.zid, peer, mask))
         })?;
@@ -7634,7 +7693,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn draw_multilink_challenge<E: EntropySource + ?Sized>(&self, entropy: &mut E) {
         let draw = entropy.try_next_u64().ok();
-        R::with_mutex_mut(&self.multilink, |slot| {
+        self.fact_multilink(|slot| {
             if let Some(d) = slot.as_mut() {
                 d.set_drawn_challenge(draw);
             }
@@ -7647,9 +7706,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn multilink_accept_state(&self) -> crate::accept_cookie::MultilinkAcceptState {
         #[cfg(feature = "transport-multilink")]
         {
-            crate::accept_cookie::MultilinkAcceptState(R::with_mutex_mut(&self.multilink, |slot| {
-                slot.as_ref().and_then(|d| d.accept_state())
-            }))
+            crate::accept_cookie::MultilinkAcceptState(
+                self.fact_multilink(|slot| slot.as_ref().and_then(|d| d.accept_state())),
+            )
         }
         #[cfg(not(feature = "transport-multilink"))]
         crate::accept_cookie::MultilinkAcceptState(None)
@@ -7669,7 +7728,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is made to refuse instead (`cookie_valid` denies on an absent nonce).
     pub fn draw_cookie_nonce<E: EntropySource + ?Sized>(&self, entropy: &mut E) -> bool {
         let nonce = entropy.try_next_u64().ok();
-        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = nonce);
+        self.fact_cookie_nonce(|slot| *slot = nonce);
         nonce.is_some()
     }
 
@@ -7682,7 +7741,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// serialized, and a test that wants to reproduce the minted cookie reads
     /// it here rather than assuming the derivation is nonce-free.
     pub fn cookie_nonce(&self) -> Option<u64> {
-        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot)
+        self.fact_cookie_nonce(|slot| *slot)
     }
 
     /// R2769 — the acceptor's InitSyn-derived state, in the form the cookie
@@ -7733,7 +7792,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         crate::accept_state::NegotiatedExtensions,
         crate::accept_cookie::MultilinkAcceptState,
     ) {
-        let caps = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let caps = self.fact_inbound_peer_init_caps(|slot| *slot);
         (
             self.peer_whatami_wire().unwrap_or(0),
             // The peer's advertisement as the BYTE the peer sent, re-packed by
@@ -7839,12 +7898,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             compression: CompressionAcceptState(self.is_compression()),
             #[cfg(not(feature = "transport-compression"))]
             compression: CompressionAcceptState(false),
-            patch: PatchAcceptState(R::with_mutex_mut(&self.negotiated_patch, |s| *s)),
+            patch: PatchAcceptState(self.fact_negotiated_patch(|s| *s)),
             // R2780 — the region the peer announced on this InitSyn, admitted
             // (and validated) before the InitAck is minted.
-            region: RegionAcceptState::new(
-                R::with_mutex_mut(&self.peer_region, |s| s.clone()).as_ref(),
-            ),
+            region: RegionAcceptState::new(self.fact_peer_region(|s| s.clone()).as_ref()),
         }
     }
 
@@ -7865,7 +7922,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             PatchAcceptState, QosAcceptState, RegionAcceptState, ShmAcceptState,
         };
         use crate::transport_mode::TransportMode;
-        let offer = R::with_mutex_mut(&self.offer, |o| *o);
+        let offer = self.fact_offer(|o| *o);
         NegotiatedExtensions {
             // R2777 — a QoS offer carries the band it offers; the band is
             // meaningful only beside a QoS offer, as the emit seam already
@@ -7927,29 +7984,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn install_negotiated(&self, n: crate::accept_state::NegotiatedExtensions) {
         #[cfg(feature = "transport-qos")]
-        R::with_mutex_mut(&self.is_qos, |s| *s = n.qos.negotiated());
+        self.fact_is_qos(|s| *s = n.qos.negotiated());
         // R2777 — the band, from the same QoS state: one member, two slots.
         // R2941 — and the link's egress band with it, so a band restored from
         // a cookie routes as the band the merge settled does.
         #[cfg(feature = "session-extqos")]
         self.settle_qos_link(crate::extqos::QosLinkState::from_qos_accept_state(n.qos));
         #[cfg(feature = "transport-shm")]
-        R::with_mutex_mut(&self.is_shm, |s| *s = n.shm.0);
+        self.fact_is_shm(|s| *s = n.shm.0);
         // R2779 — the auth challenges, into the methods that issued them.
         #[cfg(feature = "session-extauth")]
         R::with_mutex_mut(&self.auth, |d| d.restore_accept_state(n.auth));
         #[cfg(feature = "transport-lowlatency")]
-        R::with_mutex_mut(&self.is_lowlatency, |s| *s = n.lowlatency.0);
+        self.fact_is_lowlatency(|s| *s = n.lowlatency.0);
         #[cfg(feature = "transport-compression")]
-        R::with_mutex_mut(&self.is_compression, |s| *s = n.compression.0);
+        self.fact_is_compression(|s| *s = n.compression.0);
         // UNGATED, and it is the one with content: `negotiated_patch` is an
         // ungated field carrying `Option<u8>`, so it is the only member of the
         // five that a default build can observe at all.
-        R::with_mutex_mut(&self.negotiated_patch, |s| *s = n.patch.0);
+        self.fact_negotiated_patch(|s| *s = n.patch.0);
         // R2780 — UNGATED too, and a second member a default build observes:
         // `peer_region` is an ungated slot. It is not one of the five above,
         // which are outcomes of a negotiation; it is what the peer announced.
-        R::with_mutex_mut(&self.peer_region, |s| *s = n.region.name());
+        self.fact_peer_region(|s| *s = n.region.name());
     }
 
     /// R2774 — return EVERY negotiated slot to this node's offer: the state a
@@ -7988,7 +8045,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// with itself.
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     pub(crate) fn restore_accept_state_from_cookie(&self) -> bool {
-        let echoed = match R::with_mutex_mut(&self.inbound_opensyn_cookie, |s| s.clone()) {
+        let echoed = match self.fact_inbound_opensyn_cookie(|s| s.clone()) {
             Some(c) => c,
             None => return false,
         };
@@ -8037,9 +8094,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn install_accept_head(&self, head: Option<&crate::accept_cookie::AcceptCookieState>) {
         let zid = head.map(|h| h.peer_zid);
-        R::with_mutex_mut(&self.inbound_peer_zid, |s| *s = zid);
-        R::with_mutex_mut(&self.remote_peer_zid, |s| *s = zid);
-        R::with_mutex_mut(&self.peer_whatami, |s| *s = head.map(|h| h.peer_whatami));
+        self.fact_inbound_peer_zid(|s| *s = zid);
+        self.fact_remote_peer_zid(|s| *s = zid);
+        self.fact_peer_whatami(|s| *s = head.map(|h| h.peer_whatami));
         self.set_peer_init_caps(
             head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size))),
         );
@@ -8064,7 +8121,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Option` and assigns instead of taking a value and setting.
     #[cfg(feature = "session-extauth")]
     pub fn set_peer_auth_id(&self, id: Option<crate::auth_dispatch::AuthIdentity>) {
-        R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = id);
+        self.fact_peer_auth_id(|slot| *slot = id);
     }
 
     /// The principal this session's peer authenticated as, if any — what an ACL
@@ -8072,7 +8129,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session, or a pubkey-only one, which proves key possession and not a name).
     #[cfg(feature = "session-extauth")]
     pub fn peer_auth_id(&self) -> Option<crate::auth_dispatch::AuthIdentity> {
-        R::with_mutex_mut(&self.peer_auth_id, |slot| slot.clone())
+        self.fact_peer_auth_id(|slot| slot.clone())
     }
 
     /// Whether the zid this session's peer CLAIMED is the zid the key it PROVED
@@ -8096,7 +8153,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session's locks are ever held together here.
     pub fn peer_identity_verified(&self) -> bool {
         use crate::credential_identity::{zid_is_bound, CREDENTIAL_ZID_BYTES};
-        let claimed = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+        let claimed = self.fact_remote_peer_zid(|slot| {
             slot.as_deref()
                 .filter(|zid| zid.len() <= CREDENTIAL_ZID_BYTES)
                 .map(|zid| {
@@ -8158,7 +8215,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and handed in through the rsa-free [`MultiLinkDispatch`](crate::extmultilink::MultiLinkDispatch).
     #[cfg(feature = "transport-multilink")]
     pub fn install_multilink_dispatch(&self, dispatch: crate::extmultilink::MultiLinkDispatch) {
-        R::with_mutex_mut(&self.multilink, |slot| *slot = Some(dispatch));
+        self.fact_multilink(|slot| *slot = Some(dispatch));
     }
 
     // R2783 — `refresh_multilink_challenge_nonce`, the out-of-band install the
@@ -8177,7 +8234,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         f: impl FnOnce(&mut crate::extmultilink::MultiLinkDispatch) -> U,
     ) -> Option<U> {
-        R::with_mutex_mut(&self.multilink, |slot| slot.as_mut().map(f))
+        self.fact_multilink(|slot| slot.as_mut().map(f))
     }
 
     /// Latch the peer's captured ephemeral multilink pubkey (encoded ZPublicKey
@@ -8188,11 +8245,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// same key re-latches identically).
     #[cfg(feature = "transport-multilink")]
     pub fn capture_multilink_pubkey(&self) {
-        let captured = R::with_mutex_mut(&self.multilink, |slot| {
-            slot.as_ref().and_then(|d| d.captured_peer_pubkey())
-        });
+        let captured =
+            self.fact_multilink(|slot| slot.as_ref().and_then(|d| d.captured_peer_pubkey()));
         if let Some(bytes) = captured {
-            R::with_mutex_mut(&self.multilink_pubkey, |slot| *slot = Some(bytes));
+            self.fact_multilink_pubkey(|slot| *slot = Some(bytes));
         }
     }
 
@@ -8206,12 +8262,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "session-unicast-accept"
     ))]
     fn release_multilink_accept_state(&self) {
-        R::with_mutex_mut(&self.multilink, |slot| {
+        self.fact_multilink(|slot| {
             if let Some(d) = slot.as_mut() {
                 d.release_accept_state();
             }
         });
-        R::with_mutex_mut(&self.multilink_pubkey, |slot| *slot = None);
+        self.fact_multilink_pubkey(|slot| *slot = None);
     }
 
     /// R2783 — put back the multilink state the echoed cookie carried, before
@@ -8224,7 +8280,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "session-unicast-accept"
     ))]
     fn restore_multilink_accept_state(&self, carried: &crate::accept_cookie::MultilinkAcceptState) {
-        R::with_mutex_mut(&self.multilink, |slot| {
+        self.fact_multilink(|slot| {
             if let Some(d) = slot.as_mut() {
                 let carried = carried.0.as_ref().map(|(c, k)| (*c, k.as_slice()));
                 // The refusal is the OpenSyn stage's to report: a failed
@@ -8239,7 +8295,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session). The join gate's config-equality key.
     #[cfg(feature = "transport-multilink")]
     pub fn multilink_pubkey(&self) -> Option<Vec<u8>> {
-        R::with_mutex_mut(&self.multilink_pubkey, |slot| slot.clone())
+        self.fact_multilink_pubkey(|slot| slot.clone())
     }
 
     /// R2943 — write this link's DECLARED reliability class, the egress twin of
@@ -8280,9 +8336,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &mut crate::extmultilink::MultiLinkDispatch,
         ) -> Result<Option<ExtEntryOwned>, crate::auth_dispatch::AuthError>,
     ) {
-        let ext = R::with_mutex_mut(&self.multilink, |slot| {
-            slot.as_mut().and_then(|d| produce(d).ok().flatten())
-        });
+        let ext = self.fact_multilink(|slot| slot.as_mut().and_then(|d| produce(d).ok().flatten()));
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Multilink, ext);
         });
@@ -8424,7 +8478,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let ends = crate::link::LinkEndsText::link_endpoints(link.link_driver());
             let slot = ends.map(|ends| {
-                R::with_mutex_mut(&self.metrics, |metrics| {
+                self.fact_metrics(|metrics| {
                     metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
                 })
             });
@@ -8446,7 +8500,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// closes the link INVALID) or when no pubkey is bound yet.
     #[cfg(feature = "transport-multilink")]
     pub fn authorize_link(&self, candidate_pubkey: &[u8]) -> Option<PubkeyBound> {
-        let bound = R::with_mutex_mut(&self.multilink_pubkey, |slot| slot.clone());
+        let bound = self.fact_multilink_pubkey(|slot| slot.clone());
         match bound {
             Some(b) if b.as_slice() == candidate_pubkey => Some(PubkeyBound(())),
             _ => None,
@@ -8464,7 +8518,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // upstream's `remove_link` folds them.
         #[cfg(feature = "transport-stats")]
         if let Some(slot) = R::with_mutex_mut(&link.stats_slot, |own| own.take()) {
-            R::with_mutex_mut(&self.metrics, |metrics| metrics.close_link(slot));
+            self.fact_metrics(|metrics| metrics.close_link(slot));
         }
         // ARCHITECTURE section 9.1 -- the batch frames open in this link's
         // slots move to the heap stage before the link leaves the set.
@@ -8715,12 +8769,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-lowlatency")]
     pub fn set_lowlatency_offer(&self, offer: bool) -> bool {
         use crate::transport_mode::TransportMode;
-        if !R::with_mutex_mut(&self.offer, |o| {
-            o.stage_mode(TransportMode::LowLatency, offer)
-        }) {
+        if !self.fact_offer(|o| o.stage_mode(TransportMode::LowLatency, offer)) {
             return false;
         }
-        R::with_mutex_mut(&self.is_lowlatency, |s| *s = offer);
+        self.fact_is_lowlatency(|s| *s = offer);
         true
     }
 
@@ -8736,7 +8788,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// exchange — OpenSyn / OpenAck carry nothing).
     #[cfg(feature = "transport-lowlatency")]
     pub fn negotiate_lowlatency_against_peer(&self, peer_offered: bool) {
-        R::with_mutex_mut(&self.is_lowlatency, |s| *s &= peer_offered);
+        self.fact_is_lowlatency(|s| *s &= peer_offered);
     }
 
     /// R311y578 — cap this session's protocol patch level at the peer's
@@ -8755,7 +8807,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// non-increasing, so a second Init cannot raise a level a first one
     /// lowered.
     pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
-        R::with_mutex_mut(&self.negotiated_patch, |s| {
+        self.fact_negotiated_patch(|s| {
             // The first Init starts from wz's OWN announcement (R121f1 puts
             // `_Z_CURRENT_PATCH` on every Init wz sends), matching
             // zenoh-pico's `iam._patch` starting at its current level; a
@@ -8773,18 +8825,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is a property of the message. Staging at configure time would put the
     /// InitAck's entry on a chain the acceptor has not begun.
     pub fn set_local_region(&self, name: Option<crate::extregion::RegionName>) {
-        R::with_mutex_mut(&self.local_region, |s| *s = name);
+        self.fact_local_region(|s| *s = name);
     }
 
     /// This node's region identity, `None` when it has none.
     pub fn local_region(&self) -> Option<crate::extregion::RegionName> {
-        R::with_mutex_mut(&self.local_region, |s| s.clone())
+        self.fact_local_region(|s| s.clone())
     }
 
     /// The PEER's region identity as announced on its Init, `None` when it
     /// announced none or no Init has been admitted yet.
     pub fn peer_region(&self) -> Option<crate::extregion::RegionName> {
-        R::with_mutex_mut(&self.peer_region, |s| s.clone())
+        self.fact_peer_region(|s| s.clone())
     }
 
     /// R2539 — stage (or remove) this role's `0x8` REGION-NAME entry from the
@@ -8834,7 +8886,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> bool {
         match crate::extbound::peer_remote_bound_in(extensions) {
             Ok(bound) => {
-                R::with_mutex_mut(&self.peer_remote_bound, |s| *s = bound);
+                self.fact_peer_remote_bound(|s| *s = bound);
                 true
             }
             Err(_) => false,
@@ -8843,7 +8895,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2858 — the bound the peer announced on its Open, `None` for none.
     pub fn peer_remote_bound(&self) -> Option<crate::extbound::Bound> {
-        R::with_mutex_mut(&self.peer_remote_bound, |s| *s)
+        self.fact_peer_remote_bound(|s| *s)
     }
 
     /// Item 751 — set how this node's south is partitioned. Every handshake this
@@ -8854,7 +8906,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The node sets this on each session from the same partition its routing
     /// places faces by, so the two cannot place one remote differently.
     pub fn set_south_partition(&self, partition: crate::region_partition::SouthPartition) {
-        R::with_mutex_mut(&self.south_partition, |slot| *slot = partition);
+        self.fact_south_partition(|slot| *slot = partition);
     }
 
     /// Item 751 — decide the bound this session announces for its peer: the
@@ -8885,7 +8937,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Option<crate::extbound::Bound>,
             crate::region_partition::RegionError,
         > = Ok(None);
-        R::with_mutex_mut(&self.local_remote_bound, |slot| {
+        self.fact_local_remote_bound(|slot| {
             *slot = decided.ok().flatten();
         });
         decided
@@ -8899,7 +8951,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
         // The slot's own form, copied: the public `peer_zid` hands out a
         // vector, which this decision (run on every handshake) must not need.
-        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot);
+        let zid = self.fact_remote_peer_zid(|slot| *slot);
         let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
         let region = self.peer_region();
         let interfaces: Vec<&str> = self
@@ -8915,7 +8967,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     region_name: region.as_ref().map(|name| name.as_str()),
                     interfaces: &interfaces,
                 };
-                R::with_mutex_mut(&self.south_partition, |partition| {
+                self.fact_south_partition(|partition| {
                     crate::region_partition::transient_bound_of(
                         self.params.whatami,
                         partition,
@@ -8932,7 +8984,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Item 751 — the bound this session announces for its peer, as last decided.
     pub fn local_remote_bound(&self) -> Option<crate::extbound::Bound> {
-        R::with_mutex_mut(&self.local_remote_bound, |s| *s)
+        self.fact_local_remote_bound(|s| *s)
     }
 
     /// Item 751 — put the decided bound on the Open chain `role` sends, or take
@@ -8984,7 +9036,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `zid_from_wire`, so a reader that renders them renders what the peer sent and
     /// allocates nothing (`peer_zid`, heap profile, is the owned copy).
     pub fn with_peer_zid<X>(&self, f: impl FnOnce(Option<&[u8]>) -> X) -> X {
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| f(slot.as_deref()))
+        self.fact_remote_peer_zid(|slot| f(slot.as_deref()))
     }
 
     /// Whether this session negotiated SHM, upstream's `transport.is_shm()` as a
@@ -9035,7 +9087,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> bool {
         match region {
             Ok(region) => {
-                R::with_mutex_mut(&self.peer_region, |s| *s = region);
+                self.fact_peer_region(|s| *s = region);
                 true
             }
             Err(_) => false,
@@ -9156,9 +9208,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// passive consumer reporting on a session wants the level, not only
     /// the one predicate wz currently derives from it.
     pub fn negotiated_patch(&self) -> u8 {
-        R::with_mutex_mut(&self.negotiated_patch, |s| {
-            s.unwrap_or(crate::extpatch::NO_PATCH)
-        })
+        self.fact_negotiated_patch(|s| s.unwrap_or(crate::extpatch::NO_PATCH))
     }
 
     /// R311y578 — whether a patch level has been NEGOTIATED at all, as
@@ -9167,7 +9217,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiated_patch`] and mean different things to anything
     /// reporting on a session it did not establish.
     pub fn patch_was_negotiated(&self) -> bool {
-        R::with_mutex_mut(&self.negotiated_patch, |s| s.is_some())
+        self.fact_negotiated_patch(|s| s.is_some())
     }
 
     /// R311y578 — zenoh `patch.has_fragmentation_markers()`: whether this
@@ -9185,7 +9235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// when BOTH peers offered the ext.
     #[cfg(feature = "transport-lowlatency")]
     pub fn is_lowlatency(&self) -> bool {
-        R::with_mutex_mut(&self.is_lowlatency, |s| *s)
+        self.fact_is_lowlatency(|s| *s)
     }
 
     /// transport-qos (R311y215) — the AP layer's "this deploy offers the QoS
@@ -9208,10 +9258,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-qos")]
     pub fn set_qos_offer(&self, offer: bool) -> bool {
         use crate::transport_mode::TransportMode;
-        if !R::with_mutex_mut(&self.offer, |o| o.stage_mode(TransportMode::Qos, offer)) {
+        if !self.fact_offer(|o| o.stage_mode(TransportMode::Qos, offer)) {
             return false;
         }
-        R::with_mutex_mut(&self.is_qos, |s| *s = offer);
+        self.fact_is_qos(|s| *s = offer);
         true
     }
 
@@ -9226,7 +9276,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// exchange — Open carries nothing).
     #[cfg(feature = "transport-qos")]
     pub fn negotiate_qos_against_peer(&self, peer_offered: bool) {
-        R::with_mutex_mut(&self.is_qos, |s| *s &= peer_offered);
+        self.fact_is_qos(|s| *s &= peer_offered);
     }
 
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
@@ -9236,7 +9286,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// True only when BOTH peers offered the ext.
     #[cfg(feature = "transport-qos")]
     pub fn is_qos(&self) -> bool {
-        R::with_mutex_mut(&self.is_qos, |s| *s)
+        self.fact_is_qos(|s| *s)
     }
 
     /// Allow the drive loop to report a frame of plain `Put`s as one
@@ -9264,7 +9314,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return false;
         }
         #[cfg(feature = "routing-namespace")]
-        if R::with_mutex_mut(&self.core.namespace_ingress, |slot| slot.is_some()) {
+        if self.core.fact_namespace_ingress(|slot| slot.is_some()) {
             return false;
         }
         true
@@ -9335,15 +9385,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// has narrowed it.
     #[cfg(feature = "session-extqos")]
     pub fn set_qos_link_metadata(&self, state: crate::extqos::QosLinkState) {
-        R::with_mutex_mut(&self.offer, |o| o.qos_link = Some(state));
-        R::with_mutex_mut(&self.qos_link, |s| *s = state);
+        self.fact_offer(|o| o.qos_link = Some(state));
+        self.fact_qos_link(|s| *s = state);
     }
 
     /// session-extqos — the QoS metadata currently negotiated for this session:
     /// the staged local value before the handshake, the merged value after.
     #[cfg(feature = "session-extqos")]
     pub fn qos_link_metadata(&self) -> crate::extqos::QosLinkState {
-        R::with_mutex_mut(&self.qos_link, |s| *s)
+        self.fact_qos_link(|s| *s)
     }
 
     /// session-extqos (R311y506) — run the directional `QoSLink` merge against
@@ -9412,7 +9462,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     fn settle_qos_link(&self, outcome: crate::extqos::QosLinkState) {
-        R::with_mutex_mut(&self.qos_link, |s| *s = outcome);
+        self.fact_qos_link(|s| *s = outcome);
         self.apply_negotiated_qos_to_link(&outcome);
     }
 
@@ -9607,10 +9657,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`api/session.rs`).
     #[cfg(feature = "routing-namespace")]
     pub fn set_namespace(&self, namespace: OwnedNonWildKeyExpr) {
-        R::with_mutex_mut(&self.namespace_ingress, |s| {
+        self.fact_namespace_ingress(|s| {
             *s = Some(NamespaceIngress::new(namespace.clone()));
         });
-        R::with_mutex_mut(&self.namespace_egress, |s| *s = Some(namespace));
+        self.fact_namespace_egress(|s| *s = Some(namespace));
     }
 
     /// §5.21 routing-namespace — apply the stateful INGRESS decorator to one
@@ -9623,7 +9673,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// observer fans the same `&outcome` into every consumer registry.
     #[cfg(feature = "routing-namespace")]
     pub fn apply_namespace_ingress(&self, outcome: &mut crate::driver_loop::DriverLoopOutcome) {
-        R::with_mutex_mut(&self.namespace_ingress, |slot| {
+        self.fact_namespace_ingress(|slot| {
             if let Some(ing) = slot.as_mut() {
                 crate::namespace::strip_outcome(ing, outcome);
             }
@@ -9666,7 +9716,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         mut d: crate::transport_profile::owned::DeclareOwned,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, sce_forge_runtime::codec::CodecError>
     {
-        R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
+        self.fact_namespace_egress(|slot| match slot.as_ref() {
             Some(ns) => crate::namespace::apply_egress_declare(ns, &mut d),
             None => Ok(()),
         })?;
@@ -9688,7 +9738,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         mut i: crate::transport_profile::owned::InterestOwned,
     ) -> Result<crate::transport_profile::owned::InterestOwned, sce_forge_runtime::codec::CodecError>
     {
-        R::with_mutex_mut(&self.namespace_egress, |slot| match slot.as_ref() {
+        self.fact_namespace_egress(|slot| match slot.as_ref() {
             Some(ns) => crate::namespace::apply_egress_interest(ns, &mut i),
             None => Ok(()),
         })?;
@@ -9797,7 +9847,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// way to flip the flag, so it never engages.
     #[cfg(feature = "transport-compression")]
     pub fn is_compression(&self) -> bool {
-        R::with_mutex_mut(&self.is_compression, |s| *s)
+        self.fact_is_compression(|s| *s)
     }
 
     /// transport-compression (R311y434) — SSOT for "is the lz4 batch wrap ACTIVE
@@ -9846,7 +9896,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// swap + the RX un-swap (R3b).
     #[cfg(feature = "transport-shm")]
     pub fn is_shm(&self) -> bool {
-        R::with_mutex_mut(&self.is_shm, |s| *s)
+        self.fact_is_shm(|s| *s)
     }
 
     /// R3065 -- whether a buffer of shared-memory `protocol` may be sent to this peer as its
@@ -10002,8 +10052,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiate_compression_against_peer`].
     #[cfg(feature = "session-extcompression")]
     pub fn set_compression_offer(&self, offer: bool) {
-        R::with_mutex_mut(&self.offer, |o| o.compression = offer);
-        R::with_mutex_mut(&self.is_compression, |s| *s = offer);
+        self.fact_offer(|o| o.compression = offer);
+        self.fact_is_compression(|s| *s = offer);
     }
 
     /// session-extcompression — AND the peer's InitSyn / InitAck compression offer
@@ -10014,7 +10064,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// exchange (zenoh's Open stages are NOP).
     #[cfg(feature = "session-extcompression")]
     pub fn negotiate_compression_against_peer(&self, peer_offered: bool) {
-        R::with_mutex_mut(&self.is_compression, |s| *s &= peer_offered);
+        self.fact_is_compression(|s| *s &= peer_offered);
     }
 
     /// session-extshm — the AP layer's "this deploy offers SHM toward this peer"
@@ -10023,8 +10073,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiate_shm_against_peer`].
     #[cfg(feature = "session-extshm")]
     pub fn set_shm_offer(&self, offer: bool) {
-        R::with_mutex_mut(&self.offer, |o| o.shm = offer);
-        R::with_mutex_mut(&self.is_shm, |s| *s = offer);
+        self.fact_offer(|o| o.shm = offer);
+        self.fact_is_shm(|s| *s = offer);
     }
 
     /// session-extshm — AND the peer's Init / InitAck SHM offer into the local
@@ -10039,7 +10089,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// that offers SHM but cannot map our memory ends up with `is_shm = false`.
     #[cfg(feature = "session-extshm")]
     pub fn negotiate_shm_against_peer(&self, peer_offered: bool) {
-        R::with_mutex_mut(&self.is_shm, |s| *s &= peer_offered);
+        self.fact_is_shm(|s| *s &= peer_offered);
     }
 
     /// session-extshm (R311y507) — what counts as "the peer offered SHM" on an
@@ -10137,7 +10187,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R3123 -- the same withdrawal as the acceptor's InitSyn: a new establishment.
         self.withdraw_shm_rx();
         if installed && !proved {
-            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+            self.fact_is_shm(|s| *s = false);
         }
     }
 
@@ -10185,7 +10235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R3123 -- the handoff opened from the counters the peer named is kept by THIS link.
         R::with_mutex_mut(&self.link.shm_rx, |slot| slot.apply(received.rx));
         if installed && !received.accepted {
-            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+            self.fact_is_shm(|s| *s = false);
         }
         received.refusal.map_or(Ok(()), Err)
     }
@@ -10218,7 +10268,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R3123 -- kept by THIS link, as the acceptor's is.
         R::with_mutex_mut(&self.link.shm_rx, |slot| slot.apply(received.rx));
         if installed && !received.accepted {
-            R::with_mutex_mut(&self.is_shm, |s| *s = false);
+            self.fact_is_shm(|s| *s = false);
         }
         received.refusal.map_or(Ok(()), Err)
     }
@@ -10239,7 +10289,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     #[cfg(feature = "action-trace")]
     pub fn trace_snapshot(&self) -> ActionTrace {
-        R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
+        self.fact_trace(|t| t.clone_via_copy())
     }
 
     /// Count one run of an action in the trace (`count` names its counter). A build without
@@ -10247,7 +10297,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[inline(always)]
     pub(crate) fn note_action(&self, count: impl FnOnce(&mut ActionTrace)) {
         #[cfg(feature = "action-trace")]
-        R::with_mutex_mut(&self.trace, count);
+        self.fact_trace(count);
         #[cfg(not(feature = "action-trace"))]
         let _ = count;
     }
@@ -10286,7 +10336,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-open-body")]
     pub(crate) fn seed_rx_sn(&self, initial_sn: u64) {
         let mask = self.negotiated_sn_mask();
-        R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, initial_sn));
+        self.fact_rx_sn(|s| s.seed(mask, initial_sn));
     }
 
     /// R2782 — everything an ADMITTED OpenSyn does to the acceptor, in one
@@ -10312,7 +10362,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !self.fixed_cookie() {
             self.restore_accept_state_from_cookie();
         }
-        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
+        self.fact_cookie_nonce(|slot| *slot = None);
         // R311ke — the peer's announced initial_sn seeds the RX gate on the
         // ring the restored caps give (peer.c:212-214).
         self.seed_rx_sn(initial_sn);
@@ -10320,7 +10370,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // projection) for the deadline comparator's min(); pico adopts it at
         // OpenSyn arrival (unicast/transport.c:269), which on its accept path
         // is after the cookie is judged.
-        R::with_mutex_mut(&self.peer_open_lease_ms, |slot| *slot = Some(lease));
+        self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
     }
 
     /// R2782 — the initiator's admission predicate for an OpenAck: one is
@@ -10328,7 +10378,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// question, so it only reads; `admit_open_ack` (crate-private, so a
     /// code span rather than a link) is the answer's side effect.
     pub fn open_ack_awaited(&self) -> bool {
-        R::with_mutex_mut(&self.awaiting_open_ack, |s| *s)
+        self.fact_awaiting_open_ack(|s| *s)
     }
 
     /// Hold `bytes`, the establishment answer this session just sent, for a replay
@@ -10441,13 +10491,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// nothing to wait for but admission.
     #[cfg(feature = "codec-open-body")]
     pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
-        R::with_mutex_mut(&self.awaiting_open_ack, |s| *s = false);
+        self.fact_awaiting_open_ack(|s| *s = false);
         // R311ke — pico captures `_initial_sn_rx` from either Open body
         // (transport.c:196/270).
         self.seed_rx_sn(initial_sn);
         // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
         // unicast/transport.c:193).
-        R::with_mutex_mut(&self.peer_open_lease_ms, |slot| *slot = Some(lease));
+        self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
     }
 
     /// R311y632 (§17) — the same, told how many bytes the message occupied.
@@ -10563,18 +10613,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // The parser refused an INIT whose zid is no zid (`parse_init`), so the
                 // conversion holds for every frame it produced; a frame built by hand
                 // that names none records none.
-                R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+                self.fact_remote_peer_zid(|slot| {
                     *slot = SessionZid::new(init.zid).ok();
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid. Both Init arms capture it (a face may be
                 // opened from either side); the routing boundary maps wire -> the
                 // graph's API-form role. The gossip-policy prerequisite ("F1").
-                R::with_mutex_mut(&self.peer_whatami, |slot| {
+                self.fact_peer_whatami(|slot| {
                     *slot = Some(init.whatami);
                 });
                 if let Some(cookie) = init.cookie {
-                    R::with_mutex_mut(&self.inbound_cookie, |slot| {
+                    self.fact_inbound_cookie(|slot| {
                         crate::session_init_params::store_session_bytes(slot, cookie);
                     });
                 }
@@ -10605,20 +10655,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 // As the InitAck arm's: `parse_init` refused a zid that is none.
                 let zid = SessionZid::new(init.zid).ok();
-                R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
+                self.fact_inbound_peer_zid(|slot| {
                     *slot = zid;
                 });
                 // R311qh — also capture it into the role-agnostic routing
                 // identity slot (the Initiating side captures the same from the
                 // InitAck above), so a held face exposes its remote peer's zid
                 // regardless of which side opened it.
-                R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+                self.fact_remote_peer_zid(|slot| {
                     *slot = zid;
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid; see the InitAck arm above for why both
                 // directions capture it (the gossip-policy "F1" prerequisite).
-                R::with_mutex_mut(&self.peer_whatami, |slot| {
+                self.fact_peer_whatami(|slot| {
                     *slot = Some(init.whatami);
                 });
                 // R121d — capture the peer's announced sizing caps
@@ -10643,7 +10693,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // Closes the loop opened by R86 (outbound cookie
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
-                R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
+                self.fact_inbound_opensyn_cookie(|slot| {
                     crate::session_init_params::store_session_bytes(slot, cookie);
                 });
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
@@ -10979,7 +11029,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !R::with_mutex_mut(&self.link.link_lease, |slot| slot.is_some()) {
             return true;
         }
-        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot);
+        let zid = self.fact_remote_peer_zid(|slot| *slot);
         match zid {
             Some(zid) => self.link_admitted(&zid),
             // A link whose peer named no zid cannot collide with another.
@@ -11175,9 +11225,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R311y215 — the SN gate is per-(priority, reliable) conduit; a non-QoS
         // session passes `Priority::DEFAULT` and gates on the single conduit.
         let mask = self.negotiated_sn_mask();
-        R::with_mutex_mut(&self.rx_sn, |s| {
-            s.admit_judged(priority, mask, reliable, sn)
-        })
+        self.fact_rx_sn(|s| s.admit_judged(priority, mask, reliable, sn))
     }
 
     /// Record that the peer's `DeclareFinal` of the initial interest arrived,
@@ -17468,7 +17516,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn rewrites_originated_keys(&self) -> bool {
         #[cfg(feature = "routing-namespace")]
         {
-            R::with_mutex_mut(&self.namespace_egress, |slot| slot.is_some())
+            self.fact_namespace_egress(|slot| slot.is_some())
         }
         #[cfg(not(feature = "routing-namespace"))]
         {
@@ -17531,7 +17579,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "routing-namespace")]
         let mut response = response;
         #[cfg(feature = "routing-namespace")]
-        R::with_mutex_mut(&self.namespace_egress, |slot| {
+        self.fact_namespace_egress(|slot| {
             if let Some(ns) = slot.as_ref() {
                 let _ = crate::namespace::apply_egress_response(ns, &mut response);
             }
@@ -17976,12 +18024,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The next peer has been asked for nothing: the answers owed by the last are not
             // owed to it, and the replay asks again, noting each interest as it does.
             R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());
-            R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
-            R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
+            self.fact_inbound_cookie(|slot| *slot = None);
+            self.fact_inbound_opensyn_cookie(|slot| *slot = None);
             // R2782 — a reopen awaits no OpenAck until its own OpenSyn is out;
             // one left standing would admit a stray OpenAck into the new
             // handshake.
-            R::with_mutex_mut(&self.awaiting_open_ack, |slot| *slot = false);
+            self.fact_awaiting_open_ack(|slot| *slot = false);
             #[cfg(all(
                 any(feature = "codec-init-body", feature = "codec-open-body"),
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -18013,9 +18061,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
             R::with_mutex_mut(&self.link.last_outbound_at, |slot| *slot = None);
-            R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
-            R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
-            R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
+            self.fact_inbound_peer_zid(|slot| *slot = None);
+            self.fact_remote_peer_zid(|slot| *slot = None);
+            self.fact_peer_whatami(|slot| *slot = None);
             // R2774 — the peer's region is the PEER's, as `peer_whatami` is:
             // upstream builds its region state `None` on every link. Without
             // a clear the reconnect window reported the previous peer's region
@@ -18030,7 +18078,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // that earned it; this slot is cleared with the rest of the
             // per-handshake state, which is the reason it lives out here.
             #[cfg(feature = "session-extauth")]
-            R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
+            self.fact_peer_auth_id(|slot| *slot = None);
             self.set_peer_init_caps(None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
@@ -18040,7 +18088,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.return_to_offer();
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
-            R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxConduits::default());
+            self.fact_rx_sn(|s| *s = crate::sn::RxConduits::default());
             // The next peer has sent none of its initial declarations yet.
             self.peer_declarations_final
                 .store(false, core::sync::atomic::Ordering::Release);
@@ -18059,7 +18107,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the namespace PREFIX is preserved (it is this node's config, not
             // peer state). No-op when no namespace is installed.
             #[cfg(feature = "routing-namespace")]
-            R::with_mutex_mut(&self.namespace_ingress, |slot| {
+            self.fact_namespace_ingress(|slot| {
                 if let Some(ing) = slot.as_mut() {
                     ing.reset();
                 }
@@ -18926,7 +18974,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // drop before the encode call (2b-① reentrancy discipline).
             #[cfg(not(feature = "tx-lend-only"))]
             {
-                let cookie_override = R::with_mutex_mut(&a.inbound_cookie, |c| c.clone());
+                let cookie_override = a.fact_inbound_cookie(|c| c.clone());
                 // An OpenSyn the encoder refuses is not sent and is counted, as the lend-only
                 // arm below answers it.
                 let encoded = a.encode_open_with_role(
@@ -18955,7 +19003,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 ExtChainRole::OpenSyn,
             );
             // R2782 — the one OpenAck this OpenSyn asks for is now awaited.
-            R::with_mutex_mut(&a.awaiting_open_ack, |s| *s = true);
+            a.fact_awaiting_open_ack(|s| *s = true);
         }
     }
 
@@ -19112,19 +19160,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // is admitted, so the same value cannot admit a second OpenSyn after it.
             let fixed_cookie = a.fixed_cookie();
             if fixed_cookie {
-                R::with_mutex_mut(&a.cookie_nonce, |slot| *slot = Some(FIXED_COOKIE_PENDING));
+                a.fact_cookie_nonce(|slot| *slot = Some(FIXED_COOKIE_PENDING));
             } else {
                 a.draw_cookie_nonce(&mut self.entropy);
             }
             let nonce: Option<u64> = if fixed_cookie {
                 None
             } else {
-                R::with_mutex_mut(&a.cookie_nonce, |slot| *slot)
+                a.fact_cookie_nonce(|slot| *slot)
             };
             #[cfg(not(feature = "tx-lend-only"))]
             let cookie_carried = {
-                let peer_zid: Option<SessionZid> =
-                    R::with_mutex_mut(&a.inbound_peer_zid, |slot| *slot);
+                let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
                         &a.params.cookie_signing_key,
@@ -19159,7 +19206,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // does, and the state below is then not released.
             #[cfg(feature = "tx-lend-only")]
             let cookie_carried = {
-                let zid: Option<SessionZid> = R::with_mutex_mut(&a.inbound_peer_zid, |slot| *slot);
+                let zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let peer_zid: Option<&[u8]> = zid.as_deref();
                 let mut cookie_buf = [0u8; crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES];
                 let cookie: Option<&[u8]> = match (peer_zid, nonce) {
@@ -19448,16 +19495,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// configured one, an absent cookie reading as an empty one. Nothing is decoded: the
     /// acceptor holds the state the cookie would have carried.
     fn fixed_cookie_echoed(&self) -> bool {
-        let pending = R::with_mutex_mut(&self.cookie_nonce, |slot| {
-            *slot == Some(FIXED_COOKIE_PENDING)
-        });
+        let pending = self.fact_cookie_nonce(|slot| *slot == Some(FIXED_COOKIE_PENDING));
         if !pending {
             return false;
         }
         let configured: &[u8] = &self.params.cookie;
-        R::with_mutex_mut(&self.inbound_opensyn_cookie, |echoed| {
-            echoed.as_deref().unwrap_or(&[]) == configured
-        })
+        self.fact_inbound_opensyn_cookie(|echoed| echoed.as_deref().unwrap_or(&[]) == configured)
     }
 
     /// R57 placeholder constant (`true`) pending the per-source
@@ -19503,11 +19546,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // this point there is no held copy to require, which is upstream's
         // position exactly: its OpenSyn check has only the cookie and the
         // nonce its driver carried.
-        let echoed = match R::with_mutex_mut(&self.inbound_opensyn_cookie, |s| s.clone()) {
+        let echoed = match self.fact_inbound_opensyn_cookie(|s| s.clone()) {
             Some(c) => c,
             None => return false,
         };
-        let nonce = match R::with_mutex_mut(&self.cookie_nonce, |s| *s) {
+        let nonce = match self.fact_cookie_nonce(|s| *s) {
             Some(n) => n,
             None => return false,
         };

@@ -23,13 +23,11 @@
 //! regression net over what that comparison established, not a second authority.
 
 use super::*;
-use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use sce_forge_runtime::codec::Bounded;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wz_codecs::linkstate_link::LinkstateLink;
-use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::query_mode::ConsolidationMode;
@@ -338,13 +336,13 @@ impl Node {
         match step {
             Step::Up(id, zid_byte, wire) => {
                 let (actions, sink) = recording_actions();
-                TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+                actions.fact_remote_peer_zid(|s| {
                     *s = Some(
                         wz_session_core::session_zid::SessionZid::new(zid(*zid_byte).as_slice())
                             .expect("a 1 to 16 byte zid, not all zero"),
                     )
                 });
-                TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(*wire as u8));
+                actions.fact_peer_whatami(|s| *s = Some(*wire as u8));
                 self.fwd.register(FaceId(*id), &actions);
                 self.sinks.insert(*id, sink);
                 self.read.insert(*id, 0);

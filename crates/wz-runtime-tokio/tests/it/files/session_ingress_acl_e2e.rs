@@ -146,11 +146,9 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
     // The enforcer admits a message it cannot attribute (open-debt item 655), so
     // without a conformant peer zid this fixture would reach no rule and BOTH
     // tests would pass while proving nothing.
-    *session
+    session
         .actions()
-        .remote_peer_zid
-        .lock()
-        .expect("remote_peer_zid poisoned in fixture") = Some([0x5a; 16].into());
+        .fact_remote_peer_zid(|slot| *slot = Some([0x5a; 16].into()));
 
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();

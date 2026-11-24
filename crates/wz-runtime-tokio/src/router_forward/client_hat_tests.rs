@@ -6,10 +6,8 @@
 //! rule is the client hat's own, the peer node beside it as the control.
 
 use super::*;
-use crate::runtime_impl::TokioRuntime;
 use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-use wz_runtime_core::runtime::Runtime;
 
 const WIRE_ROUTER: u8 = 0b00;
 const WIRE_PEER: u8 = 0b01;
@@ -23,13 +21,13 @@ fn zid(b: u8) -> Zid {
 /// its link was given.
 fn face(peer: Zid, wire_whatami: u8) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let (actions, sink) = recording_actions();
-    TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+    actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
+    actions.fact_peer_whatami(|s| *s = Some(wire_whatami));
     (actions, sink)
 }
 

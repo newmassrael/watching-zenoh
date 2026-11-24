@@ -23,11 +23,9 @@
 
 use super::peer_differential_tests::{decode, make, zid, Mode, NodeSession, Seen, Wire};
 use super::*;
-use crate::runtime_impl::TokioRuntime;
 use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use std::collections::BTreeMap;
-use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::interest_build::InterestKinds;
 
@@ -156,13 +154,13 @@ impl Network {
     /// the node's forwarder.
     fn open_face(&mut self, node: u8, remote: u8, wire: Wire, far: Far) -> u64 {
         let (actions, sink) = recording_actions();
-        TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+        actions.fact_remote_peer_zid(|s| {
             *s = Some(
                 wz_session_core::session_zid::SessionZid::new(zid(remote).as_slice())
                     .expect("a 1 to 16 byte zid, not all zero"),
             )
         });
-        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire as u8));
+        actions.fact_peer_whatami(|s| *s = Some(wire as u8));
         let n = self.nodes.get_mut(&node).expect("a node of the network");
         let id = n.next_face;
         n.next_face += 1;

@@ -22,9 +22,7 @@
 
 use super::*;
 use crate::multilink::{join_link, JoinOutcome};
-use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::recording_actions_over;
-use wz_runtime_core::runtime::Runtime;
 use wz_session_core::link::LinkKind;
 
 fn zid_of(b: u8) -> Zid {
@@ -39,16 +37,18 @@ fn a_session_of_two_links(
 ) -> (Arc<SessionLinkActions>, Arc<SessionLinkActions>) {
     let (primary, _) = recording_actions_over(LinkKind::Tcp);
     let (secondary, _) = recording_actions_over(LinkKind::Tcp);
-    TokioRuntime::with_mutex_mut(&primary.remote_peer_zid, |s| {
+    primary.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(zid_of(peer).as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&primary.peer_whatami, |s| *s = Some(0b01));
+    primary.fact_peer_whatami(|s| *s = Some(0b01));
     let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
-    TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
-    TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+    primary
+        .core
+        .fact_multilink_pubkey(|s| *s = Some(key.clone()));
+    secondary.core.fact_multilink_pubkey(|s| *s = Some(key));
     fwd.register(FaceId(0), &primary);
     let JoinOutcome::Joined(joined) = join_link(&primary, &secondary, 2) else {
         panic!("the second link joins the session");
@@ -76,13 +76,13 @@ fn a_put_on_a_joined_link_is_routed_as_the_primary_faces() {
     let fwd = RouterForwarder::peer(zid_of(0x01));
     a_session_of_two_links(&fwd, 0xAA);
     let (client, sink) = recording_actions_over(LinkKind::Tcp);
-    TokioRuntime::with_mutex_mut(&client.remote_peer_zid, |s| {
+    client.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(zid_of(0xCC).as_slice())
                 .expect("a 1 to 16 byte zid, not all zero"),
         )
     });
-    TokioRuntime::with_mutex_mut(&client.peer_whatami, |s| *s = Some(0b10));
+    client.fact_peer_whatami(|s| *s = Some(0b10));
     fwd.register(FaceId(1), &client);
     let subscribe = wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
         .expect("declare");

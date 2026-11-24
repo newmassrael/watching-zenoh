@@ -339,7 +339,7 @@ fn r311kv_shorter_peer_lease_governs_deadline() {
     let stamp = actions.clock.now_monotonic_ms();
     *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
     // Peer advertised 2s in its OPEN; local window is the fixture 10s.
-    *actions.peer_open_lease_ms.lock().unwrap() = Some(2_000);
+    actions.fact_peer_open_lease_ms(|slot| *slot = Some(2_000));
 
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 1_999);
     assert_eq!(outcome, LeaseCheckOutcome::WithinLease, "inside 2s window");
@@ -361,7 +361,7 @@ fn r311kv_local_cap_bounds_longer_peer_lease() {
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
     *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
-    *actions.peer_open_lease_ms.lock().unwrap() = Some(60_000);
+    actions.fact_peer_open_lease_ms(|slot| *slot = Some(60_000));
 
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
     assert_eq!(
