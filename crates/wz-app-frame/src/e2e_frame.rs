@@ -335,6 +335,8 @@ pub(crate) fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
     digest.finish()
 }
 
+/// Out of line: every refusal of a build reaches it.
+#[inline(never)]
 fn invalid(path: String, reason: String) -> BuildError {
     BuildError::Values(DocError::invalid(path, reason))
 }

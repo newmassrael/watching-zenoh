@@ -351,6 +351,9 @@ impl Transfer {
         self.have.as_slice() == [(0, self.total)]
     }
 
+    /// Out of line: a transfer superseded, evicted and closed is each told by
+    /// it, and each inlined copy carried the sum of the received ranges.
+    #[inline(never)]
     fn ended(&self, ending: Ending) -> Ended {
         Ended {
             transfer: self.number,
