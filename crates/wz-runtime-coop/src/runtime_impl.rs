@@ -803,8 +803,8 @@ mod tests {
     /// On a host the runtime's try answers a value another thread holds with `None` and does not
     /// wait for it, as the tokio runtime's does: what lets a droppable message give up on a
     /// conduit a blocking sender holds while it waits for its link's room. Once the holder lets
-    /// go, the try runs. Not under `session-confined`, where no other thread reaches the value.
-    #[cfg(all(feature = "host-lock", not(feature = "session-confined")))]
+    /// go, the try runs.
+    #[cfg(feature = "host-lock")]
     #[test]
     fn a_value_another_thread_holds_is_tried_without_waiting() {
         extern crate std;
@@ -837,24 +837,6 @@ mod tests {
             <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),
             Some(1)
         );
-    }
-
-    /// Under an engine that confines each session to its lock, the value the runtime lends is the
-    /// one that takes no lock, and its try always runs, nested in another value's hold too.
-    #[cfg(feature = "session-confined")]
-    #[test]
-    fn a_confined_session_is_lent_values_that_take_no_lock() {
-        type R = CoopRuntime<NopClock>;
-        let value: crate::sync::OwnerHeld<u32> = <R as Runtime>::new_mutex(5u32);
-        let other = <R as Runtime>::new_mutex(1u32);
-        let read = <R as Runtime>::with_mutex_mut(&other, |_| {
-            <R as Runtime>::try_with_mutex_mut(&value, |held| {
-                *held += 1;
-                *held
-            })
-        });
-        assert_eq!(read, Some(6));
-        assert_eq!(<R as Runtime>::with_mutex_mut(&value, |held| *held), 6);
     }
 
     #[test]

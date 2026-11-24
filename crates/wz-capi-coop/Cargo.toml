@@ -95,14 +95,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # holds it, its records handed to the session's tables lent and one at a time, so a link keeps a
 # datagram its session stopped in and none is copied to wait (the delivery lane's gate). The one
 # receive of the C ABI's engine.
-# Each value the runtime lends a session takes no lock of its own (`session-confined`): the
-# engine reaches a session's state only under the session's one lock (src/engine.rs, `Confined`),
-# and a scouting window's in the frame of the call that pumps it, so a lock of each value would be
-# a second lock around what the first keeps to one thread.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = [
     "alloc",
     "rx-in-place",
-    "session-confined",
     "transport-batching",
 ] }
 # The engine's 64-bit counters (entity ids, link generations): native where the target has a
