@@ -133,16 +133,16 @@ impl Deliveries {
     /// Take `word`'s thread out of `others` when nothing of it is kept any more.
     fn let_go_of(&self, word: usize, change: impl FnOnce(&mut Beside)) {
         let removed = self.with_others(|others| {
-            let Some(at) = others.iter().position(|t| t.word == word) else {
+            let Some((at, thread)) = others.iter_mut().enumerate().find(|(_, t)| t.word == word)
+            else {
                 return false;
             };
-            change(&mut others[at]);
-            if others[at].is_spent() {
+            change(thread);
+            let spent = thread.is_spent();
+            if spent {
                 others.swap_remove(at);
-                true
-            } else {
-                false
             }
+            spent
         });
         if removed {
             self.beside.fetch_sub(1, Ordering::AcqRel);
