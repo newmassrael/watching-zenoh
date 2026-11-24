@@ -865,9 +865,10 @@ impl PendingDial<HeapLink> for PendingAppLink {
                     heap_link(
                         self.cells.as_ref(),
                         datagram_ends_fit(&socket, Some(self.to)),
-                        || {
-                            self.owner_waits
-                                .datagram(UdpDriver::initiator_in(socket, self.to, rx, tx))
+                        |place| {
+                            self.owner_waits.datagram(
+                                place.write(UdpDriver::initiator_in(socket, self.to, rx, tx)),
+                            )
                         },
                     )
                 } else {
@@ -876,8 +877,9 @@ impl PendingDial<HeapLink> for PendingAppLink {
                         local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                         peer: self.to,
                     };
-                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
-                        self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
+                        self.owner_waits
+                            .stream(place.write(StreamDriver::over(stream, rx, tx)))
                     })
                 })
             }
@@ -1283,22 +1285,22 @@ pub struct AppLinks {
 struct OwnerWaits(bool);
 
 impl OwnerWaits {
-    /// A stream link as the links open it.
+    /// A stream link as the links open it, set where it lies.
     fn stream(
         self,
-        mut link: StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>,
-    ) -> StreamDriver<AppStreamSocket, RxBuffer, TxBuffer> {
+        link: &mut StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>,
+    ) -> &mut StreamDriver<AppStreamSocket, RxBuffer, TxBuffer> {
         if self.0 {
             link.wait_by_owner();
         }
         link
     }
 
-    /// A datagram link as the links open it.
+    /// A datagram link as the links open it, set where it lies.
     fn datagram(
         self,
-        mut link: UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>,
-    ) -> UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer> {
+        link: &mut UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>,
+    ) -> &mut UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer> {
         if self.0 {
             link.wait_by_owner();
         }
@@ -1389,17 +1391,18 @@ impl SessionLinks for AppLinks {
                 heap_link(
                     self.cells.as_ref(),
                     datagram_ends_fit(&socket, Some(to.at)),
-                    || {
+                    |place| {
                         self.owner_waits
-                            .datagram(UdpDriver::initiator_in(socket, to.at, rx, tx))
+                            .datagram(place.write(UdpDriver::initiator_in(socket, to.at, rx, tx)))
                     },
                 )
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
                 let stream = self.dial.dial(to.at)?;
-                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
-                    self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
+                    self.owner_waits
+                        .stream(place.write(StreamDriver::over(stream, rx, tx)))
                 })
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1558,9 +1561,9 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         heap_link(
             self.cells.as_ref(),
             datagram_ends_fit(&socket, Some(peer)),
-            || {
+            |place| {
                 self.owner_waits
-                    .datagram(UdpDriver::initiator_in(socket, peer, rx, tx))
+                    .datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
             },
         )
         .map(Some)
@@ -1594,8 +1597,9 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
-            self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
+            self.owner_waits
+                .stream(place.write(StreamDriver::over(stream, rx, tx)))
         })
         .map(Some)
     }
