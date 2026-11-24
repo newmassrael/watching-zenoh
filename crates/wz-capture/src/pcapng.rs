@@ -1114,9 +1114,11 @@ pub struct InterfaceDescription {
     pub comments: Vec<Comment>,
 }
 
-/// Every interface a pcapng capture's IDBs describe, in file order (see
-/// [`ScannedBlocks`] for where the scan stops). Empty for a container that is
-/// not pcapng.
+/// Every interface a pcapng capture's IDBs describe, in file order, read by
+/// the block walk's byte-order and length rules. A block that breaks them ends
+/// the scan where it stands: the interfaces before it are returned, and a
+/// growing capture's partial last block is simply not reached yet. Empty for
+/// a container that is not pcapng.
 pub fn interface_descriptions(bytes: &[u8]) -> Vec<InterfaceDescription> {
     let mut out = Vec::new();
     let mut section: Option<usize> = None;
@@ -1190,8 +1192,10 @@ pub struct CommentCensus {
 }
 
 /// The comments of a pcapng capture, counted for its packets and carried for
-/// its sections (see [`ScannedBlocks`] for where the scan stops). Empty for a
-/// container that is not pcapng: a classic pcap has no options.
+/// its sections, read by the block walk's rules as
+/// [`interface_descriptions`] reads them, so a cut or broken block ends the
+/// count where it stands. Empty for a container that is not pcapng: a classic
+/// pcap has no options.
 ///
 /// A Simple Packet Block has no option list. A packet block whose captured
 /// length runs past its body has no list this scan can find, the same answer
