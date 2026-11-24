@@ -513,6 +513,8 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     use wz_runtime_tokio::serial_pipeline::{wire_serial_stream, SerialPort};
+    // A concrete write driver, so the trait must be in scope to call `link_subject` through it.
+    use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::locator::{SerialEndpoint, SerialOptions, SerialTarget};
 
     let device_end = SerialEndpoint {

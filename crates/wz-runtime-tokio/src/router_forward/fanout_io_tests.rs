@@ -18,7 +18,6 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWrite;
-use wz_runtime_core::runtime::Runtime;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::driver_loop::DriverLoopOutcome;
