@@ -20,7 +20,6 @@ use sce_forge_runtime::codec::{Bounded, CodecError, SceByteBuf, SceStr};
 
 /// Copy a byte slice into an owned `bytes` field: `LengthOutOfRange` past the
 /// field's bound, `CapacityExceeded` past what the profile's container holds.
-#[allow(dead_code)] // used by codec-gated builders; unused in no-codec subsets
 pub fn owned_bytes<B: SceByteBuf, const MAX: usize, const MIN: usize>(
     b: &[u8],
 ) -> Result<Bounded<B, MAX, MIN>, CodecError> {
@@ -32,7 +31,6 @@ pub fn owned_bytes<B: SceByteBuf, const MAX: usize, const MIN: usize>(
 /// `lent_control`, `lent_response`): `LengthOutOfRange` past the `u16` length
 /// the protocol bounds a suffix at, the refusal a decode of such a frame gives,
 /// so a key past it is not sent rather than sent as another.
-#[allow(dead_code)] // used by codec-gated composers; unused in no-codec subsets
 pub fn sent_suffix<const MAX: usize>(suffix: &str) -> Result<Bounded<&str, MAX>, CodecError> {
     Bounded::new(suffix).ok_or(CodecError::LengthOutOfRange)
 }
@@ -40,7 +38,6 @@ pub fn sent_suffix<const MAX: usize>(suffix: &str) -> Result<Bounded<&str, MAX>,
 /// [`sent_suffix`] for any borrowed field a composer fills from the sender's own
 /// bytes or text (a payload, an attachment, a schema, a selector's parameters):
 /// `LengthOutOfRange` past the field's bound.
-#[allow(dead_code)] // used by codec-gated composers; unused in no-codec subsets
 pub fn sent<L, const MAX: usize, const MIN: usize>(
     value: L,
 ) -> Result<Bounded<L, MAX, MIN>, CodecError>
@@ -52,7 +49,6 @@ where
 
 /// Copy a string slice into an owned `string` field, refused as
 /// [`owned_bytes`] refuses bytes.
-#[allow(dead_code)] // used by codec-gated builders; unused in no-codec subsets
 pub fn owned_string<T: SceStr, const MAX: usize, const MIN: usize>(
     s: &str,
 ) -> Result<Bounded<T, MAX, MIN>, CodecError> {

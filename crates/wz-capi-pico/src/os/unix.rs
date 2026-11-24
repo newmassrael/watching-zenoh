@@ -573,9 +573,9 @@ mod threads {
     }
 
     /// The interval from `now` to the absolute instant `abs`, or zero when `abs` is not
-    /// in the future. Pure arithmetic and compiled on every Unix, so the one place the
-    /// macOS wait differs from the others is tested where the tests run.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// in the future. Pure arithmetic and compiled for every Unix's tests, so the one place
+    /// the macOS wait differs from the others is tested where the tests run.
+    #[cfg(any(test, target_os = "macos"))]
     pub(super) fn relative_deadline(now: Clock, abs: Clock) -> Clock {
         // Both readings' nanoseconds are below 1e9, so the borrow leaves them in range.
         let mut sec = abs.tv_sec.saturating_sub(now.tv_sec);

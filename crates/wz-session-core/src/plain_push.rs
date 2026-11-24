@@ -151,12 +151,13 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
 struct Read {
     put: PlainPut,
     end: usize,
-    // Read only by the frame reader, which needs `alloc`; a build without it reads one record.
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    // These two are read only by the frame reader, which needs `alloc`; a build without it
+    // reads one record.
+    #[cfg(feature = "alloc")]
     same_suffix: bool,
     /// Everything up to and including the Put header: the Push header, the key, the QoS
     /// extension. What follows is the payload's length and the payload.
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[cfg(feature = "alloc")]
     prefix_end: usize,
 }
 
@@ -170,6 +171,7 @@ struct Read {
 /// again to tell whether the key repeats.
 #[inline]
 fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Option<Read> {
+    #[cfg(feature = "alloc")]
     let mut same_suffix = false;
     let mut cursor = at;
     let header = *buf.get(cursor)?;
@@ -184,10 +186,13 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
         let end = cursor.checked_add(length)?;
         let bytes = buf.get(cursor..end)?;
         // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
-        if known_utf8 == Some(bytes) {
-            same_suffix = true;
-        } else {
+        let same = known_utf8 == Some(bytes);
+        if !same {
             core::str::from_utf8(bytes).ok()?;
+        }
+        #[cfg(feature = "alloc")]
+        {
+            same_suffix = same;
         }
         let range = (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?);
         cursor = end;
@@ -210,6 +215,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
         return None;
     }
     cursor = cursor.saturating_add(1);
+    #[cfg(feature = "alloc")]
     let prefix_end = cursor;
     let (end, payload) = read_payload(buf, cursor)?;
     Some(Read {
@@ -222,7 +228,9 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
             repeats_key: false,
         },
         end,
+        #[cfg(feature = "alloc")]
         same_suffix,
+        #[cfg(feature = "alloc")]
         prefix_end,
     })
 }

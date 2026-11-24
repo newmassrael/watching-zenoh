@@ -94,15 +94,14 @@ pub(crate) struct AdminSpaceSlot {
 /// The queryables a started admin space holds, undeclared together when it stops.
 ///
 /// Fields are held for their drop, never read.
-#[allow(dead_code)]
 struct Running {
     /// pico's own documents, at `@/<zid>/pico/**`.
-    pico: PlainQueryable,
+    _pico: PlainQueryable,
     /// wz's resource snapshot, at `wz/@/<zid>/snapshot`: under the wz-owned root and not inside
     /// pico's tree, as the hosted admin space serves its own, so a query for pico's documents
     /// meets exactly the documents pico has.
     #[cfg(feature = "resource-snapshot")]
-    snapshot: PlainQueryable,
+    _snapshot: PlainQueryable,
 }
 
 impl AdminSpaceSlot {
@@ -181,9 +180,9 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             Err(code) => return code,
         };
         *running = Some(Running {
-            pico,
+            _pico: pico,
             #[cfg(feature = "resource-snapshot")]
-            snapshot,
+            _snapshot: snapshot,
         });
         Z_OK
     })

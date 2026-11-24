@@ -630,14 +630,13 @@ mod compile_time_assertions {
 
     // R258 — public Phase W contract trait-bound fixity. Same
     // pattern as wz_runtime_core::error::compile_time_assertions:
-    // never-called functions whose body is the bound-check; a
+    // never-called closures whose body is the bound-check; a
     // regression on Send / Sync / Copy / Default fails the build.
     fn _assert_send<T: Send>() {}
     fn _assert_sync<T: Sync>() {}
     fn _assert_send_sync<T: Send + Sync>() {}
 
-    #[allow(dead_code)]
-    fn tokio_runtime_trait_bounds_compile() {
+    const _: fn() = || {
         _assert_send_sync::<TokioRuntime>();
         _assert_send_sync::<TokioTime>();
         // TokioJoinHandle is Send (matches tokio's JoinHandle)
@@ -645,7 +644,7 @@ mod compile_time_assertions {
         // tokio::task::JoinHandle which is Send + !Sync.
         _assert_send::<TokioJoinHandle<()>>();
         _assert_send::<TokioJoinHandle<String>>();
-    }
+    };
 
     // R311ar — Runtime trait Mutex/RwLock GAT bound fixity. Pins the
     // contract that `<TokioRuntime as Runtime>::Mutex<T>` and
@@ -654,13 +653,12 @@ mod compile_time_assertions {
     // alloc-Send). A regression that re-binds the alias to a
     // non-Sync wrapper (e.g. tokio::sync::Mutex without an
     // appropriate guard layer) fails this assertion at compile time.
-    #[allow(dead_code)]
-    fn tokio_runtime_mutex_rwlock_bounds_compile() {
+    const _: fn() = || {
         _assert_send_sync::<<TokioRuntime as Runtime>::Mutex<u32>>();
         _assert_send_sync::<<TokioRuntime as Runtime>::Mutex<String>>();
         _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<u32>>();
         _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<String>>();
-    }
+    };
 
     // Stage 2b — SessionRuntime::LinkSink fixity. Pins that the AP
     // profile's link sink stays `Send + Sync` (so a shared
@@ -670,12 +668,11 @@ mod compile_time_assertions {
     // non-Send wrapper, or that re-adds `Send + Sync` onto the pure
     // `BoxedLinkDriver` trait and breaks the MCU `!Send` Rc binding,
     // surfaces here at compile time.
-    #[allow(dead_code)]
-    fn tokio_session_runtime_link_sink_bounds_compile() {
+    const _: fn() = || {
         fn _assert_clone<T: Clone>() {}
         _assert_send_sync::<<TokioRuntime as SessionRuntime>::LinkSink>();
         _assert_clone::<<TokioRuntime as SessionRuntime>::LinkSink>();
-    }
+    };
 
     // R258 — generic composition smoke test. Validates that the
     // R: Runtime + T: TimeSource trait pair is actually usable
@@ -683,7 +680,6 @@ mod compile_time_assertions {
     // Session<R, T> reparameterisation per the §5.P leaf-first
     // guidance). This function never executes; its body just
     // exercises every public trait method against generic R + T.
-    #[allow(dead_code)]
     fn runtime_and_time_compose_in_generic_code<R, T>(rt: &R, clock: &T)
     where
         R: Runtime,
@@ -717,7 +713,7 @@ mod compile_time_assertions {
         // bound is what makes the cross-thread `Arc<R::Mutex<...>>`
         // pattern viable; the assert_send_sync calls below pin the
         // contract from the generic side mirror of the concrete
-        // assertions in `tokio_runtime_mutex_rwlock_bounds_compile`.
+        // Mutex / RwLock assertions above.
         fn _generic_mutex_bound_holds<R, T>()
         where
             R: Runtime,
@@ -743,6 +739,10 @@ mod compile_time_assertions {
         _generic_rwlock_bound_holds::<R, u32>();
         _generic_rwlock_bound_holds::<R, String>();
     }
+
+    // The generic above at the profile's own runtime and clock, so its bounds are checked
+    // against them and it has a reader.
+    const _: fn(&TokioRuntime, &TokioTime) = runtime_and_time_compose_in_generic_code;
 
     // Inline helper module so the generic-composition smoke fn above
     // has a real owned `Future + Send + 'static` to thread through

@@ -221,7 +221,7 @@ use crate::handshake_encode::encode_close;
 #[cfg(all(feature = "alloc", feature = "codec-init-body"))]
 use crate::handshake_encode::encode_init_with_caps;
 #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
-use crate::handshake_encode::encode_open;
+use crate::handshake_encode::encode_open_chain;
 
 // R3b — the Z_EXT_AUTH dispatch wired into the four handshake send/recv stages.
 #[cfg(feature = "session-extauth")]
@@ -944,7 +944,21 @@ const TX_CONDUITS: usize = Priority::NUM;
 const TX_CONDUITS: usize = 1;
 
 /// The entry of `rows`, one per conduit, that `priority` rides: its own under `transport-qos`,
-/// where the wire priority is the conduit, and the single one otherwise.
+/// where the wire priority is the conduit, and the single one otherwise. Gated as its readers
+/// (`TxConduits::sender_flag` and `TxConduits::conduit`) are.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+    feature = "transport-batching",
+))]
 fn conduit_row<T>(rows: &[T; TX_CONDUITS], priority: Priority) -> &T {
     #[cfg(feature = "transport-qos")]
     {
@@ -1140,19 +1154,9 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
     /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
     /// every priority collapses onto the single conduit.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-        feature = "transport-batching",
-    ))]
+    // Its readers are the batching paths (the lend-only frame open reads it inside its batching
+    // window), and `flush_conduit` is one under the feature alone.
+    #[cfg(feature = "transport-batching")]
     const fn conduit_index(priority: Priority) -> usize {
         #[cfg(feature = "transport-qos")]
         {
@@ -1624,14 +1628,38 @@ impl TxLimitsCache {
     /// The number a value computed NOW would be tagged with. Read under the capabilities'
     /// mutex, together with the capabilities.
     // Read by `negotiated_tx_limits`, which exists in a build with a sending codec only.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     pub(crate) fn current_tag(&self) -> u32 {
         self.writes.load(Ordering::Acquire).wrapping_add(1)
     }
 
     /// The kept `(batch budget, ring resolution)`, when it is for the current capabilities.
     // See `current_tag`.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     #[inline]
     pub(crate) fn get(&self) -> Option<(usize, u8)> {
         let packed = self.packed.load(Ordering::Acquire);
@@ -1648,7 +1676,19 @@ impl TxLimitsCache {
     /// Keep `(mtu, ring)` as computed from the capabilities the tag was read with. `mtu` over
     /// what 16 bits hold is not kept: the reader then asks the mutex every time, as it did.
     // See `current_tag`.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     pub(crate) fn keep(&self, tag: u32, mtu: usize, ring: u8) {
         let Ok(mtu) = u16::try_from(mtu) else { return };
         let packed = (u64::from(tag) << 24) | (u64::from(mtu) << 8) | u64::from(ring);
@@ -3579,8 +3619,9 @@ enum UnicastPush {
     /// every try gets as far as the lane is deep and no further. Such a message is the caller's
     /// to send with a wait; a chain the lane can hold whole is probed like a frame.
     ///
-    /// Only a build that fragments has a chain to refuse.
-    #[cfg(feature = "transport-fragmentation")]
+    /// Only a build that fragments has a chain to refuse, and only one with `alloc` has a
+    /// sender that may not wait (`DispatchStage::Probe`).
+    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
     Chain,
 }
 
@@ -4815,7 +4856,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if patch {
                 // SAFETY: written just above.
                 R::with_mutex_mut(unsafe { &*at }, |chain| {
-                    chain.push(default_init_patch_ext_entry());
+                    crate::ext_chain::stage(
+                        chain,
+                        crate::ext_chain::StagedExt::Patch,
+                        Some(default_init_patch_ext_entry()),
+                    );
                 });
             }
         }
@@ -4890,7 +4935,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.own_link().link_driver().tx_slot_claimable()
     }
 
-    #[allow(dead_code)]
+    // Read by the batching window and by the heap Push's claim check.
+    #[cfg(any(
+        feature = "transport-batching",
+        all(feature = "codec-push", feature = "alloc")
+    ))]
     fn own_link(&self) -> &LinkState<R> {
         &self.link
     }
@@ -5945,6 +5994,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the runtime, which pushes it off the caller's thread and then gives the
     /// slot back ([`Self::run_block_first_job`]).
     ///
+    /// # Errors
+    ///
+    /// The refusal of `encode_body`, a body that refuses its message: the slot taken for it
+    /// is given back and nothing is handed to the runtime.
+    ///
     /// The slot is the one of the link the message's conduit is routed to,
     /// keyed by the message's OWN priority (upstream's `msg.priority()`), and
     /// it waits `wait_before_drop` (`.wait_timeout(self.manager.config.wait_before_drop)`).
@@ -5976,7 +6030,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         worst_case_payload: usize,
         stats_class: crate::stats::NetworkStatsClass,
         encode_body: &P,
-    ) -> bool
+    ) -> Result<bool, sce_forge_runtime::codec::CodecError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
@@ -5984,7 +6038,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // holds a slot nothing would give back.
         let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
         if !installed {
-            return false;
+            return Ok(false);
         }
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let wait_us = self.params.tx_queue.wait_before_drop_us;
@@ -5995,12 +6049,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !granted {
             #[cfg(feature = "transport-stats")]
             self.count_congestion_drop(wire_reliability, route, priority, &stats_class);
-            return true;
+            return Ok(true);
         }
         let mut body = Vec::with_capacity(worst_case_payload);
-        {
+        let encoded = {
             let mut sink = crate::tx_buf::TxSink::new(&mut body);
-            encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+            encode_body(&mut sink)
+        };
+        if let Err(refused) = encoded {
+            // The body refused its message: the slot taken for it goes back, and the caller
+            // answers the refusal as a send it made itself would.
+            self.with_conduit_link(wire_reliability, route, |link| {
+                link.link_driver()
+                    .block_first_release_for(wire_reliability, qos.priority())
+            });
+            return Err(refused);
         }
         let job = BlockFirstJob {
             priority,
@@ -6017,7 +6080,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 handoff(job);
             }
         });
-        true
+        Ok(true)
     }
 
     /// R2952 — the background half of a block-first message: push its bytes
@@ -6607,7 +6670,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 &self.params,
                 caps,
                 is_ack,
-                chain,
+                crate::ext_chain::ChainRef::from(&*chain),
                 cookie_override,
             )
         });
@@ -6619,7 +6682,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     &self.params,
                     caps,
                     is_ack,
-                    chain,
+                    crate::ext_chain::ChainRef::from(&*chain),
                     cookie_override,
                 )
             })?;
@@ -6659,6 +6722,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The chain counted here is the one written below: the send is the
         // chain's only consumer, and the drive loop is one task on this profile.
         let (has_ext, chain_len) = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let chain = crate::ext_chain::ChainRef::from(&*chain);
             (!chain.is_empty(), crate::ext_chain::ext_chain_len(chain))
         });
         // The message's own length, so the link lends a slot that holds this
@@ -6689,7 +6753,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
             }
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                crate::handshake_encode::encode_held_chain_into(buf, chain)
+                crate::handshake_encode::encode_held_chain_into(
+                    buf,
+                    crate::ext_chain::ChainRef::from(&*chain),
+                )
             })?;
             // The initiator's OpenSyn is the answer a replay sends again, as written.
             if holds_answer(role) {
@@ -7245,9 +7312,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
     ///
-    /// Absent under `session-slot`, where the four chains are arrays of the
-    /// session's own storage and the stagers fill them one entry per extension
-    /// kind: a caller there has no vector to hand over.
+    /// Absent under `session-fixed-storage`, where each of the four chains holds
+    /// one place per extension kind in the session's own storage and the stagers
+    /// fill their own places: a caller there has no vector to hand over.
     ///
     /// The entries are held in upstream's encode order, ascending extension
     /// id (stable, so entries of one id keep the order given): the stagers
@@ -7293,6 +7360,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // encode call composes against `&chain` without an extra clone.
         let caps = self.init_caps(is_ack);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let chain = crate::ext_chain::ChainRef::from(&*chain);
             encode_init_with_caps(&self.params, caps, is_ack, chain, cookie_override)
         })
     }
@@ -7324,7 +7392,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let params_owned = self.open_params();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             let params = params_owned.as_ref().unwrap_or(&self.params);
-            encode_open(params, is_ack, cookie_override, chain)
+            encode_open_chain(
+                params,
+                is_ack,
+                cookie_override,
+                crate::ext_chain::ChainRef::from(&*chain),
+            )
         })
     }
 
@@ -7949,7 +8022,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let ext = R::with_mutex_mut(&self.auth, produce).ok().flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, crate::extauth::AUTH_EXT_ID, ext);
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Auth, ext);
         });
     }
 
@@ -8091,11 +8164,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             slot.as_mut().and_then(|d| produce(d).ok().flatten())
         });
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extmultilink::MULTILINK_EXT_ID,
-                ext,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Multilink, ext);
         });
     }
 
@@ -8609,7 +8678,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// for a session whose identity was cleared after a first Init staged one.
     ///
     /// The entry takes its place in upstream's encode order wherever the other
-    /// stagers put theirs (`ext_chain::stage_in_canonical_order`, crate-private
+    /// stagers put theirs (`ext_chain::stage`, crate-private
     /// and so not an intra-doc link from this `pub` item). A name that does not
     /// encode leaves the chain as it was.
     pub fn stage_local_region(&self, role: ExtChainRole) {
@@ -8621,11 +8690,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => None,
         };
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extregion::REGION_NAME_EXT_ID,
-                entry,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RegionName, entry);
         });
     }
 
@@ -8763,11 +8828,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let bound = self.local_remote_bound();
         let entry = bound.map(crate::extbound::encode_remote_bound_ext);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::ext_header::ext_id(crate::extbound::REMOTE_BOUND_EXT_HEADER),
-                entry,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RemoteBound, entry);
         });
     }
 
@@ -8902,7 +8963,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// ## Where the entry sits
     ///
     /// Where upstream's encoder writes it: after compression and before the
-    /// region name (`ext_chain::stage_in_canonical_order`). Both reference
+    /// region name (`ext_chain::stage`). Both reference
     /// decoders walk a chain by header id, so the position is not what they
     /// judge; it is what makes wz's InitAck the bytes a zenoh acceptor would
     /// have sent. That function's unit tests hold the rule, and the
@@ -8923,7 +8984,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let entry = (level != crate::extpatch::NO_PATCH)
             .then(|| crate::extpatch::encode_patch_ext_at(level));
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, crate::extpatch::PATCH_EXT_ID, entry);
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Patch, entry);
         });
     }
 
@@ -8944,7 +9005,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// this exact extension).
     pub fn advertised_patch(&self) -> u8 {
         R::with_mutex_mut(&self.init_syn_ext, |chain| {
-            crate::extpatch::peer_patch(chain)
+            crate::extpatch::peer_patch_in(chain.iter())
         })
     }
 
@@ -9091,6 +9152,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session gave the link when it was established ([`Self::record_established_at`]), asked
     /// of the same parameters.
     #[cfg(all(
+        feature = "alloc",
         feature = "transport-fragmentation",
         any(
             feature = "codec-push",
@@ -9554,11 +9616,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let produced = self.is_shm().then(|| produce(self)).flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extshm::SHM_ESTABLISHMENT_EXT_ID,
-                produced,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Shm, produced);
         });
     }
 
@@ -9569,11 +9627,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// form or the z64 `QoSLink` form depending on the staged metadata. Every
     /// pre-existing caller passes a `fn` item, which coerces unchanged.
     ///
-    /// The `retain` keys on `ext_id()` (the 4-bit id FIELD), not on the full
-    /// header, which is load-bearing here: the unit `QoS` and the z64 `QoSLink`
-    /// share id `0x1` and zenoh forbids emitting both at once
-    /// ("Extensions QoS and QoSOptimized cannot both be enabled at once"), so
-    /// clearing by id is what makes a re-stage REPLACE rather than accumulate.
+    /// The chain keeps one entry per `kind`, not per header, which is
+    /// load-bearing here: the unit `QoS` and the z64 `QoSLink` share id `0x1`
+    /// and zenoh forbids emitting both at once ("Extensions QoS and
+    /// QoSOptimized cannot both be enabled at once"), so they are one kind and
+    /// a re-stage REPLACES rather than accumulates.
     ///
     /// R311y507 — gated on the exact condition under which it has a CALLER.
     /// Every call site is a capability stage inside the Init send blocks, so the
@@ -9592,14 +9650,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept",),
     ))]
-    fn stage_capability(&self, role: ExtChainRole, offer: bool, build: impl Fn() -> ExtEntryOwned) {
+    fn stage_capability(
+        &self,
+        role: ExtChainRole,
+        kind: crate::ext_chain::StagedExt,
+        offer: bool,
+        build: impl Fn() -> ExtEntryOwned,
+    ) {
         // Built once, outside the chain's guard: the QoS form reads the link
         // metadata under a mutex of its own, and the MCU profile's mutexes do
         // not nest.
         let entry = build();
-        let ext_id = entry.ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, ext_id, offer.then_some(entry));
+            crate::ext_chain::stage(chain, kind, offer.then_some(entry));
         });
     }
 
@@ -11374,8 +11437,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 let mut wire = Vec::with_capacity(worst_case_payload);
                 {
+                    // The vector refuses no write, but the body can refuse its message.
                     let mut sink = crate::tx_buf::TxSink::new(&mut wire);
-                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                    encode_body(&mut sink)?;
                 }
                 // No congestion decision on this path: upstream's lowlatency
                 // transport writes to the link under its own lock and has no
@@ -11402,7 +11466,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 worst_case_payload,
                 _stats_class,
                 &encode_body,
-            )
+            )?
         {
             return Ok(Dispatched::Sent);
         }
@@ -11593,7 +11657,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(not(feature = "tx-lend-only"))]
                 let encode_into = |buf: &mut Vec<u8>| {
                     let mut sink = crate::tx_buf::TxSink::new(buf);
-                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                    encode_body(&mut sink)
                 };
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
@@ -11685,10 +11749,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         let stage = &mut batch.stage;
                         // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
                         // begin_frame may append (symmetric with encode_frame_envelope).
-                        stage.buf.reserve(1 + 10 + 2 + worst_case_payload);
-                        begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos)
-                            .expect("a Vec grows, so its sink is infallible");
-                        encode_into(&mut stage.buf);
+                        stage
+                            .buf
+                            .reserve(worst_case_payload.saturating_add(1 + 10 + 2));
+                        let staged =
+                            match begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos) {
+                                Ok(()) => encode_into(&mut stage.buf),
+                                Err(refused) => Err(refused),
+                            };
+                        if let Err(refused) = staged {
+                            // The body refused its message: the frame it opened is dropped whole
+                            // and its SN given back, before a byte left.
+                            stage.buf.clear();
+                            stage.count = 0;
+                            self.outbound_frame_sn.unmint(priority, reliable);
+                            return Err(SendWireError::Codec(refused));
+                        }
                         if stage.buf.len() > mtu {
                             // The message alone exceeds the budget — the
                             // batch cannot carry it; emit it through the
@@ -11752,9 +11828,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             continue;
                         }
                         let wpos = stage.buf.len();
-                        encode_into(&mut stage.buf);
+                        if let Err(refused) = encode_into(&mut stage.buf) {
+                            // The body refused its message: its partial bytes are rolled back and
+                            // the frame open before it stays as it was.
+                            stage.buf.truncate(wpos);
+                            return Err(SendWireError::Codec(refused));
+                        }
                         if stage.buf.len() <= mtu {
-                            stage.count += 1;
+                            // One more message than the frame held, which holds at most a batch.
+                            stage.count = stage.count.saturating_add(1);
                             return Ok(UnicastPush::Pushed);
                         }
                         // Overflow: roll the partial encode back, flush this
@@ -11828,13 +11910,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         return Err(SendWireError::Codec(refused));
                     }
                 }
-                let wire = crate::frame_encode::encode_frame_envelope(
+                let wire = match crate::frame_encode::encode_frame_envelope(
                     sn,
                     crate::frame_encode::frame_flags(reliable),
                     worst_case_payload,
                     ext_qos,
                     encode_body,
-                );
+                ) {
+                    Ok(wire) => wire,
+                    // The body refused its message: refused before a byte left, as the lent
+                    // frame's refusal above is, with the SN minted above given back.
+                    Err(refused) => {
+                        self.outbound_frame_sn.unmint(priority, reliable);
+                        return Err(SendWireError::Codec(refused));
+                    }
+                };
                 self.emit_frame_or_fragments(batch, &wire, frame_emit)
             }
             #[cfg(feature = "tx-lend-only")]
@@ -11990,11 +12080,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // counted as a message sent and not a congestion drop, the message is the caller's.
             #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
             Ok(UnicastPush::Chain) => Ok(Dispatched::Chain),
-            // Only a probe is answered `Chain`, and a probe exists with `alloc`.
-            #[cfg(all(not(feature = "alloc"), feature = "transport-fragmentation"))]
-            Ok(UnicastPush::Chain) => {
-                unreachable!("a chain is refused only to a sender that may not wait")
-            }
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
             // and the refusal was counted where it was raised (`refuse_tx`).
@@ -12375,7 +12460,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
         // with the SN of this message given back; the sender sends it waiting. The chain that
         // fits may still find the lane full and is abandoned and put down for later, which is
-        // what a probe does with a frame.
+        // what a probe does with a frame. A probe exists with `alloc`.
+        #[cfg(feature = "alloc")]
         if deadline.is_probe() {
             let before_last = plan
                 .remaining_fragments()
@@ -12574,8 +12660,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(not(feature = "transport-tx-lend"))]
             let _ = batch;
             let mut wire = Vec::with_capacity(span.wire_bound());
-            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)
-                .expect("a Vec grows, so its sink is infallible");
+            // The vector refuses no write, but the body can refuse itself (an encoder that composes
+            // its message as it writes it), as it does in a slot: refused before a byte leaves.
+            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)?;
             self.send_wire(&wire, reliability, priority);
             Ok(())
         }
@@ -13871,7 +13958,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         declare: &crate::transport_profile::owned::DeclareOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::declare_body(declare);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14012,7 +14099,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // and an express message leaves its batch at once
         // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
         let qos = crate::declare_ext_qos::read_request_qos(request);
-        let encode_body = crate::frame_encode::request_body(request);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14072,7 +14159,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // answered in the `Data` band. A non-QoS session still clamps the band
         // downstream.
         let qos = crate::declare_ext_qos::read_response_qos(response);
-        let encode_body = crate::frame_encode::response_body(response);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14125,7 +14212,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // final built with `QosLevel::DEFAULT` carries no ext and lands on the
         // DEFAULT band exactly as before.
         let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
-        let encode_body = crate::frame_encode::response_final_body(response_final);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14178,7 +14265,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest: &crate::transport_profile::owned::InterestOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::interest_body(interest);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -16145,7 +16232,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // `reconstruct_outbound_keyexpr_shape_table` fine-grained unit test,
     // kept tokio-side per the test_fixtures dev-dep-cycle rationale) and a
     // future MCU resolver reach through the re-exported type.
-    #[allow(dead_code)]
     #[cfg(feature = "alloc")]
     pub fn reconstruct_outbound_keyexpr(
         &self,
@@ -18641,6 +18727,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(feature = "transport-lowlatency")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::LowLatency,
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
@@ -18653,16 +18740,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Qos,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
             #[cfg(feature = "session-extqos")]
-            a.stage_capability(ExtChainRole::InitSyn, a.is_qos(), || {
-                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
-            });
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Qos,
+                a.is_qos(),
+                || crate::extqos::encode_qos_ext_for(&a.qos_link_metadata()),
+            );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Compression,
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
@@ -18681,6 +18773,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             } else {
                 a.stage_capability(
                     ExtChainRole::InitSyn,
+                    crate::ext_chain::StagedExt::Shm,
                     a.is_shm(),
                     crate::extshm::encode_shm_establishment_ext,
                 );
@@ -18821,6 +18914,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(feature = "transport-lowlatency")]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::LowLatency,
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
@@ -18833,16 +18927,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Qos,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
             #[cfg(feature = "session-extqos")]
-            a.stage_capability(ExtChainRole::InitAck, a.is_qos(), || {
-                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
-            });
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Qos,
+                a.is_qos(),
+                || crate::extqos::encode_qos_ext_for(&a.qos_link_metadata()),
+            );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Compression,
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
@@ -18856,6 +18955,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             } else {
                 a.stage_capability(
                     ExtChainRole::InitAck,
+                    crate::ext_chain::StagedExt::Shm,
                     a.is_shm(),
                     crate::extshm::encode_shm_establishment_ext,
                 );

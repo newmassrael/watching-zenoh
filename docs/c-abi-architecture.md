@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (87) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (75) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -262,28 +262,23 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
 | TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
-| TD-004 | `wz-session-core` | `session_actions` | `expect_used`, `unreachable` | 10 | open |
-| TD-017 | `wz-session-core` | `frame_encode` | `expect_used` | 37 | open |
+| TD-004 | `wz-session-core` | `session_actions` | `expect_used` | 4 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
-| TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
-| TD-044 | `wz-session-core` | `encoded_push` | `expect_used` | 19 | open |
+| TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
 | TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
-| TD-051 | `wz-session-core` | `ext_chain` | `expect_used`, `panic`, `arithmetic_side_effects` | 16 | open |
 | TD-054 | `wz-session-core` | `reassembly_dispatch` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
 | TD-058 | `wz-session-core` | `declare` | `expect_used`, `arithmetic_side_effects` | 12 | in flight |
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
-| TD-066 | `wz-session-core` | `inbound` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
 | TD-085 | `wz-session-core` | `query` | `expect_used`, `arithmetic_side_effects` | 6 | in flight |
 | TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | open |
-| TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
@@ -308,7 +303,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
-| TD-202 | `wz-runtime-coop` | `app_link` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
 | TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing` | 1 | open |
 | TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
 | TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
@@ -318,6 +312,10 @@ fills a list of `N` zids from the text a build states. It reads the text by slic
 it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
 that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
 (`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
+
+TD-036 (`drive`) keeps `indexing_slicing` and `arithmetic_side_effects` for the reassembly path
+(`fragment_in_place`, `dispatch_datagram_reassembling`), which the reassembly sizing work is changing
+now; the rest of the module reads its units by `get` and adds its offsets saturating.
 
 TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
 (`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
@@ -346,19 +344,13 @@ same: `encode_join` writes a beacon whose zid and SN body reach the codec's boun
 through `Bounded::new`, over a sink that cannot refuse. TD-108
 (`query_options::loopback_query`) builds the loopback's Query body (`QueryBuilder`), whose
 bounded copies answer a `Result`: a value form moves its callers in the cooperative engine and
-the tokio session, and is made with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
-for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
+the tokio session, and is made with them.
 
-TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
-whose error is fixed to `CodecError` whatever buffer is under it, so a `Vec` that cannot refuse
-still answers a `Result` its type does not rule out. The fix is that the buffer names its error:
-`TxBuf` gets an associated `Error` and `TxSink<B>` answers `B::Error`, so a `Vec` sink is
-`Infallible` and a lent slot's stays `CodecError`. The lending build's `dyn TxBuf` becomes
-`dyn TxBuf<Error = CodecError>`, with an adapter for the `Vec` it is sometimes given. It moves
-`tx_buf`, `tx_lease`, `frame_encode`, `encoded_push`, `ext_chain`, `handshake_encode`,
-`multicast_tx` and `session_actions`, and the slot buffers of the cooperative crates, so it is
-made after the branches restructuring those land; the same `expect` in `encoded_push` leaves
-with it.
+The transmit buffer names its refusal (`TxBuf::Error`, `CodecError` for every buffer today). A body
+a send hands its dispatch can refuse its own message (a key or a payload past its protocol bound),
+whatever buffer it is written into, so a heap send answers that refusal as a value
+(`SendWireError::Codec`, `PushOutcome::Refused`); an owned message, which its writer cannot
+refuse, is framed through the codec's own vector sink, which refuses no write.
 
 TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn` that fills an
 array of `N` waits when the build is compiled, and TD-102 (`ext_name`) keeps it for
