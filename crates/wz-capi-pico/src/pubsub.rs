@@ -393,6 +393,7 @@ impl SampleMarshal {
     /// are deliberately left UNBOUND: they point at the copy's own fields, so
     /// they can only be set once the copy has reached its final address, which
     /// is [`Self::bind`]'s whole contract.
+    #[cfg(any(feature = "query", test))]
     pub(crate) fn deep_copy(&self) -> Result<Self, NoRoom> {
         self.kept_parts().map(|parts| self.copy_with(parts))
     }
