@@ -2388,13 +2388,13 @@ binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
-The queryables a session holds at once. Declaring one more is refused
-while the table is full.
+The queryables a session holds at once, a background one included until
+the session closes. Declaring one more is refused while the table is full.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `assert(z_declare_queryable(z_loan(s2), qle, z_loan(ke), z_move(callback), NULL) == _Z_RES_OK);`), so a session of the pico ABI takes every queryable a pico program of its tests declares."
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. A background queryable (`z_declare_background_queryable`) is one of them until the session's close lets it go, as zenoh-pico keeps it in that same list, so the pico ABI places it as it places one with a handle and counts it against this bound. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `assert(z_declare_queryable(z_loan(s2), qle, z_loan(ke), z_move(callback), NULL) == _Z_RES_OK);`), so a session of the pico ABI takes every queryable a pico program of its tests declares."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queryables: HashMap<Id, Arc<QueryableState>>,`"]
 
 [[limit]]

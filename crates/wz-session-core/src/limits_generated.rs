@@ -198,7 +198,8 @@ const _: LimitDomain = DeliveryLaneCallbacks::DOMAIN;
 pub type DeliveryLaneCallbacksHeld =
     Limited<DeliveryLaneCallbacks, { DeliveryLaneCallbacks::HELD }>;
 
-/// `MAX_QUERYABLES`: The queryables a session holds at once.
+/// `MAX_QUERYABLES`: The queryables a session holds at once, a background one included
+/// until the session closes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaxQueryables;
 
