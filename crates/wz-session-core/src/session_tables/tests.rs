@@ -102,6 +102,7 @@ fn rows() -> TableRows {
         publishers: caps::MAX_PUBLISHERS,
         queriers: caps::MAX_QUERIERS,
         matching_listeners: caps::MAX_MATCHING_LISTENERS,
+        key_listeners: caps::MAX_MATCHING_LISTENERS,
         pending_gets: caps::MAX_PENDING_QUERIES,
         held_replies: caps::MAX_PENDING_REPLIES,
     }
@@ -556,8 +557,12 @@ fn queries_tokens_and_liveliness_reach_by_their_keys() {
     assert_eq!(tables.tokens_for("u").count(), 0);
 }
 
+/// Each write filter that asks opens an Interest of its own, a second one on the same kind and
+/// key too, as zenoh-pico's `_z_write_filter_create` adds one for each filter; a listener on a
+/// filter reads its filter's and opens none. Turned red by a search that hands the second filter
+/// the first's Interest, or a Final held back while another filter on the key stands.
 #[test]
-fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
+fn each_filter_opens_an_interest_of_its_own_its_listeners_read() {
     let mut tables = Tables::new();
     let first = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
@@ -567,9 +572,13 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let second = tables
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
-    assert_eq!(second.interest, None);
+    let again = second
+        .interest
+        .expect("a second filter on the same kind and key asks apart");
+    assert_ne!(again.id, asked);
+    assert_ne!(again.handle, opened.handle);
     let listener = tables.declare_matching_listener(first.handle, 9).unwrap();
-    // Another kind on the same key asks apart.
+    // Another kind on the same key asks apart too.
     let querier = tables
         .declare_write_filter(
             Plane::Queryables {
@@ -579,8 +588,10 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             false,
         )
         .unwrap();
-    assert!(querier.interest.is_some_and(|new| new.id != asked));
-    assert_eq!(tables.interests().len(), 2);
+    assert!(querier
+        .interest
+        .is_some_and(|new| new.id != asked && new.id != again.id));
+    assert_eq!(tables.interests().len(), 3, "the listener opened none");
     let interest = tables
         .write_filters()
         .get(first.handle)
@@ -593,24 +604,19 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     );
     assert_eq!(tables.interests().get(interest).unwrap().id(), asked);
     assert_eq!(tables.interest_key(interest), Some("k"));
-    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
-        tables
-            .matching_listeners()
-            .get(listener)
-            .unwrap()
-            .interest(),
-        Some(interest),
-        "a listener reads its filter's Interest"
+        tables.matching_listeners().get(listener).unwrap().filter(),
+        first.handle,
+        "a listener is its filter's callback"
     );
-    // The Interest's Final goes with its last holder; the listener goes with its filter.
+    // Each filter's Final goes with it; the listener goes with its filter.
     let mut gone = Vec::new();
     assert_eq!(
         tables
             .undeclare_write_filter(first.handle, |handle, removal| gone.push((handle, removal)))
             .unwrap()
             .interest_final,
-        None
+        Some(asked)
     );
     assert_eq!(gone.len(), 1);
     assert_eq!(gone[0].0, listener);
@@ -621,7 +627,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             .undeclare_write_filter(second.handle, |_, _| unreachable!("no listener on it"))
             .unwrap()
             .interest_final,
-        Some(asked)
+        Some(again.id)
     );
     assert_eq!(tables.interests().len(), 1);
 }
@@ -744,24 +750,30 @@ fn a_matching_listener_is_told_each_change_once() {
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap()
         .handle;
-    let listener = tables.declare_matching_listener(filter, 3).unwrap();
+    let mut cursor = 0;
+    assert_eq!(
+        tables.next_matching_change(&mut cursor, &NoPeers),
+        None,
+        "a filter no listener is declared on is not read"
+    );
+    tables.declare_matching_listener(filter, 3).unwrap();
     let mut cursor = 0;
     assert_eq!(tables.next_matching_change(&mut cursor, &NoPeers), None);
     let sub = subscribe(&mut tables, "k", Locality::Any, 1);
     let mut cursor = 0;
     assert_eq!(
         tables.next_matching_change(&mut cursor, &NoPeers),
-        Some((listener, true))
+        Some((filter, true))
     );
     assert_eq!(tables.next_matching_change(&mut cursor, &NoPeers), None);
     let mut cursor = 0;
     assert_eq!(tables.next_matching_change(&mut cursor, &NoPeers), None);
-    assert!(tables.matching_listeners().get(listener).unwrap().last());
+    assert!(tables.write_filters().get(filter).unwrap().matching());
     let _ = tables.undeclare_subscriber(sub.handle);
     let mut cursor = 0;
     assert_eq!(
         tables.next_matching_change(&mut cursor, &NoPeers),
-        Some((listener, false))
+        Some((filter, false))
     );
     // A peer's declaration counts too.
     let peers = Peers::default();
@@ -769,7 +781,7 @@ fn a_matching_listener_is_told_each_change_once() {
     let mut cursor = 0;
     assert_eq!(
         tables.next_matching_change(&mut cursor, &peers),
-        Some((listener, true))
+        Some((filter, true))
     );
 }
 
@@ -783,16 +795,16 @@ fn a_matching_verdict_is_recorded_through_shared_tables() {
         .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
-    let listener = tables.declare_matching_listener(filter, 3).unwrap();
+    tables.declare_matching_listener(filter, 3).unwrap();
     let peers = Peers::default();
     peers.declares.set(true);
     let shared: &Tables = &tables;
     let mut cursor = 0;
     assert_eq!(
         shared.next_matching_change(&mut cursor, &peers),
-        Some((listener, true))
+        Some((filter, true))
     );
-    assert!(shared.matching_listeners().get(listener).unwrap().last());
+    assert!(shared.write_filters().get(filter).unwrap().matching());
     let mut cursor = 0;
     assert_eq!(
         shared.next_matching_change(&mut cursor, &peers),
@@ -824,7 +836,7 @@ fn a_listeners_callback_is_owed_its_verdict_until_it_takes_it() {
     peers.declares.set(true);
     assert_eq!(
         tables.next_matching_change(&mut 0, &peers),
-        Some((listener, true))
+        Some((filter, true))
     );
     assert_eq!(
         tables.take_owed_matching(&mut 0, out),
@@ -840,12 +852,12 @@ fn a_listeners_callback_is_owed_its_verdict_until_it_takes_it() {
     peers.declares.set(false);
     assert_eq!(
         tables.next_matching_change(&mut 0, &peers),
-        Some((listener, false))
+        Some((filter, false))
     );
     peers.declares.set(true);
     assert_eq!(
         tables.next_matching_change(&mut 0, &peers),
-        Some((listener, true))
+        Some((filter, true))
     );
     assert_eq!(
         tables.take_owed_matching(&mut 0, take),
@@ -1048,6 +1060,7 @@ fn small_rows() -> TableRows {
         publishers: 1,
         queriers: 0,
         matching_listeners: 1,
+        key_listeners: 1,
         pending_gets: 1,
         held_replies: 1,
     }
@@ -2406,8 +2419,8 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
     let mut cursor = 0;
     assert_eq!(
         tables.next_matching_change(&mut cursor, &peers),
-        Some((listener, true)),
-        "the listener reads the filter's key"
+        Some((quiet.handle, true)),
+        "the filter is read on its own key for its listener"
     );
     let mut gone = Vec::new();
     let unwatched = tables
@@ -2417,27 +2430,25 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
     assert_eq!(gone, [listener]);
 }
 
-/// A listener declared on a key holds an Interest of its own on the key whole, shared with one open
-/// on the same key and kind, and its undeclaration hands back that Interest's Final when it held it
-/// last; it is told its changes as one on a filter is. Turned red by a listener that holds no hold
-/// of its own, sends a second Interest for a key asked already, or keeps the Interest open.
+/// A listener declared on a key opens an Interest of its own on the key whole, apart from a filter
+/// on the same key and kind, and its undeclaration hands back that Interest's Final; it is told
+/// its changes as one on a filter is. Turned red by a listener that takes the filter's Interest,
+/// or keeps its own open once it is gone.
 #[test]
-fn a_listener_on_a_key_holds_an_interest_of_its_own() {
+fn a_listener_on_a_key_opens_an_interest_of_its_own() {
     let mut tables = Tables::new();
     let alone = tables
         .declare_matching_listener_on(Plane::Subscribers, "m", true, 6)
         .unwrap();
     let opened = alone.interest.expect("a new Interest");
     let asked = opened.id;
-    let interest = tables
-        .matching_listeners()
-        .get(alone.handle)
-        .unwrap()
-        .interest()
-        .unwrap();
+    let listener = tables.matching_listeners().get(alone.handle).unwrap();
+    assert!(listener.owns_filter());
+    let own = listener.filter();
+    let interest = tables.write_filters().get(own).unwrap().interest().unwrap();
     assert_eq!(
         interest, opened.handle,
-        "the listener holds the Interest it opened"
+        "the listener's own filter holds the Interest it opened"
     );
     let row = tables.interests().get(interest).unwrap();
     assert_eq!(
@@ -2447,89 +2458,76 @@ fn a_listener_on_a_key_holds_an_interest_of_its_own() {
     let filter = tables
         .declare_write_filter(Plane::Subscribers, "m", false)
         .unwrap();
-    assert_eq!(
-        filter.interest, None,
-        "the filter shares the listener's Interest"
-    );
-    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
+    let filters = filter
+        .interest
+        .expect("the filter asks apart from the listener");
+    assert_ne!(filters.id, asked);
+    assert_eq!(tables.interests().len(), 2);
     let sub = subscribe(&mut tables, "m", Locality::Any, 1);
     let mut cursor = 0;
     assert_eq!(
         tables.next_matching_change(&mut cursor, &NoPeers),
-        Some((alone.handle, true))
+        Some((own, true)),
+        "the listener's own filter is read; the entity's, with no listener, is not"
     );
     let _ = tables.undeclare_subscriber(sub.handle);
     let first = tables.undeclare_matching_listener(alone.handle).unwrap();
-    assert_eq!(first.interest_final, None, "the filter still holds it");
+    assert_eq!(
+        first.interest_final,
+        Some(asked),
+        "its own filter and Interest end with it"
+    );
     assert!(first.row.is_some());
-    let again = tables
-        .declare_matching_listener_on(Plane::Subscribers, "m", false, 7)
-        .unwrap();
-    let _ = tables.undeclare_write_filter(filter.handle, |_, _| {});
+    assert!(tables.write_filters().get(own).is_none());
+    assert_eq!(tables.interests().len(), 1, "the entity's filter's stands");
     assert_eq!(
         tables
-            .undeclare_matching_listener(again.handle)
+            .undeclare_write_filter(filter.handle, |_, _| {})
             .unwrap()
             .interest_final,
-        Some(asked),
-        "the last holder ends it"
+        Some(filters.id)
     );
     assert_eq!(tables.interests().len(), 0);
 }
 
-/// A listener declared from a write filter reads the filter's kind, key and count of the session's
-/// own off its row and is the listener declared on that key: it shares the filter's Interest, opens
-/// one of its own for a filter that asks nothing, and stays when the filter goes; one from a filter
-/// that is gone is refused, its callback handed back. Turned red by a listener that takes another
-/// key or count, or goes with its filter.
+/// A matching listener declared on a key judges through a filter of its own, held to the key
+/// listeners' rows and not to the publishers' bound, and gone with the listener; one past those
+/// rows is refused with its callback, nothing opened. Turned red by a listener's filter counted as
+/// a publisher's, one taken past the key listeners' rows, or one left behind by its listener.
 #[test]
-fn a_listener_from_a_filter_is_the_listener_on_its_key() {
+fn a_key_listeners_filter_is_held_to_the_key_listeners_rows() {
     let mut tables = Tables::new();
-    let asking = tables
-        .declare_write_filter(Plane::Subscribers, "m", true)
-        .unwrap();
-    let shared = tables
-        .declare_matching_listener_of(asking.handle, 1)
-        .unwrap();
-    assert_eq!(shared.interest, None, "the filter's Interest is shared");
-    let row = tables.matching_listeners().get(shared.handle).unwrap();
-    assert_eq!(
-        (row.filter(), row.plane(), row.count_local(), row.interest()),
-        (
-            None,
-            Plane::Subscribers,
-            true,
-            asking.interest.map(|opened| opened.handle)
-        )
-    );
-    let quiet = tables
-        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
-        .unwrap();
-    let own = tables
-        .declare_matching_listener_of(quiet.handle, 2)
-        .unwrap();
-    let opened = own
-        .interest
-        .expect("a filter that asks nothing leaves the listener an Interest of its own");
-    assert_eq!(
-        tables.interests().get(opened.handle).unwrap().suffix(),
-        Some("q")
-    );
-    assert!(!tables
-        .matching_listeners()
-        .get(own.handle)
-        .unwrap()
-        .count_local());
-    let _ = tables.undeclare_write_filter(quiet.handle, |_, _| {});
-    assert!(
-        tables.matching_listeners().get(own.handle).is_some(),
-        "it stays with its filter gone"
-    );
+    tables.limit_to(&TableRows {
+        publishers: 1,
+        key_listeners: 1,
+        ..rows()
+    });
+    assert!(tables
+        .declare_write_filter(Plane::Subscribers, "p", false)
+        .is_ok());
+    let listener = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", false, 1)
+        .expect("the publishers' bound does not hold a listener's filter");
     let refused = tables
-        .declare_matching_listener_of(quiet.handle, 3)
+        .declare_matching_listener_on(Plane::Subscribers, "n", false, 2)
         .unwrap_err();
-    assert_eq!(refused.why, RegisterError::OwnerGone);
-    assert_eq!(refused.callback, 3);
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 2)
+    );
+    assert_eq!(
+        tables.interests().len(),
+        2,
+        "the refused listener opened nothing"
+    );
+    let _ = tables.undeclare_matching_listener(listener.handle);
+    assert_eq!(tables.write_filters().len(), 1, "its filter went with it");
+    assert!(
+        tables
+            .declare_matching_listener_on(Plane::Subscribers, "n", false, 3)
+            .is_ok(),
+        "the row it gave back takes the next"
+    );
 }
 
 /// An Interest keeps the rest of the key it names as a range of its own key: the tail where the
@@ -2823,6 +2821,7 @@ fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
         publishers: 2,
         queriers: 1,
         matching_listeners: 1,
+        key_listeners: 1,
         pending_gets: 2,
         held_replies: 2,
     };

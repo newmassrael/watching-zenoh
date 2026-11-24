@@ -1840,14 +1840,16 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     }
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
-    assert_eq!(
-        entities.filters(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"))
-    );
-    assert_eq!(
-        entities.interests(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
-    );
+    // A matching listener declared on a key judges through a filter of its own, in a build that
+    // keeps such listeners.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        preset("MAX_MATCHING_LISTENERS")
+    } else {
+        0
+    };
+    let filters = preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + key_listeners;
+    assert_eq!(entities.filters(), Some(filters));
+    assert_eq!(entities.interests(), Some(filters), "one Interest a filter");
     assert_eq!(
         plan.gets().rows.queries,
         if cfg!(feature = "query") {

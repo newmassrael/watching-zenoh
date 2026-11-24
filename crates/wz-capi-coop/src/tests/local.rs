@@ -181,8 +181,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
-    // One Interest on the key serves the two listeners and the two filters: the session holds
-    // one per plane and key.
+    // Each listener and each filter asks an Interest of its own on the key.
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });

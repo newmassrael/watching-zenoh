@@ -490,7 +490,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
     /// [`Self::declare_matching_listener`] of what write filter `filter` counts, on its key and with
     /// its count of the session's own, as the engine keeps them for the filter, so the filter's
-    /// holder keeps no copy of them. The listener does not go with the filter: its holder stops it.
+    /// holder keeps no copy of them. An engine that keeps the filter's answer reads it for the
+    /// listener and asks the peers nothing more, as zenoh-pico's listener is a callback of its
+    /// entity's filter; the holder stops its listeners before the filter.
     /// [`Refusal::Closed`] when `filter` names no filter, as for anything of a closed session.
     fn declare_filter_matching_listener(
         &self,

@@ -6036,7 +6036,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 return Err(why);
             }
         };
-        // A new Interest is asked of each link from its row; one held already was asked.
+        // A listener on a key asks its own Interest of each link from its row; one on a filter
+        // asks nothing.
         if let Some(opened) = watching.interest {
             core.announce(DeclaredRow::of(opened.handle));
         }
@@ -6866,15 +6867,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> Result<MatchId, Declined> {
-        // A plane the build does not hold is refused first, with nothing taken. Every refusal
-        // lets `sink` go as it returns, before the caller hears of it.
+        // A build that keeps no filter rows for a listener on a key, or does not hold the plane,
+        // refuses it first, with nothing taken. Every refusal lets `sink` go as it returns, before
+        // the caller hears of it.
+        if !cfg!(feature = "key-matching-listener") {
+            return Err(Declined::NotBuilt);
+        }
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
         let mut guard = self.live().ok_or(Declined::Closed)?;
-        // The listener is a row of the session's tables holding an Interest of its own: a full
-        // table, a key the session cannot hold or an Interest it cannot hold or number refuses it
-        // before anything is asked, as a listener that could ask no peer would never hear one.
+        // The listener is a row of the session's tables on a write filter of its own, which holds
+        // an Interest: a full table, a key the session cannot hold or an Interest it cannot hold or
+        // number refuses it before anything is asked, as a listener that could ask no peer would
+        // never hear one.
         let declared = tables_mut(&mut guard.0.session.registry).declare_matching_listener_on(
             plane_of(plane),
             keyexpr,
@@ -6892,10 +6898,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<MatchId, Declined> {
         let handle = row_of(filter).ok_or(Declined::Closed)?;
         let mut guard = self.live().ok_or(Declined::Closed)?;
-        // The filter's row holds the plane and the count of the session's own it was declared
-        // with, as `declare_matching_listener` would make them, so the listener is that one's.
+        // The listener is a callback of the filter's row, which it reads and goes with, and asks
+        // nothing of its own, as zenoh-pico's is a callback of its entity's filter.
         let declared = tables_mut(&mut guard.0.session.registry)
-            .declare_matching_listener_of(handle, MatchingCall { sink: Some(sink) });
+            .declare_matching_listener(handle, MatchingCall { sink: Some(sink) })
+            .map(|handle| Watching {
+                handle,
+                interest: None,
+            });
         self.matching_declared(guard, declared)
     }
 
@@ -6905,7 +6915,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let handle = row_of(id)?;
             let place = {
                 let tables = tables(&core.session.registry);
-                let interest = tables.matching_listeners().get(handle)?.interest();
+                let row = tables.matching_listeners().get(handle)?;
+                // A listener declared on a key ends the Interest of the filter it owns; one declared
+                // on an entity's filter ends none.
+                let owned = row.owns_filter().then_some(row.filter());
+                let interest =
+                    owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
                 interest_rank(tables, interest)
             };
             let unwatched =
@@ -6953,26 +6968,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             )
             .map_err(Declined::from)?;
         let id = row_id(watching.handle);
-        // The id this filter spent of its own, when it spent one: its Interest's, when it is the
-        // first to hold it, or the one taken for a filter that sends none.
-        let spent = if ask.is_some() {
-            if let Some(opened) = watching.interest {
+        // The id this filter spent of its own: its Interest's, or the one taken for a filter that
+        // sends none.
+        let spent = match watching.interest {
+            Some(opened) => {
                 core.announce(DeclaredRow::of(opened.handle));
+                u64::from(opened.id)
             }
-            watching.interest.map(|opened| u64::from(opened.id))
-        } else {
-            // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
-            // `_z_add_interest` takes it before it decides: a filter that finds none left is
-            // refused, its row given back.
-            let Some(taken) = core.session.take_entity_id() else {
-                let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
-                return Err(Declined::NoEntityId);
-            };
-            Some(u64::from(taken))
+            None => {
+                // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
+                // `_z_add_interest` takes it before it decides: a filter that finds none left is
+                // refused, its row given back.
+                let Some(taken) = core.session.take_entity_id() else {
+                    let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
+                    return Err(Declined::NoEntityId);
+                };
+                u64::from(taken)
+            }
         };
         // Each group a write filter asks (`asks_for_filters`) is asked for its members'
-        // declarations by an id of the filter's own, as the tokio engine's group is: the one the
-        // filter spent, or a fresh one when its Interest was held already.
+        // declarations by the id the filter spent, as the tokio engine's group is.
         #[cfg(feature = "group")]
         if core
             .transport
@@ -6980,12 +6995,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .iter()
             .any(|group| group.declarations().asks_for_filters())
         {
-            if let Some(interest_id) =
-                spent.or_else(|| core.session.take_entity_id().map(u64::from))
-            {
-                for group in &core.transport.groups {
-                    group.ask_filter(id, interest_id, plane, keyexpr, wire);
-                }
+            for group in &core.transport.groups {
+                group.ask_filter(id, spent, plane, keyexpr, wire);
             }
         }
         #[cfg(not(feature = "group"))]
