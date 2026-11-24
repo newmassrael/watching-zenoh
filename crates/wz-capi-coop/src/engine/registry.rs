@@ -31,14 +31,14 @@
 //! so the verdicts that one face's dispatch reaches count the other faces' declarations beside
 //! its own ([`Others`], `slot_observer::OtherPeers`).
 
-#[cfg(feature = "queryable")]
-use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
-use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
+use super::decl_watch::WatchObserver;
+#[cfg(feature = "queryable")]
+use wz_session_core::bounded::Static;
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
@@ -333,18 +333,18 @@ impl ObserverSinks for CoopSinks {
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::Queryable;
     // The program's watches of what the peers declare are the only observers this engine installs
-    // (`decl_watch`), boxed closures; a build without them holds none, so its observer lists are
-    // of a sink that cannot be made and hold nothing to drop or free.
+    // (`decl_watch`), each held in its row of an observer list; a build without them holds none,
+    // so its observer lists are of a sink that cannot be made and hold nothing to drop or free.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    type Declared = BoxedDeclSink;
+    type Declared = WatchObserver;
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    type Undeclared = BoxedUndeclSink;
+    type Undeclared = WatchObserver;
     #[cfg(not(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"

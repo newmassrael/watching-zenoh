@@ -30,7 +30,7 @@ use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::bounded::{LendRefused, Storage};
 use wz_session_core::caps;
-use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
+use wz_session_core::decl_sink::{BoxedDeclSink, DeclSink, DeclView, UndeclSink};
 use wz_session_core::declare::MatchingReport;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
@@ -465,10 +465,10 @@ impl DeclWatches {
     ///
     /// Whatever storage `P` the application's tables have: the session's registry holds them in
     /// rows its arena lent, while the lists of observers are the build's profile's in every
-    /// observer. Whatever binding `K` they have, too, so its observers are the boxed ones: the
-    /// engine's tables and the heap profile's alike.
+    /// observer. Whatever binding `K` they have, too, as long as its observers are the watches'
+    /// own ([`WatchObserver`]).
     pub(super) fn add<
-        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
         P: Storage,
         M: MatchingReport,
     >(
@@ -556,7 +556,7 @@ impl DeclWatches {
     /// or `Some(None)` when the sink is out for a call, which the calling thread lets go of as the
     /// call returns ([`Self::put_back`]); `None` when no watch is declared under `id`.
     pub(super) fn undeclare<
-        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
         P: Storage,
         M: MatchingReport,
     >(
@@ -730,25 +730,50 @@ impl Drop for HandingTurn<'_> {
     }
 }
 
-/// The observer that stages a declaration of `plane`.
-fn declared_sink(plane: DeclPlane, shared: &Arc<Shared>) -> BoxedDeclSink {
-    let shared = Arc::clone(shared);
-    BoxedDeclSink::new(move |view: &dyn DeclView| {
-        stage(&shared, What::Declared, plane, view.id(), view.keyexpr());
-    })
+/// The observer the application layer tells what a peer declares and retracts of one plane, which
+/// stages it for the watches: the plane and the watches' rows, held in the row of the observer
+/// list it is installed in, so installing a pair of them for a watch allocates nothing.
+pub(super) struct WatchObserver {
+    plane: DeclPlane,
+    shared: Arc<Shared>,
 }
 
-/// The observer that stages an undeclaration of `plane`.
-fn undeclared_sink(plane: DeclPlane, shared: &Arc<Shared>) -> BoxedUndeclSink {
-    let shared = Arc::clone(shared);
-    BoxedUndeclSink::new(move |id: u64| {
-        stage(&shared, What::Undeclared, plane, id, "");
-    })
+// The arena's plan lays the observer lists out for the heap profile's boxed observers
+// (`crate::arena`), so this observer takes no more room in a row, nor a stricter alignment.
+const _: () = assert!(
+    core::mem::size_of::<WatchObserver>() <= core::mem::size_of::<BoxedDeclSink>()
+        && core::mem::align_of::<WatchObserver>() <= core::mem::align_of::<BoxedDeclSink>()
+);
+
+impl DeclSink for WatchObserver {
+    fn on_declared(&mut self, decl: &dyn DeclView) {
+        stage(
+            &self.shared,
+            What::Declared,
+            self.plane,
+            decl.id(),
+            decl.keyexpr(),
+        );
+    }
+}
+
+impl UndeclSink for WatchObserver {
+    fn on_undeclared(&mut self, id: u64) {
+        stage(&self.shared, What::Undeclared, self.plane, id, "");
+    }
+}
+
+/// The observer that stages what a peer declares and retracts of `plane`.
+fn observer(plane: DeclPlane, shared: &Arc<Shared>) -> WatchObserver {
+    WatchObserver {
+        plane,
+        shared: Arc::clone(shared),
+    }
 }
 
 /// Install in `app` the two observers of `plane`, both or neither.
 fn install<
-    K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+    K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
     P: Storage,
     M: MatchingReport,
 >(
@@ -756,8 +781,8 @@ fn install<
     plane: DeclPlane,
     shared: &Arc<Shared>,
 ) -> Result<Observers, Declined> {
-    let declared = declared_sink(plane, shared);
-    let undeclared = undeclared_sink(plane, shared);
+    let declared = observer(plane, shared);
+    let undeclared = observer(plane, shared);
     let (declared, undeclared) = match plane {
         DeclPlane::Subscribers => {
             let tables = &mut app.remote_subscribers;
@@ -814,7 +839,7 @@ fn install<
 
 /// Take the two observers `observers` names out of `app`.
 fn uninstall<
-    K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+    K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
     P: Storage,
     M: MatchingReport,
 >(
@@ -881,7 +906,7 @@ mod tests {
 
     /// Watch `plane` through `sink` in a table with room for it, owed nothing held.
     fn added<
-        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
         P: Storage,
         M: MatchingReport,
     >(
