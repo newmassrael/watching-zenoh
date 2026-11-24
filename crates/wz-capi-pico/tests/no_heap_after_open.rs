@@ -280,6 +280,7 @@ enum Round {
     AdvancedHistory,
     GroupReceive,
     TransportEventsListener,
+    DeclWatch,
     E2eSenderDemux,
     E2eSupervision,
     InstanceKey,
@@ -290,7 +291,7 @@ enum Round {
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 32] = [
+    const ALL: [Round; 33] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -317,6 +318,7 @@ impl Round {
         Round::AdvancedHistory,
         Round::GroupReceive,
         Round::TransportEventsListener,
+        Round::DeclWatch,
         Round::E2eSenderDemux,
         Round::E2eSupervision,
         Round::InstanceKey,
@@ -349,6 +351,10 @@ impl Round {
             Round::AdvancedPut | Round::AdvancedHistory => cfg!(feature = "advanced"),
             Round::GroupReceive => cfg!(feature = "multicast-transport"),
             Round::TransportEventsListener => cfg!(feature = "connectivity"),
+            Round::DeclWatch => cfg!(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )),
             Round::E2eSenderDemux => {
                 cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
             }
@@ -392,7 +398,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 36] = [
+const FAMILIES: [(&str, Round, Part); 37] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -441,6 +447,9 @@ const FAMILIES: [(&str, Round, Part); 36] = [
         Round::TransportEventsListener,
         Part::All,
     ),
+    // A watch of the peer's subscribers declared, told of one the peer declares and retracts, and
+    // dropped.
+    ("decl-watch", Round::DeclWatch, Part::All),
     ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
     ("e2e-supervision", Round::E2eSupervision, Part::All),
     ("instance-key", Round::InstanceKey, Part::All),
@@ -1526,6 +1535,13 @@ impl Bench {
                 #[cfg(feature = "connectivity")]
                 self.transport_events_listener();
             }
+            Round::DeclWatch => {
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                self.decl_watch();
+            }
             Round::E2eSenderDemux => {
                 #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
                 self.e2e_demux.round();
@@ -1625,6 +1641,69 @@ impl Bench {
             z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener)),
             Z_OK,
             "a transport events listener is undeclared"
+        );
+    }
+
+    /// Watch the dialling peer's subscribers from the listening session, have the dialling session
+    /// declare one and retract it, each told to the watch, and drop the watch.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    unsafe fn decl_watch(&self) {
+        use wz_capi_pico::decl_watch::{
+            wz_ext_decl_watch_declare, wz_ext_decl_watch_drop, wz_ext_owned_decl_watch_t,
+            WZ_EXT_DECL_SUBSCRIBER,
+        };
+        let declared = TOLD.declared.load(Ordering::SeqCst);
+        let undeclared = TOLD.undeclared.load(Ordering::SeqCst);
+        let dropped = TOLD.dropped.load(Ordering::SeqCst);
+        let mut watch: wz_ext_owned_decl_watch_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_decl_watch_declare(
+                z_session_loan(self.pair.listener()),
+                &mut watch,
+                WZ_EXT_DECL_SUBSCRIBER,
+                Some(on_told),
+                Some(told_drop),
+                told_context(),
+            ),
+            Z_OK,
+            "a declaration watch is declared"
+        );
+        let mut closure = pipe_pair::sample_closure(&self.pair.counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_subscriber(
+                self.pair.dialler(),
+                DECLARED,
+                &mut closure,
+                &mut subscriber
+            ),
+            Z_OK,
+            "the watched peer declares a subscriber"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || TOLD.declared.load(Ordering::SeqCst)
+                > declared),
+            "a declaration was not told to the watch within {WAIT_BOUND:?}"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber)),
+            Z_OK,
+            "the watched peer retracts its subscriber"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || TOLD.undeclared.load(Ordering::SeqCst)
+                > undeclared),
+            "an undeclaration was not told to the watch within {WAIT_BOUND:?}"
+        );
+        wz_ext_decl_watch_drop(&mut watch);
+        assert!(watch._val.is_null(), "a dropped watch holds none");
+        assert_eq!(
+            TOLD.dropped.load(Ordering::SeqCst),
+            dropped + 1,
+            "a dropped watch has run the program's drop once"
         );
     }
 
@@ -2012,6 +2091,84 @@ impl Bench {
         );
         self.pair.close()
     }
+}
+
+/// What the `decl-watch` family's watch was told of a subscriber on `DECLARED`, and the drops of
+/// its context. A static, so that the callback reads and writes it with no allocation.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+struct Told {
+    /// The declarations of a subscriber on `DECLARED` told.
+    declared: AtomicUsize,
+    /// The id the last of them was declared under, which its undeclaration names again.
+    id: std::sync::atomic::AtomicU64,
+    /// The undeclarations of that id told.
+    undeclared: AtomicUsize,
+    /// The drops the library ran of the watch's context.
+    dropped: AtomicUsize,
+}
+
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+static TOLD: Told = Told {
+    declared: AtomicUsize::new(0),
+    id: std::sync::atomic::AtomicU64::new(u64::MAX),
+    undeclared: AtomicUsize::new(0),
+    dropped: AtomicUsize::new(0),
+};
+
+/// The context a declaration watch is handed: `TOLD`, which outlives every watch.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+fn told_context() -> *mut std::ffi::c_void {
+    std::ptr::from_ref(&TOLD)
+        .cast_mut()
+        .cast::<std::ffi::c_void>()
+}
+
+/// Count a declaration of a subscriber on `DECLARED` and the undeclaration of its id; the other
+/// entities the watched peer holds are told too and not counted.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+unsafe extern "C" fn on_told(
+    context: *mut std::ffi::c_void,
+    event: *const wz_capi_pico::decl_watch::wz_ext_decl_event_t,
+) {
+    use wz_capi_pico::decl_watch::{WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_UNDECLARED};
+    let told = &*(context as *const Told);
+    let event = &*event;
+    match event.kind {
+        WZ_EXT_DECL_DECLARED if !event.keyexpr.is_null() => {
+            let key = std::slice::from_raw_parts(event.keyexpr.cast::<u8>(), event.keyexpr_len);
+            if key == DECLARED.to_bytes() {
+                told.id.store(event.id, Ordering::SeqCst);
+                told.declared.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        WZ_EXT_DECL_UNDECLARED if event.id == told.id.load(Ordering::SeqCst) => {
+            told.undeclared.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+}
+
+/// The drop of a declaration watch's context, counted.
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+unsafe extern "C" fn told_drop(context: *mut std::ffi::c_void) {
+    (*(context as *const Told))
+        .dropped
+        .fetch_add(1, Ordering::SeqCst);
 }
 
 /// The drop of a closure whose context is a [`pipe_pair::context`]: counted, as the pair's own
