@@ -291,7 +291,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Keep the taken face at `at`, whose link went, as a departed place while its tomb is owed:
     /// its tables go now, as a removed face's do, and its place, which no face takes meanwhile,
     /// once no listener is owed its departure. `false` for a face with no tomb, and for the dial
-    /// role's, which stays.
+    /// role's, which stays. Only a face taken besides the dial (`listen`) is removed.
+    #[cfg(feature = "listen")]
     pub(super) fn keep_departed(&mut self, at: usize) -> bool {
         let Some(face) = self.transport.links.face_mut(at) else {
             return false;
