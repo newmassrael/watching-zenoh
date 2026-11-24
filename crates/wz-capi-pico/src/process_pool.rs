@@ -328,7 +328,7 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         {
-            plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+            plan = plan.with::<crate::query::QueryablePlace>(Kind::Queryable, objects.queryables);
         }
         #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         {
@@ -1579,7 +1579,7 @@ mod tests {
         row(
             "queryable",
             Kind::Queryable,
-            core::mem::size_of::<crate::query::QueryableState>(),
+            core::mem::size_of::<crate::query::QueryablePlace>(),
         );
         #[cfg(feature = "liveliness")]
         {

@@ -841,29 +841,41 @@ unsafe fn session_tail<'a>(zs: *const z_loaned_session_t) -> &'a SessionTail {
     unsafe { (*((*zs)._val as *const SessionPlace)).beside() }
 }
 
-/// Count `closure` in the session `zs` names: its close waits for the closure's `drop(context)`,
-/// and the place of the session's handle stands until it has run.
+/// The count of the session `zs` names, to count what its close waits for in: a closure, or a
+/// background entity's place, either of which keeps the place of the session's handle standing
+/// until it is let go of.
 ///
 /// # Safety
-/// `zs` names a session [`open_session_handle`] read, whose handle is not let go of meanwhile.
-#[cfg(feature = "query")]
-pub(crate) unsafe fn count_in_session<C>(
-    zs: *const z_loaned_session_t,
-    closure: &mut crate::ffi::CClosure<C>,
-) {
+/// `zs` names a session [`open_session_handle`] read, whose handle is not let go of before what is
+/// counted is.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) unsafe fn session_count(zs: *const z_loaned_session_t) -> crate::ffi::CountIn {
     // SAFETY: the caller's: the session's place stands, as its handle is held.
     let tail = unsafe { session_tail(zs) };
     // SAFETY: the count lies in the place `_val` names, which goes back only through
     // `give_back_session_place`, called by whichever of the handle's release and the last
-    // closure counted goes last.
-    let owner = unsafe {
+    // hold counted goes last.
+    unsafe {
         crate::ffi::CountIn::new(
             &tail.open,
             core::ptr::NonNull::new_unchecked((*zs)._val),
             give_back_session_place,
         )
-    };
-    closure.count_in(owner);
+    }
+}
+
+/// Count `closure` in the session `zs` names: its close waits for the closure's `drop(context)`,
+/// and the place of the session's handle stands until it has run.
+///
+/// # Safety
+/// As [`session_count`].
+#[cfg(feature = "query")]
+pub(crate) unsafe fn count_in_session<C>(
+    zs: *const z_loaned_session_t,
+    closure: &mut crate::ffi::CClosure<C>,
+) {
+    // SAFETY: the caller's.
+    closure.count_in(unsafe { session_count(zs) });
 }
 
 /// Give back the place of a session's handle once neither the handle nor a closure counted in the
