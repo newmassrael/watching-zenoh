@@ -1635,6 +1635,20 @@ impl FrameTxConduits {
 /// budget (at most 65535: both advertisements are `u16`), 24-55 the tag; zero is empty.
 pub struct TxLimitsCache {
     writes: AtomicU32,
+    // Read and written by the sends alone, as `current_tag` says.
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     packed: AtomicU64,
 }
 
@@ -1642,6 +1656,19 @@ impl TxLimitsCache {
     pub(crate) fn new() -> Self {
         Self {
             writes: AtomicU32::new(0),
+            #[cfg(any(
+                test,
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            ))]
             packed: AtomicU64::new(0),
         }
     }

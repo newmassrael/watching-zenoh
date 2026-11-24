@@ -19,6 +19,7 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 use core::net::IpAddr;
 
+use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::scouting::ScoutMembers;
@@ -27,7 +28,6 @@ use wz_session_core::scouting_host::ScoutingActions;
 use wz_session_core::scouting_host::{
     deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
 };
-use wz_session_core::session_zid::SessionZid;
 
 use crate::prelude::*;
 
@@ -131,23 +131,16 @@ fn pump<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 /// A socket that cannot be bound is a smaller window, and no window at all is a window nobody
 /// answers: `0`, not an error, as both C ABIs report success and simply find nothing.
 ///
-/// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
-/// ABI's to refuse before it scouts.
-#[allow(clippy::too_many_arguments)]
+/// `ask.zid` is the asker the Scout names, `None` for none; a configured zid that is not one is
+/// the ABI's to refuse before it scouts.
 pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
-    group: IpAddr,
-    port: u16,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     table: &mut HelloTable,
     buffer: &mut [u8],
     on_hello: impl FnMut(&HelloRow),
 ) -> usize {
-    window_hellos::<S, C>(
-        clock, group, port, what, zid, budget_ms, false, table, buffer,
-    );
+    window_hellos::<S, C>(clock, ask, false, table, buffer);
     deliver_rows_in_upstream_order(table, on_hello)
 }
 
@@ -157,42 +150,30 @@ pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 /// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`). The
 /// `true` is `exit_on_first`: the window ends at the first Hello. `table` is where the window
 /// records it and `buffer` what it reads into, as [`run_scout`]'s.
-#[allow(clippy::too_many_arguments)]
 pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
-    group: IpAddr,
-    port: u16,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) -> Option<ScoutedHello> {
-    window_hellos::<S, C>(
-        clock, group, port, what, zid, budget_ms, true, table, buffer,
-    );
+    window_hellos::<S, C>(clock, ask, true, table, buffer);
     table.first().map(HelloRow::to_hello)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
-    group: IpAddr,
-    port: u16,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     exit_on_first: bool,
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) {
-    let members = ScoutMembers::<S>::open(group, port, &interface_addresses());
+    let members = ScoutMembers::<S>::open(ask.group, ask.port, &interface_addresses());
     let params = ScoutParams {
-        what,
-        zid,
+        what: ask.what,
+        zid: ask.zid,
         // The caller's whole budget IS the window: upstream hands its `timeout` straight to
         // `__z_scout_loop`'s `while elapsed < period`.
-        timeout_ms: budget_ms,
+        timeout_ms: ask.budget_ms,
         exit_on_first,
     };
     run_window_over(clock, members, params, table, buffer);

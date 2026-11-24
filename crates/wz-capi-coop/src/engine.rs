@@ -49,8 +49,8 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables,
-    SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, OpenStorage,
+    PlaceTables, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
@@ -4194,8 +4194,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             || config,
             policy,
             key_ids,
-            memory,
-            HeldPlaces::NONE,
+            OpenStorage {
+                memory,
+                held: HeldPlaces::NONE,
+            },
         )
     }
 
@@ -4213,12 +4215,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
     ///
-    /// The arena also holds the places `held` names, lent after every table
+    /// The arena also holds the places `storage.held` names, lent after every table
     /// ([`ArenaPlan::holding`]): a place for the ABI's own handle of the session
     /// ([`CoopDrive::handle_place`]) and places for its objects of the session's entities
     /// ([`PlaceLender::claim_place`]). They are reserved with the session, and an open whose arena cannot
     /// hold them opens nothing.
-    #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
         links: L,
         clock: C,
@@ -4226,10 +4227,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
-        memory: &'static dyn ArenaMemory,
-        held: HeldPlaces,
+        storage: OpenStorage,
     ) -> Result<Arc<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, memory, held)?;
+        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
         engine.open_links()?;
         Ok(engine)
     }
@@ -4240,7 +4240,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// this frame and moved into the engine's allocation, and the frame has returned before the
     /// first link is opened.
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
     fn assemble(
         links: L,
         clock: C,
@@ -4248,9 +4247,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
-        memory: &'static dyn ArenaMemory,
-        held: HeldPlaces,
+        storage: OpenStorage,
     ) -> Result<Arc<Self>, OpenError> {
+        let OpenStorage { memory, held } = storage;
         let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;

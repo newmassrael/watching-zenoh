@@ -4642,11 +4642,16 @@ fn compile_matches(
     value_at: usize,
 ) -> Result<Pattern, FilterError> {
     let source = literal.text("matches", value_at)?;
+    // A build with the engine refuses at the value, one without it at the operator.
+    #[cfg(feature = "filter-regex")]
+    let _ = op_at;
     Pattern::compile(&source).map_err(|why| match why {
+        #[cfg(not(feature = "filter-regex"))]
         PatternRefusal::Unsupported => FilterError {
             at: op_at,
             kind: FilterErrorKind::PatternUnsupported,
         },
+        #[cfg(feature = "filter-regex")]
         PatternRefusal::Invalid(message) => FilterError {
             at: value_at,
             kind: FilterErrorKind::BadPattern(message),

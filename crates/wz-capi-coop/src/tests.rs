@@ -1951,8 +1951,10 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::handle(layout),
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::handle(layout),
+        },
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -2023,8 +2025,10 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             || config(router),
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
-            &AllocatorMemory,
-            held,
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held,
+            },
         )
         .expect("the session opens")
     };
@@ -2607,8 +2611,10 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         },
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2649,8 +2655,10 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         listener,
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());

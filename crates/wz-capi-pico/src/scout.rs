@@ -57,7 +57,7 @@
 //! The order is the session's too, so both engines hand the peers over the same way.
 
 use core::ffi::c_void;
-use core::net::IpAddr;
+use wz_capi_port::ScoutAsk;
 
 use crate::prelude::*;
 
@@ -105,14 +105,13 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 /// windows read each datagram into a buffer of the multicast batch its limits hold
 /// (`PICO_MULTICAST_BATCH_BYTES`), as zenoh-pico reads a scout.
 mod window {
-    use core::net::IpAddr;
+    use wz_capi_port::ScoutAsk;
 
     use wz_session_core::limits::SessionLimits;
     use wz_session_core::policy::SessionPolicy;
     #[cfg(not(feature = "engine-tokio"))]
     use wz_session_core::scouting_host::HelloRow;
     use wz_session_core::scouting_host::ScoutedHello;
-    use wz_session_core::session_zid::SessionZid;
 
     use crate::config::ConfigState;
     use crate::result::ZResult;
@@ -332,18 +331,20 @@ mod window {
     /// `on_hello` after the window, last responder first; the number delivered, or the code of a
     /// window that could not be run.
     #[cfg(feature = "engine-tokio")]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         policy: &SessionPolicy,
         _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> Result<usize, ZResult> {
+        let ScoutAsk {
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+        } = ask;
         Ok(wz_capi_core::scouting::run_scout(
             *clock, group, port, what, zid, budget_ms, policy, on_hello,
         ))
@@ -351,17 +352,19 @@ mod window {
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
     #[cfg(feature = "engine-tokio")]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         policy: &SessionPolicy,
         _limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
+        let ScoutAsk {
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+        } = ask;
         Ok(wz_capi_core::scouting::scout_first(
             *clock, group, port, what, zid, budget_ms, policy,
         ))
@@ -369,46 +372,38 @@ mod window {
 
     // The cooperative engine on a host with `scout`: a socket for each interface.
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
     ) -> Result<usize, ZResult> {
-        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+        let Some((mut claim, budget_ms)) = hold_table(clock, ask.budget_ms)? else {
             return Ok(0);
         };
+        let ask = ScoutAsk { budget_ms, ..ask };
         let (table, buffer) = claim.parts(limits);
         let delivered = wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms, table, buffer, on_hello,
+            clock, ask, table, buffer, on_hello,
         );
         Ok(delivered)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
-        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+        let Some((mut claim, budget_ms)) = hold_table(clock, ask.budget_ms)? else {
             return Ok(None);
         };
+        let ask = ScoutAsk { budget_ms, ..ask };
         let (table, buffer) = claim.parts(limits);
         let first = wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms, table, buffer,
+            clock, ask, table, buffer,
         );
         Ok(first)
     }
@@ -416,46 +411,36 @@ mod window {
     // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links
     // run on (`crate::coop_host`), as zenoh-pico scouts where it has no interface iterator.
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
     ) -> Result<usize, ZResult> {
-        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+        let Some((mut claim, budget_ms)) = hold_table(clock, ask.budget_ms)? else {
             return Ok(0);
         };
+        let ask = ScoutAsk { budget_ms, ..ask };
         let (table, buffer) = claim.parts(limits);
         Ok(crate::coop_host::run_scout(
-            clock, group, port, what, zid, budget_ms, table, buffer, on_hello,
+            clock, ask, table, buffer, on_hello,
         ))
     }
 
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
-        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+        let Some((mut claim, budget_ms)) = hold_table(clock, ask.budget_ms)? else {
             return Ok(None);
         };
+        let ask = ScoutAsk { budget_ms, ..ask };
         let (table, buffer) = claim.parts(limits);
-        Ok(crate::coop_host::scout_first(
-            clock, group, port, what, zid, budget_ms, table, buffer,
-        ))
+        Ok(crate::coop_host::scout_first(clock, ask, table, buffer))
     }
 }
 
@@ -1132,11 +1117,13 @@ pub(crate) fn locators_by_scout(
     let clock = window::clock_of(Some(cfg));
     window::first(
         &clock,
-        group,
-        port,
-        read.what,
-        zid,
-        read.budget_ms,
+        ScoutAsk {
+            group,
+            port,
+            what: read.what,
+            zid,
+            budget_ms: read.budget_ms,
+        },
         policy,
         limits,
     )?
@@ -1221,11 +1208,13 @@ pub unsafe extern "C" fn z_scout(
 
     let scouted = run_scout(
         &clock,
-        group,
-        port,
-        what,
-        zid,
-        budget_ms,
+        ScoutAsk {
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+        },
         &policy,
         &limits,
         |hello| {
@@ -1274,29 +1263,16 @@ pub unsafe extern "C" fn z_scout(
 /// All this side keeps is the ABI mapping: a scouted hello becomes the `HelloState` behind
 /// pico's `z_loaned_hello_t`. `policy` and `limits` are the scout's snapshots, handed to the
 /// window.
-#[allow(clippy::too_many_arguments)]
 fn run_scout(
     clock: &window::Clock,
-    group: IpAddr,
-    port: u16,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     policy: &SessionPolicy,
     limits: &SessionLimits,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> Result<usize, ZResult> {
-    window::run(
-        clock,
-        group,
-        port,
-        what,
-        zid,
-        budget_ms,
-        policy,
-        limits,
-        |hello| lend_hello(hello, &mut on_hello),
-    )
+    window::run(clock, ask, policy, limits, |hello| {
+        lend_hello(hello, &mut on_hello)
+    })
 }
 
 /// Adopt a loaned hello into an owned one (pico `z_hello_take_from_loaned`).
