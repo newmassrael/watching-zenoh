@@ -2275,6 +2275,9 @@ where
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
+    // Out of line: the receive paths that take the hand-off as a known type inlined it into each,
+    // beside the copy its trait object calls.
+    #[inline(never)]
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         match event {
             IterationEvent::Poll(outcome) => {
