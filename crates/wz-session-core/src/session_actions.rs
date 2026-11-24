@@ -5823,12 +5823,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } = head;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
-            let mut slot = self.lease_on(link, want, priority)?;
+            // The lease is lent from where `acquire` wrote it: bound out of its `Option` it would
+            // be copied first.
+            let mut lent = self.lease_on(link, want, priority);
+            let slot = lent.as_mut()?;
             #[cfg(feature = "transport-batching")]
             if window.is_some() && slot.capacity() < mtu {
                 return Some(LentFill::ShortSlot);
             }
-            let filled = fill_lent_frame(&mut slot, mtu, sn, reliable, ext_qos, encode_body);
+            let filled = fill_lent_frame(slot, mtu, sn, reliable, ext_qos, encode_body);
             if filled != LentFill::Fits {
                 return Some(filled);
             }
@@ -5852,17 +5855,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(not(feature = "session-unicast-accept"))]
                 let keeps = true;
                 if keeps {
-                    let open = slot.keep_open();
-                    if let Some(record) = link.batch_slots.get(idx) {
+                    let open = lent.take().map(crate::tx_lease::TxLease::keep_open);
+                    if let (Some(record), Some(open)) = (link.batch_slots.get(idx), open.as_ref()) {
                         record.hold(open.slot());
                     }
-                    batch.stage.lent = Some(open);
+                    batch.stage.lent = open;
                     batch.stage.count = 1;
                     return Some(LentFill::Fits);
                 }
                 batch.stage.count = 0;
             }
-            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+            self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
             Some(LentFill::Fits)
         })
     }
@@ -5904,13 +5907,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         F: FnOnce(&mut crate::tx_lease::TxLease<'_, R::Driver>) -> Result<(), E>,
     {
         self.with_conduit_link(reliability, priority, |link| {
-            let Some(mut slot) = self.lease_on(link, want, priority) else {
+            // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
+            let mut lent = self.lease_on(link, want, priority);
+            let Some(slot) = lent.as_mut() else {
                 return Lend::NoSlot;
             };
-            if let Err(why) = fill(&mut slot) {
+            if let Err(why) = fill(&mut *slot) {
                 return Lend::Refused(why);
             }
-            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+            self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
             Lend::Sent
         })
     }
@@ -7030,15 +7035,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     ) -> Result<(), crate::link::LinkDropCause> {
         let link = &self.link;
-        let Some(mut slot) = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
-        else {
+        // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
+        let mut lent = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority);
+        let Some(slot) = lent.as_mut() else {
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         };
-        if fill(&mut slot).is_err() {
+        if fill(&mut *slot).is_err() {
             // Dropping the lease gives the slot back unsent.
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         }
-        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+        self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
         Ok(())
     }
 
@@ -11370,7 +11376,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             all(feature = "codec-open-body", feature = "session-unicast-accept")
         )
     ))]
-    pub(crate) fn link_admitted(&self, remote_zid: &[u8]) -> bool {
+    pub(crate) fn link_admitted(&self, remote_zid: Option<&SessionZid>) -> bool {
         R::with_mutex_mut(&self.link.link_lease, |slot| match slot {
             Some(lease) => lease.reserve(remote_zid),
             None => true,
@@ -11395,7 +11401,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let zid = self.fact_remote_peer_zid(|slot| *slot);
         match zid {
-            Some(zid) => self.link_admitted(&zid),
+            Some(zid) => self.link_admitted(Some(&zid)),
             // A link whose peer named no zid cannot collide with another.
             None => true,
         }
