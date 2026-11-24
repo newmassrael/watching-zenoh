@@ -409,4 +409,27 @@ mod tests {
         assert_eq!(calls.drained.lock().unwrap().as_slice(), [link]);
         transport.received(link, b"e", None).unwrap();
     }
+    /// A lock that runs the call it is given twice still runs the caller's closure once, and the
+    /// answer is that run's.
+    #[test]
+    fn a_lock_that_runs_the_call_twice_runs_the_closure_once() {
+        struct Twice(Mutex<AppLinkTable>);
+        impl TableLock for Twice {
+            fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+                let mut table = self.0.lock().unwrap();
+                let LockedCall(()) = f(&mut table);
+                f(&mut table)
+            }
+        }
+        let transport = AppTransport::new(
+            Box::new(Twice(Mutex::new(AppLinkTable::new()))),
+            Box::new(Port(Arc::new(Calls::default()))),
+        );
+        let mut runs = 0;
+        let answer = transport.with(|_| {
+            runs += 1;
+            7
+        });
+        assert_eq!((answer, runs), (7, 1));
+    }
 }
