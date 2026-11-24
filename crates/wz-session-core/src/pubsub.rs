@@ -9038,31 +9038,36 @@ mod fixed_backing_interest_staging_tests {
         fn deliver(&mut self, _sample: &dyn SampleView) {}
     }
 
-    const PATTERNS: [&str; 16] = [
-        "t/0", "t/1", "t/2", "t/3", "t/4", "t/5", "t/6", "t/7", "t/8", "t/9", "t/10", "t/11",
-        "t/12", "t/13", "t/14", "t/15",
-    ];
-
+    /// A registry of `subscriptions` subscriptions, each on a key of its own.
     fn registry_with(subscriptions: usize) -> SubscriberRegistry<Noop> {
         let mut reg = SubscriberRegistry::with_sink_backing();
-        for pattern in PATTERNS.iter().take(subscriptions) {
-            reg.register_sink(pattern, crate::locality::Locality::Any, Noop)
+        for id in 0..subscriptions {
+            let mut pattern: crate::bounded::BoundedString<16> =
+                crate::bounded::BoundedString::new();
+            core::fmt::Write::write_fmt(&mut pattern, format_args!("t/{id}")).unwrap();
+            reg.register_sink(pattern.as_str(), crate::locality::Locality::Any, Noop)
                 .expect("below MAX_SUBSCRIPTIONS");
         }
         reg
     }
 
-    /// Two CURRENT dumps of 16 replies each need 2 x 17 slots against 32. The
-    /// code this replaced pushed the second best-effort: 15 of its replies and
-    /// no `Final`, so that peer was answered half and never terminated. Now the
-    /// second is refused whole and counted, and the first is intact.
+    /// Two CURRENT dumps of `n` replies each need 2 x (`n` + 1) slots, where the
+    /// buffer holds one dump and not two: `n` is the most subscriptions whose dump
+    /// and `Final` fit, under the build's own bounds. The code this replaced
+    /// pushed the second best-effort: part of its replies and no `Final`, so that
+    /// peer was answered half and never terminated. Now the second is refused
+    /// whole and counted, and the first is intact.
     #[test]
     fn a_current_chain_that_does_not_fit_whole_is_refused_and_counted() {
-        assert_eq!(PATTERNS.len(), caps::MAX_SUBSCRIPTIONS);
-        let mut reg = registry_with(caps::MAX_SUBSCRIPTIONS);
+        let n = caps::MAX_SUBSCRIPTIONS.min(caps::MAX_PENDING_DECLARES - 1);
+        assert!(
+            2 * (n + 1) > caps::MAX_PENDING_DECLARES,
+            "the build's bounds leave room for two dumps; this case is not reachable"
+        );
+        let mut reg = registry_with(n);
         assert_eq!(
             reg.respond_to_subscriber_interest_borrowed(1, None, false, true, false),
-            caps::MAX_SUBSCRIPTIONS
+            n
         );
         assert_eq!(
             reg.respond_to_subscriber_interest_borrowed(2, None, false, true, false),
@@ -9076,7 +9081,7 @@ mod fixed_backing_interest_staging_tests {
             }
         );
         let staged = reg.take_staged_sub_interest_replies();
-        assert_eq!(staged.len(), caps::MAX_SUBSCRIPTIONS + 1);
+        assert_eq!(staged.len(), n + 1);
         assert!(staged.iter().all(|item| matches!(
             item,
             SubInterestReply::Concrete { interest_id: 1, .. }
