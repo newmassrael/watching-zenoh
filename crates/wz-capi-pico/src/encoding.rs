@@ -227,13 +227,24 @@ impl HeldEncoding {
     unsafe fn set_schema(at: *mut HeldEncoding, bytes: &[u8]) -> Result<(), NoRoom> {
         let has_schema = !bytes.is_empty();
         let kept = BoundedEncoding::of(EncodingRef {
-            packed_id: ((*at).kept.view().packed_id & !1) | u32::from(has_schema),
+            packed_id: with_schema_flag((*at).kept.view().packed_id, has_schema),
             schema: has_schema.then_some(bytes),
         })
         .map_err(|_| NoRoom)?;
         (*at).kept = kept;
         Self::read_own_room(at);
         Ok(())
+    }
+}
+
+/// `packed_id` with bit 0, the wire word's schema flag, set when the encoding carries a schema and
+/// clear when it carries none, whatever the bit held before: a schema that replaces another keeps
+/// the flag, and one taken away clears it.
+fn with_schema_flag(packed_id: u32, has_schema: bool) -> u32 {
+    if has_schema {
+        packed_id | 1
+    } else {
+        packed_id & !1
     }
 }
 
@@ -596,7 +607,7 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         let code = store_encoding(
             &mut owned,
             EncodingRef {
-                packed_id: (packed_id & !1) | u32::from(has_schema),
+                packed_id: with_schema_flag(packed_id, has_schema),
                 schema: has_schema.then_some(bytes),
             },
         );
@@ -949,6 +960,17 @@ mod tests {
         assert_eq!(with.schema.as_deref(), Some(&b"utf8"[..]));
     }
 
+    /// The flag is set or cleared whatever bit 0 held before, and the id above it is untouched.
+    /// Turned red by a flag that is toggled rather than set.
+    #[test]
+    fn the_schema_flag_is_set_or_cleared_whatever_it_held() {
+        let id: u32 = 4 << 1;
+        assert_eq!(with_schema_flag(id | 1, true), id | 1);
+        assert_eq!(with_schema_flag(id, true), id | 1);
+        assert_eq!(with_schema_flag(id | 1, false), id);
+        assert_eq!(with_schema_flag(id, false), id);
+    }
+
     /// An UNRECOGNISED prefix is not an error — the whole string becomes the
     /// schema under the default id, which is pico's fallback and the reason
     /// `z_encoding_from_str` cannot fail on content.
@@ -1061,6 +1083,11 @@ mod tests {
             );
             let set = encoding_view(z_encoding_loan(&owned)).expect("set");
             assert_eq!(set.schema, Some(&b"other"[..]));
+            assert_eq!(
+                set.packed_id,
+                (4 << 1) | 1,
+                "a schema that replaces another keeps the flag"
+            );
             assert!(room.contains(&(set.schema.expect("set").as_ptr() as usize)));
             assert_eq!(
                 z_encoding_set_schema_from_substr(

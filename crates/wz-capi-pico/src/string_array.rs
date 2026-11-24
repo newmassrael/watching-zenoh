@@ -701,6 +701,41 @@ mod tests {
         }
     }
 
+    /// Taking an owned array moves it: the destination holds the source's own state, and the
+    /// source is emptied. Turned red by an owned array taken as if it were lent, which copies it
+    /// and leaves the source holding its strings.
+    #[test]
+    fn taking_an_owned_array_moves_it_and_empties_the_source() {
+        let first = z_loaned_string_t {
+            _start: b"first".as_ptr(),
+            _len: 5,
+        };
+        // SAFETY: every pointer is a live value of its type this test owns, and the taken array is
+        // dropped once.
+        unsafe {
+            let mut source = z_owned_string_array_t::null_value();
+            z_string_array_new(&mut source);
+            assert_eq!(
+                z_string_array_push_by_copy(z_string_array_loan_mut(&mut source), &first),
+                1
+            );
+            let state = source.handle;
+            let mut taken = z_owned_string_array_t::null_value();
+            assert_eq!(
+                z_string_array_take_from_loaned(&mut taken, z_string_array_loan_mut(&mut source)),
+                crate::result::Z_OK
+            );
+            assert_eq!(taken.handle, state, "the state itself is moved, not copied");
+            assert!(
+                !z_internal_string_array_check(&source),
+                "the source is emptied"
+            );
+            let taken_state = string_array_state(z_string_array_loan(&taken)).expect("an array");
+            assert_eq!(entries(taken_state), [b"first".to_vec()]);
+            z_string_array_drop(z_string_array_move(&mut taken));
+        }
+    }
+
     /// Taking a lent array copies it and leaves it lent: the owned one holds strings of its own,
     /// which outlive the lender's, and the lender's array is not emptied into a handle that would
     /// free what it does not own.
