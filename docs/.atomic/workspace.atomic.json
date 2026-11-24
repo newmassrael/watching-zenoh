@@ -7500,6 +7500,11 @@
       "source": "open-debt register",
       "reason": "OPEN, CHOSEN GROWTH NOT YET COMPACTED: the C ABI images count static pointer tables twice in the size gate -- a cdylib pays one 24-byte relative relocation per pointer, so the default and lean images grew 17,232 bytes of .rela.dyn plus 12,000 bytes of .data.rel.ro (718 relocations) with no named symbol growing (Round 4444: nm -S of both builds identical, size -A showed the sections). The tables are the document history and row-facts key sets of the capture crate reached by the sender frame writer. A table of offsets into one string block would pay no relocations. Not worth doing at today's budgets (capic-default 11,183,300, lean 9,605,800); do it when the document history grows again and a C1cs budget would have to move for it. SECOND INSTANCE (Round 4551, runtime configuration step 5): the generated policy and profile tables (`POLICIES`, `PROFILES`: policy ids, value ids, profile statements) that `policy_document::compose` and `resolve_under` read cost every pico case more in relocations than in code -- on pico-client-coop, pc2, `.rela.dyn` +5,712 and `.data.rel.ro` +3,536 against `.text` +6,864 -- and the C1cs budgets moved for it. The same remedy applies to the generator (`scripts/lib/wz_config.py` `emit_rust_policies`): names as offsets into one string, entries holding indices. Closes when both table families are emitted without pointers and the pico and zenoh-c images, measured on one host, show the relocations gone by `size -A`, with the budgets moved down by what was measured."
     },
+    "debt-capic-default-acl-verdict-door-cost": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: ledger round 4621 added the C door wz_capi_c_config_acl_verdicts (crates/wz-capi-c/src/acl_verdict.rs, with the judge in wz-access-control) to the default C build, and the capability-cost gate (Layer C1cs, shard 0/2) went red on its first hosted run (run 45312531249 at 1eb3817e7): capic-default exports 838 C symbols against the pinned 837, its text is 11,273,845 bytes against a budget of 11,252,900 (20,945 over), and capic-default-lean is 25,125 over its budget of 9,454,348. The round did not run C1cs before landing. At main 271f5cd09 the same two rows stay red (6,057 and 29,721 over) on top of other sessions' changes. Closes when the symbol diff of the two builds is read (nm -C --size-sort) and either the door and its judge move behind a feature the default build does not name, or the budget and the export pin move in one commit with the new measurement stated as the chosen growth."
+    },
     "debt-carry-N10": {
       "status": "deprecated",
       "source": "open-debt register, carry axis",
@@ -7922,6 +7927,16 @@
       "source": "open-debt register",
       "reason": "CLOSED (c7 integration round): the port trait takes the stated set (and the other three statements: admission retry, all-or-none, target peer) and every engine decides; the tokio registry honours them, the router engine, the cooperative engine and a C router-node session refuse each by name (StatementNotHonoured / LinksNotHonoured, Z_EUNAVAILABLE in C); none ignores a stated value."
     },
+    "debt-main-tip-red-pico-coop-builds-271f": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: the same hosted run 45334898820 of main 271f5cd09 fails on the pico and cooperative builds: the capability-cost gate (C1cs) finds pico-client-small 2,858 bytes over its budget of 1,657,964, no symbol matching wz_capi_coop::engine::Listening< in pico-peer-coop, and seven log:: symbols in pico-client-coop-nostd, a build that leaves logging out; the default-off builds (C1cf) find the methods counts and place_counts never used in wz-capi-coop, unexpected cfg values (declarations-synced-event, liveliness) in wz-capi-pico-ext, and a function with eight arguments in wz-session-lwip; Vcov finds three wz-capi-pico config_policy tests failing (config_policy.rs lines 1162, 1380 and 1411). Read from the job logs on 2026-11-24, not reproduced locally. Some of the C1cf rows were already red at f1dc5fa4f with other names. Closes when a run of main is green on C1cs, C1cf and Vcov, or each red is acknowledged with its own debt."
+    },
+    "debt-main-tip-red-session-core-builds-271f": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: the hosted CI run 45334898820 of main 271f5cd09 (the int12 landing after ledger round 4622) fails on session-core builds: Layer C1 and Vcov cannot compile the wz-session-core lib test (cannot find value NoEntropy), Layer C1bn fails on an unused import crate::declare_form::GroupDeclaration, the reduced builds fail on an unused resolve_plain_parts_over and a dead FLAG_PUSH_M, the stack-bound contract (Layer C0) says the rule entropy-draw anchors on src.try_next_u64().ok(), which no line of session_actions.rs holds any more, the analyzer docs (C1bz) count 84 broken links in wz-session-core where the earlier heads counted 36, and the reduced-configuration docs (C1bzr) find new unresolved links in session_actions.rs, session_slot.rs, sink.rs, slot_observer.rs and declare/queryable.rs. Read from the job logs on 2026-11-24, not reproduced locally. Closes when a run of main is green on those jobs, or each red is acknowledged in docs/hosted-red-acks.md with its own debt."
+    },
     "debt-memory-document-values-door": {
       "status": "deprecated",
       "source": "carry of Round 4385",
@@ -7988,6 +8003,11 @@
       "status": "active",
       "reason": "Round 1994's open item 468, the half `scripts/lib/sce-codegen-oracle.sh` answers for: an untracked build oracle must record WHAT it was built from, not merely that it exists (Layers B/B2 SKIP-green) or when it was built (R114's mtime, which a backwards pin defeats). The sce-codegen instance is closed and gated; the item stays open for the oracles that still carry no provenance record at all -- `target/zenohd`, `target/zenoh-pico-cli`, the capture fixtures, and `binary_freshness_lint.py`, which grades the sibling class by mtime."
     },
+    "debt-windows-capic-largest-chain-never-arrives": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: the Platform workflow job C ABI (windows-latest) fails the same test at f1dc5fa4f, 1eb3817e7 and dc898a1e1 (runs 45184042866, 45312531140, 45329750154): files::fragmentation_roundtrip::a_chain_up_to_the_largest_message_sent_arrives_whole panics at crates/wz-capi-c/tests/it/files/fragmentation_roundtrip.rs:345 with 4000000 bytes never arrived whole at the subscriber; 126 other tests pass. The four pico library package jobs of the same workflow are red on the same heads and were not read. Nothing registers either, and the Platform runs are not part of the land queue's verdict. Closes when the 4 MB chain arrives whole on Windows (read on pc3-win, the Windows verification host) and the package jobs are read and attributed."
+    },
     "debt-writer-queue-permit-in-link-driver-trait": {
       "status": "active",
       "source": "open-debt register",
@@ -8002,6 +8022,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN, INTERMITTENT, ROOT CAUSE NOT READ: Layer Z8 regions measured 125 of 126 on hosted run 43360452070 (head dcaed6aeed) because scenario7::test_regions_scenario7_order2_pubsub failed its final assertion at scenario7.rs:871, that every one of the nine subscribers (s9110 to s9330) sees unique timestamps -- at least one subscriber was delivered a sample twice. The other 125 regions tests passed. The window since the previous reading changed the session core by four commits (the chain head gated on its walker, the reassembly tests built without alloc, the consolidation mode word, a citation) and the router crates by none; none of the four is on the delivery path of a published sample, but no commit was bisected, so a regression is not excluded, only unlikely. Related and already fixed: order3's 1.5 to 4.4 percent duplicate delivery had its cause in the transport event listener announcing a face twice (watch plus history), closed by FaceLedger. What closes it: a stress run of order2 on the build machine with the peer trace lines on, read for WHICH subscriber got the second copy and through which face, then a fix in the router (not a retry in the test) and 200 of 200 passes."
+    },
+    "debt-zenoh-c-pin-tls-split-race-awaits-release": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: the pinned upstream zenoh 1.10.2 (and the zenoh-c built from it, the oracle wz is measured against) can panic in its TLS link when the receive and transmit halves run at once, because the stream is shared rather than split. Upstream fixed it in eclipse-zenoh/zenoh pull request 2910, merged to main as 169d9182cb on 2026-11-09, and no release carries it yet (newest release 1.10.2, checked 2026-11-24). wz's own TLS link (wz-runtime-tokio tls_pipeline.rs) splits the stream and does not have the defect. The pin is not moved to a patched build on purpose: the oracle is the bytes upstream released, pinned by sha256, and a patched build would break that contract and leave a revert. Closes when the pin (UPSTREAM_VERSION in scripts/lib/upstream_feature_census.py, with the zenoh-c and zenoh-pico pins) moves to the first upstream release that carries the fix, and the consumer that reported the panic is told the landing commit."
     },
     "declare-final": {
       "status": "active",
