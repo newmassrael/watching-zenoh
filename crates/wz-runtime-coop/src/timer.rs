@@ -231,13 +231,10 @@ impl TimerQueue {
                 self.with_slots(cs, |slots| {
                     let mut taken: usize = 0;
                     for place in due.iter_mut() {
-                        let Some((index, _)) = earliest(slots, now_us) else {
+                        let Some(waker) = take_earliest(slots, now_us) else {
                             break;
                         };
-                        *place = slots
-                            .get_mut(index)
-                            .and_then(|slot| slot.0.take())
-                            .map(|entry| entry.waker);
+                        *place = Some(waker);
                         taken = taken.saturating_add(1);
                     }
                     taken
@@ -311,6 +308,16 @@ fn empty_slots(count: usize) -> Box<[TimerSlot]> {
     // SAFETY: the global allocator made the allocation with the layout a boxed slice of `count`
     // entries has (`Layout::array`), and every entry is written above.
     unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(first, count)) }
+}
+
+/// Take the waker of the entry of `slots` due first at `until_us` or before out of the table,
+/// its entry free from then; `None` when none is due.
+// Out of line: the batch's loop has a count of its own, and the compiler copies whatever its body
+// holds once for each place of the batch; a call is what it copies.
+#[inline(never)]
+fn take_earliest(slots: &mut [TimerSlot], until_us: u64) -> Option<Waker> {
+    let (index, _) = earliest(slots, until_us)?;
+    slots.get_mut(index)?.0.take().map(|entry| entry.waker)
 }
 
 /// The entry of `slots` due first at `until_us` or before, ties in registration order: its index
