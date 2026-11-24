@@ -121,6 +121,7 @@ fn session() -> TokioSession {
         fixture_session_init_params(),
         TokioTime::new(),
     );
+    actions.enter_established();
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
         ApplicationLayerObserver::new(),
     ));

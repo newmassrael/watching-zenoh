@@ -137,9 +137,9 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{
-    CoopTables, FACE_SET_BYTES, HELD_SET_BYTES, REGISTRY_LEND_BYTES, ROUTER_LEND_BYTES,
-};
+#[cfg(any(feature = "listen", feature = "group"))]
+use crate::engine::HELD_SET_BYTES;
+use crate::engine::{CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROUTER_LEND_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -457,8 +457,9 @@ const OBSERVER_ROWS: usize = 1;
 /// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
 /// that asks nothing holds no table of gets.
 const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
-/// The faces' sets and the index of the held ones.
-const FACE_ROWS: usize = 2;
+/// The faces' sets, and the index of the held ones where the build takes faces beside its dial
+/// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
+const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
 const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
@@ -1835,7 +1836,9 @@ impl ArenaPlan {
             self.session.peers.sets(),
             FACE_SET_BYTES,
         );
-        // Which face holds which set, a row for each set.
+        // Which face holds which set, a row for each set, in a build that takes faces beside its
+        // dial role's.
+        #[cfg(any(feature = "listen", feature = "group"))]
         self.put(
             ArenaPart::HeldFaces,
             self.session.peers.sets(),
@@ -2556,10 +2559,20 @@ const fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
 /// The faces besides the dial role's that `limits` admit: the session's `MAX_FACES`, under the
 /// build's. What an ABI states as [`CoopConfig::max_faces`] for a session that takes faces besides
 /// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
-/// the build's.
+/// the build's. None in a build that takes no face beside its dial role's (`TAKES_FACES`),
+/// whatever the session's value: such a session holds its dial role's face alone, so a config that
+/// states one more is refused by the limit's name rather than lent places no face can take.
 pub const fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    if !TAKES_FACES {
+        return Ok(0);
+    }
     lent::<{ caps::MAX_FACES }>(ArenaLimit::MaxFaces, limits.max_faces())
 }
+
+/// Whether the build takes faces beside its dial role's: the links a listener accepts and the
+/// faces it attaches (`listen`), and the groups it joins (`group`). A build of neither holds
+/// its dial role's face alone (`wz_runtime_coop::faces::OneFace`).
+pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "group"));
 
 /// The inbound links in their handshake at once that `limits` admit: the session's
 /// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as

@@ -1116,6 +1116,45 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |"
+    # The lend-only send on the FIXED storage with no accepting role and none of the extensions a
+    # handshake action adds (QoS, SHM, auth, multilink, low latency, compression): a build that
+    # stages no handshake extension, the session core of the C library's client build. A SEPARATE
+    # build from the lend-only row above, which accepts: here the session holds no handshake
+    # chain, and its Init and Open are written from the parameters (`encode_init_patch_into`,
+    # `encode_open_bound_into` in `handshake_encode`), which no other row compiles into the
+    # session. Two filters, one build: the writers' own tests against the chain path
+    # (`handshake_encode::`), and the lent handshake of a session
+    # (`session_actions::bundle_tests::lent_handshake::`), whose
+    # `a_lent_opening_handshake_writes_the_bytes_of_its_chains` holds the InitSyn and the OpenSyn
+    # sent to the bytes the heap encoders write for the same chains. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-fixed-storage,\
+        session-unicast,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |handshake_encode::"
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-fixed-storage,\
+        session-unicast,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::lent_handshake::"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the
@@ -1996,13 +2035,6 @@ a memory leg of Layer S, run by it with --ignored on each engine (8 passed guard
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
     "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
-    # The conformance corpus's arm for the codecs SCE generates from its layouts
-    # (`wz-app-frame`'s `fixed_records_tests`, behind `sce-generated-codec`): it fails naming each
-    # layout whose generated codec the test module does not list, and it lists none until a build
-    # links them, so no leg of this table runs it. The corpus itself runs in the crate's default
-    # build, through the hand-written builder and opener.
-    "wz-app-frame|fixed_records_tests::generated_codec_matches_the_corpus|\
-the arm of generated codecs, which fails until each layout's codec is listed; the default build runs the corpus"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

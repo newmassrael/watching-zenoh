@@ -2004,16 +2004,21 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * never lends a slot to another, so each kind holds what was stated for it
  * and no more. wz_ext_object_pool_class reports the pools by size class, of
  * WZ_EXT_OBJECT_POOL_CLASSES classes whose largest slots are 16 bytes, then
- * each twice the one before: the kinds whose slots a class holds together,
- * with the bytes their slots take. A pool of slots larger than the largest
- * class is reported by none.
+ * each twice the one before: the pools whose slots a class holds together,
+ * the kinds' and the payload blocks', with the bytes their slots take. A pool
+ * of slots larger than the largest class is reported by none.
  *
- * THE PAYLOADS' AREA. The bytes the owned payloads, strings and slices carry
- * lie beside the pools, in one area of payload_bytes bytes: blocks of
- * power-of-two sizes from 32 bytes, a payload taking the smallest that holds
- * its bytes and a 16-byte head, a larger block split in halves for it and
- * joined again when both halves are free. A payload larger than the area's
- * largest block, or one no free block holds, is refused.
+ * THE PAYLOAD BLOCKS. The bytes the owned payloads, strings and slices carry
+ * lie beside the pools, in three pools of fixed blocks: small_payload_blocks
+ * blocks of PAYLOAD_SMALL_BLOCK_BYTES, medium_payload_blocks blocks of
+ * PAYLOAD_MEDIUM_BLOCK_BYTES, and large_payload_blocks blocks that each hold
+ * the largest message a session of the build delivers (the larger of
+ * PICO_FRAG_MAX_BYTES and the batch sizes), each block's bytes counting a
+ * 16-byte head. A payload takes a block of the smallest pool whose blocks
+ * hold it and that has one free. One no free block holds is refused, and
+ * counted in the class of the smallest pool whose blocks hold it, or of its
+ * own bytes when none does. payload_bytes is refused with Z_EINVAL when it is
+ * not 0: bytes are no count of blocks of each size.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers, queriers,
@@ -2032,8 +2037,8 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
- * own pools states the configs it opens from and the bytes its payloads
- * carry. A count of an object the build has none of is not read.
+ * own pools states the configs it opens from and the payload blocks its
+ * payloads take. A count of an object the build has none of is not read.
  *
  * THE SIZE. The counts are a sized struct (SIZED STRUCTS, at the top): a
  * program compiled before a count was added states it as 0, its limit's
@@ -2045,8 +2050,9 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
  * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES, HELD_PAYLOADS
  * and HELD_ENCODINGS of the owned values, HELD_CONFIGS configs, HELD_HELLOS
- * kept hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
- * counts of its own reserves them before its first object instead.
+ * kept hellos, and HELD_SMALL_PAYLOAD_BLOCKS, HELD_MEDIUM_PAYLOAD_BLOCKS and
+ * HELD_LARGE_PAYLOAD_BLOCKS payload blocks. A program that states counts of
+ * its own reserves them before its first object instead.
  *
  * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
  * build's reservation the heap cannot give, refuses the object: the call that
@@ -2079,7 +2085,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t bytes;
   size_t configs;
   size_t hellos;
-  size_t payload_bytes;
+  size_t payload_bytes; /* 0; any other value is refused with Z_EINVAL */
   size_t queriers;
   size_t keyexprs;
   size_t encodings;
@@ -2090,6 +2096,9 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t decl_watches;
   size_t transport_events_listeners;
   size_t link_events_listeners;
+  size_t small_payload_blocks;
+  size_t medium_payload_blocks;
+  size_t large_payload_blocks;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {
@@ -2107,23 +2116,25 @@ typedef struct wz_ext_object_pool_class_t {
  * argument; _Z_ERR_CONFIG_INVALID_VALUE for counts that make no pool (a
  * count left 0 whose limit holds no bound, or no slot at all);
  * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds;
- * Z_EINVAL for a struct_size short of the base (THE SIZE). */
+ * Z_EINVAL for a struct_size short of the base (THE SIZE) or a payload_bytes
+ * not 0. */
 z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
                                     size_t *out_bytes);
 
 /* Reserve the pools of counts from the heap, in one allocation. Z_OK;
  * _Z_ERR_NULL for a NULL counts; _Z_ERR_CONFIG_INVALID_VALUE for counts that
  * make no pool; _Z_ERR_SYSTEM_OUT_OF_MEMORY when the heap has not the
- * memory; Z_EINVAL when pools are reserved already, or for a struct_size
- * short of the base (THE SIZE). A refusal leaves the heap as it was. */
+ * memory; Z_EINVAL when pools are reserved already, for a struct_size short
+ * of the base (THE SIZE), or for a payload_bytes not 0. A refusal leaves the
+ * heap as it was. */
 z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts);
 
 /* Reserve the pools of counts over the len bytes at base, which the program
  * hands over until wz_ext_object_pool_release and must not touch meanwhile.
  * Z_OK; _Z_ERR_NULL for a NULL argument; _Z_ERR_CONFIG_INVALID_VALUE for
  * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes,
- * when pools are reserved already, or for a struct_size short of the base
- * (THE SIZE); _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
+ * when pools are reserved already, for a struct_size short of the base
+ * (THE SIZE) or a payload_bytes not 0; _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
  * under what wz_ext_object_pool_bytes answers. A refused call writes nothing
  * at base. */
 z_result_t wz_ext_object_pool_place(void *base, size_t len,

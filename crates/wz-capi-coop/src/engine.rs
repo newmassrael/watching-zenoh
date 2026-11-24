@@ -154,9 +154,9 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleView};
+use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
 use wz_session_core::step_lend::{LendCell, StepLend};
-use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
+use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
@@ -193,10 +193,12 @@ mod deliveries;
 use deliveries::Deliveries;
 
 mod registry;
+pub(crate) use registry::FACE_SET_BYTES;
+#[cfg(any(feature = "listen", feature = "group"))]
+pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
-pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
 use replay::{Replay, TurnEnd};
@@ -1984,15 +1986,18 @@ impl SubscriberRow {
 
     /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
     /// begun: the one place a sample is handed to a subscriber's callback.
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         if self.latch.retired() {
             return;
         }
-        if self.expose {
-            self.sink.call(sample);
+        let hidden;
+        let sample = if self.expose {
+            sample
         } else {
-            self.sink.call(&HiddenTimestamp(sample));
-        }
+            hidden = sample.without_timestamp();
+            &hidden
+        };
+        self.sink.call(sample);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
@@ -2081,7 +2086,7 @@ impl SubscriberCall {
     }
 
     /// Hand `sample` to the row's callback.
-    pub(crate) fn hand(&self, sample: &dyn SampleView) {
+    pub(crate) fn hand(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
         // not; nothing writes a row's sink or its timestamp choice after it is declared.
         unsafe { self.call.0.as_ref() }.hand(sample);
@@ -2125,9 +2130,19 @@ impl RoundDelivery {
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     fn deliver(
         &mut self,
-        _id: SubscriberHandle,
+        id: SubscriberHandle,
         row: RowAccess<'_, SubscriberRow>,
         sample: &dyn SampleView,
+        turn: FanOut,
+    ) {
+        self.deliver_ref(id, row, &SampleRef::of(sample), turn);
+    }
+
+    fn deliver_ref(
+        &mut self,
+        _id: SubscriberHandle,
+        row: RowAccess<'_, SubscriberRow>,
+        sample: &SampleRef<'_>,
         turn: FanOut,
     ) {
         // The row is read where it lies, shared with the calls of it a delivery makes on another
@@ -2140,7 +2155,7 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         // holds, as the round's writer must.
         unsafe {
             self.round
-                .offer_sample(SubscriberCall::new(call), sample, turn.is_first())
+                .offer_sample_ref(SubscriberCall::new(call), sample, turn.is_first())
         };
     }
 }
@@ -2698,6 +2713,19 @@ pub(crate) fn read_wait_room(config: &CoopConfig<impl EndpointList>) -> usize {
         .saturating_add(config.groups.len())
 }
 
+/// The deadlines a session's runtime holds at once: the entries of its timer table, which only a
+/// task that sleeps or times out on the runtime (`CoopTime`'s `sleep` and `timeout`) places a
+/// deadline in. A session keeps its own deadlines (the lease, the keep-alive, the next dial, the idle
+/// wait) in places of its own and reads them off the clock at each step, so the table is the
+/// build's `MAX_TIMERS` entries only in a build with a feature whose task sleeps on the runtime,
+/// and none otherwise, with no making of a table linked.
+pub(crate) const RUNTIME_TIMERS: usize = if TASKS_SLEEP { caps::MAX_TIMERS } else { 0 };
+
+/// Whether a feature of the build spawns a task that sleeps or times out on the session's runtime.
+/// The `cfg` names every such feature, and no feature of this engine is one: a feature that
+/// spawns such a task names itself here.
+const TASKS_SLEEP: bool = cfg!(any());
+
 /// What a session's runtime reserves when the session opens (`Self::runtime`), from the build's
 /// limits and the faces its config admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2705,7 +2733,7 @@ pub(crate) struct RuntimeTables {
     /// Reserved at once: a task cell for each face the session may hold at once (the dial role's
     /// when it dials, and each `max_faces` admits, a link in its handshake among them: a link
     /// taken off a port past them is closed before it has a task), in the bytes a link's session task takes
-    /// (`link_task_bytes`), and `MAX_TIMERS` deadlines.
+    /// (`link_task_bytes`), and `RUNTIME_TIMERS` deadlines.
     pub(crate) rows: RuntimeRows,
     /// The cells the open may add, one for each group it joins: a group's task is a future no
     /// type names, so its cell takes the bytes the task has when the open spawns it.
@@ -2725,7 +2753,7 @@ impl RuntimeTables {
             rows: RuntimeRows {
                 tasks: links,
                 task_bytes: link_task_bytes::<C>(),
-                timers: caps::MAX_TIMERS,
+                timers: RUNTIME_TIMERS,
             },
             groups,
         }
@@ -2735,21 +2763,35 @@ impl RuntimeTables {
     /// cells and holds a bare cell for each group, given the bytes the group's task needs when the
     /// open spawns it, and sealed once the open is over (`open_links`). A build that joins none
     /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
-    /// that names a group is refused by name there, so the groups' cells are none.
+    /// that names a group is refused by name there, so the groups' cells are none. A build that
+    /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
+    /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
+    /// walk of a table of many cells.
     pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
+        // The timers are stated as the constant they are, so the making of the timer table is that
+        // of the build's count alone (`CoopRuntime::reserved`).
+        let rows = RuntimeRows {
+            timers: RUNTIME_TIMERS,
+            ..self.rows
+        };
         #[cfg(feature = "group")]
         {
-            CoopRuntime::opening(clock, self.rows, self.groups)
+            CoopRuntime::opening(clock, rows, self.groups)
         }
         #[cfg(not(feature = "group"))]
         {
-            CoopRuntime::reserved(
-                clock,
-                RuntimeRows {
-                    tasks: self.rows.tasks.saturating_add(self.groups),
-                    ..self.rows
-                },
-            )
+            let rows = RuntimeRows {
+                tasks: rows.tasks.saturating_add(self.groups),
+                ..rows
+            };
+            #[cfg(feature = "listen")]
+            {
+                CoopRuntime::reserved(clock, rows)
+            }
+            #[cfg(not(feature = "listen"))]
+            {
+                CoopRuntime::reserved_for_one(clock, rows)
+            }
         }
     }
 }
@@ -3267,9 +3309,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         last: OpenError,
         redial_ms: Option<u64>,
     ) -> Result<(), OpenError> {
+        // Only a face taken beside the dial role's goes, and the dial role's stands by only for a
+        // node such a face holds: a session whose table holds the dial role's face alone is asked
+        // neither (`FacePlaces::TAKES`), and carries neither.
+        let takes = self.transport.links.takes_faces();
         match then {
             Next::Remove => {
-                self.remove_face(at);
+                if takes {
+                    self.remove_face(at);
+                }
                 Ok(())
             }
             Next::EndSession => Err(last),
@@ -3279,7 +3327,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // face has the node, where dialling at once would be refused again and the handshake
             // paid each time.
             Next::StandBy { node } => {
-                self.transport.links.put_link(at, Link::Held { zid: node });
+                if takes {
+                    self.transport.links.put_link(at, Link::Held { zid: node });
+                }
                 Ok(())
             }
         }
@@ -5451,6 +5501,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut reached = unsafe { self.samples.captured() };
         drop(core);
         let count = reached.len();
+        let sample = SampleRef::of(&sample);
         // A callback that steps the session from inside the put hands out nothing itself, as one
         // inside a delivery does; nor does an undeclare inside it wait for this call.
         self.deliveries.within(|_| {
@@ -5788,8 +5839,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // ends (`Self::answer`).
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let reply: wz_session_core::reply::InboundReply =
-                wz_session_core::query::QueryReply::from_parts(&parts).into();
+            // Handed as it lies: a requester that keeps the reply copies what it keeps, and keeps
+            // a buffer of shared memory as its page, as it keeps the owned projection's.
+            let reply = wz_session_core::reply::LocalReplyView::new(parts);
             self.gets.capture();
             core.0
                 .session

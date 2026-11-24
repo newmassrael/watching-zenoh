@@ -474,6 +474,27 @@ derived from the declaration and never chosen by hand:
      and the job's ceiling step fails with the row to paste; the rows then move only down, under
      `debt-pico-host-size-ceiling`, until each reads WIN and is locked. The Linux client without
      `std` (`pico-client-coop-nostd`, 1.4025) is the reading the size work starts from.
+  9. **The like-for-like verdict of the release DLL, and its doors apart.** The release DLL is
+     `host-peer-ext`: zenoh-pico's features with the peer role, the advanced plane, the unstable
+     API and connectivity, whose switches the reference turns on with them, and wz's own doors
+     (`wz_ext_*`), which zenoh-pico has no switch of. A door's bytes therefore count on wz's side
+     alone, and rule 8's row is the release DLL whole, held so that it does not grow, and no
+     verdict of like against like. The verdict is `pico-api-windows-x64` and
+     `pico-api-windows-x86`: the release profile without its doors
+     (`configs/profiles/host-peer.conf`), built as the release DLL is (without `std`, the
+     `capi-nostd` profile and configuration, the same link), against the same reading's
+     zenoh-pico. Each door is held apart by a row of that library and the door alone,
+     `pico-api-windows-<width>-with-<door>`, as Layer C1cs pairs a capability with the build
+     without it; the judge prints the door's bytes over the library without it, and zenoh-pico's
+     are none. `pico_windows_package.py --size-features` builds and grades them in the job that
+     reads rule 8's row, against the reference that step built: it fails a library whose derived
+     zenoh-pico is not that reference (a door that turns a switch of zenoh-pico's on would need a
+     reference of its own), and fails when `host-peer-ext`'s features are not `host-peer`'s and
+     exactly the doors that have rows (`RELEASE_DOORS`), so a door added to the release has its
+     rows from the commit that adds it. The library with `std` is no release form (the release
+     workflow ships the one library without it, and `--release` refuses a set with `std`), so no
+     row reads it: its sizes are printed by the package job and gate nothing. The rows start
+     unfilled, as rule 7 says, and are filled from the hosted run that first reads them.
 - **D10. The host performance matrix of the pico ABI is a ratchet and a debt loop (owner,
   2026-11-21).** wz is to be faster than zenoh-pico and than a deployment's own build of a
   library of the pico API, and gates hold it, not a reading taken now and then. The matrix is

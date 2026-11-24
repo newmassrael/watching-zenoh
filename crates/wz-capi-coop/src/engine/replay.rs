@@ -30,6 +30,7 @@
 //! with no retry wait or after the no-progress bound, gives the replay up and the link with it
 //! ([`TurnEnd::EndsLink`]).
 
+use wz_runtime_coop::faces::FacePlaces;
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
@@ -476,8 +477,8 @@ fn told<C: ClockSource + 'static>(
 /// takes back what the faces before it were sent and leaves every replay as it was, so nothing is
 /// kept to put back.
 #[inline(never)]
-fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
-    faces: &mut [Option<Face<C, L>>],
+fn announce_on<C: ClockSource + 'static, L: SessionLinks + 'static>(
+    faces: &mut impl FacePlaces<Face<C, L>>,
     place: usize,
     on_refusal: OnRefusal,
     send: &dyn SendTo<C>,
@@ -489,10 +490,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         cursor.inserted(place) == Insertion::EmitNow
     };
     let mut refused_at = None;
-    for (at, face) in faces.iter().enumerate() {
-        let Some(face) = face else {
-            continue;
-        };
+    for (at, face) in faces.placed() {
         let Link::Up(wire) = &face.link else {
             continue;
         };
@@ -502,7 +500,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         }
     }
     if let Some(refused) = refused_at {
-        for face in faces.iter().take(refused).flatten() {
+        for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
             if let Link::Up(wire) = &face.link {
                 if emits_now(face) {
                     undo.tell_to(&wire.actions);
@@ -511,7 +509,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         }
         return false;
     }
-    for face in faces.iter_mut().flatten() {
+    for face in faces.iter_mut() {
         if matches!(face.link, Link::Up(_)) {
             // The face was told it above, or its replay tells it in its turn.
             let _ = face.replay.cursor.inserted(place);

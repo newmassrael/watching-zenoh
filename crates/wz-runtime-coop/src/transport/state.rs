@@ -41,12 +41,12 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
-use crate::face_life::{FaceEffect, FaceLife, Next, Turn};
+use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FaceRead, FaceRecord, IdleWait, Link,
-    LinkSupervisor, Wire,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
+    IdleWait, Link, LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -87,6 +87,9 @@ pub trait TransportFaces {
         Pump = <Self::Links as SessionLinks>::Pump,
         Dial = <Self::Links as SessionLinks>::Dial,
     >;
+    /// The table the engine keeps its faces in by their places: one face alone for a session that
+    /// only dials, a place for each face for one that takes faces beside it.
+    type Places: FacePlaces<Self::Face>;
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;
@@ -117,7 +120,7 @@ pub struct TransportState<T: TransportFaces> {
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
-    pub links: LinkSupervisor<T::Links, T::Face>,
+    pub links: LinkSupervisor<T::Links, T::Face, T::Places>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
     /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
     /// copies went with the open.
@@ -640,6 +643,13 @@ impl<T: TransportFaces> TransportState<T> {
             signals,
             answer,
         } = self.links.read_face(at, id);
+        // The face is read out of line, so its role is a value here; a table of the dial role's
+        // face alone holds no other role, which this step then knows when compiled.
+        let role = if self.links.takes_faces() {
+            role
+        } else {
+            FaceRole::Dial
+        };
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         let endpoint = match turn {

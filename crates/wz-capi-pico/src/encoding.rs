@@ -90,7 +90,7 @@ pub(crate) struct EncodingState {
     /// while it lives; or they lie in `_block`.
     schema_start: *const u8,
     schema_len: usize,
-    /// Held for its drop alone, never read: the block of the payloads' area a kept schema lies
+    /// Held for its drop alone, never read: the payload block a kept schema lies
     /// in ([`Self::kept`]), let go with the state. It is what a sample, a reply or a query kept
     /// past its callback holds, whose message's bytes it may outlive. It takes no encoding of the
     /// pool, whose count is the program's own encodings. None for a schema another holds, for an
@@ -100,7 +100,7 @@ pub(crate) struct EncodingState {
 
 // SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
 // (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
-// as the holder's own borrow would be; a kept one is a block of the payloads' area this state alone
+// as the holder's own borrow would be; a kept one is a payload block this state alone
 // holds and nothing writes after the copy, and the pools are reached under the port's lock.
 unsafe impl Send for EncodingState {}
 unsafe impl Sync for EncodingState {}
@@ -148,7 +148,7 @@ impl EncodingState {
     }
 
     /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
-    /// callback holds. A schema is copied into a block of the payloads' area, as the kept value's
+    /// callback holds. A schema is copied into a payload block, as the kept value's
     /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
     /// encoding of no schema, or of an empty one, takes none.
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {

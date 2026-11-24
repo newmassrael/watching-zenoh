@@ -1132,11 +1132,12 @@ mod tests {
 
     // ---- ARCHITECTURE section 9.1: a frame sent from a transmit pool slot --------
 
-    /// Lend a pool slot through the socket, write `bytes` into it, and send it to
-    /// the far host. Returns the address the bytes were written at.
+    /// Lend a pool slot as the socket's send does, write `bytes` into it, and send
+    /// it to the far host. Returns the address the bytes were written at.
     #[cfg(feature = "tx-pool")]
     fn send_from_slot(socket: &mut crate::rx_sockets::SessionRxSocket, bytes: &[u8]) -> usize {
-        let payload = socket.alloc_tx_payload(bytes.len()).expect("a lend");
+        let len = u16::try_from(bytes.len()).expect("a datagram's length");
+        let payload = crate::TxPayload::from_pool(len).expect("a lend");
         let (at, capacity) = payload.storage();
         std::assert!(capacity >= bytes.len());
         std::assert_eq!(

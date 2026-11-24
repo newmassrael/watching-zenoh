@@ -3748,6 +3748,15 @@ mod read_task_start_codes {
 /// node. Its owner lets go of it with `z_session_drop`.
 #[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
 pub(crate) fn listening_on_loopback() -> z_owned_session_t {
+    listening_on_loopback_with(|_| {})
+}
+
+/// [`listening_on_loopback`] from a config `amend` wrote to before the open, as a program states
+/// what its session opens under, its limits among them.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+pub(crate) fn listening_on_loopback_with(
+    amend: impl FnOnce(*mut crate::abi::z_loaned_config_t),
+) -> z_owned_session_t {
     use crate::config::{z_config_default, z_config_loan_mut, z_config_move, zp_config_insert};
     // SAFETY: every pointer is to a live owned value of this frame, and the open consumes the
     // config.
@@ -3762,6 +3771,7 @@ pub(crate) fn listening_on_loopback() -> z_owned_session_t {
             ),
             Z_OK
         );
+        amend(z_config_loan_mut(&mut config));
         let mut session = z_owned_session_t::null_value();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut config), core::ptr::null()),
