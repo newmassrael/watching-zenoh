@@ -77,8 +77,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
-// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;

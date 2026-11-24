@@ -133,8 +133,9 @@ impl CancellationToken {
         let mut inner = self.lock();
         let id = inner.next_id;
         inner.handlers.as_mut()?.insert(id, Box::new(on_cancel));
-        inner.next_id += 1;
-        inner.active += 1;
+        // An id is named once in 2^64 registrations; the count is of live ones.
+        inner.next_id = inner.next_id.wrapping_add(1);
+        inner.active = inner.active.saturating_add(1);
         Some(Registration {
             token: Arc::clone(self),
             id,
@@ -149,7 +150,7 @@ impl CancellationToken {
             let taken = inner.handlers.take();
             if taken.is_some() {
                 // This call runs the handlers; hold the group open meanwhile.
-                inner.active += 1;
+                inner.active = inner.active.saturating_add(1);
             }
             taken
         };
@@ -159,7 +160,8 @@ impl CancellationToken {
             }
             let mut inner = self.lock();
             inner.cancelled = true;
-            inner.active -= 1;
+            // The count this call took above.
+            inner.active = inner.active.saturating_sub(1);
             if inner.active == 0 {
                 self.idle.notify_all();
             }
@@ -177,7 +179,8 @@ impl CancellationToken {
         if let Some(handlers) = inner.handlers.as_mut() {
             handlers.remove(&id);
         }
-        inner.active -= 1;
+        // The count `register` took for this registration.
+        inner.active = inner.active.saturating_sub(1);
         if inner.active == 0 {
             self.idle.notify_all();
         }
