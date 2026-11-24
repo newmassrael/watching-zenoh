@@ -1985,27 +1985,10 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     let kept = on_event.holds_datagram();
     #[cfg(not(feature = "alloc"))]
     let kept = false;
-    dispatch_units(
-        unit,
-        actions,
-        kept,
-        on_event,
-        &mut |unit, resume, on_event| {
-            dispatch_datagram_unit(unit, resume, kept, actions, engine, record, on_event)
-        },
-    )
+    dispatch_units(unit, actions, kept, on_event, |unit, resume, on_event| {
+        dispatch_datagram_unit(unit, resume, kept, actions, engine, record, on_event)
+    })
 }
-
-/// How [`dispatch_units`] reads one unit of a datagram: the unit, where the next record of a
-/// `Frame` an earlier step stopped in starts, and the sink; answered with the path it took, the
-/// bytes of the unit it went through, and whether it stopped before a record.
-#[cfg(feature = "codec-frame")]
-type ReadUnit<'a> = dyn FnMut(
-        &[u8],
-        Option<usize>,
-        &mut dyn crate::driver_loop::EventSink,
-    ) -> (DatagramPath, usize, bool)
-    + 'a;
 
 /// The dispatch of a datagram: its transport messages one after the other where the datagram
 /// lies, `unit_at` reading each (its unit, where the next record of a `Frame` stopped in
@@ -2020,13 +2003,22 @@ type ReadUnit<'a> = dyn FnMut(
 /// ([`SessionLinkActions::set_datagram_resume`]) and the link keeps the datagram for a later
 /// step, in its own buffer, which it does not read into again until the dispatch has gone
 /// through it.
+///
+/// `unit_at` is handed the unit, where the next record of a `Frame` an earlier step stopped in
+/// starts, and the sink, and answers the path the unit took, the bytes of the datagram it went
+/// through, and whether it stopped before a record. A type of its own and not a trait object: a
+/// build links one receive of the two, so the walk and the read of a unit are one body there.
 #[cfg(feature = "codec-frame")]
 fn dispatch_units<R: SessionRuntime, T: TimeSource>(
     datagram: &[u8],
     actions: &SessionLinkActions<R, T>,
     kept: bool,
     on_event: &mut dyn crate::driver_loop::EventSink,
-    unit_at: &mut ReadUnit<'_>,
+    mut unit_at: impl FnMut(
+        &[u8],
+        Option<usize>,
+        &mut dyn crate::driver_loop::EventSink,
+    ) -> (DatagramPath, usize, bool),
 ) -> DatagramPath {
     // Only a kept datagram has a step to go on from, and only a build with an allocator keeps one.
     #[cfg(feature = "alloc")]
@@ -2231,23 +2223,17 @@ where
         actions,
         now_ms,
     };
-    dispatch_units(
-        unit,
-        actions,
-        kept,
-        on_event,
-        &mut |unit, resume, on_event| {
-            dispatch_datagram_reassembling_unit(
-                unit,
-                resume,
-                kept,
-                engine,
-                record,
-                &mut rejoin,
-                on_event,
-            )
-        },
-    )
+    dispatch_units(unit, actions, kept, on_event, |unit, resume, on_event| {
+        dispatch_datagram_reassembling_unit(
+            unit,
+            resume,
+            kept,
+            engine,
+            record,
+            &mut rejoin,
+            on_event,
+        )
+    })
 }
 
 /// [`dispatch_datagram_reassembling`] for the unit at the front of `unit`, with the
