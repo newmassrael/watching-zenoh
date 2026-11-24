@@ -610,6 +610,30 @@ pub const MAX_TICKERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::ADVANCED_CACHE_SAMPLE_BYTES`] is bound.
+pub const ADVANCED_CACHE_SAMPLE_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::ADVANCED_CACHE_ROWS`] is bound.
+pub const ADVANCED_CACHE_ROWS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
