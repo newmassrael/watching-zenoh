@@ -386,8 +386,12 @@ impl_handle_ownership7!(
 /// in a slot of the pool of encodings. `Z_OK`, or `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with `dst` still
 /// null when the schema is longer than the room or the pool has no slot free.
 ///
+/// One body out of line: every door that hands an encoding back stores it this way, and each copy
+/// inlined held its own placing of the schema.
+///
 /// # Safety
 /// `dst` is valid and writable.
+#[inline(never)]
 pub(crate) unsafe fn store_encoding(
     dst: *mut z_owned_encoding_t,
     encoding: EncodingRef<'_>,
