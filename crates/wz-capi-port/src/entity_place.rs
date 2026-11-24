@@ -91,3 +91,20 @@ pub trait PlaceLender {
     /// session lent. What the ABI kept at the place it lets go of first.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
 }
+
+/// An engine that lends an ABI rows for the samples its advanced publishers' caches keep, from
+/// memory the session reserved at its open: as many as `ADVANCED_CACHE_ROWS` admits, each of the
+/// layout the open was given for them, so a cache's put copies its sample into the session's memory
+/// and takes none of its own ([`crate::SessionEngine::cache_row_lender`]).
+pub trait CacheRowLender {
+    /// A free row, closed or not: `None` when every one is lent, or when the open laid out none.
+    fn claim_cache_row(&self) -> Option<NonNull<u8>>;
+
+    /// Give back `row`, closed or not: `false`, and the row stays lent, when it is no row this
+    /// session lent.
+    ///
+    /// # Safety
+    /// `row` is a row a session lent the ABI and the ABI has not given back, and nothing lies there
+    /// any more.
+    unsafe fn give_back_cache_row(&self, row: NonNull<u8>) -> bool;
+}

@@ -1827,30 +1827,6 @@ pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
     }
 }
 
-/// Take a moved payload's bytes as a `Vec`, nulling the source: what an advanced put's option
-/// that carries an attachment reads, which is copied into the options it builds. A borrowed payload is read where
-/// its marshal holds it, which this call outlives, and copied nowhere else.
-///
-/// # Safety
-/// As [`read_moved_bytes`].
-#[cfg(feature = "advanced")]
-pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
-    if payload.is_null() {
-        return None;
-    }
-    let handle = (*payload)._this.handle;
-    if handle.is_null() {
-        return None;
-    }
-    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
-    (*payload)._this = z_owned_bytes_t::null_value();
-    if borrowed {
-        Some((*(handle as *const ByteBuf)).to_vec())
-    } else {
-        Some(crate::bytes::unbox_bytes(handle as *mut ByteBuf).to_vec())
-    }
-}
-
 /// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`], or
 /// `None` when it carries nothing: a NULL `options`, which is the plain default
 /// as it is in pico, or one whose every field is empty. The put then sends from

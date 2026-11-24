@@ -212,7 +212,7 @@ impl AdvancedPublisherPlane for RecordingPlane {
             Some(rows) => {
                 let (lender, _out) = crate::advanced_cache::test_rows::HeapRows::new(rows);
                 CacheStore::over_rows(config, Box::new(lender))
-                    .ok_or_else(|| AdvancedPublisherError::Plane(String::from("cache rows")))
+                    .ok_or(AdvancedPublisherError::CacheRowsExhausted)
             }
         }
     }
@@ -739,6 +739,47 @@ fn a_cache_with_too_few_rows_is_refused_before_anything_is_declared() {
         options,
         SessionZid::from([0x01]),
     );
-    assert!(matches!(refused, Err(AdvancedPublisherError::Plane(_))));
+    assert!(matches!(
+        refused,
+        Err(AdvancedPublisherError::CacheRowsExhausted)
+    ));
     assert!(plane.events().is_empty(), "nothing was declared");
+}
+
+/// Put options lending an attachment and an encoding of `text/plain`, as a C program's put lends
+/// them.
+fn lent_options(attachment: &[u8]) -> AdvancedPutOptions<'_> {
+    AdvancedPutOptions::default()
+        .with_attachment_lent(attachment)
+        .with_encoding_ref(EncodingRef {
+            packed_id: 3,
+            schema: Some(b"text/plain"),
+        })
+}
+
+/// A lent attachment counts against a row's room as an owned one does: a payload beside an
+/// attachment of the whole room is refused, and the attachment alone is sent and kept.
+#[test]
+fn a_lent_attachment_counts_against_a_rows_room() {
+    let plane = Arc::new(RecordingPlane::with_rows(1));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig::default()),
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/rows",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("one row lends a cache of one");
+
+    let attachment = vec![7u8; wz_session_core::caps::ADVANCED_CACHE_SAMPLE_BYTES];
+    assert_eq!(
+        publisher.put_with(b"x", lent_options(&attachment)),
+        Err(PublishError::ExceedsCacheRow)
+    );
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(0));
+    assert_eq!(publisher.put_with(b"", lent_options(&attachment)), Ok(0));
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(1));
 }

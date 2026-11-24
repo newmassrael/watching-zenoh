@@ -316,12 +316,28 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
 /// it: its handle's, of `handle`, and one for each entity of each kind the build has, as many as
 /// the session's limit of the kind admits, so an entity's object takes no memory of the process's
 /// and no other session's.
+///
+/// With `advanced`, a row for each sample the session's advanced publishers' caches keep
+/// together (`ADVANCED_CACHE_ROWS`), so a cache's put copies its sample into the session's memory
+/// (`crate::advanced_plane`).
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::HeldPlaces {
-    entity_places().fold(
+    cache_rows(entity_places().fold(
         wz_capi_coop::arena::HeldPlaces::handle(handle),
         |held, (entity, layout)| held.with_entity(entity, layout),
-    )
+    ))
+}
+
+/// `held`, with the rows of the advanced publishers' caches.
+#[cfg(all(not(feature = "engine-tokio"), feature = "advanced"))]
+fn cache_rows(held: wz_capi_coop::arena::HeldPlaces) -> wz_capi_coop::arena::HeldPlaces {
+    held.with_cache_rows(wz_ext_pubsub::advanced_cache::CacheRow::LAYOUT)
+}
+
+/// `held`: a build without the advanced publisher keeps no cache.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "advanced")))]
+fn cache_rows(held: wz_capi_coop::arena::HeldPlaces) -> wz_capi_coop::arena::HeldPlaces {
+    held
 }
 
 /// Drop the object at `object` and give its place back.

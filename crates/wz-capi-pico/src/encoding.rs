@@ -437,16 +437,6 @@ pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<OwnedEnco
     Placed::from_raw(handle.cast::<HeldEncoding>()).map(OwnedEncoding::Held)
 }
 
-/// [`take_moved_encoding`] for a door whose options still keep the encoding as a hint of their
-/// own: the schema is copied out and the encoding let go. The advanced publisher's put is that
-/// door.
-#[cfg(feature = "advanced")]
-pub(crate) unsafe fn take_moved_encoding_copy(
-    moved: *mut c_void,
-) -> Option<wz_session_core::sample::EncodingHint> {
-    take_moved_encoding(moved).map(|held| held.view().to_hint())
-}
-
 // --- exports ---------------------------------------------------------------
 
 /// Build an encoding from a NUL-terminated `id;schema` string (pico

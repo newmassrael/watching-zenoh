@@ -21,10 +21,11 @@
 //! [`AdvancedPublisherOn`]: wz_ext_pubsub::advanced_publisher::AdvancedPublisherOn
 
 use alloc::sync::Arc;
+use core::ptr::NonNull;
 use core::time::Duration;
 
-use wz_capi_port::{QueryHolder, QueryableSink, Ticker, WireKey};
-use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
+use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine, Ticker, WireKey};
+use wz_ext_pubsub::advanced_cache::{CacheConfig, CacheStore, Retained, RowLender};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
@@ -71,6 +72,28 @@ impl PicoPlane {
     /// What the plane names a failed declaration.
     fn refusal(what: &str, code: ZResult) -> AdvancedPublisherError {
         AdvancedPublisherError::Plane(format!("{what}: pico result {code}"))
+    }
+}
+
+/// The rows of a session's arena a cache keeps its samples in, holding the session's engine so the
+/// arena stands for as long as the cache does.
+struct SessionCacheRows(Arc<dyn SessionEngine>);
+
+// SAFETY: the rows are the session's, laid out at its open by `CacheRow::LAYOUT`
+// (`crate::object_slot::held_places`), each lent once until it is given back, in an arena that
+// stands while the engine held here does.
+unsafe impl RowLender for SessionCacheRows {
+    fn claim_row(&self) -> Option<NonNull<u8>> {
+        self.0.cache_row_lender()?.claim_cache_row()
+    }
+
+    unsafe fn give_back_row(&self, row: NonNull<u8>) {
+        // SAFETY: the caller's: a row this session lent, which holds nothing any more.
+        let given = self
+            .0
+            .cache_row_lender()
+            .is_some_and(|lender| unsafe { lender.give_back_cache_row(row) });
+        debug_assert!(given, "a row goes back to the session that lent it");
     }
 }
 
@@ -174,6 +197,18 @@ impl AdvancedPublisherPlane for PicoPlane {
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
+    }
+
+    /// In rows of the session's arena when the session lends them (the cooperative engine, which
+    /// laid them out at its open: `crate::object_slot::held_places`), so a put takes no memory;
+    /// a cache deeper than the rows free is refused. On the heap on an engine that lends none.
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        let engine = crate::session::port_engine(&self.session.engine);
+        if engine.cache_row_lender().is_none() {
+            return Ok(CacheStore::new(config));
+        }
+        CacheStore::over_rows(config, Box::new(SessionCacheRows(engine)))
+            .ok_or(AdvancedPublisherError::CacheRowsExhausted)
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {

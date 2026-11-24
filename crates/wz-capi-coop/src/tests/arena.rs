@@ -2094,9 +2094,10 @@ fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<Sessio
 }
 
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
-/// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
-/// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does
-/// not count, or counts one it does not put, turns this red.
+/// handle, its places for every kind of entity and the rows of the caches (`cache-rows`) among
+/// them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
+/// whichever build. A group that puts a row it does not count, or counts one it does not put,
+/// turns this red.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -2106,6 +2107,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .fold(HeldPlaces::handle(place), |held, kind| {
             held.with_entity(kind, place)
         });
+    #[cfg(feature = "cache-rows")]
+    let held = held.with_cache_rows(place);
     // Faces that share their pools, so the table of tokens the faces that went owe is put too.
     let plan = ArenaPlan::of(
         &CoopConfig {

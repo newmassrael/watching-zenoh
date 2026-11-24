@@ -4286,6 +4286,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.places.counts(kind)
     }
 
+    /// How many rows of the caches the ABI holds now, and how many the session's arena lends.
+    #[cfg(all(test, feature = "cache-rows"))]
+    pub(crate) fn cache_row_counts(&self) -> (usize, usize) {
+        self.core.lock().0.places.cache_row_counts()
+    }
+
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
     /// ([`ArenaPlan::reserved_bytes`]).
     pub fn arena_bytes(&self) -> usize {
@@ -6562,6 +6568,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(self)
     }
 
+    #[cfg(feature = "cache-rows")]
+    fn cache_row_lender(&self) -> Option<&dyn wz_capi_port::CacheRowLender> {
+        Some(self)
+    }
+
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -7582,6 +7593,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     /// which the ABI's object of the entity holds off.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
+    }
+}
+
+/// The rows the session's arena laid out at its open for the samples of its advanced publishers'
+/// caches ([`HeldPlaces::with_cache_rows`]), lent and given back under the session's lock, as
+/// every table of its arena is.
+#[cfg(feature = "cache-rows")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheRowLender
+    for CoopEngine<L, C>
+{
+    /// Closed or not, as a place is: a row is the session's memory and not its state.
+    fn claim_cache_row(&self) -> Option<core::ptr::NonNull<u8>> {
+        self.core.lock().0.places.claim_cache_row()
+    }
+
+    /// Closed or not: the arena the row lies in is the session's until the engine is let go,
+    /// which the cache that holds the row holds off.
+    unsafe fn give_back_cache_row(&self, row: core::ptr::NonNull<u8>) -> bool {
+        // SAFETY: the caller's.
+        unsafe { self.core.lock().0.places.give_back_cache_row(row) }
     }
 }
 

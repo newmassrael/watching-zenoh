@@ -600,6 +600,9 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
+            // A cache deeper than the session's free rows is a full room, as every fixed room of
+            // this ABI answers it.
+            Err(AdvancedPublisherError::CacheRowsExhausted) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
         let mut boxed = Box::new(AdvPubState {
@@ -706,15 +709,14 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         // Consume the moved payload, attachment and encoding FIRST, so every
         // early return below still honours the C side's ownership transfer.
         let buf = crate::pubsub::take_moved_bytes(payload);
-        let mut put_options = AdvancedPutOptions::default();
+        // The moved attachment and encoding are held here for as long as the put reads them and
+        // lent to it, as a plain put's are: the put copies them only into its cache's row.
+        let mut attachment = None;
+        let mut encoding = None;
         if !options.is_null() {
             let embedded = &(*options).put_options;
-            if let Some(attachment) = crate::pubsub::take_moved_bytes_to_vec(embedded.attachment) {
-                put_options = put_options.with_attachment(attachment);
-            }
-            if let Some(encoding) = crate::encoding::take_moved_encoding_copy(embedded.encoding) {
-                put_options = put_options.with_encoding(encoding);
-            }
+            attachment = crate::pubsub::read_moved_bytes(embedded.attachment);
+            encoding = crate::encoding::take_moved_encoding(embedded.encoding);
             // The timestamp and the source info are NOT read: pico overwrites
             // both with the publisher's own sequencing before it sends
             // (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
@@ -729,6 +731,13 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;
         };
+        let mut put_options = AdvancedPutOptions::default();
+        if let Some(attachment) = &attachment {
+            put_options = put_options.with_attachment_lent(attachment.as_slice());
+        }
+        if let Some(encoding) = &encoding {
+            put_options = put_options.with_encoding_ref(encoding.view());
+        }
         advanced_publish_code(state.publisher.put_with(&buf, put_options))
     })
 }
