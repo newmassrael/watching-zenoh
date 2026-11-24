@@ -2499,18 +2499,21 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
     usize,
 ) {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let (message, used) = match crate::inbound::read_control(unit) {
-        Ok(read) => read,
+    // Judged where the read left it: the message and its facts are borrowed out of the read's
+    // answer, not moved out of it.
+    let read = crate::inbound::read_control(unit);
+    let (message, used) = match &read {
+        Ok((message, used)) => (message, *used),
         Err(err) => {
             return (
-                DriverLoopOutcome::ParseError(err),
+                DriverLoopOutcome::ParseError(*err),
                 Some(E::FramingError),
                 unit.len(),
             )
         }
     };
     let facts = message.facts();
-    actions.observe_control(&facts);
+    actions.observe_control(facts);
     // R2825 — one transport message read off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
     note_rx_transport_message(actions);
@@ -2520,15 +2523,10 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         unit.len()
     };
     let mut decided = None;
-    let outcome = match crate::inbound::control_event(message.ext_admission(), &facts) {
-        Some(event) => decide_admitted(
-            event,
-            &facts,
-            message.chain(),
-            &mut decided,
-            actions,
-            engine,
-        ),
+    let outcome = match crate::inbound::control_event(message.ext_admission(), facts) {
+        Some(event) => {
+            decide_admitted(event, facts, message.chain(), &mut decided, actions, engine)
+        }
         None => match facts {
             #[cfg(feature = "codec-keep-alive")]
             crate::inbound::ControlFacts::KeepAlive => DriverLoopOutcome::SideEffectOnly,
