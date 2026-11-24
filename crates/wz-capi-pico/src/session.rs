@@ -896,15 +896,6 @@ pub(crate) fn engine_ref(handle: &PicoSessionHandle) -> &Engine {
     handle.drive.engine_ref()
 }
 
-/// The engine as the port's trait object, for what serves any engine (the advanced plane's host
-/// and its periodic jobs, an open set): a clone of the entity's hold.
-#[cfg(feature = "advanced")]
-pub(crate) fn port_engine(
-    engine: &alloc::sync::Arc<Engine>,
-) -> alloc::sync::Arc<dyn wz_capi_port::SessionEngine> {
-    engine.clone()
-}
-
 // --- z_open / z_close ------------------------------------------------------
 
 /// Open a session, consuming the moved config (pico `z_open`). A `connect`
