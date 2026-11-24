@@ -14,42 +14,48 @@ pub use wz_host_net::link_interfaces::*;
 
 use std::net::{IpAddr, SocketAddr};
 
-use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
+use wz_session_core::link::{KeptLinkEnds, LinkKind, LinkSubject};
 
-/// R311y473 — the `{src,dst}` LOCATOR PAIR of an IP-addressed link, for the
-/// adminspace's per-link view (zenoh `link_to_json`,
-/// `net/runtime/adminspace.rs:608-613`).
+/// R311y473 — the ends of an IP-addressed link, which the `{src,dst}` LOCATOR PAIR of
+/// the adminspace's per-link view (zenoh `link_to_json`,
+/// `net/runtime/adminspace.rs:608-613`) is written from by whoever reports it.
 ///
 /// Both ends are required: `None` when either address could not be read, which
 /// is the same "could not determine" honesty [`ip_link_subject`] applies to its
 /// interface set. A half-known pair rendered as a locator would be a string an
 /// admin client cannot dial and cannot tell apart from one it can.
 ///
-/// The scheme comes from [`LinkKind::locator_for`] — the single table
-/// `BoundListener::advertised_locator` also delegates to — so this emitter cannot
-/// repeat the R311y470 defect of shipping a log word where a scheme belongs.
+/// The scheme comes from [`LinkKind::scheme`] — the single table
+/// `BoundListener::advertised_locator` also reaches through [`LinkKind::locator_for`] —
+/// so no reader can repeat the R311y470 defect of shipping a log word where a scheme
+/// belongs.
 ///
 /// R2794 (open-debt item 814) — takes the link's KIND, the same value
 /// [`ip_link_subject`] takes. Every pipeline used to hand one `InterceptorLink`
 /// to both, which is where the two axes were fused: this function wants the
 /// kind's advertised form, the subject wants what a rule sees.
-pub fn ip_link_endpoints(
+pub fn ip_link_ends(
     kind: LinkKind,
     local: Option<SocketAddr>,
     peer: Option<SocketAddr>,
-) -> Option<LinkEndpoints> {
-    Some(LinkEndpoints::new(
-        kind.locator_for(&local?.to_string()),
-        kind.locator_for(&peer?.to_string()),
-    ))
+) -> Option<KeptLinkEnds> {
+    Some(KeptLinkEnds::Ip {
+        kind,
+        local: local?,
+        peer: peer?,
+    })
 }
 
-/// R311y473 — the `{src,dst}` pair of a link addressed by something other than an
-/// IP socket: a unix-socket path, a vsock `cid:port`, a named pipe, a serial
-/// device. The caller renders each end's ADDRESS; the scheme is applied here from
-/// the same single table [`ip_link_endpoints`] uses.
-pub fn addressless_link_endpoints(kind: LinkKind, local: &str, peer: &str) -> LinkEndpoints {
-    LinkEndpoints::new(kind.locator_for(local), kind.locator_for(peer))
+/// R311y473 — the ends of a link addressed by something other than an IP socket: a
+/// unix-socket path, a vsock `cid:port`, a named pipe, a serial device. The caller
+/// renders each end's ADDRESS; the scheme is applied by the reader that writes the
+/// locators, from the same single table [`ip_link_ends`] names.
+pub fn addressless_link_ends(kind: LinkKind, local: &str, peer: &str) -> KeptLinkEnds {
+    KeptLinkEnds::Named {
+        kind,
+        local: local.into(),
+        peer: peer.into(),
+    }
 }
 
 /// The §5.16 subject of an IP-addressed link: its protocol, plus the NICs its

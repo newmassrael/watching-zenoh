@@ -129,6 +129,20 @@ pub trait RoundCalls: 'static {
     type Tally: RoundTally;
 }
 
+/// What the session's planes are made of in an engine's own types beyond what its round owes:
+/// whether the session's own queryables answer its gets, and the locks the planes keep their state
+/// and their queues under. The get plane ([`crate::get_plane`]) and the query plane
+/// ([`crate::query_plane`]) read both.
+pub trait PlaneCalls: RoundCalls {
+    /// Whether the session's own queryables answer a get of the session on the thread that holds
+    /// the session's lock: the get plane captures the callback the answer reaches, and the query
+    /// plane notes the calls the get begins.
+    type LocalAnswers: Presence;
+    /// The locks of the planes' state and of the queues every delivery looks at
+    /// ([`Queued`](crate::plane_lock::Queued)).
+    type Queues: LockFamily;
+}
+
 /// What a round counts of the rounds it hands out, for an engine that reads it: `()` counts
 /// nothing, and the count is not even made.
 pub trait RoundTally: Default + Send + Sync {
@@ -564,12 +578,6 @@ impl<C: RoundCalls> RoundRows<C> {
             assert!(
                 core::mem::align_of::<Entry<C>>() == core::mem::align_of::<Span>(),
                 "a record holds nothing aligned wider than its spans"
-            );
-            // Each call a record owes is a row's address alone, so a callback row is that and its
-            // tag; the plan sizes the round's arena rows by it.
-            assert!(
-                Self::CALLBACK_BYTES <= core::mem::size_of::<usize>().saturating_mul(2),
-                "a callback a record owes is a row's address and its tag"
             );
         }
         Ok(Self {
@@ -2131,19 +2139,6 @@ impl<C: RoundCalls> Round<C> {
     }
 }
 
-/// The round as the session's state asks it (`SessionState::retract_owed`). Named by its path
-/// alone: in scope, its methods would be found first on an `Arc<Round>`, before the round's own.
-impl<C: RoundCalls> crate::session_state::DeliveryRound for Round<C> {
-    unsafe fn has_room(&self, callbacks: usize) -> bool {
-        // SAFETY: the caller's contract, which is the round's own.
-        unsafe { Self::has_room(self, ReadRoom { callbacks }) }
-    }
-
-    fn owe(&self, owed: bool) {
-        Self::owe(self, owed);
-    }
-}
-
 /// A query of the round, read where its parts lie: what each queryable it reached is handed.
 struct RoundQuery<'t, C: RoundCalls> {
     query: &'t HeldQuery,
@@ -2332,4 +2327,4 @@ impl<C: RoundCalls> ReplyView for RoundReply<'_, C> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

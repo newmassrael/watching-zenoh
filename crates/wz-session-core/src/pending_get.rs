@@ -173,7 +173,7 @@ mod tests {
     /// A table holds legs to its rows and hands back the one past them.
     #[test]
     fn a_full_table_hands_the_leg_back() {
-        let mut legs = BoundedVec::<PendingGet<u8>, 2, Static>::new();
+        let mut legs = BoundedVec::<PendingGet<u8>, 2, Static>::new_static();
         assert!(legs.note(leg(1, 1)).is_ok());
         assert!(legs.note(leg(1, 2)).is_ok());
         let refused = legs.note(leg(2, 3)).unwrap_err();
@@ -184,7 +184,7 @@ mod tests {
     /// The legs of a lost face are taken out, each once, and the others keep their order.
     #[test]
     fn the_legs_of_a_lost_face_go_and_the_rest_keep_their_order() {
-        let mut legs = BoundedVec::<PendingGet<u8>, 8, Static>::new();
+        let mut legs = BoundedVec::<PendingGet<u8>, 8, Static>::new_static();
         for (face, id) in [(1, 1), (2, 2), (1, 3), (3, 4), (1, 5)] {
             legs.note(leg(face, id)).unwrap();
         }

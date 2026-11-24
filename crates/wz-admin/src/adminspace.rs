@@ -230,7 +230,7 @@ impl AdminSession {
 ///
 /// An extension trait on `SessionLinkActions`, not methods of it, so the session
 /// engine names nothing of the admin space: the row is built from the session's
-/// public accessors (`link_endpoints_all`, `link_endpoints`, `with_peer_zid`,
+/// public accessors (`link_endpoints_all`, `link_ends`, `with_peer_zid`,
 /// `shm_negotiated`, `admin_region`), and a host brings the trait into scope.
 #[cfg(feature = "session-unicast")]
 pub trait SessionAdminRow {
@@ -339,9 +339,9 @@ where
         use wz_session_core::text_out::FixedText;
 
         /// The one link of a session, as the writer reads a list of links.
-        struct OneLink<'a>(Option<&'a wz_session_core::link::LinkEndpoints>);
+        struct OneLink(Option<wz_session_core::link::LinkEndpoints>);
 
-        impl AdminLinkList for OneLink<'_> {
+        impl AdminLinkList for OneLink {
             fn link_count(&self) -> usize {
                 1
             }
@@ -350,7 +350,7 @@ where
                 if index != 0 {
                     return None;
                 }
-                Some(match self.0 {
+                Some(match &self.0 {
                     Some(ends) => (ends.src.as_str(), ends.dst.as_str()),
                     None => ("", ""),
                 })
@@ -379,7 +379,8 @@ where
             role,
             self.peer_remote_bound(),
         );
-        let links = OneLink(self.link_endpoints());
+        // The locators are written here, for the row, from the ends the link lends.
+        let links = OneLink(self.link_ends().and_then(|ends| ends.endpoints().ok()));
         Some(f(AdminSessionRef {
             peer_zid_hex: zid_hex.prefix(),
             whatami: role.map(|role| role.to_str()),

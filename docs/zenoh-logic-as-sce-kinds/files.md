@@ -166,7 +166,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
-| `crates/wz-capi-coop/src/engine/queued.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
@@ -771,6 +770,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/foreign_version.rs` | S10 | |
 | `crates/wz-session-core/src/fragment_pacing.rs` | S1 | |
 | `crates/wz-session-core/src/frame_encode.rs` | S1 | |
+| `crates/wz-session-core/src/get_plane.rs` | S2 | |
+| `crates/wz-session-core/src/get_plane/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/group_membership.rs` | S1 | |
 | `crates/wz-session-core/src/group_view.rs` | S1 | |
 | `crates/wz-session-core/src/handshake_encode.rs` | S1 | |
@@ -866,6 +867,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/query_mode.rs` | S2 | |
 | `crates/wz-session-core/src/query_options.rs` | S2 | |
 | `crates/wz-session-core/src/query_parts.rs` | S2 | |
+| `crates/wz-session-core/src/query_plane.rs` | S2 | |
+| `crates/wz-session-core/src/query_plane/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/query_sink.rs` | S2 | |
 | `crates/wz-session-core/src/query_value_ext.rs` | S2 | |
 | `crates/wz-session-core/src/queryable_info.rs` | S2 | |

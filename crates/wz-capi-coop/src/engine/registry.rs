@@ -562,8 +562,8 @@ impl Registry {
     /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
     /// of each, the pools of what the peers write `peers` counts lent from it next, and the tables
     /// of each face `gets` and `peers` count lent from it too: the dial face's (one of no rows for
-    /// a session that dials nothing, `FacePeers::dial`), the session's own gets where it answers
-    /// its own, and the rest kept for the faces to come. What the peers
+    /// a session that dials nothing, `FacePeers::dial`), the rest kept for the faces to come, and
+    /// the session's own gets where it answers its own. What the peers
     /// declare keeps its keys in `keys`, the session's key arena, as the session's own
     /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
     /// the arena has not the rows, which one reserved by the plan that counts them always has.
@@ -583,21 +583,22 @@ impl Registry {
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
         // lends one set; a build without pools keeps each set's rows inline.
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
-        // The sets are lent in the order the plan counts them: the dial face's, the session's own
-        // gets, then the faces to come. A session that dials nothing lent its dial face no set:
-        // that face holds one of no rows, first, and every lent set is for the faces to come.
-        let dial = usize::from(peers.dial);
+        // A session that dials nothing lent its dial face no set: that face holds one of no rows,
+        // first, and every lent set is for the faces to come. Otherwise the first lent set is the
+        // dial face's. Either way every set the plan counts is lent by the one call below, so the
+        // open builds and lends a set in one place.
         let mut sets = arena.lend(peers.sets())?;
         let mut held: BoundedVec<HeldSet, MAX_FACE_SETS, Lent> = arena.lend(peers.sets())?;
-        if peers.dial {
-            lend_set(
-                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-            )?;
-        } else {
+        if !peers.dial {
             push_unpeered(&mut sets, keys, limits).ok_or(LendRefused::OverCeiling {
                 rows: 1,
                 ceiling: 0,
             })?;
+        }
+        for _ in 0..peers.tables {
+            lend_set(
+                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+            )?;
         }
         held.push(HeldSet {
             at: 0,
@@ -607,13 +608,10 @@ impl Registry {
             rows: 1,
             ceiling: 0,
         })?;
+        // Every span an arena lends starts on one alignment, so lending the session's own gets
+        // after the faces' takes the bytes the plan counts for them wherever it lends them.
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
-        for _ in dial..peers.tables {
-            lend_set(
-                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-            )?;
-        }
         Ok(Self {
             app,
             delivery,
@@ -1368,7 +1366,7 @@ mod tests {
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
             round,
-            alloc::sync::Arc::new(super::super::query::QueryPlane::leaked(1)),
+            alloc::sync::Arc::new(super::super::query::leaked_plane(1)),
         );
         let registry = Registry::new(
             &SessionLimits::defaults(),

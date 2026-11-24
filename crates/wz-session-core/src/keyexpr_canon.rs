@@ -262,15 +262,25 @@ pub fn canonize_keyexpr_as<P: Storage>(
 /// written, so a caller that needs only the verdict (an outbound declaration's check) holds no
 /// buffer and allocates nothing on any profile.
 pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), KeyexprCanonError> {
+    verdict_walk(input, dialect).map(|_| ())
+}
+
+/// The walk [`canon_verdict`] steps, run to its end and handed back with what it read on the
+/// way, or the refusal that stopped it.
+fn verdict_walk(input: &str, dialect: KeyexprDialect) -> Result<CanonWalk, KeyexprCanonError> {
     if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
         return Err(KeyexprCanonError::ExceedsCapacity);
     }
-    walk_canonical(
-        input,
+    let whole = input.as_bytes();
+    let text = Parts(core::slice::from_ref(&whole));
+    let mut walk = CanonWalk::new(
         dialect,
         <<Profile as Storage>::Scratch as Storage>::ENFORCES_CAPACITY,
-        &mut |_: &str| Ok(()),
-    )
+    );
+    while let Some(piece) = walk.next(&text) {
+        piece?;
+    }
+    Ok(walk)
 }
 
 /// Whether `input` is already the canonical form `dialect` writes: what comparing
@@ -310,18 +320,7 @@ pub fn canonize_into(
     out: &mut [u8],
     dialect: KeyexprDialect,
 ) -> Result<usize, KeyexprCanonError> {
-    let mut len = 0usize;
-    walk_canonical(input, dialect, false, &mut |piece: &str| {
-        let end = len
-            .checked_add(piece.len())
-            .ok_or(KeyexprCanonError::ExceedsCapacity)?;
-        out.get_mut(len..end)
-            .ok_or(KeyexprCanonError::ExceedsCapacity)?
-            .copy_from_slice(piece.as_bytes());
-        len = end;
-        Ok(())
-    })?;
-    Ok(len)
+    canonize_parts_into(core::slice::from_ref(&input.as_bytes()), out, dialect)
 }
 
 /// The canonical form of `text` written over `text` from its first byte, and its length: the
@@ -342,7 +341,11 @@ pub fn canonize_in_place(
 ) -> Result<usize, KeyexprCanonError> {
     let mut walk = CanonWalk::new(dialect, false);
     let mut len = 0usize;
-    while let Some(piece) = walk.next(&*text) {
+    loop {
+        let read: &[u8] = &*text;
+        let Some(piece) = walk.next(&Parts(core::slice::from_ref(&read))) else {
+            break;
+        };
         // A piece past the room the walk's property promises is refused rather than written
         // where the walk has still to read; no text reaches that arm.
         len = match piece? {
@@ -441,35 +444,24 @@ fn collapsed_len(input: &str) -> usize {
     }
 }
 
-/// A text the walk reads a byte at a time: one slice, or the parts of a text that lies in pieces
-/// ([`canonize_parts_into`]), read as one text with no copy of it made.
-trait CanonText {
-    /// How many bytes the text holds.
-    fn bytes_len(&self) -> usize;
-    /// The byte at `at`, `None` past the end.
-    fn byte(&self, at: usize) -> Option<u8>;
-}
-
-impl CanonText for [u8] {
-    fn bytes_len(&self) -> usize {
-        self.len()
-    }
-
-    fn byte(&self, at: usize) -> Option<u8> {
-        self.get(at).copied()
-    }
-}
-
-/// The parts of a text, in order, read as the one text they make.
+/// The text the walk reads a byte at a time: the parts of a text, in order, read as the one text
+/// they make with no copy of it made. A text that lies in one place is one part. Every walk reads
+/// this one type, so the walk is built once for every writer and for a key in pieces
+/// ([`canonize_parts_into`]) alike.
 struct Parts<'p, 'b>(&'p [&'b [u8]]);
 
-impl CanonText for Parts<'_, '_> {
+impl Parts<'_, '_> {
+    /// How many bytes the text holds.
     fn bytes_len(&self) -> usize {
         self.0
             .iter()
             .fold(0usize, |sum, part| sum.saturating_add(part.len()))
     }
 
+    /// The byte at `at`, `None` past the end. Out of line: the walk reads a byte at a dozen
+    /// places and a key is canonized where it is declared, not per message, so one call each
+    /// costs less than the walk over the parts written out at every place.
+    #[inline(never)]
     fn byte(&self, at: usize) -> Option<u8> {
         let mut at = at;
         for part in self.0 {
@@ -480,9 +472,7 @@ impl CanonText for Parts<'_, '_> {
         }
         None
     }
-}
 
-impl Parts<'_, '_> {
     /// Fill `dst` with the bytes of the text from `from`, as many as `dst` holds; what lies
     /// past the end of the text leaves the rest of `dst` as it was.
     fn copy_into(&self, from: usize, dst: &mut [u8]) {
@@ -507,21 +497,15 @@ impl Parts<'_, '_> {
 }
 
 /// Whether a `$*` token starts at byte `i` of `text`.
-fn is_dollar_star_at<T: CanonText + ?Sized>(text: &T, i: usize) -> bool {
+fn is_dollar_star_at(text: &Parts<'_, '_>, i: usize) -> bool {
     text.byte(i) == Some(b'$') && text.byte(i.saturating_add(1)) == Some(b'*')
 }
 
 /// Whether the bytes `start..end` of `text` are one or more `$*` tokens and nothing else: the
 /// chunk whose collapsed form is a lone `$*`.
-fn is_dollar_star_run_in<T: CanonText + ?Sized>(text: &T, start: usize, end: usize) -> bool {
+fn is_dollar_star_run_in(text: &Parts<'_, '_>, start: usize, end: usize) -> bool {
     let len = end.saturating_sub(start);
     len > 0 && len & 1 == 0 && (start..end).step_by(2).all(|i| is_dollar_star_at(text, i))
-}
-
-/// Whether `chunk` is one or more `$*` tokens and nothing else.
-#[cfg(feature = "storage-profile")]
-fn is_dollar_star_run(chunk: &[u8]) -> bool {
-    is_dollar_star_run_in(chunk, 0, chunk.len())
 }
 
 /// One piece of the canonical form: a span of the text, where it lies, or a spelling the walk
@@ -569,8 +553,8 @@ enum Step {
 ///
 /// Every writer of the form steps this one walk (the canonizer, the verdict, the canon check,
 /// the writer into a caller's buffer and the writer over the text itself), so no two of them
-/// can disagree on a text. It holds places and counts and no borrow of the text, which it is
-/// handed at each step.
+/// can disagree on a text, and the outbound check reads the chunks it judges from the same
+/// walk. It holds places and counts and no borrow of the text, which it is handed at each step.
 ///
 /// The form never grows: each chunk written stands for a chunk read that is at least as long,
 /// and each `/` for a `/` read. So when a piece is handed out, everything written before it
@@ -608,6 +592,9 @@ struct CanonWalk {
     singles: usize,
     double: bool,
     step: Step,
+    /// What a zenoh-pico canonizer would do with the chunks read so far.
+    #[cfg(feature = "storage-profile")]
+    pico_abort: PicoAbortWatch,
 }
 
 impl CanonWalk {
@@ -620,6 +607,8 @@ impl CanonWalk {
             singles: 0,
             double: false,
             step: Step::Read,
+            #[cfg(feature = "storage-profile")]
+            pico_abort: PicoAbortWatch::START,
         }
     }
 
@@ -627,10 +616,7 @@ impl CanonWalk {
     /// form is all handed out or a refusal was. `text` is the same text at every step, but for
     /// the bytes before the start of the last span handed out, which the caller may have
     /// written the form over.
-    fn next<T: CanonText + ?Sized>(
-        &mut self,
-        text: &T,
-    ) -> Option<Result<Piece, KeyexprCanonError>> {
+    fn next(&mut self, text: &Parts<'_, '_>) -> Option<Result<Piece, KeyexprCanonError>> {
         let stepped = self.step_on(text);
         if matches!(stepped, Some(Err(_))) {
             self.step = Step::Done;
@@ -638,10 +624,7 @@ impl CanonWalk {
         stepped
     }
 
-    fn step_on<T: CanonText + ?Sized>(
-        &mut self,
-        text: &T,
-    ) -> Option<Result<Piece, KeyexprCanonError>> {
+    fn step_on(&mut self, text: &Parts<'_, '_>) -> Option<Result<Piece, KeyexprCanonError>> {
         let text_len = text.bytes_len();
         loop {
             match self.step {
@@ -665,6 +648,10 @@ impl CanonWalk {
                         Ok(shape) => shape,
                         Err(refused) => return Some(Err(refused)),
                     };
+                    #[cfg(feature = "storage-profile")]
+                    {
+                        self.pico_abort = self.pico_abort.see(shape, end.saturating_sub(start));
+                    }
                     // The ONE case the two dialects split on — see [`KeyexprDialect`]: pico ends
                     // the wild run at a `$*` chunk and writes `*` after whatever the run held;
                     // zenoh-c folds it into the run.
@@ -771,8 +758,10 @@ fn walk_canonical(
     chunk_bound: bool,
     sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
 ) -> Result<(), KeyexprCanonError> {
+    let whole = input.as_bytes();
+    let text = Parts(core::slice::from_ref(&whole));
     let mut walk = CanonWalk::new(dialect, chunk_bound);
-    while let Some(piece) = walk.next(input.as_bytes()) {
+    while let Some(piece) = walk.next(&text) {
         // A span starts and ends at a `/`, at a `$*` or at an end of the text, each an ASCII
         // byte, so it is cut at char boundaries.
         let piece = match piece? {
@@ -794,8 +783,8 @@ fn walk_canonical(
 /// encoding (0 = normal, 1 = after `$`, 3 = after `$*`); the
 /// non-contiguous 2-skip keeps the cross-reference mechanical
 /// instead of having to mentally re-encode states.
-fn analyze_span<T: CanonText + ?Sized>(
-    text: &T,
+fn analyze_span(
+    text: &Parts<'_, '_>,
     start: usize,
     end: usize,
 ) -> Result<ChunkShape, KeyexprCanonError> {
@@ -856,7 +845,7 @@ fn analyze_span<T: CanonText + ?Sized>(
 /// [`analyze_span`] of a whole chunk.
 #[cfg(test)]
 fn analyze_chunk(chunk: &[u8]) -> Result<ChunkShape, KeyexprCanonError> {
-    analyze_span(chunk, 0, chunk.len())
+    analyze_span(&Parts(core::slice::from_ref(&chunk)), 0, chunk.len())
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1303,97 +1292,108 @@ impl core::error::Error for OutboundKeyexprError {
 /// ```
 #[cfg(feature = "storage-profile")]
 pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
-    // Structural canon (empty chunks, reserved chars, unbound `$`,
-    // bare `*` mid-chunk, …), as a verdict: the wire emit path uses the
-    // raw suffix verbatim (R300 NARROW scope; pre-emit canonization
-    // is the R299 carry #3 architectural decision), so no canonical form
-    // is built and the check allocates nothing.
-    canon_verdict(input, KeyexprDialect::Pico).map_err(OutboundKeyexprError::NotCanonical)?;
-
-    // Bug #3 family walk — a direct model of pico's `__zp_canon_prefix`
-    // chunk loop (`vendor/zenoh-pico/src/session/keyexpr.c:121-209`),
-    // because that loop is what decides whether the abort fires.
-    //
-    // * big_wild_open — pico's `in_big_wild`. Set by a `**` chunk.
-    // * intervening — whether at least one chunk has passed since that
-    //   `**` while the window stayed open. It is what separates an
-    //   ABORT from bug #1: pico's rewrite offset is
-    //   `pos(closer) - 3`, which addresses the `**` chunk exactly when
-    //   the closer is adjacent to it, and lands mid-keyexpr otherwise
-    //   (`keyexpr.c:132` / `:147` vs the `chunk_end - reader == 2`
-    //   precondition at `:330`).
-    //
-    // ONLY a chunk of length 1 keeps the window open. pico reaches the
-    // reset-skipping `else { advance; continue; }` exclusively from
-    // `case 1:` (`keyexpr.c:130-138`); every chunk of length >= 2 that
-    // is not `**` falls through to the char-walk and runs
-    // `in_big_wild = false` (`keyexpr.c:206`). R311y544 measured this
-    // rather than reading it —
-    // `layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured`
-    // runs the real `_z_keyexpr_canonize` in a subprocess and pins the
-    // outcome for each shape, including the `**/ab/*` vs `**/a/*`
-    // boundary. It REFUTES this function's former claim that the
-    // trigger "fires on multi-char literals as well"; `**/foo/*` and
-    // `**/abc/*/def` canonize to themselves on a real pico.
-    //
-    // The closer must be an exact `*` or `**`. A `$*`-shape closer
-    // takes pico's LONE_DOLLAR_STAR branch, whose offset addresses the
-    // `$*` chunk itself, so it cannot trip the assert (measured:
-    // `**/c/$*` returns `**/c/*`).
-    // The walk TERMINATES at the first chunk for which pico's loop
-    // leaves `Z_KEYEXPR_CANON_SUCCESS`, because that is where
-    // `__zp_canon_prefix` returns. Past that point control is in the
-    // rewrite loop (`keyexpr.c:342-422`), which carries no assert, so
-    // nothing later in the keyexpr can abort.
-    let mut big_wild_open = false;
-    let mut intervening = false;
-    for chunk in input.split('/') {
-        let abort = |offending: &str| {
-            Err(OutboundKeyexprError::PicoBugThreeFamily {
-                keyexpr: diagnostic_text(input),
-                offending_chunk: diagnostic_text(offending),
-            })
-        };
-        if chunk == "**" {
-            if big_wild_open {
-                // DOUBLE_STAR_AFTER_DOUBLE_STAR — walk ends here.
-                return if intervening { abort(chunk) } else { Ok(()) };
-            }
-            big_wild_open = true;
-            intervening = false;
-        } else if chunk == "*" {
-            if big_wild_open {
-                // SINGLE_STAR_AFTER_DOUBLE_STAR — walk ends here.
-                return if intervening { abort(chunk) } else { Ok(()) };
-            }
-            // pico's `case 1:` else-branch: advance, no reset. The
-            // window is already closed, so nothing to carry.
-        } else if chunk_canonizes_to_star_shape(chunk) {
-            // A `$*`-run chunk: LONE_DOLLAR_STAR, whose offset
-            // addresses this chunk itself, so the rewrite precondition
-            // holds and the walk ends without an assert.
-            return Ok(());
-        } else if chunk.len() == 1 {
-            // pico's `case 1:` — advance without resetting the window.
-            intervening = big_wild_open;
-        } else {
-            // Any longer chunk reaches the char-walk, which resets it.
-            big_wild_open = false;
-            intervening = false;
-        }
+    // The structural verdict and the abort shape are read in one walk of the text. The verdict
+    // comes first: the wire emit path uses the raw suffix verbatim (R300 NARROW scope; pre-emit
+    // canonization is the R299 carry #3 architectural decision), so no canonical form is built
+    // and the check allocates nothing.
+    let walked =
+        verdict_walk(input, KeyexprDialect::Pico).map_err(OutboundKeyexprError::NotCanonical)?;
+    match walked.pico_abort {
+        PicoAbortWatch::Aborts(offending) => Err(OutboundKeyexprError::PicoBugThreeFamily {
+            keyexpr: diagnostic_text(input),
+            offending_chunk: diagnostic_text(offending),
+        }),
+        PicoAbortWatch::Open { .. } | PicoAbortWatch::Safe => Ok(()),
     }
-    Ok(())
 }
 
-/// True iff the raw chunk's canonical form is `*` — i.e. an exact
-/// `*` / `**` chunk, or a `$*`-run-only chunk that the singleify +
-/// lone-`$*` lift in [`canonize_keyexpr`] collapses to `*`.
-/// Mixed chunks (literal + `$*` + literal) canonize verbatim and do
-/// not trigger pico's case-1 `in_big_wild` confusion, so they are
-/// excluded.
+/// The bug #3 family, followed a chunk at a time as [`CanonWalk`] judges each one: a direct
+/// model of pico's `__zp_canon_prefix` chunk loop
+/// (`vendor/zenoh-pico/src/session/keyexpr.c:121-209`), because that loop is what decides
+/// whether the abort fires.
+///
+/// ONLY a chunk of length 1 keeps the window open. pico reaches the reset-skipping
+/// `else { advance; continue; }` exclusively from `case 1:` (`keyexpr.c:130-138`); every chunk
+/// of length >= 2 that is not `**` falls through to the char-walk and runs
+/// `in_big_wild = false` (`keyexpr.c:206`). R311y544 measured this rather than reading it:
+/// `layer3_keyexpr_canon::canon_pico_abort_family_is_single_byte_chunks_only_measured` runs the
+/// real `_z_keyexpr_canonize` in a subprocess and pins the outcome for each shape, including the
+/// `**/ab/*` vs `**/a/*` boundary; `**/foo/*` and `**/abc/*/def` canonize to themselves on a
+/// real pico.
+///
+/// The closer must be an exact `*` or `**`. A `$*`-shape closer takes pico's LONE_DOLLAR_STAR
+/// branch, whose offset addresses the `$*` chunk itself, so it cannot trip the assert
+/// (measured: `**/c/$*` returns `**/c/*`).
+///
+/// The model stops at the first chunk for which pico's loop leaves `Z_KEYEXPR_CANON_SUCCESS`,
+/// because that is where `__zp_canon_prefix` returns. Past that point control is in the rewrite
+/// loop (`keyexpr.c:342-422`), which carries no assert, so nothing later in the keyexpr can
+/// abort.
 #[cfg(feature = "storage-profile")]
-fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
-    chunk == "*" || chunk == "**" || is_dollar_star_run(chunk.as_bytes())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PicoAbortWatch {
+    /// pico's loop is still running.
+    Open {
+        /// pico's `in_big_wild`, set by a `**` chunk.
+        big_wild: bool,
+        /// Whether a chunk has passed since that `**` while the window stayed open. It is
+        /// what separates an ABORT from bug #1: pico's rewrite offset is `pos(closer) - 3`,
+        /// which addresses the `**` chunk exactly when the closer is adjacent to it, and lands
+        /// mid-keyexpr otherwise (`keyexpr.c:132` / `:147` vs the `chunk_end - reader == 2`
+        /// precondition at `:330`).
+        intervening: bool,
+    },
+    /// pico's loop returned on a chunk that does not abort.
+    Safe,
+    /// pico's loop returns on this closer and the rewrite aborts.
+    Aborts(&'static str),
+}
+
+#[cfg(feature = "storage-profile")]
+impl PicoAbortWatch {
+    const START: Self = Self::Open {
+        big_wild: false,
+        intervening: false,
+    };
+
+    /// The watch once pico's loop has read one more chunk, of `shape` and `len` bytes as the
+    /// text holds it.
+    fn see(self, shape: ChunkShape, len: usize) -> Self {
+        let Self::Open {
+            big_wild,
+            intervening,
+        } = self
+        else {
+            return self;
+        };
+        match shape {
+            // SINGLE_STAR_AFTER_DOUBLE_STAR or DOUBLE_STAR_AFTER_DOUBLE_STAR: the loop ends here.
+            ChunkShape::SingleStar | ChunkShape::DoubleStar if big_wild => {
+                if !intervening {
+                    Self::Safe
+                } else if shape == ChunkShape::DoubleStar {
+                    Self::Aborts("**")
+                } else {
+                    Self::Aborts("*")
+                }
+            }
+            ChunkShape::DoubleStar => Self::Open {
+                big_wild: true,
+                intervening: false,
+            },
+            // pico's `case 1:` else-branch with the window closed: nothing to carry.
+            ChunkShape::SingleStar => self,
+            // LONE_DOLLAR_STAR, whose offset addresses this chunk itself.
+            ChunkShape::LoneDollarStar => Self::Safe,
+            // pico's `case 1:`: advance without resetting the window.
+            ChunkShape::Mixed if len == 1 => Self::Open {
+                big_wild,
+                intervening: big_wild,
+            },
+            // Any longer chunk reaches the char-walk, which resets it.
+            ChunkShape::Mixed => Self::START,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2358,19 +2358,121 @@ mod tests {
         ));
     }
 
+    /// The outbound check as it was written before it read the text once: the canon verdict,
+    /// then a second walk of the raw chunks split at `/`. Kept as the oracle the one walk is
+    /// held to.
+    #[cfg(feature = "alloc")]
+    fn reference_outbound(input: &str) -> Result<(), OutboundKeyexprError> {
+        canonize_keyexpr_in(input, KeyexprDialect::Pico)
+            .map_err(OutboundKeyexprError::NotCanonical)?;
+        let star_run =
+            |chunk: &str| !chunk.is_empty() && chunk.as_bytes().chunks(2).all(|t| t == b"$*");
+        let mut big_wild_open = false;
+        let mut intervening = false;
+        for chunk in input.split('/') {
+            let abort = |offending: &str| {
+                Err(OutboundKeyexprError::PicoBugThreeFamily {
+                    keyexpr: input.to_owned(),
+                    offending_chunk: offending.to_owned(),
+                })
+            };
+            if chunk == "**" {
+                if big_wild_open {
+                    return if intervening { abort(chunk) } else { Ok(()) };
+                }
+                big_wild_open = true;
+                intervening = false;
+            } else if chunk == "*" {
+                if big_wild_open {
+                    return if intervening { abort(chunk) } else { Ok(()) };
+                }
+            } else if star_run(chunk) {
+                return Ok(());
+            } else if chunk.len() == 1 {
+                intervening = big_wild_open;
+            } else {
+                big_wild_open = false;
+                intervening = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// The outbound check that reads the text once answers what the canon verdict followed by a
+    /// split walk of the raw chunks answered, refusal and offending chunk included, on every text
+    /// the canon walk is held to and on the abort shapes with longer chunks.
     #[cfg(feature = "alloc")]
     #[test]
-    fn chunk_canonizes_to_star_shape_classification() {
-        assert!(chunk_canonizes_to_star_shape("*"));
-        assert!(chunk_canonizes_to_star_shape("**"));
-        assert!(chunk_canonizes_to_star_shape("$*"));
-        assert!(chunk_canonizes_to_star_shape("$*$*"));
-        assert!(chunk_canonizes_to_star_shape("$*$*$*"));
-        assert!(!chunk_canonizes_to_star_shape("foo"));
-        assert!(!chunk_canonizes_to_star_shape("$*foo"));
-        assert!(!chunk_canonizes_to_star_shape("foo$*"));
-        assert!(!chunk_canonizes_to_star_shape("foo$*bar"));
-        assert!(!chunk_canonizes_to_star_shape(""));
+    fn the_outbound_check_in_one_walk_agrees_with_the_two_walks() {
+        let agree = |text: &str| {
+            assert_eq!(
+                check_outbound_keyexpr_pico_safe(text),
+                reference_outbound(text),
+                "{text:?}"
+            );
+        };
+        for text in [
+            "**/a/$*$*/*",
+            "**/ab/a/*",
+            "x/**/a/b/c/**",
+            "**/a$*b/a/*",
+            "**/a/*/b/**",
+            "**/a/**/a/*",
+        ] {
+            agree(text);
+        }
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(agree);
+        // The alphabet reaches the abort shape, so the agreement covers it.
+        let mut aborts = 0usize;
+        walk_alphabet(|text| {
+            aborts += usize::from(matches!(
+                check_outbound_keyexpr_pico_safe(text),
+                Err(OutboundKeyexprError::PicoBugThreeFamily { .. })
+            ));
+        });
+        assert!(aborts > 0);
+    }
+
+    /// A grammar fault behind the abort shape is the refusal the check gives: the whole text is
+    /// judged before the shape is. Turned red by a check that answers from the abort shape as
+    /// soon as it is read.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_grammar_fault_behind_the_abort_shape_is_the_refusal() {
+        assert_eq!(
+            check_outbound_keyexpr_pico_safe("**/c/*/b?"),
+            Err(OutboundKeyexprError::NotCanonical(
+                KeyexprCanonError::ContainsSharpOrQmark,
+            )),
+        );
+        assert_eq!(
+            check_outbound_keyexpr_pico_safe("**/c/**/b//d"),
+            Err(OutboundKeyexprError::NotCanonical(
+                KeyexprCanonError::EmptyChunk,
+            )),
+        );
+        // Control: the same shape with no fault behind it is the abort.
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/c/*/b"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. })
+        ));
+    }
+
+    /// The chunks the abort shape is read from are the shapes the canon walk judges: a run of
+    /// `$*` is a lone `$*`, which ends pico's loop, and a chunk with a `$*` and a literal is
+    /// a longer chunk, which closes the window.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_abort_shape_reads_a_dollar_star_run_as_one_chunk_shape() {
+        assert_eq!(check_outbound_keyexpr_pico_safe("**/c/$*$*$*/*"), Ok(()));
+        assert_eq!(check_outbound_keyexpr_pico_safe("**/c/$*x/*"), Ok(()));
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/c/d/*"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. })
+        ));
     }
 
     // ── The validator ──

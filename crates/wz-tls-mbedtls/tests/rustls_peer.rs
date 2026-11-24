@@ -31,6 +31,7 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_session_core::credential_identity::zid_from_spki_der;
+use wz_session_core::link::LinkEndsText;
 use wz_tls_mbedtls::channel::{start, Identity, Zid};
 use wz_tls_mbedtls::stream::{HandshakeBudget, TlsDial};
 
@@ -248,7 +249,7 @@ fn a_tls_locator_opens_the_stream_link_over_the_channel_on_the_hosts_links() {
         "a `tls/` dial opened another kind of link"
     );
     assert_eq!(
-        link.link_endpoints().map(|ends| ends.dst.as_str()),
+        link.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
         Some(format!("tls/127.0.0.1:{port}").as_str())
     );
     assert_eq!(

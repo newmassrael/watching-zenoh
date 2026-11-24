@@ -160,7 +160,6 @@ impl ExitingFlow for DatagramDissection {
 /// exit after which the list is still read, the end of the capture.
 fn abandon_on_the_list(
     session: &mut wz_session_core::passive::PassiveSession,
-    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
     frames: &mut crate::messages::MessageList,
 ) -> ChainLoss {
     let mut ended = Vec::new();
@@ -173,7 +172,7 @@ fn abandon_on_the_list(
         wz_session_core::passive_messages::ChainEnding::AbandonedAtEnd,
     );
     #[cfg(not(feature = "reassembly"))]
-    let _ = ended;
+    let _ = (ended, frames);
     loss
 }
 

@@ -54,7 +54,7 @@ use wz_session_core::link::LostCause;
 use wz_session_core::link::RxFrame;
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::text_out::{FixedText, TextOut};
+use wz_session_core::text_out::FixedText;
 use wz_session_core::transport_timers::TransportTimers;
 use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
 
@@ -554,12 +554,20 @@ pub enum LinkProto {
 }
 
 impl LinkProto {
-    /// The locator scheme that names the protocol: `udp`, `tcp` or `tls`.
+    /// The locator scheme that names the protocol: `udp`, `tcp` or `tls`, the kind's
+    /// ([`wz_session_core::link::LinkKind::scheme`]).
     pub const fn scheme(self) -> &'static str {
+        self.kind().scheme()
+    }
+
+    /// The kind of link a link of the protocol is, which names the scheme of its locators and
+    /// what it reports of itself.
+    pub const fn kind(self) -> wz_session_core::link::LinkKind {
+        use wz_session_core::link::LinkKind;
         match self {
-            LinkProto::Udp => "udp",
-            LinkProto::Tcp => "tcp",
-            LinkProto::Tls => "tls",
+            LinkProto::Udp => LinkKind::Udp,
+            LinkProto::Tcp => LinkKind::Tcp,
+            LinkProto::Tls => LinkKind::Tls,
         }
     }
 
@@ -635,9 +643,8 @@ impl Locator {
     /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
     pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
         let mut text = FixedText::new();
-        text.push_str(self.proto.scheme());
-        text.push('/');
-        text.push_socket_addr(self.at);
+        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at)
+            .write_src(&mut text);
         text
     }
 }

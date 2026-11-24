@@ -5,7 +5,7 @@
 //! R311y473 left reporting nothing: udp, quic-datagram, serial and unixpipe.
 //!
 //! R311y473 wired `sessions[].links` into both wz admin hosts, but
-//! `BoxedLinkDriver::link_endpoints` has a `None` default, so those four
+//! `BoxedLinkDriver::link_ends` has a `None` default, so those four
 //! transports rendered a link with blank `{src,dst}` — the aggregation COUNT was
 //! right, the strings were not. Its carry named the gap; this is the witness for
 //! closing it.
@@ -73,7 +73,7 @@
     )
 ))]
 
-use wz_session_core::link::{LinkEndpoints, LinkSendOutcome};
+use wz_session_core::link::{LinkEndpoints, LinkEndsText, LinkSendOutcome};
 use wz_session_core::locator::{parse_any_locator, AnyLocator};
 
 /// Assert both halves of `pair` parse back through wz's own dial-side parser.
@@ -194,12 +194,10 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
 
     let dial_pair = dial_out
         .link_endpoints()
-        .expect("the udp DIAL face must report its endpoints")
-        .clone();
+        .expect("the udp DIAL face must report its endpoints");
     let acc_pair = acc_out
         .link_endpoints()
-        .expect("the udp DEMUX face must report its endpoints")
-        .clone();
+        .expect("the udp DEMUX face must report its endpoints");
 
     assert_mirrored(&dial_pair, &acc_pair, "udp");
     let (dial_src, dial_dst) = parse_back_both_ends(&dial_pair, "udp dial face");
@@ -285,12 +283,10 @@ async fn quic_datagram_link_pair(
 
     let dial_pair = dial_out
         .link_endpoints()
-        .expect("the quic-datagram DIAL end must report its endpoints")
-        .clone();
+        .expect("the quic-datagram DIAL end must report its endpoints");
     let acc_pair = acc_out
         .link_endpoints()
-        .expect("the quic-datagram ACCEPT end must report its endpoints")
-        .clone();
+        .expect("the quic-datagram ACCEPT end must report its endpoints");
     (dial_pair, acc_pair, dial_at)
 }
 
@@ -461,12 +457,10 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 
     let dial_pair = dial_out
         .link_endpoints()
-        .expect("the unixpipe DIAL end must report its endpoints")
-        .clone();
+        .expect("the unixpipe DIAL end must report its endpoints");
     let acc_pair = acc_out
         .link_endpoints()
-        .expect("the unixpipe ACCEPT end must report its endpoints")
-        .clone();
+        .expect("the unixpipe ACCEPT end must report its endpoints");
 
     assert_mirrored(&dial_pair, &acc_pair, "unixpipe");
     let (dial_src, dial_dst) = parse_back_both_ends(&dial_pair, "unixpipe dial end");
@@ -547,8 +541,7 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     {
         let pair = driver
             .link_endpoints()
-            .unwrap_or_else(|| panic!("the serial {which} end must report its endpoints"))
-            .clone();
+            .unwrap_or_else(|| panic!("the serial {which} end must report its endpoints"));
         let (src, dst) = parse_back_both_ends(&pair, &format!("serial {which} end"));
         for (half, parsed) in [("src", src), ("dst", dst)] {
             match parsed {

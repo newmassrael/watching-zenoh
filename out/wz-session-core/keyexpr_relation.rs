@@ -1,7 +1,7 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 5c9b030c04da2321653512e78bd1f5d70f0a54cfa892806c84214b6e49ee07ab
-// source: keyexpr_intersects.scxml
-// SCE-MAP: keyexpr_intersects.scxml:25 :: _forge_body
+// source-hash: 8542a43ccbca92634cbbed529e2825cab002e2e9a5b8405cb646246c2816b85a
+// source: keyexpr_relation.scxml
+// SCE-MAP: keyexpr_relation.scxml:38 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none
@@ -19,9 +19,9 @@ use super::keyexpr_relation_dp;
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
-pub fn keyexpr_intersects(a: &[u8], b: &[u8], wild_single: bool, wild_double: bool, wild_dsl: bool, bounded: bool, chunk_bound: u32) -> bool {
+pub fn keyexpr_relation(a: &[u8], b: &[u8], relation: u8, wild_single: bool, wild_double: bool, wild_dsl: bool, bounded: bool, chunk_bound: u32) -> bool {
     if !bounded {
-        let quick: u8 = keyexpr_walk::keyexpr_walk(a, b, 1, wild_single, wild_double, wild_dsl);
+        let quick: u8 = keyexpr_walk::keyexpr_walk(a, b, relation, wild_single, wild_double, wild_dsl);
         if quick != 2 {
             return quick == 1;
         }
@@ -38,19 +38,23 @@ pub fn keyexpr_intersects(a: &[u8], b: &[u8], wild_single: bool, wild_double: bo
     if !sa.star && !sb.star {
         return keyexpr_range_equal::keyexpr_range_equal(a, 0, (a).len() as u32, b, 0, (b).len() as u32);
     }
+    let includes: bool = relation == 2;
     let da: bool = wild_double && sa.double_star;
     let db: bool = wild_double && sb.double_star;
-    if da && db {
+    if db {
+        if !da {
+            if includes {
+                return false;
+            }
+            return keyexpr_walk::keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) == 1;
+        }
         if sb.chunks <= 63 {
-            return keyexpr_relation_dp::keyexpr_relation_dp(a, b, true, true, false, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(a, b, true, !includes, includes, wild_single, dsl);
         }
         if sa.chunks <= 63 {
-            return keyexpr_relation_dp::keyexpr_relation_dp(b, a, true, true, false, wild_single, dsl);
+            return keyexpr_relation_dp::keyexpr_relation_dp(b, a, !includes, true, includes, wild_single, dsl);
         }
         return false;
     }
-    if db {
-        return keyexpr_walk::keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) == 1;
-    }
-    return keyexpr_walk::keyexpr_walk(a, b, 1, wild_single, wild_double, dsl) == 1;
+    return keyexpr_walk::keyexpr_walk(a, b, relation, wild_single, wild_double, dsl) == 1;
 }

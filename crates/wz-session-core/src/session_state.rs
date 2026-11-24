@@ -23,6 +23,9 @@ use crate::face::{FaceEventKind, FaceSnapshot};
 use crate::face_plane::FaceReports;
 use crate::key_arena::KeySpace;
 use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
+use crate::replay_pacing::ReplayPacing;
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+use crate::round::{ReadRoom, Round, RoundCalls};
 use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
@@ -122,6 +125,10 @@ pub struct SessionState<P: SessionParts> {
     pub local_requests: P::LocalRequests,
     /// Where the matching listeners were last read.
     pub matching: MatchingRead,
+    /// How a link that comes up is told the declarations the session holds: a burst at a time at
+    /// this pace, or all in one turn (`None`). One for the session, which every face's replay
+    /// reads, as the policies the session opened under state it or a caller set it since.
+    pub replay_pacing: Option<ReplayPacing>,
     /// The plane the session's queryables answer through.
     pub plane: P::Queryables,
     /// The legs of the session's gets still pending on its links.
@@ -192,52 +199,24 @@ where
     }
 }
 
-/// The session's round of deliveries as its state asks it: whether the round takes one more record
-/// now, and whether a source the links' gate does not hold back still owes it records.
-///
-/// The state names the round it asks by this trait alone, so it is bound neither to the calls a
-/// round owes nor to the heap and the atomics the round is made of: `round::Round` answers it
-/// where the build has them, and the state's tests stand in a round of their own.
-pub trait DeliveryRound {
-    /// Whether the round takes one more record that owes `callbacks` callbacks now.
-    ///
-    /// # Safety
-    /// The caller holds what the round's writer holds: the engine's lock of the session.
-    unsafe fn has_room(&self, callbacks: usize) -> bool;
-
-    /// Whether a source the links' gate does not hold back still owes the round records: no link
-    /// is read while one does.
-    fn owe(&self, owed: bool);
-}
-
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-impl<R: DeliveryRound + ?Sized> DeliveryRound for alloc::sync::Arc<R> {
-    unsafe fn has_room(&self, callbacks: usize) -> bool {
-        // SAFETY: the caller's contract, which is the shared round's.
-        unsafe { (**self).has_room(callbacks) }
-    }
-
-    fn owe(&self, owed: bool) {
-        (**self).owe(owed);
-    }
-}
-
-impl<P: SessionParts> SessionState<P>
+impl<P, C> SessionState<P>
 where
-    P::Lane: DeliveryRound,
+    P: SessionParts<Lane = alloc::sync::Arc<Round<C>>>,
+    C: RoundCalls,
 {
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
-    /// takes now, each a record that owes `callbacks` callbacks, and tell the round whether any is
-    /// still owed: while one is, no link is read, so a token's `Delete` comes before anything a
-    /// link brings after its loss, and none is dropped.
+    /// takes now, each a record that takes `room` of it, and tell the round whether any is still
+    /// owed: while one is, no link is read, so a token's `Delete` comes before anything a link
+    /// brings after its loss, and none is dropped.
     ///
     /// # Safety
-    /// The caller may ask the round for room ([`DeliveryRound::has_room`]).
-    pub unsafe fn retract_owed(&self, callbacks: usize) {
+    /// The caller holds the session's lock, as the round's writer does ([`Round::has_room`]).
+    pub unsafe fn retract_owed(&self, room: ReadRoom) {
         let round = &self.lane;
         // SAFETY: the caller's contract.
-        let mut room = || unsafe { round.has_room(callbacks) };
-        let done = P::faces_mut(&self.registry).retract_owed(&mut room);
+        let mut has_room = || unsafe { round.has_room(room) };
+        let done = P::faces_mut(&self.registry).retract_owed(&mut has_room);
         round.owe(!done);
     }
 }
@@ -313,7 +292,14 @@ mod tests {
         lost: std::vec::Vec<u64>,
         /// The tokens of lost links still to be retracted.
         owed_tokens: usize,
+        /// The round each token retracted is offered to, as a record of its `Delete`.
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        retracts_into: Option<(TestLane, alloc::sync::Arc<crate::round::tests::Log>)>,
     }
+
+    /// The round of a test's session: a real one, of the calls the round's own tests make.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    type TestLane = alloc::sync::Arc<Round<crate::round::tests::Kept>>;
 
     impl SessionFaces for Registry {
         fn end_leg(&mut self, face: u64, kind: GetKind) {
@@ -333,30 +319,24 @@ mod tests {
                 if !room() {
                     return false;
                 }
+                #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+                if let Some((round, log)) = &self.retracts_into {
+                    let call = crate::round::tests::Call {
+                        row: 1,
+                        log: log.clone(),
+                    };
+                    let token = crate::declare::liveliness_sample::LivelinessSample {
+                        kind: crate::declare::liveliness_sample::LivelinessSampleKind::Delete,
+                        keyexpr: "t/1",
+                        token_id: 7,
+                    };
+                    // SAFETY: the test's thread is the round's one writer, as the session's lock
+                    // holder is, and it asked the round for the room first.
+                    unsafe { round.offer_liveliness(call, &token, None) };
+                }
                 self.owed_tokens -= 1;
             }
             true
-        }
-    }
-
-    /// A round that takes `room` more records, and keeps what it was last asked and told.
-    #[derive(Default)]
-    struct Round {
-        room: Cell<usize>,
-        asked: Cell<Option<usize>>,
-        owes: Cell<Option<bool>>,
-    }
-
-    impl DeliveryRound for Round {
-        unsafe fn has_room(&self, callbacks: usize) -> bool {
-            self.asked.set(Some(callbacks));
-            let room = self.room.get();
-            self.room.set(room.saturating_sub(1));
-            room > 0
-        }
-
-        fn owe(&self, owed: bool) {
-            self.owes.set(Some(owed));
         }
     }
 
@@ -405,7 +385,8 @@ mod tests {
 
     tables_only!(Unwatched, (), (), ());
     tables_only!(Legs, (), TwoLegs, ());
-    tables_only!(Rounds, (), (), Round);
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    tables_only!(Rounds, (), (), TestLane);
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     tables_only!(Watched, crate::face_plane::FacePlane<CellLocks>, (), ());
 
@@ -445,6 +426,23 @@ mod tests {
         P::PendingGets: Default,
         P::Lane: Default,
     {
+        new_state_with(Default::default())
+    }
+
+    /// A state that delivers through `lane`.
+    fn new_state_with<P>(lane: P::Lane) -> SessionState<P>
+    where
+        P: SessionParts<
+            Registry = RefCell<Registry>,
+            Entities = (),
+            Queryables = (),
+            Gets = (),
+            KeyIds = (),
+            LocalRequests = LocalRequests,
+        >,
+        P::Watchers: Default,
+        P::PendingGets: Default,
+    {
         SessionState {
             registry: RefCell::new(Registry::default()),
             watchers: Default::default(),
@@ -453,10 +451,11 @@ mod tests {
             key_ids: (),
             local_requests: LocalRequests::default(),
             matching: MatchingRead::default(),
+            replay_pacing: None,
             plane: (),
             pending_gets: Default::default(),
             gets: (),
-            lane: Default::default(),
+            lane,
         }
     }
 
@@ -511,36 +510,48 @@ mod tests {
         state.registry.borrow()
     }
 
-    /// The state retracts the owed tokens the round has room for, asking it for records of the
-    /// callbacks given, and tells it one is still owed; once the round takes the rest, none is.
-    #[test]
-    fn the_state_retracts_what_the_round_takes_and_says_what_is_owed() {
-        let state = new_state::<Rounds>();
-        state.registry.borrow_mut().owed_tokens = 3;
-        state.lane.room.set(2);
-        // SAFETY: the test's thread is the round's one writer.
-        unsafe { state.retract_owed(4) };
-        assert_eq!(faces_told(&state).owed_tokens, 1, "two retracted, one left");
-        assert_eq!(state.lane.asked.get(), Some(4));
-        assert_eq!(state.lane.owes.get(), Some(true), "one still owed");
-        state.lane.room.set(5);
-        // SAFETY: as above.
-        unsafe { state.retract_owed(4) };
-        assert_eq!(faces_told(&state).owed_tokens, 0);
-        assert_eq!(state.lane.owes.get(), Some(false), "none owed");
-    }
-
-    /// A round shared behind an `Arc` is asked and told as the round itself.
+    /// The state retracts the owed tokens the round of deliveries has room for, each a record of
+    /// it, and tells it one is still owed; a sealed round takes none; once the round was handed
+    /// out and takes the rest, none is owed.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
-    fn a_shared_round_is_asked_and_told_as_the_round() {
-        let round = alloc::sync::Arc::new(Round::default());
-        round.room.set(1);
-        // SAFETY: the test's thread is the round's one writer.
-        assert!(unsafe { DeliveryRound::has_room(&round, 3) });
-        assert_eq!(round.asked.get(), Some(3));
-        DeliveryRound::owe(&round, true);
-        assert_eq!(round.owes.get(), Some(true));
+    fn the_state_retracts_what_the_round_takes_and_says_what_is_owed() {
+        const OWED: usize = 64;
+        let lane: TestLane = crate::round::tests::round();
+        let log = alloc::sync::Arc::new(crate::round::tests::Log::default());
+        let state = new_state_with::<Rounds>(lane.clone());
+        {
+            let mut registry = state.registry.borrow_mut();
+            registry.owed_tokens = OWED;
+            registry.retracts_into = Some((lane, log.clone()));
+        }
+        let one = ReadRoom { callbacks: 1 };
+        // SAFETY: the test's thread is the round's one writer, as the session's lock holder is.
+        unsafe { state.retract_owed(one) };
+        let left = faces_told(&state).owed_tokens;
+        assert!(left > 0 && left < OWED, "the round took some and not all");
+        assert!(state.lane.owes(), "one still owed: no link is read");
+        // SAFETY: as above.
+        unsafe { state.lane.seal() };
+        // SAFETY: as above.
+        unsafe { state.retract_owed(one) };
+        assert_eq!(
+            faces_told(&state).owed_tokens,
+            left,
+            "a sealed round takes none"
+        );
+        assert!(state.lane.owes());
+        assert!(state.lane.deliver());
+        assert_eq!(
+            log.handed().len(),
+            OWED - left,
+            "each token retracted is a record handed out"
+        );
+        state.registry.borrow_mut().owed_tokens = 1;
+        // SAFETY: as above.
+        unsafe { state.retract_owed(one) };
+        assert_eq!(faces_told(&state).owed_tokens, 0);
+        assert!(!state.lane.owes(), "none owed");
     }
 
     /// The state numbers the session's entities by the ids its tables hand out, each once.

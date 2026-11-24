@@ -18,10 +18,11 @@
 //! exact when only one side can take several chunks. With `**` on both sides it is a dynamic
 //! programme over the two keys' prefixes whose rows are `uint64` bit sets, two of them at a time
 //! (`keyexpr_relation_dp.scxml`, one programme for both relations: which side's `**` stretches
-//! and which chunk step relates two chunks are its arguments); the side the bits stand for has
-//! at most 63 chunks, and two such keys of more than 63 chunks each are refused. Until 2026-11-19
-//! this module held the matcher by hand, a descent that remembered the suffix pairs it had
-//! refuted, over keys split into a chunk view.
+//! and which chunk step relates two chunks are its arguments). The intersection and the inclusion
+//! are one document over all of this (`keyexpr_relation.scxml`), the relation its argument. The
+//! side the bits stand for has at most 63 chunks, and two such keys of more than 63 chunks each
+//! are refused. Until 2026-11-19 this module held the matcher by hand, a descent that remembered
+//! the suffix pairs it had refuted, over keys split into a chunk view.
 //!
 //! ## What every relation refuses
 //!
@@ -93,16 +94,12 @@ mod generated {
             generated!(#[cfg(all())] $($name),*);
         };
     }
-    // The directional relation, under its own catalog switch. The programme it fills is the
-    // symmetric relation's too, and its chunk step is the walk's, so neither is gated.
-    generated!(
-        #[cfg(feature = "keyexpr-includes")]
-        keyexpr_includes,
-    );
+    // `keyexpr_relation` answers the symmetric relation and the directional one; the directional
+    // one's catalog switch gates its caller, `keyexpr_includes`, and nothing here.
     generated!(
         key_facts,
         key_facts_schema,
-        keyexpr_intersects,
+        keyexpr_relation,
         keyexpr_matches,
         keyexpr_walk,
         keyexpr_relation_dp,
@@ -124,15 +121,7 @@ mod generated {
 pub fn keyexpr_intersects(a: &str, b: &str) -> bool {
     #[cfg(test)]
     INTERSECT_WALKS.with(|walks| walks.set(walks.get() + 1));
-    generated::keyexpr_intersects::keyexpr_intersects(
-        a.as_bytes(),
-        b.as_bytes(),
-        WILD_SINGLE,
-        WILD_DOUBLE,
-        WILD_DSL,
-        crate::bounded::ENFORCES_CAPACITY,
-        CHUNK_BOUND,
-    )
+    relate(a, b, INTERSECTS)
 }
 
 /// Whether every key `subset` matches is matched by `superset`: zenoh's `includes` (zenoh-pico
@@ -141,9 +130,24 @@ pub fn keyexpr_intersects(a: &str, b: &str) -> bool {
 /// refuses.
 #[cfg(feature = "keyexpr-includes")]
 pub fn keyexpr_includes(superset: &str, subset: &str) -> bool {
-    generated::keyexpr_includes::keyexpr_includes(
-        superset.as_bytes(),
-        subset.as_bytes(),
+    relate(superset, subset, INCLUDES)
+}
+
+/// The `relation` code of the generated `keyexpr_relation` for [`keyexpr_intersects`].
+const INTERSECTS: u8 = 1;
+/// The `relation` code of the generated `keyexpr_relation` for `keyexpr_includes`.
+#[cfg(feature = "keyexpr-includes")]
+const INCLUDES: u8 = 2;
+
+/// The generated relation of `a` and `b` named by `relation`, under the build's switches. Kept
+/// out of line where both relations are built, so its body is linked once for the two; with only
+/// the symmetric one built it folds into its one caller.
+#[cfg_attr(feature = "keyexpr-includes", inline(never))]
+fn relate(a: &str, b: &str, relation: u8) -> bool {
+    generated::keyexpr_relation::keyexpr_relation(
+        a.as_bytes(),
+        b.as_bytes(),
+        relation,
         WILD_SINGLE,
         WILD_DOUBLE,
         WILD_DSL,
@@ -728,6 +732,217 @@ mod tests {
                     reference::matches_by_walk(a, b),
                     "matches {a:?} {b:?}"
                 );
+            }
+        }
+    }
+
+    /// The two generated relations `keyexpr_relation` replaced, transcribed from the documents
+    /// they were generated from, over the same generated steps: the reference the one document
+    /// is held to.
+    mod before {
+        use super::super::generated::{
+            keyexpr_range_equal, keyexpr_relation_dp, keyexpr_shape, keyexpr_walk,
+        };
+
+        pub(super) fn intersects(
+            a: &[u8],
+            b: &[u8],
+            wild_single: bool,
+            wild_double: bool,
+            wild_dsl: bool,
+            bounded: bool,
+            chunk_bound: u32,
+        ) -> bool {
+            if !bounded {
+                let quick = keyexpr_walk::keyexpr_walk(a, b, 1, wild_single, wild_double, wild_dsl);
+                if quick != 2 {
+                    return quick == 1;
+                }
+            }
+            let sa = keyexpr_shape::keyexpr_shape(a);
+            let sb = keyexpr_shape::keyexpr_shape(b);
+            let dsl = wild_dsl && (sa.dollar || sb.dollar);
+            if sa.chunks == 0 || sb.chunks == 0 {
+                return false;
+            }
+            if bounded && (sa.chunks > chunk_bound || sb.chunks > chunk_bound) {
+                return false;
+            }
+            if !sa.star && !sb.star {
+                return keyexpr_range_equal::keyexpr_range_equal(
+                    a,
+                    0,
+                    a.len() as u32,
+                    b,
+                    0,
+                    b.len() as u32,
+                );
+            }
+            let da = wild_double && sa.double_star;
+            let db = wild_double && sb.double_star;
+            if da && db {
+                if sb.chunks <= 63 {
+                    return keyexpr_relation_dp::keyexpr_relation_dp(
+                        a,
+                        b,
+                        true,
+                        true,
+                        false,
+                        wild_single,
+                        dsl,
+                    );
+                }
+                if sa.chunks <= 63 {
+                    return keyexpr_relation_dp::keyexpr_relation_dp(
+                        b,
+                        a,
+                        true,
+                        true,
+                        false,
+                        wild_single,
+                        dsl,
+                    );
+                }
+                return false;
+            }
+            if db {
+                return keyexpr_walk::keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) == 1;
+            }
+            keyexpr_walk::keyexpr_walk(a, b, 1, wild_single, wild_double, dsl) == 1
+        }
+
+        pub(super) fn includes(
+            a: &[u8],
+            b: &[u8],
+            wild_single: bool,
+            wild_double: bool,
+            wild_dsl: bool,
+            bounded: bool,
+            chunk_bound: u32,
+        ) -> bool {
+            if !bounded {
+                let quick = keyexpr_walk::keyexpr_walk(a, b, 2, wild_single, wild_double, wild_dsl);
+                if quick != 2 {
+                    return quick == 1;
+                }
+            }
+            let sa = keyexpr_shape::keyexpr_shape(a);
+            let sb = keyexpr_shape::keyexpr_shape(b);
+            let dsl = wild_dsl && (sa.dollar || sb.dollar);
+            if sa.chunks == 0 || sb.chunks == 0 {
+                return false;
+            }
+            if bounded && (sa.chunks > chunk_bound || sb.chunks > chunk_bound) {
+                return false;
+            }
+            let da = wild_double && sa.double_star;
+            let db = wild_double && sb.double_star;
+            if db {
+                if !da {
+                    return false;
+                }
+                if sb.chunks <= 63 {
+                    return keyexpr_relation_dp::keyexpr_relation_dp(
+                        a,
+                        b,
+                        true,
+                        false,
+                        true,
+                        wild_single,
+                        dsl,
+                    );
+                }
+                if sa.chunks <= 63 {
+                    return keyexpr_relation_dp::keyexpr_relation_dp(
+                        b,
+                        a,
+                        false,
+                        true,
+                        true,
+                        wild_single,
+                        dsl,
+                    );
+                }
+                return false;
+            }
+            keyexpr_walk::keyexpr_walk(a, b, 2, wild_single, wild_double, dsl) == 1
+        }
+    }
+
+    /// The one generated relation and the two it replaced on `a` and `b`, under the switches
+    /// and the chunk bound given.
+    fn one_relation_agrees(a: &str, b: &str, wild: [bool; 3], bounded: bool) {
+        let [single, double, dsl] = wild;
+        let (a_bytes, b_bytes) = (a.as_bytes(), b.as_bytes());
+        let one = |relation: u8| {
+            generated::keyexpr_relation::keyexpr_relation(
+                a_bytes,
+                b_bytes,
+                relation,
+                single,
+                double,
+                dsl,
+                bounded,
+                CHUNK_BOUND,
+            )
+        };
+        assert_eq!(
+            one(INTERSECTS),
+            before::intersects(a_bytes, b_bytes, single, double, dsl, bounded, CHUNK_BOUND),
+            "intersects {a:?} {b:?} {wild:?} bounded {bounded}"
+        );
+        #[cfg(feature = "keyexpr-includes")]
+        assert_eq!(
+            one(INCLUDES),
+            before::includes(a_bytes, b_bytes, single, double, dsl, bounded, CHUNK_BOUND),
+            "includes {a:?} {b:?} {wild:?} bounded {bounded}"
+        );
+    }
+
+    /// One generated relation answers what the two it replaced answered: for every pair of
+    /// sequences of one to three chunks over every kind of chunk with every wildcard on, for every
+    /// pair of one or two chunks and of malformed and over-deep keys under every setting of the
+    /// switches, each with the chunk bound applied and not. Two texts without a `*` are compared
+    /// as text for the inclusion too, which the walk it used to ask answered the same.
+    #[test]
+    fn the_one_relation_answers_what_the_two_answered() {
+        let n = TABLE_ALPHABET.len();
+        let sequences = n + n * n + n * n * n;
+        for x in 0..sequences {
+            let (a, a_len) = table_sequence(x);
+            let a_text = joined(&a[..a_len]);
+            for y in 0..sequences {
+                let (b, b_len) = table_sequence(y);
+                let b_text = joined(&b[..b_len]);
+                for bounded in [false, true] {
+                    one_relation_agrees(a_text.as_str(), b_text.as_str(), [true; 3], bounded);
+                }
+            }
+        }
+        let deep_a = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "a";
+        let deep_b = "**/".repeat(MAX_KEYEXPR_CHUNKS) + "b";
+        let odd = [
+            "",
+            "a/b/",
+            "/a/b",
+            "a//b",
+            "a/@v",
+            deep_a.as_str(),
+            deep_b.as_str(),
+        ];
+        let short: [crate::bounded::BoundedString<32>; 90] = core::array::from_fn(|index| {
+            let (chunks, len) = table_sequence(index);
+            joined(&chunks[..len])
+        });
+        let keys = || short.iter().map(|text| text.as_str()).chain(odd);
+        for switches in 0..8u8 {
+            let wild = [switches & 1 != 0, switches & 2 != 0, switches & 4 != 0];
+            for a in keys() {
+                for b in keys() {
+                    for bounded in [false, true] {
+                        one_relation_agrees(a, b, wild, bounded);
+                    }
+                }
             }
         }
     }

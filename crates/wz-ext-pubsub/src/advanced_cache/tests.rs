@@ -160,6 +160,29 @@ fn parse_sn_range_mirrors_decode_range() {
     assert_eq!(parse_sn_range("7"), (Some(7), Some(7)));
 }
 
+/// A bounded `_sn` range holds a sample's sn at both of its ends and refuses one past either, an
+/// open end refuses none on its side, a sample with no sn is held only by an unbounded range, and
+/// no range holds every sample.
+#[test]
+fn sample_matches_sn_holds_both_ends_of_a_range() {
+    let range = Some((Some(10), Some(20)));
+    assert!(sample_matches_sn(Some(10), range), "the lower end is in");
+    assert!(sample_matches_sn(Some(20), range), "the upper end is in");
+    assert!(!sample_matches_sn(Some(9), range), "under the lower end");
+    assert!(!sample_matches_sn(Some(21), range), "past the upper end");
+    assert!(
+        sample_matches_sn(Some(u32::MAX), Some((Some(10), None))),
+        "an open upper end refuses none"
+    );
+    assert!(
+        sample_matches_sn(Some(0), Some((None, Some(20)))),
+        "an open lower end refuses none"
+    );
+    assert!(!sample_matches_sn(None, range), "no sn is outside a bound");
+    assert!(sample_matches_sn(None, Some((None, None))));
+    assert!(sample_matches_sn(None, None));
+}
+
 /// Integration over `answer_from_ring`: a populated ring + a synthetic
 /// query exercise the `_sn` filter, the `_max` cap, and the
 /// timestamp-stamped reply fan together.

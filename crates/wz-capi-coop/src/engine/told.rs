@@ -277,7 +277,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let departed = Face {
             id,
             link: Link::Waiting { at_us: u64::MAX },
-            replay: Replay::with_pacing(None),
+            replay: Replay::idle(),
             told: FaceTold::departed(apart),
         };
         if self.transport.links.push_face(departed).is_ok() {

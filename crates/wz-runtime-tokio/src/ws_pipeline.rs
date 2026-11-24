@@ -374,7 +374,7 @@ pub fn wire_ws_stream(link: WsLink) -> (WsReadDriver, Arc<WsWriteDriver>, Writer
     let subject = ip_link_subject(LinkKind::Ws, wire.local_addr().ok());
     // R311y473 — the adminspace `{src,dst}` pair, off the same wrapped TCP socket
     // and in the same before-the-split window.
-    let endpoints = crate::link_interfaces::ip_link_endpoints(
+    let endpoints = crate::link_interfaces::ip_link_ends(
         LinkKind::Ws,
         wire.local_addr().ok(),
         wire.peer_addr().ok(),
@@ -488,7 +488,7 @@ pub struct WsWriteDriver {
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y473 — this link's `{src,dst}` locator pair for the adminspace.
-    endpoints: Option<wz_session_core::link::LinkEndpoints>,
+    endpoints: Option<wz_session_core::link::KeptLinkEnds>,
     /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy`.
     #[cfg(feature = "runtime-zero-copy")]
@@ -506,7 +506,7 @@ impl WsWriteDriver {
         tx: crate::writer_queue::OutboundTx,
         end: WsEnd,
         subject: LinkSubject,
-        endpoints: Option<wz_session_core::link::LinkEndpoints>,
+        endpoints: Option<wz_session_core::link::KeptLinkEnds>,
     ) -> Self {
         Self {
             tx,
@@ -544,8 +544,10 @@ impl BoxedLinkDriver for WsWriteDriver {
     }
 
     // R311y473 — the adminspace `{src,dst}` pair resolved at open.
-    fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
-        self.endpoints.as_ref()
+    fn link_ends(&self) -> Option<wz_session_core::link::LinkEnds<'_>> {
+        self.endpoints
+            .as_ref()
+            .map(wz_session_core::link::KeptLinkEnds::ends)
     }
 
     // The writer queue stamps the end of every write; see the stream driver.
