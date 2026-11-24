@@ -320,7 +320,7 @@ fn interest_ask<'a>(
 mod tests {
     use super::*;
     use crate::session::{
-        engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+        engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
         z_session_move,
     };
 
@@ -337,7 +337,7 @@ mod tests {
             core::ptr::eq(PicoSession::of(handle), PicoSession::of(handle)),
             "one view, lent each time"
         );
-        let kept = engine_of(handle);
+        let kept = engine_held(handle).clone();
         assert!(
             Arc::ptr_eq(&PicoSession::of(handle).engine, &kept),
             "over the session's engine"

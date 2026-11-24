@@ -708,7 +708,7 @@ impl SessionTail {
         Self {
             open: crate::ffi::OpenClosures::default(),
             #[cfg(not(feature = "engine-tokio"))]
-            arena: core::mem::ManuallyDrop::new(engine_of(handle)),
+            arena: core::mem::ManuallyDrop::new(engine_held(handle).clone()),
         }
     }
 }
@@ -853,13 +853,6 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 /// made: no table of its functions is made, so the operations the build never calls are not linked.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
-
-/// The engine behind a session handle, to keep: what an entity declared on the session holds for
-/// its own life. The engine hands itself out, so this crate never turns an engine's own type into
-/// the port's, which would instantiate the engine's drop glue a second time here.
-pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> {
-    handle.drive.engine()
-}
 
 /// The engine behind a session handle as the session holds it, for the length of one call: a door
 /// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
@@ -3724,9 +3717,10 @@ mod session_place_tests {
         // while the engine the test holds keeps the session's arena standing.
         unsafe {
             let mut session = listening_on_loopback();
-            let engine = engine_of(
+            let engine = engine_held(
                 session_handle(z_session_loan(&session)).expect("an open session has its handle"),
-            );
+            )
+            .clone();
             let mut copy = z_owned_session_t {
                 _val: session._val,
                 _cnt: session._cnt,
@@ -3758,7 +3752,7 @@ mod session_place_tests {
             let mut session = listening_on_loopback();
             let handle =
                 session_handle(z_session_loan(&session)).expect("an open session has its handle");
-            let kept = engine_of(handle);
+            let kept = engine_held(handle).clone();
             assert!(
                 alloc::sync::Arc::ptr_eq(&kept, engine_held(handle)),
                 "the engine kept is the one held"
@@ -3789,9 +3783,13 @@ mod session_place_tests {
         // SAFETY: every pointer is to a live owned value of this frame.
         unsafe {
             let mut session = listening_on_loopback();
-            let engine = alloc::sync::Arc::downgrade(&engine_of(
-                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
-            ));
+            let engine = alloc::sync::Arc::downgrade(
+                &engine_held(
+                    session_handle(z_session_loan(&session))
+                        .expect("an open session has its handle"),
+                )
+                .clone(),
+            );
             let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
                 core::ptr::from_ref(&dropped).cast_mut().cast(),
                 None,

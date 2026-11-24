@@ -2397,7 +2397,7 @@ mod key_text_tests {
 mod arena_key_tests {
     use super::*;
     use crate::session::{
-        engine_of, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
+        engine_held, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
         z_session_loan, z_session_loan_mut, z_session_move,
     };
 
@@ -2407,7 +2407,7 @@ mod arena_key_tests {
         let session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         (session, engine)
     }
 

@@ -3670,7 +3670,7 @@ mod place_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::session::{
-        engine_of, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
+        engine_held, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
         z_session_loan, z_session_loan_mut, z_session_move,
     };
 
@@ -3747,7 +3747,7 @@ mod place_tests {
     fn engine_of_session(session: &z_owned_session_t) -> Arc<Engine> {
         // SAFETY: a live session of this frame's caller.
         let handle = unsafe { session_handle(z_session_loan(session)) };
-        engine_of(handle.expect("an open session has its handle"))
+        engine_held(handle.expect("an open session has its handle")).clone()
     }
 
     /// Closing the session lets go of both listeners' closures and of the background listener's

@@ -2587,7 +2587,7 @@ mod tests {
     fn a_gets_place_goes_back_with_its_last_leg() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -2605,7 +2605,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many get places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =

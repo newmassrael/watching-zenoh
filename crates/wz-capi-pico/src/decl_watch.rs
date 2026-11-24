@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn a_watch_holds_a_place_of_its_session_until_it_is_dropped() {
         use crate::session::{
-            engine_of, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
         static DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -506,7 +506,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
-        let engine = engine_of(handle);
+        let engine = engine_held(handle).clone();
         // How many watch places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: alloc::vec::Vec<Slot<u64>> =

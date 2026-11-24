@@ -4035,7 +4035,7 @@ mod tests {
     fn a_subscribers_place_goes_back_when_its_row_lets_go_of_the_closure() {
         use crate::object_slot::{retire_entity, Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4047,7 +4047,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many subscriber places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: alloc::vec::Vec<Slot<u64>> =

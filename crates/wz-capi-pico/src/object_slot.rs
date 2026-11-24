@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn an_object_larger_or_stricter_than_its_kinds_place_is_lent_none() {
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
@@ -815,7 +815,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         assert!(
             Slot::<[u8; PAST_THE_PLACE]>::take_entity(&engine, Kind::Publisher).is_none(),
             "larger than the place"
@@ -842,7 +842,7 @@ mod tests {
     #[test]
     fn a_session_lends_its_entities_places_and_spends_none_of_anothers() {
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
@@ -856,7 +856,7 @@ mod tests {
             let session = listening_on_loopback();
             // SAFETY: the session is live and owned by this frame.
             let handle = unsafe { session_handle(z_session_loan(&session)) };
-            let engine = engine_of(handle.expect("an open session has its handle"));
+            let engine = engine_held(handle.expect("an open session has its handle")).clone();
             (session, engine)
         };
         let (mut one, one_engine) = open();
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn an_entitys_place_goes_back_with_the_last_of_its_owner_and_closures() {
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
@@ -934,7 +934,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many querier places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<crate::session::Engine>| {
             let claimed: Vec<Slot<u64>> =
@@ -995,14 +995,14 @@ mod tests {
     #[test]
     fn a_kept_place_outlives_its_owner_and_is_not_waited_for() {
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many querier places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<crate::session::Engine>| {
             let claimed: Vec<Slot<u64>> =

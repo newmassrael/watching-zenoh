@@ -2926,7 +2926,7 @@ mod tests {
     fn a_queryables_place_goes_back_when_its_row_lets_go_of_the_closure() {
         use crate::object_slot::{count_in_entity, kept_at, retire_entity, Answering, Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
@@ -2938,7 +2938,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many queryable places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =
@@ -3043,7 +3043,7 @@ mod kept_query_tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    use crate::session::{engine_of, listening_on_loopback, session_handle};
+    use crate::session::{engine_held, listening_on_loopback, session_handle};
     use crate::{
         z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_reply, z_closure_reply_move,
         z_config_default, z_config_loan_mut, z_config_move, z_get, z_get_options_default,
@@ -3173,9 +3173,10 @@ mod kept_query_tests {
         // sessions, whose callbacks read it.
         unsafe {
             let mut listener = listening_on_loopback();
-            let engine = engine_of(
+            let engine = engine_held(
                 session_handle(z_session_loan(&listener)).expect("an open session has its handle"),
-            );
+            )
+            .clone();
             let session = Arc::downgrade(&engine);
             let locator = engine
                 .listening()
