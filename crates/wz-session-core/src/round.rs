@@ -64,6 +64,7 @@ use crate::reliability::Reliability;
 use crate::reply_sink::{ReplyKind, ReplyView};
 use crate::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo};
 use crate::session_tables::Presence;
+use crate::session_zid::ZID_MAX;
 use crate::sink::SampleView;
 
 /// A call a record of the round owes, begun on a row of the session's tables under its lock and
@@ -93,6 +94,43 @@ pub trait TokenCall: RoundCall {
     fn hand(&self, sample: LivelinessSample<'_>);
 }
 
+/// What a declaration watch is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclEventKind {
+    /// A peer declared an entity.
+    Declared,
+    /// A peer retracted the entity it had declared.
+    Undeclared,
+    /// A peer has sent every declaration it held when its link came up.
+    Synced,
+    /// The watch was owed events the round had no room for.
+    Lost,
+}
+
+/// One event a declaration watch is handed ([`WatchCall::hand`]); what it borrows lives for the
+/// call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclEvent<'a> {
+    /// What it tells.
+    pub kind: DeclEventKind,
+    /// The id of the declaration, for a declaration and a retraction; how many events were lost,
+    /// for a loss.
+    pub id: u64,
+    /// The key of a declaration; empty for the others.
+    pub keyexpr: &'a str,
+    /// The zenoh id of the peer it came from, as its link's handshake gave it, when it names one.
+    pub peer: Option<&'a [u8]>,
+}
+
+/// A call of a declaration watch's sink, which what the peers declare and retract is handed to.
+pub trait WatchCall: RoundCall {
+    /// Whether `other` is a call of the same watch.
+    fn same_row(&self, other: &Self) -> bool;
+
+    /// Hand `event` to the watch's sink.
+    fn hand(&self, event: DeclEvent<'_>);
+}
+
 /// What a round is made of in an engine's own types: the calls its records owe, as the rows of
 /// the engine's tables begin them, and which kinds of record its build keeps. A kind of row the
 /// build keeps none of has the call [`Infallible`], of which none is ever made, and its record
@@ -107,6 +145,8 @@ pub trait RoundCalls: 'static {
     type Liveliness: TokenCall;
     /// A call of a queryable's callback.
     type Queryable: RoundCall;
+    /// A call of a declaration watch's sink.
+    type Watch: WatchCall;
     /// The leg of a get a reply is held for: the place of the row its callback lies in.
     type Leg: Copy;
     /// A leg's callback, as its holders hand it back once its row's last count is given back.
@@ -117,6 +157,8 @@ pub trait RoundCalls: 'static {
     type Replies: Presence;
     /// Whether the round holds queries for the session's queryables.
     type Queries: Presence;
+    /// Whether the round holds what the peers declare and retract, for the declaration watches.
+    type Watches: Presence;
     /// Whether the session's own put is handed the calls of the subscribers it reaches
     /// ([`Round::capture`]).
     type Capture: Presence;
@@ -177,6 +219,16 @@ impl TokenCall for Infallible {
     }
 
     fn hand(&self, _sample: LivelinessSample<'_>) {
+        match *self {}
+    }
+}
+
+impl WatchCall for Infallible {
+    fn same_row(&self, _other: &Self) -> bool {
+        match *self {}
+    }
+
+    fn hand(&self, _event: DeclEvent<'_>) {
         match *self {}
     }
 }
@@ -423,6 +475,47 @@ enum Held<C: RoundCalls> {
     Reply(<C::Replies as Presence>::Record<HeldReply>),
     /// A query, for the callbacks of the queryables it reached.
     Query(<C::Queries as Presence>::Record<HeldQuery>),
+    /// What a peer declared or retracted, for the sinks of the declaration watches it reached.
+    DeclWatch(<C::Watches as Presence>::Record<HeldWatch>),
+}
+
+/// What a peer declared or retracted as a record of the round holds it: where the key of a
+/// declaration lies, and the peer it came from.
+struct HeldWatch {
+    kind: DeclEventKind,
+    id: Word,
+    key: Span,
+    peer: PeerZid,
+}
+
+/// The zenoh id of the peer an event came from, in bytes of the record: no link lends it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PeerZid {
+    bytes: [u8; ZID_MAX],
+    /// How many of `bytes` it is; none at all names no peer.
+    len: u8,
+}
+
+impl PeerZid {
+    /// `peer` held; `None` for bytes longer than a zenoh id, which no handshake gives.
+    fn of(peer: Option<&[u8]>) -> Option<Self> {
+        let mut held = Self {
+            bytes: [0; ZID_MAX],
+            len: 0,
+        };
+        if let Some(peer) = peer {
+            held.bytes.get_mut(..peer.len())?.copy_from_slice(peer);
+            held.len = u8::try_from(peer.len()).ok()?;
+        }
+        Some(held)
+    }
+
+    /// The peer, when one is named.
+    fn peer(&self) -> Option<&[u8]> {
+        self.bytes
+            .get(..usize::from(self.len))
+            .filter(|zid| !zid.is_empty())
+    }
 }
 
 /// A token's appearance or retraction as a record of the round holds it: where its key lies.
@@ -490,6 +583,8 @@ enum Owed<C: RoundCalls> {
     Reply(C::Leg),
     /// A queryable's: the call begun on its row as the query reached it.
     Query(C::Queryable),
+    /// A declaration watch's: the call begun on its row as the event reached it.
+    DeclWatch(C::Watch),
 }
 
 impl<C: RoundCalls> Owed<C> {
@@ -497,7 +592,15 @@ impl<C: RoundCalls> Owed<C> {
     fn subscriber(&self) -> Option<&C::Subscriber> {
         match self {
             Self::Subscriber(callback) => Some(callback),
-            Self::Liveliness(_) | Self::Reply(_) | Self::Query(_) => None,
+            Self::Liveliness(_) | Self::Reply(_) | Self::Query(_) | Self::DeclWatch(_) => None,
+        }
+    }
+
+    /// The call, when it is of a declaration watch's sink.
+    fn watch(&self) -> Option<&C::Watch> {
+        match self {
+            Self::DeclWatch(call) => Some(call),
+            _ => None,
         }
     }
 
@@ -662,7 +765,7 @@ impl<C: RoundCalls> Table<C> {
     /// The text at `span`: a key, whose bytes were a `&str`'s.
     fn text(&self, span: Span) -> &str {
         // SAFETY: a key's bytes were a `&str`'s (`SampleView::keyexpr`, `ReplyView::keyexpr`,
-        // `LivelinessSample::keyexpr`), copied whole, so they are UTF-8.
+        // `LivelinessSample::keyexpr`, `DeclEvent::keyexpr`), copied whole, so they are UTF-8.
         unsafe { core::str::from_utf8_unchecked(self.bytes(span)) }
     }
 
@@ -820,6 +923,9 @@ impl<C: RoundCalls> Table<C> {
                     }
                     Held::Reply(reply) => <C::Replies as Presence>::read::<HeldReply>(reply).key,
                     Held::Query(query) => <C::Queries as Presence>::read::<HeldQuery>(query).key,
+                    Held::DeclWatch(watch) => {
+                        <C::Watches as Presence>::read::<HeldWatch>(watch).key
+                    }
                 };
                 if key.place == Place::Held {
                     // SAFETY: the record took one count of the block when it was written
@@ -936,6 +1042,13 @@ impl<C: RoundCalls> Released<C> {
         }
     }
 
+    /// [`Self::end`] for a call of a declaration watch's sink.
+    fn end_watch(&self, call: C::Watch) {
+        if call.end() {
+            self.mark();
+        }
+    }
+
     /// The holders of the legs' callbacks, once the session told the round of them.
     fn legs(&self) -> Option<&dyn LegHolders<C>> {
         <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(Option::as_deref)
@@ -960,6 +1073,7 @@ impl<C: RoundCalls> Released<C> {
                 }
             }
             Owed::Query(call) => self.end_query(call),
+            Owed::DeclWatch(call) => self.end_watch(call),
         }
     }
 }
@@ -1577,6 +1691,128 @@ impl<C: RoundCalls> Round<C> {
         unsafe { self.filled(table) };
     }
 
+    /// Hold `event`, what a peer declared or retracted, for `call`, a call of a declaration watch's
+    /// sink begun on its row: the key of a declaration read where it lies, in the block of
+    /// `held`, a key of the session's key arena, when the declaration's row keeps it there, which
+    /// the record holds until it is handed out (so a retraction in the same frame does not take it
+    /// from under the record), or else written into the table. Written once for the watches it
+    /// reaches one after the other, as a sample is. `false`, the call ended, when it found no room
+    /// or no place, counted with what was dropped: the watch is told the loss
+    /// ([`DeclEventKind::Lost`]), and the peer is not held back for it.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub unsafe fn offer_decl_watch(
+        &self,
+        call: C::Watch,
+        event: DeclEvent<'_>,
+        held: Option<&KeyRef>,
+    ) -> bool {
+        // SAFETY: the caller's contract.
+        let lending = unsafe { self.lending() };
+        // SAFETY: the caller's contract.
+        let Some(table) = (unsafe { self.writable() }) else {
+            self.refuse(false);
+            self.released.end_watch(call);
+            return false;
+        };
+        let key = event.keyexpr.as_bytes();
+        if let Some(
+            entry @ Entry {
+                what: Held::DeclWatch(watch),
+                ..
+            },
+        ) = table.entries.last()
+        {
+            let watch = <C::Watches as Presence>::read::<HeldWatch>(watch);
+            let joins = watch.kind == event.kind
+                && watch.id.get() == event.id
+                && watch.peer.peer() == event.peer
+                && same(table.bytes(watch.key), key)
+                && !table
+                    .owed(entry)
+                    .iter()
+                    .filter_map(Owed::watch)
+                    .any(|owed| owed.same_row(&call));
+            if joins && Self::joins(table) {
+                if let Err(full) = table.callbacks.push(Owed::DeclWatch(call)) {
+                    self.refuse(false);
+                    self.released.settle(full.0);
+                    return false;
+                }
+                if let Some(last) = table.entries.last_mut() {
+                    last.owed = last.owed.saturating_add(1);
+                }
+                // SAFETY: the caller's contract: the session's lock is held.
+                unsafe { self.filled(table) };
+                return true;
+            }
+        }
+        if !Self::takes(table, 1) {
+            self.refuse(false);
+            self.released.end_watch(call);
+            return false;
+        }
+        let placed = match held.and_then(|held| table.held_key(held)) {
+            Some(at) => Some(at),
+            None => table.place_key(key, lending),
+        };
+        let (Some(at), Some(peer)) = (placed, PeerZid::of(event.peer)) else {
+            self.refuse_unplaced(false);
+            self.released.end_watch(call);
+            return false;
+        };
+        let watch = HeldWatch {
+            kind: event.kind,
+            id: Word::of(event.id),
+            key: at,
+            peer,
+        };
+        // A round whose build keeps no watch refuses the event, as one with no room does.
+        let Some(watch) = <C::Watches as Presence>::record(watch) else {
+            self.refuse(false);
+            self.released.end_watch(call);
+            return false;
+        };
+        let first = table.callbacks.len();
+        let entry = table
+            .entries
+            .push(Entry::owing_one(Held::DeclWatch(watch), first));
+        if let (Ok(()), Some(held)) = (&entry, held) {
+            table.hold_key(at, held);
+        }
+        let kept = match entry {
+            Ok(()) => match table.callbacks.push(Owed::DeclWatch(call)) {
+                Ok(()) => true,
+                Err(full) => {
+                    self.released.settle(full.0);
+                    false
+                }
+            },
+            Err(_) => {
+                self.released.end_watch(call);
+                false
+            }
+        };
+        debug_assert!(kept, "the table had the room its checks found");
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
+        kept
+    }
+
+    /// Whether the table takes `records` more records owing `callbacks` callbacks now: what a
+    /// source that writes several records at once asks before it writes the first (a declaration
+    /// watch's catch-up). `false` while the table is sealed or handed out.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub unsafe fn has_room(&self, records: usize, callbacks: usize) -> bool {
+        // SAFETY: the caller's contract.
+        (unsafe { self.writable() }).is_some_and(|table| {
+            table.entries.free_slots() >= records && table.callbacks.free_slots() >= callbacks
+        })
+    }
+
     /// Hold `view`, a reply, for leg `leg`, whose callback answers it, each part read where it lies
     /// or written into the table, with a count of the leg's row ([`LegHolders`]). A reply is the
     /// answer a get waits for: one that finds no room is counted with the records that hold their
@@ -2104,6 +2340,18 @@ impl<C: RoundCalls> Round<C> {
                         for call in owed.iter().filter_map(Owed::query) {
                             answering.answer_query(call, &view, query.generation.get());
                         }
+                    }
+                }
+                Held::DeclWatch(watch) => {
+                    let watch = <C::Watches as Presence>::read::<HeldWatch>(watch);
+                    let event = DeclEvent {
+                        kind: watch.kind,
+                        id: watch.id.get(),
+                        keyexpr: table.text(watch.key),
+                        peer: watch.peer.peer(),
+                    };
+                    for call in owed.iter().filter_map(Owed::watch) {
+                        call.hand(event);
                     }
                 }
             }

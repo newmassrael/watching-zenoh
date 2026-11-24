@@ -215,6 +215,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
                 let view = BorrowedDecl {
                     id: decl.id,
                     keyexpr: &resolved,
+                    held: None,
                 };
                 self.dispatch_declared_borrowed(&view);
             }
@@ -260,6 +261,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
                 let view = BorrowedDecl {
                     id: decl.id,
                     keyexpr: resolved,
+                    held: None,
                 };
                 self.dispatch_declared_borrowed(&view);
             }

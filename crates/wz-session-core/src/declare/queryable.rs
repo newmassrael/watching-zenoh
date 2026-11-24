@@ -1371,9 +1371,15 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
                 peer.aliases.remove(id);
             }
         }
+        // The key as the row just bound keeps it, so a holder that reads it past the call holds
+        // its block rather than copy it.
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
+            held: peer
+                .declared
+                .find(id)
+                .and_then(|row| crate::bounded::KeyBacking::held(&row.keyexpr)),
         };
         self.dispatch_declared_borrowed(&view);
         // R311kh — membership changed: flip-fire the matching

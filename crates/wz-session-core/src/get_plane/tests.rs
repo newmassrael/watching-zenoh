@@ -48,11 +48,13 @@ impl RoundCalls for Asking {
     type Subscriber = Infallible;
     type Liveliness = Infallible;
     type Queryable = Infallible;
+    type Watch = core::convert::Infallible;
     type Leg = LegId;
     type ReplyCallback = Counted;
     type Tokens = Absent;
     type Replies = Present;
     type Queries = Absent;
+    type Watches = Absent;
     type Capture = Absent;
     type Group = Absent;
     type Locks = StdLocks;
@@ -81,11 +83,13 @@ impl RoundCalls for Remote {
     type Subscriber = Infallible;
     type Liveliness = Infallible;
     type Queryable = Infallible;
+    type Watch = core::convert::Infallible;
     type Leg = LegId;
     type ReplyCallback = Counted;
     type Tokens = Absent;
     type Replies = Present;
     type Queries = Absent;
+    type Watches = Absent;
     type Capture = Absent;
     type Group = Absent;
     type Locks = StdLocks;

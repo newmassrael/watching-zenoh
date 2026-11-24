@@ -112,6 +112,7 @@ impl RoundCalls for CoopCalls {
     type Queryable = QueryableCall;
     #[cfg(not(feature = "queryable"))]
     type Queryable = core::convert::Infallible;
+    type Watch = core::convert::Infallible;
     #[cfg(feature = "query")]
     type Leg = LegId;
     #[cfg(not(feature = "query"))]
@@ -132,6 +133,7 @@ impl RoundCalls for CoopCalls {
     type Queries = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "queryable"))]
     type Queries = wz_session_core::session_tables::Absent;
+    type Watches = wz_session_core::session_tables::Absent;
     #[cfg(feature = "local-subscriber")]
     type Capture = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "local-subscriber"))]
