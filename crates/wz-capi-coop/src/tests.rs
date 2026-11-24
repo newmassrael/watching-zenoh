@@ -2772,7 +2772,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
         matches!(
             refused,
             Some(OpenError::Arena(ArenaRefused::Limit {
-                limit: "MAX_STATIC_CONNECT",
+                limit: crate::arena::ArenaLimit::MaxStaticConnect,
                 ..
             }))
         ),

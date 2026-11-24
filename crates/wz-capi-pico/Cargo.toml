@@ -628,8 +628,10 @@ unstable-api = ["wz-capi-core?/unstable-api", "wz-session-core/pubsub-source-inf
 # state over the build's defaults (`src/config_policy.rs`). wz's own, which zenoh-pico has not: on
 # in a build that names nothing, and off in the zenoh-pico preset (`configs/zenoh-pico_defconfig`),
 # whose sessions run under the build's policies and limits and whose open links no resolver of a
-# statement. Both engines take the policies the open hands them, so it selects neither.
-config-policy = ["wz-capi-core?/config-policy"]
+# statement. Both engines take the policies the open hands them, so it selects neither. The doors
+# select policies after the build, so their domains keep every value the build does not leave out
+# (`wz-session-core/policy-selection`); without them each such policy is its build default alone.
+config-policy = ["wz-capi-core?/config-policy", "wz-session-core/policy-selection"]
 # `conformance-digest`: `wz_ext_conformance_digest`, the digest of the configuration the library
 # was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
 # package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.
@@ -987,6 +989,9 @@ features = ["rt-multi-thread", "sync", "macros"]
 optional = true
 
 [dev-dependencies]
+# The tests select every value of a policy, with or without the config doors, which
+# `policy-selection` keeps in its domain for the test build alone.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["policy-selection"] }
 # The `tls/` link on the cooperative engine (`tests/tls_coop_roundtrip.rs`) states its certificate
 # keys inline, as the stock examples do: the test encodes the PEM of the fixture's certificate.
 base64 = "0.22"

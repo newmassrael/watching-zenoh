@@ -220,12 +220,12 @@ fn a_key_longer_than_a_fixed_row_holds_is_refused_before_an_id_is_spent() {
 }
 
 #[test]
-fn an_undeclared_entity_hands_its_row_back_and_its_handle_goes_stale() {
+fn an_undeclared_entity_hands_its_callback_back_and_its_handle_goes_stale() {
     let mut tables = Tables::new();
     let sub = subscribe(&mut tables, "a", Locality::Any, 7);
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
     assert_eq!(undeclared.id, sub.id);
-    assert_eq!(undeclared.row.unwrap().into_callback(), 7);
+    assert_eq!(undeclared.taken.unwrap(), 7);
     assert_eq!(undeclared.keyexpr, None);
     assert!(tables.undeclare_subscriber(sub.handle).is_none());
     assert!(reached(&tables, "a", false).is_empty());
@@ -241,7 +241,7 @@ fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() 
     assert_eq!(call.call, 7);
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
     assert_eq!(undeclared.id, sub.id);
-    assert!(undeclared.row.is_none(), "a call of it runs");
+    assert!(undeclared.taken.is_none(), "a call of it runs");
     // No later sample reaches it and no call of it begins, while the running call still holds it.
     assert!(tables.subscribers_for("a", false).next().is_none());
     assert!(tables.begin_subscriber(sub.handle).is_none());
@@ -279,17 +279,17 @@ fn a_walk_lets_go_of_the_rows_whose_last_call_ended() {
     assert!(tables
         .undeclare_subscriber(gone.handle)
         .unwrap()
-        .row
+        .taken
         .is_none());
     assert!(tables
         .undeclare_queryable(qbl.handle)
         .unwrap()
-        .row
+        .taken
         .is_none());
     assert!(tables
         .undeclare_liveliness_subscriber(live.handle)
         .unwrap()
-        .row
+        .taken
         .is_none());
     assert!(
         tables.release_drained_subscriber(&mut 0).is_none(),
@@ -343,7 +343,7 @@ fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
     );
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
     assert!(
-        undeclared.row.is_some(),
+        undeclared.taken.is_some(),
         "no call runs: the undeclarer lets it go"
     );
     assert!(tables.release_subscriber(sub.handle).is_none());
@@ -381,12 +381,12 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
     assert!(tables
         .undeclare_queryable(qbl.handle)
         .unwrap()
-        .row
+        .taken
         .is_none());
     assert!(tables
         .undeclare_liveliness_subscriber(live.handle)
         .unwrap()
-        .row
+        .taken
         .is_none());
     assert!(tables
         .undeclare_matching_listener(listener)
@@ -1073,7 +1073,7 @@ fn lent_tables_take_the_arena_their_plan_counts_and_hold_the_rows_they_were_lent
         "a/b"
     );
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
-    assert_eq!(undeclared.row.unwrap().into_callback(), 1);
+    assert_eq!(undeclared.taken.unwrap(), 1);
 }
 
 #[test]
@@ -1892,7 +1892,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
         "matched once, then answered from the cache"
     );
     let gone = tables.undeclare_subscriber(first.handle).unwrap();
-    assert_eq!(gone.row.unwrap().callback().0.get(), 3);
+    assert_eq!(gone.taken.unwrap().0.get(), 3);
     let second = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
@@ -1944,7 +1944,7 @@ fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     assert!(tables.has_local_matching("a/x"));
     let call = tables.begin_subscriber(sub.handle).unwrap();
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
-    assert!(undeclared.row.is_none(), "let go of by the last call");
+    assert!(undeclared.taken.is_none(), "let go of by the last call");
     assert_eq!(tables.fire_matching("a/x", true, false, count), 0);
     assert_eq!(tables.fire_matching("a/x", false, true, count), 0);
     assert!(!tables.has_local_matching("a/x"));

@@ -269,11 +269,13 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 #
 # The conformance table of decision D7 (`contract` re-exports it), which this crate's own tests
 # run its transports through, and the action counters a failed handshake's assertion prints
-# (`action-trace`).
+# (`action-trace`). The tests select every value of a policy, which `policy-selection` keeps in
+# its domain for the test build alone.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
     "lifecycle-contract",
     "action-trace",
+    "policy-selection",
 ] }
 
 [lints]

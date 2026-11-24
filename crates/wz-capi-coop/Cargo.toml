@@ -345,8 +345,10 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
 # `queryable` is then shown a peer's queryable it keeps no table of. The stand-in's sequenced
 # publisher stamps a source info the advanced subscriber orders by (`pubsub-source-info`), which
 # the C ABI's `advanced` brings through its unstable API. The registry's tests read the pools its
-# faces share (`peer-row-pools`), in every test build.
+# faces share (`peer-row-pools`), in every test build. The tests select every value of a policy,
+# which `policy-selection` keeps in its domain for the test build alone.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "policy-selection",
     "pubsub-source-info",
     "peer-row-pools",
     "session-unicast-accept",
