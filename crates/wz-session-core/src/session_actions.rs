@@ -9371,13 +9371,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and so not an intra-doc link from this `pub` item). A name that does not
     /// encode leaves the chain as it was.
     pub fn stage_local_region(&self, role: ExtChainRole) {
-        // Encoded where the identity is read, so the name is not copied out of the facts first.
-        let Ok(entry) = self.fact_local_region(|name| {
-            name.as_ref()
-                .map(crate::extregion::encode_region_name_ext)
-                .transpose()
-        }) else {
-            return;
+        let entry = match self.local_region() {
+            Some(name) => match crate::extregion::encode_region_name_ext(&name) {
+                Ok(entry) => Some(entry),
+                Err(_) => return,
+            },
+            None => None,
         };
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RegionName, entry);
