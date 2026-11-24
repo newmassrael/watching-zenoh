@@ -1263,7 +1263,7 @@ fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens()
 
     // The control: the same bytes as a plain value are bytes.
     let mut plain = local();
-    plain.payload = Some(b"local".to_vec());
+    plain.payload = Some(std::borrow::Cow::Owned(b"local".to_vec()));
     session
         .query("home/temp", plain, |_| {}, |_| {})
         .expect("query");
@@ -16539,7 +16539,7 @@ fn an_adv_recovery_selector_reads_as_accept_any() {
 
     let selector = wz_session_core::selector_params::anyke_params(&["_sn=3..".to_string()]);
     let mut opts = QueryOptions::get();
-    opts.parameters = Some(selector.into_bytes());
+    opts.parameters = Some(std::borrow::Cow::Owned(selector.into_bytes()));
     assert_eq!(opts.effective_accept_replies(), ReplyKeyExpr::Any);
 }
 

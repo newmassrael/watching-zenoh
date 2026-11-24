@@ -281,7 +281,11 @@ impl RouterState {
         // two, which the chain refuses.
         let mut options = options.clone();
         options.payload = None;
-        let encoding = options.encoding.take().unwrap_or_default();
+        let encoding = options
+            .encoding
+            .take()
+            .map(wz_session_core::sample::CarriedEncoding::into_hint)
+            .unwrap_or_default();
         let (rid, request) = self.hold_query(keyexpr, &options, ingress, on_reply, on_final)?;
         if let Err(error) = self.forwarder.local_get_shm(&request, value, &encoding) {
             // Nothing was asked, so nothing will end the query held for it.

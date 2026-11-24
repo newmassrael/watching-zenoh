@@ -6249,7 +6249,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 })
                 .map_err(SendWireError::Codec)
                 .and_then(|request| {
-                    self.send_query_request(request, descriptor_value, opts.encoding.as_ref())
+                    self.send_query_request(
+                        request,
+                        descriptor_value,
+                        opts.encoding
+                            .clone()
+                            .map(wz_session_core::sample::CarriedEncoding::into_hint)
+                            .as_ref(),
+                    )
                 });
                 // R311ln — roll the pending entry back on a failed wire
                 // emit (unregister-only; see the header comment).
@@ -6289,7 +6296,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                             })
                         })
                         .and_then(|chunk| chunk.receiver_view())
-                        .map(|view| (opts.encoding.clone().unwrap_or_default(), view));
+                        .map(|view| {
+                            (
+                                opts.encoding
+                                    .clone()
+                                    .map(wz_session_core::sample::CarriedEncoding::into_hint)
+                                    .unwrap_or_default(),
+                                view,
+                            )
+                        });
                     #[cfg(not(feature = "transport-shm"))]
                     let local_value: Option<(
                         wz_session_core::sample::EncodingHint,
@@ -6458,7 +6473,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// session that negotiated SHM, and the local one hands a queryable the chunk (R3061).
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
     fn adopt_shm_value(opts: &mut QueryOptions, value: &wz_session_core::extshm::ShmSendHandle) {
-        opts.payload = Some(value.bytes().to_vec());
+        opts.payload = Some(std::borrow::Cow::Owned(value.bytes().to_vec()));
     }
 
     /// R2962 — whether a REMOTE peer has declared a subscriber matching

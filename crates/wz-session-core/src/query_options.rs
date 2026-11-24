@@ -13,6 +13,7 @@
 //! runtime's same-named features forward to them, so every gate below means what it meant
 //! there.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use crate::link_restriction::LinkRestriction;
@@ -26,7 +27,7 @@ use crate::query_mode::{ConsolidationMode, QueryTarget};
 // the cfg-gated-import shape Layer C1cf exists to catch.
 #[cfg(any(feature = "query-get", feature = "query-selector-parameters"))]
 use crate::reply_acceptance::ReplyKeyExpr;
-use crate::sample::{EncodingHint, QosLevel, SourceInfo};
+use crate::sample::{CarriedEncoding, EncodingHint, EncodingRef, QosLevel, SourceInfo};
 
 /// R311y326 — the platform default per-query timeout, in milliseconds.
 ///
@@ -172,7 +173,7 @@ pub fn resolved_consolidation(
 /// which is the equivalent wire-elision shape).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct QueryOptions {
+pub struct QueryOptionsOf<'a> {
     /// Query-side locality predicate. `Any` (default) routes both
     /// wire and loopback; `Remote` to wire only; `SessionLocal` to
     /// loopback only. Mirrors zenoh-pico's `opt.allowed_destination`
@@ -229,26 +230,27 @@ pub struct QueryOptions {
     /// Optional Query-body payload — the querier's attached VALUE (with the
     /// optional `encoding` below). `query_metadata` collapses the `payload`
     /// and `encoding` slots into the value unit routed through
-    /// `build_request_query_with_meta`. Set via [`QueryOptions::with_payload`].
-    pub payload: Option<Vec<u8>>,
+    /// `build_request_query_with_meta`. Set via [`QueryOptions::with_payload`], or lent for
+    /// the call via [`Self::with_payload_lent`].
+    pub payload: Option<Cow<'a, [u8]>>,
     /// Optional encoding metadata for the Query body VALUE. Mirror of
     /// `z_get_options_t.encoding`; rides the value ext beside `payload`. An
     /// encoding-only value (no payload) is valid. Set via
-    /// [`QueryOptions::with_encoding`].
-    pub encoding: Option<EncodingHint>,
+    /// [`QueryOptions::with_encoding`], or lent via [`Self::with_encoding_ref`].
+    pub encoding: Option<CarriedEncoding<'a>>,
     /// Optional Query-level attachment blob. Mirror of
     /// `z_get_options_t.attachment`. Propagated on the outbound Query
     /// since R240 (`build_request_query_with_meta` ->
     /// `RequestQueryBuilder::query_attachment`); an empty blob elides
-    /// the ext.
-    pub attachment: Option<Vec<u8>>,
+    /// the ext. Owned, or lent for the call.
+    pub attachment: Option<Cow<'a, [u8]>>,
     /// Optional Query selector parameters (the `_sn=START..&_max=N`
     /// URL-style selector after `?`). `None` (or empty) elides the `Q_P`
     /// flag + params slice on the outbound Query body. What an
     /// `ext-pubsub-advanced-subscriber` recovery / history GET carries so
     /// the advanced cache's `answer_from_ring` filters its ring. Mirror of
-    /// zenoh's `z_get(keyexpr, parameters, ..)`.
-    pub parameters: Option<Vec<u8>>,
+    /// zenoh's `z_get(keyexpr, parameters, ..)`. Owned, or lent for the call.
+    pub parameters: Option<Cow<'a, [u8]>>,
     /// Optional Query-level source-info (querier identity: zid / eid /
     /// sn) stamped on the outbound Query body (ext 0x01 ZBUF). `None`
     /// elides the ext. Symmetric to
@@ -308,7 +310,66 @@ pub struct QueryOptions {
     remote_inclusion: bool,
 }
 
-impl QueryOptions {
+/// The options a holder keeps past the call they were made for: every slot its own
+/// ([`QueryOptionsOf::into_owned`]).
+pub type QueryOptions = QueryOptionsOf<'static>;
+
+impl<'a> QueryOptionsOf<'a> {
+    /// These options with every slot their own: what a holder that keeps them past the call they
+    /// were made for keeps. Lent slots are copied; owned ones move.
+    pub fn into_owned(self) -> QueryOptions {
+        let Self {
+            allowed_destination,
+            links,
+            target_peer,
+            target,
+            consolidation,
+            payload,
+            encoding,
+            attachment,
+            parameters,
+            source_info,
+            timeout_ms,
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            reply_arrival,
+            expose_timestamp,
+            remote_inclusion,
+        } = self;
+        QueryOptionsOf {
+            allowed_destination,
+            links,
+            target_peer,
+            target,
+            consolidation,
+            payload: payload.map(|payload| Cow::Owned(payload.into_owned())),
+            encoding: encoding.map(CarriedEncoding::into_owned),
+            attachment: attachment.map(|attachment| Cow::Owned(attachment.into_owned())),
+            parameters: parameters.map(|parameters| Cow::Owned(parameters.into_owned())),
+            source_info,
+            timeout_ms,
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            reply_arrival,
+            expose_timestamp,
+            remote_inclusion,
+        }
+    }
+
+    /// A copy of these options with every slot its own, for an engine that keeps them past the
+    /// call: the lent slots copied, as [`Self::into_owned`] does.
+    pub fn to_owned_options(&self) -> QueryOptions {
+        self.clone().into_owned()
+    }
+
     /// Default `Locality::Any` options — fans both wire and loopback
     /// branches. Mirror of zenoh-pico's `z_get_options_default`
     /// in semantic intent (everything cleared / unset).
@@ -508,7 +569,14 @@ impl QueryOptions {
     /// is that a value-only query forfeits the runtime's `is_empty()` fast path
     /// there (see [`QueryOptions::query_metadata`]).
     pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
-        self.payload = Some(payload);
+        self.payload = Some(Cow::Owned(payload));
+        self
+    }
+
+    /// [`Self::with_payload`] with the bytes read where their holder keeps them for as long as
+    /// the call runs: a get sends its value from the caller's bytes, and nothing is copied for it.
+    pub fn with_payload_lent(mut self, payload: &'a [u8]) -> Self {
+        self.payload = Some(Cow::Borrowed(payload));
         self
     }
 
@@ -519,7 +587,14 @@ impl QueryOptions {
     /// VALUE ext alongside `payload` (see [`Self::with_payload`] for the
     /// propagation path + the signature-stability rationale).
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
-        self.encoding = Some(encoding);
+        self.encoding = Some(CarriedEncoding::Owned(encoding));
+        self
+    }
+
+    /// [`Self::with_encoding`] with the encoding read where its holder keeps it for as long as
+    /// the call runs.
+    pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
+        self.encoding = Some(CarriedEncoding::Lent(encoding));
         self
     }
 
@@ -529,7 +604,15 @@ impl QueryOptions {
     /// setter gates with it. The field stays (struct stability).
     #[cfg(feature = "query-attachment")]
     pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
-        self.attachment = Some(attachment);
+        self.attachment = Some(Cow::Owned(attachment));
+        self
+    }
+
+    /// [`Self::with_attachment`] with the bytes read where their holder keeps them for as long
+    /// as the call runs.
+    #[cfg(feature = "query-attachment")]
+    pub fn with_attachment_lent(mut self, attachment: &'a [u8]) -> Self {
+        self.attachment = Some(Cow::Borrowed(attachment));
         self
     }
 
@@ -543,7 +626,15 @@ impl QueryOptions {
     /// its ring.
     #[cfg(feature = "query-selector-parameters")]
     pub fn with_parameters(mut self, parameters: Vec<u8>) -> Self {
-        self.parameters = Some(parameters);
+        self.parameters = Some(Cow::Owned(parameters));
+        self
+    }
+
+    /// [`Self::with_parameters`] with the bytes read where their holder keeps them for as long
+    /// as the call runs.
+    #[cfg(feature = "query-selector-parameters")]
+    pub fn with_parameters_lent(mut self, parameters: &'a [u8]) -> Self {
+        self.parameters = Some(Cow::Borrowed(parameters));
         self
     }
 
@@ -581,7 +672,11 @@ impl QueryOptions {
         if accept == ReplyKeyExpr::MatchingQuery {
             return self;
         }
-        let existing = self.parameters.take().unwrap_or_default();
+        let existing = self
+            .parameters
+            .take()
+            .map(Cow::into_owned)
+            .unwrap_or_default();
         // Non-UTF-8 parameters cannot spell the ASCII flag, so they cannot
         // already carry it; appending is still correct, and the `;` join keeps
         // the byte list a valid parameter list either way.
@@ -589,7 +684,7 @@ impl QueryOptions {
             crate::selector_params::has_param(params, crate::selector_params::ANYKE_PARAM)
         });
         if has_flag {
-            self.parameters = Some(existing);
+            self.parameters = Some(Cow::Owned(existing));
             return self;
         }
         let mut next = existing;
@@ -597,7 +692,7 @@ impl QueryOptions {
             next.push(crate::selector_params::PARAM_LIST_SEPARATOR as u8);
         }
         next.extend_from_slice(crate::selector_params::ANYKE_PARAM.as_bytes());
-        self.parameters = Some(next);
+        self.parameters = Some(Cow::Owned(next));
         self
     }
 
@@ -904,8 +999,8 @@ impl QueryOptions {
             // R311y837 — the RESOLVED mode, not the caller's raw slot. zenoh
             // transmits what it resolved (`api/session.rs:2316`).
             consolidation: self.wire_consolidation(),
-            attachment: self.attachment.clone(),
-            parameters: self.parameters.clone(),
+            attachment: self.attachment.as_deref().map(<[u8]>::to_vec),
+            parameters: self.parameters.as_deref().map(<[u8]>::to_vec),
             source_info: self.source_info.clone(),
             // R311y250 — collapse the two ergonomic QueryOptions slots
             // (`payload` / `encoding`, each independently optional) into the
@@ -920,8 +1015,14 @@ impl QueryOptions {
             value: match (&self.payload, &self.encoding) {
                 (None, None) => None,
                 _ => Some((
-                    self.encoding.clone().unwrap_or_default(),
-                    self.payload.clone().unwrap_or_default(),
+                    self.encoding
+                        .as_ref()
+                        .map(|encoding| encoding.view().to_hint())
+                        .unwrap_or_default(),
+                    self.payload
+                        .as_deref()
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
                 )),
             },
             timeout_ms: self.effective_timeout_ms(),
@@ -953,7 +1054,7 @@ impl QueryOptions {
                             packed_id: 0,
                             schema: None,
                         },
-                        crate::reply_stage::EncodingParts::of,
+                        CarriedEncoding::view,
                     ),
                     payload.as_deref().unwrap_or(&[]),
                 )),
@@ -1046,8 +1147,8 @@ mod tests {
                 true,
             ));
         // Written past the setters, which only the builds that carry these slots have.
-        every.attachment = Some(alloc::vec![1, 2]);
-        every.parameters = Some(b"_time=[..]".to_vec());
+        every.attachment = Some(Cow::Owned(alloc::vec![1, 2]));
+        every.parameters = Some(Cow::Owned(b"_time=[..]".to_vec()));
         every.source_info = Some(SourceInfo::new(&[4; 8], 3, 2));
         let cases = [
             QueryOptions::get(),

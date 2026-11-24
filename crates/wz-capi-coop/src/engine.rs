@@ -243,7 +243,7 @@ pub(crate) use get::{Ended, LegSink};
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
-    wz_session_core::query_options::QueryOptions,
+    wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
     wz_session_core::reply_sink::{timeout_reply, ConsolidatingSink, ReplyView},
@@ -5713,7 +5713,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core: &mut Core<L, C>,
         own: query::OwnFinalHold<'_>,
         keyexpr: &str,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
     ) -> query::Asked {
         let rid = own.rid();
         let qos = opts.qos.unwrap_or(QosLevel::DEFAULT);
@@ -6790,7 +6790,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Declined> {
