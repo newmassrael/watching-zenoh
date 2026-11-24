@@ -685,3 +685,33 @@ fn a_wild_key_is_declared_and_reaches_the_router() {
         "the declared callback is held"
     );
 }
+
+/// A key expression declaration the link refuses is not made: nothing is sent for it, the session
+/// keeps no row or block of it, and the replay is left as it was, so the next declaration is the
+/// one the link is told. The CONTROL is a key the link takes, declared after.
+#[test]
+fn a_key_expression_the_link_refuses_is_not_declared() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let used = engine.key_counts().used;
+    let seen = router.seen(|s| s.declares);
+    // A key zenoh-pico's canonizer aborts on (a one-byte chunk between `**` and `*`): the link
+    // refuses to send its declaration.
+    assert_eq!(
+        engine.acquire_keyexpr("**/a/*"),
+        Err(Refusal::ExceedsCapacity)
+    );
+    assert_eq!(
+        engine.key_counts().used,
+        used,
+        "the refused key keeps no block"
+    );
+    settle(&engine);
+    assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
+    engine
+        .acquire_keyexpr("demo/kx/ok")
+        .expect("CONTROL: a key the link takes");
+    until(&engine, "the router to see the declaration", || {
+        router.seen(|s| s.declares) > seen
+    });
+}
