@@ -247,7 +247,7 @@ impl WriteFilter {
 /// another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
-        self.listeners.retract_all(&self.shared);
+        self.listeners.retract_all(Arc::as_ref(&self.shared));
         self.shared.undeclare_write_filter(self.id);
     }
 }

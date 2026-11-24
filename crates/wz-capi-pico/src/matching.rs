@@ -990,7 +990,7 @@ mod tests {
             places - 1,
             "the undeclared listener's place went back; the background one's stands"
         );
-        list.retract_all(&engine);
+        list.retract_all(Arc::as_ref(&engine));
         assert_eq!(
             free(&engine),
             places,
