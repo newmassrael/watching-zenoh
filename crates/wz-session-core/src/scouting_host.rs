@@ -823,14 +823,23 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
         // is the Scout that names no asker (I clear), as zenoh's own is.
         let mut flags = Scout::new();
         flags.set_what(a.params.what);
+        // The id is at most the codec's own bound (`zid_len_m1` is four bits), as a
+        // `SessionZid` is; one the codec refused would stage nothing, as a Scout that does not
+        // fit the frame stages nothing, and the host reports the send as failed.
+        let zid = match zid.as_ref() {
+            None => None,
+            Some(zid) => match sce_forge_runtime::codec::Bounded::new(zid.as_slice()) {
+                Some(bounded) => Some(bounded),
+                None => {
+                    R::with_mutex_mut(&a.pending_scout, |slot| *slot = None);
+                    return;
+                }
+            },
+        };
         let body = ScoutParts {
             version: wz_codecs::wire_const::PROTOCOL_VERSION,
             cbyte: flags.cbyte,
-            // The id is at most the codec's own bound (`zid_len_m1` is four bits).
-            zid: zid.as_ref().map(|zid| {
-                sce_forge_runtime::codec::Bounded::new(zid.as_slice())
-                    .expect("a SessionZid is 1..=16 bytes, the codec's bounds")
-            }),
+            zid,
         };
         // The whole message, header and chain included, by its document
         // (`sources/codecs/scouting_scout.scxml`).
