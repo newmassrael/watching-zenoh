@@ -2606,6 +2606,56 @@ value = 1
 reason = "zenoh-pico bounds its matching listeners by no count; its examples and its matching API test hold one at a time, on the publisher or querier under test."
 
 [[limit]]
+id = "MAX_DECL_WATCHES"
+kconfig = "WZ_LIMIT_MAX_DECL_WATCHES"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The declaration watches a session holds at once (what its peers declare
+and retract, told to the program), over every kind of entity watched.
+Declaring one more is refused while the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: the declaration watch is a door of wz, which no upstream library has; the default holds four, a watch of each kind of entity and one to spare."
+
+[[limit]]
+id = "MAX_TRANSPORT_EVENTS_LISTENERS"
+kconfig = "WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The transport events listeners a session holds at once, each told when a
+transport to a peer opens or closes. Declaring one more is refused while
+the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the transport events listeners a session declares, and zenoh-pico has no constant for them; the default holds four, more than any of zenoh-pico's own examples or tests holds on one session at once."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its transport events listeners by no count; its info example holds one in the background, and its tests hold one at a time."
+
+[[limit]]
 id = "MAX_DECLARED_KEYEXPRS"
 kconfig = "WZ_LIMIT_MAX_DECLARED_KEYEXPRS"
 kind = "bound"
