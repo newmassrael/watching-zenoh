@@ -250,11 +250,13 @@ impl<'a> Iterator for HeldMut<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let held = self.held.next()?;
+        // `held` names the sets in their order, so each lies at or past `base`.
+        let skip = held.at.checked_sub(self.base)?;
         let rest = core::mem::take(&mut self.rest);
-        let (_, from) = rest.split_at_mut(held.at - self.base);
-        let (set, after) = from.split_first_mut()?;
+        let (set, after) = rest.get_mut(skip..)?.split_first_mut()?;
         self.rest = after;
-        self.base = held.at + 1;
+        // The set taken lies at `held.at`, so one past it is at most the sets' length.
+        self.base = held.at.saturating_add(1);
         Some(set)
     }
 
@@ -282,11 +284,11 @@ impl Others<'_> {
         let (before, after, after_at) = (self.before, self.after, self.after_at);
         self.held_before
             .iter()
-            .map(move |held| &before[held.at])
+            .filter_map(move |held| before.get(held.at))
             .chain(
                 self.held_after
                     .iter()
-                    .map(move |held| &after[held.at - after_at]),
+                    .filter_map(move |held| after.get(held.at.checked_sub(after_at)?)),
             )
     }
 }
@@ -611,15 +613,15 @@ impl Registry {
     }
 
     /// The set that lies at `at`, for a walk over the faces.
-    fn set(&self, at: usize) -> &FaceTables {
+    fn set(&self, at: usize) -> Option<&FaceTables> {
         #[cfg(test)]
         self.set_reads.set(self.set_reads.get() + 1);
-        &self.sets[at]
+        self.sets.get(at)
     }
 
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.held.iter().map(move |held| self.set(held.at))
+        self.held.iter().filter_map(move |held| self.set(held.at))
     }
 
     /// Where the set face `id` holds lies among the sets, while the session holds the face.
@@ -636,13 +638,13 @@ impl Registry {
         feature = "declarations-synced-event"
     ))]
     pub(super) fn tables_of(&self, id: FaceId) -> Option<&FaceTables> {
-        self.held_at(id).map(|at| self.set(at))
+        self.held_at(id).and_then(|at| self.set(at))
     }
 
     /// The tables of face `id`, while the session holds it, to write.
     fn held_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
         let at = self.held_at(id)?;
-        Some(&mut self.sets[at])
+        self.sets.get_mut(at)
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
@@ -686,7 +688,9 @@ impl Registry {
             // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             self.owe_tokens_of(gone.at);
-            self.sets[gone.at].give_back();
+            if let Some(set) = self.sets.get_mut(gone.at) {
+                set.give_back();
+            }
         }
     }
 
@@ -697,8 +701,8 @@ impl Registry {
         let Self { sets, held, .. } = self;
         held.retain(|face| {
             let accepted = face.id != DIAL_FACE;
-            if accepted {
-                sets[face.at].give_back();
+            if let Some(set) = sets.get_mut(face.at).filter(|_| accepted) {
+                set.give_back();
             }
             !accepted
         });
@@ -753,23 +757,28 @@ impl Registry {
             ..
         } = self;
         let held: &[HeldSet] = &held[..];
-        let place = held.iter().position(|face| face.id == id)?;
-        let at = held[place].at;
         #[cfg(any(feature = "listen", feature = "group", test))]
         let (face, others) = {
-            let (before, rest) = sets.split_at_mut(at);
+            let place = held.iter().position(|face| face.id == id)?;
+            let (held_before, from) = held.split_at_checked(place)?;
+            let (this, held_after) = from.split_first()?;
+            let (before, rest) = sets.split_at_mut_checked(this.at)?;
             let (face, after) = rest.split_first_mut()?;
             let others = Others {
                 before: &*before,
                 after: &*after,
-                held_before: &held[..place],
-                held_after: &held[place + 1..],
-                after_at: at + 1,
+                held_before,
+                held_after,
+                // `face` lies at `this.at`, so one past it is at most the sets' length.
+                after_at: this.at.saturating_add(1),
             };
             (face, others)
         };
         #[cfg(not(any(feature = "listen", feature = "group", test)))]
-        let (face, others) = (sets.get_mut(at)?, NoOtherPeers);
+        let (face, others) = (
+            sets.get_mut(held.iter().find(|face| face.id == id)?.at)?,
+            NoOtherPeers,
+        );
         Some(Split {
             app,
             delivery,
@@ -878,8 +887,8 @@ impl Registry {
     fn reconcile_subscribers(&mut self, id: FaceId) {
         // Handed out to be written, as `Self::split` hands a face's tables out.
         self.writing();
-        if let Some(at) = self.held_at(id) {
-            reconcile_face(&self.app, &mut self.sets[at]);
+        if let Some(set) = self.held_at(id).and_then(|at| self.sets.get_mut(at)) {
+            reconcile_face(&self.app, set);
         }
     }
 

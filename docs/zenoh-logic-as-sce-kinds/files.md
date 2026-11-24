@@ -161,7 +161,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/deliveries.rs` | S7 | |
-| `crates/wz-capi-coop/src/engine/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces_added.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
@@ -445,6 +444,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/link_cells.rs` | S5 | |
 | `crates/wz-runtime-coop/src/link_storage.rs` | S5 | |
 | `crates/wz-runtime-coop/src/local.rs` | S5 | |
+| `crates/wz-runtime-coop/src/locator_text.rs` | S5 | |
 | `crates/wz-runtime-coop/src/reassembly_rx.rs` | S5 | |
 | `crates/wz-runtime-coop/src/runtime_impl.rs` | S5 | |
 | `crates/wz-runtime-coop/src/session_drive.rs` | S5 | |
@@ -455,6 +455,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/table_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-coop/src/time.rs` | S5 | |
 | `crates/wz-runtime-coop/src/timer.rs` | S5 | |
+| `crates/wz-runtime-coop/src/transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/udp_link.rs` | S5 | |
 | `crates/wz-runtime-coop/src/yield_now.rs` | S10 | |
 | `crates/wz-runtime-core/src/allocator.rs` | S9 | |
@@ -748,6 +749,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/extregion.rs` | S1 | |
 | `crates/wz-session-core/src/extshm.rs` | S1 | |
 | `crates/wz-session-core/src/face.rs` | S1 | |
+| `crates/wz-session-core/src/face_plane.rs` | S2 | |
 | `crates/wz-session-core/src/facilities.rs` | S3 | |
 | `crates/wz-session-core/src/feature_bits_generated.rs` | S3 | |
 | `crates/wz-session-core/src/foreign_version.rs` | S10 | |
@@ -828,6 +830,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/peer_tables.rs` | S1 | |
 | `crates/wz-session-core/src/peer_target.rs` | S1 | |
 | `crates/wz-session-core/src/plain_push.rs` | S2 | |
+| `crates/wz-session-core/src/plane_lock.rs` | S2 | |
 | `crates/wz-session-core/src/policy.rs` | S3 | |
 | `crates/wz-session-core/src/policy_binding.rs` | S10 | |
 | `crates/wz-session-core/src/policy_document.rs` | S10 | |
@@ -899,6 +902,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/session_init_params.rs` | S1 | |
 | `crates/wz-session-core/src/session_memory.rs` | S10 | |
 | `crates/wz-session-core/src/session_slot.rs` | S1 | |
+| `crates/wz-session-core/src/session_state.rs` | S2 | |
 | `crates/wz-session-core/src/session_tables.rs` | S2 | |
 | `crates/wz-session-core/src/session_tables/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/session_timeouts.rs` | S1 | |

@@ -1499,6 +1499,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .map(|(handle, _)| handle)
     }
 
+    /// The form of an entity's key whose wire names the declaration `mapping_id` (`0` for none):
+    /// named by that declaration while it stands, which the entity's row then holds, and with the
+    /// key named in its retraction when `names_key`.
+    pub fn key_form(&self, mapping_id: ExprId, names_key: bool) -> KeyForm {
+        let prefix = if mapping_id == 0 {
+            None
+        } else {
+            self.keyexpr_by_id(mapping_id)
+        };
+        KeyForm { prefix, names_key }
+    }
+
     /// The next key expression id: from 1, past any still declared and any `usable` refuses;
     /// `None` when every id is one or the other.
     fn mint_expr(&mut self, usable: impl Fn(ExprId) -> bool) -> Option<ExprId> {

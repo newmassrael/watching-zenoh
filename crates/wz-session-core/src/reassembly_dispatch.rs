@@ -626,29 +626,30 @@ struct ChainKey {
 
 impl ChainKey {
     fn new(peer_key: &[u8], reliable: bool, priority: Priority) -> Self {
-        let (peer_key, peer_key_len) = Self::held(peer_key);
+        let kept = Self::kept(peer_key);
+        // The rest of the array stays zero, so the derived equality compares the bytes kept.
+        let mut buf = [0u8; PEER_KEY_MAX];
+        if let Some(to) = buf.get_mut(..kept.len()) {
+            to.copy_from_slice(kept);
+        }
         Self {
-            peer_key,
-            peer_key_len,
+            peer_key: buf,
+            // At most `PEER_KEY_MAX`, which a `u8` holds.
+            peer_key_len: kept.len() as u8,
             reliable,
             priority,
         }
     }
 
-    /// `peer_key` as a key holds it: its first `PEER_KEY_MAX` bytes, the rest of the array zero,
-    /// and how many it kept. Two keys held so are equal exactly when the bytes kept are.
-    fn held(peer_key: &[u8]) -> ([u8; PEER_KEY_MAX], u8) {
-        let mut buf = [0u8; PEER_KEY_MAX];
-        let mut len = 0u8;
-        for (to, from) in buf.iter_mut().zip(peer_key) {
-            *to = *from;
-            len = len.saturating_add(1);
-        }
-        (buf, len)
+    /// The bytes of `peer_key` a key holds: its first `PEER_KEY_MAX`.
+    fn kept(peer_key: &[u8]) -> &[u8] {
+        peer_key.get(..PEER_KEY_MAX).unwrap_or(peer_key)
     }
 
+    /// Compared as slices, by length and bytes: a held prefix built to compare whole would cost
+    /// an array copy at every lookup.
     fn same_peer(&self, peer_key: &[u8]) -> bool {
-        Self::held(peer_key) == (self.peer_key, self.peer_key_len)
+        self.peer_key.get(..usize::from(self.peer_key_len)) == Some(Self::kept(peer_key))
     }
 
     fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {

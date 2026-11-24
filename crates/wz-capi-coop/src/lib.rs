@@ -129,6 +129,10 @@ pub mod tls;
 /// `app_link::AppLinks`).
 #[cfg(feature = "app-transport")]
 pub use wz_runtime_coop::app_link;
+/// The host's links and the program's transport as one stack, which an ABI that opens over either
+/// opens this engine with, so the engine it reaches is one type (`either_links::EitherLinks`).
+#[cfg(feature = "app-transport")]
+pub use wz_runtime_coop::either_links;
 // The tests are a host's: they run a router stand-in on threads of `std`.
 #[cfg(all(test, feature = "std"))]
 mod tests;

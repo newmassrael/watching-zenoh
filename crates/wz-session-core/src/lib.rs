@@ -207,6 +207,11 @@ pub mod slot_map;
 /// links it.
 pub mod session_tables;
 
+/// The session's state as its layer holds it, apart from the links and the engine that drives
+/// them: the tables of what it declared and asked, in the engine's own types where its parts are
+/// the engine's. Unconditional, like [`session_tables`]: it is a value and needs no feature.
+pub mod session_state;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.
@@ -759,6 +764,15 @@ pub mod link;
 /// session's own actions, so no engine owns the model.
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub mod face;
+
+/// The watchers of a session's faces and the events queued for them ([`face`]), under a lock the
+/// engine names ([`plane_lock`]). Gated as [`face`] is.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod face_plane;
+
+/// The lock a plane of the session keeps its state under, named by the engine. Unconditional: it
+/// is a trait and needs no feature.
+pub mod plane_lock;
 
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built

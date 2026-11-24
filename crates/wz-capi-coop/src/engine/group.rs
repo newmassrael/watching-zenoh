@@ -66,7 +66,7 @@ use wz_session_mcu::group_drive::{
 };
 #[cfg(feature = "connectivity")]
 use {
-    super::faces::FacePlane,
+    super::FacePlane,
     wz_capi_port::told::{ToldBits, ToldKey, ToldPlane},
     wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, GroupMemberLink},
 };
@@ -334,6 +334,10 @@ impl Default for MemberRows {
 /// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
 /// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
+
+/// `GROUP_TICK_MS` on the session's clock, in microseconds: a product the build evaluates, so
+/// one that did not fit a `u64` would not compile.
+const GROUP_TICK_US: u64 = GROUP_TICK_MS as u64 * 1_000;
 
 /// What a group's dispatch hands what it staged to: the group's stage, which its task writes.
 pub(super) type GroupReplies = MulticastReplySink<GroupTxStage>;
@@ -977,10 +981,7 @@ impl<W: LinkWaits> GroupFace<W> {
         match &self.task {
             Some(task) if task.is_finished() => Some(0),
             Some(_) if self.tx.holds() => {
-                let tick_us = self
-                    .pace
-                    .now_us()
-                    .saturating_add(u64::from(GROUP_TICK_MS) * 1_000);
+                let tick_us = self.pace.now_us().saturating_add(GROUP_TICK_US);
                 Some(self.due.due_us().map_or(0, |due_us| due_us.min(tick_us)))
             }
             Some(_) if !self.tx.is_empty() => Some(0),
