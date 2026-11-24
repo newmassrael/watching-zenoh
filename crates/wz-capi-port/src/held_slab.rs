@@ -72,17 +72,6 @@ impl<T> HeldSlab<T> {
         released.is_some()
     }
 
-    /// The value kept under `id`, lent: `None` for an id not kept.
-    ///
-    /// # Safety
-    /// The caller holds the keep `id` and releases it only after the borrow ends: the value
-    /// stands for as long as the keep does.
-    pub unsafe fn lend(&self, id: HeldQueryId) -> Option<&T> {
-        let value = self.rows.with(|rows| rows.kept(id).map(Arc::as_ptr))?;
-        // SAFETY: the caller's keep holds the row, and the row the value, until the borrow ends.
-        Some(unsafe { &*value })
-    }
-
     /// How many keeps the slab holds.
     pub fn kept(&self) -> usize {
         self.rows
@@ -242,18 +231,6 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0, "the reply holds it");
         drop(replying);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-    }
-
-    /// A keep lends its value while it stands.
-    #[test]
-    fn a_keep_lends_its_value() {
-        let slab = HeldSlab::new();
-        let id = slab.keep(2, "lent").expect("room");
-        // SAFETY: the keep `id` is released after the borrow ends.
-        assert_eq!(unsafe { slab.lend(id) }, Some(&"lent"));
-        assert!(slab.release(id));
-        // SAFETY: nothing is lent for an id not kept.
-        assert_eq!(unsafe { slab.lend(id) }, None);
     }
 
     /// The id names the row in its low half and the turn in its high half.

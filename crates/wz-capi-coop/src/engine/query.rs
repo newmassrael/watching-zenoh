@@ -52,9 +52,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{
-    HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey,
-};
+use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -937,16 +935,6 @@ pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone +
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
-    fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery> {
-        // A keep refused holds nothing, and the query held answers nothing, as one taken outside
-        // a callback.
-        Box::new(CoopHeld {
-            engine: self.engine.clone(),
-            id: self.keep_query(view).ok().flatten(),
-            key: Box::from(view.keyexpr()),
-        })
-    }
-
     fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
         let engine = self.engine.upgrade().ok_or(Refusal::Closed)?;
         let Some((at, generation, rid)) = Answering::innermost() else {
@@ -1023,37 +1011,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             answer(&mut responder);
         }
         self.answer(id.generation, id.rid, Release::Kept);
-    }
-}
-
-/// A query a C program keeps past its callback, as the heap-held [`HeldQuery`] the engines without
-/// ids keep: the id of its keep, `None` for one refused or taken outside a callback, which holds
-/// nothing and answers nothing, and its key, which each reply is handed.
-struct CoopHeld<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    engine: Weak<CoopEngine<L, C>>,
-    id: Option<HeldQueryId>,
-    key: Box<str>,
-}
-
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for CoopHeld<L, C> {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
-            engine.reply_kept(id, &self.key, answer);
-        }
-    }
-
-    fn session_closed(&self) -> bool {
-        self.engine
-            .upgrade()
-            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
-    }
-}
-
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {
-    fn drop(&mut self) {
-        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
-            engine.answer(id.generation, id.rid, Release::Kept);
-        }
     }
 }
 
