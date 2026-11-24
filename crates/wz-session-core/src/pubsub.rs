@@ -1889,6 +1889,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// `respond_to_subscriber_interest_view`); a record of any other kind is another
     /// registry's.
     #[cfg(feature = "rx-lent-control")]
+    #[inline(never)]
     fn dispatch_in_place_control<L: LocalSubscribers>(
         &mut self,
         subs: &mut L,
@@ -2046,6 +2047,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         feature = "declare-subscriber",
         feature = "rx-lent-control"
     ))]
+    #[inline(never)]
     fn respond_to_subscriber_interest_view<L: LocalSubscribers>(
         &mut self,
         subs: &mut L,
@@ -3338,6 +3340,7 @@ impl<P: Storage> SubscriberPeer<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
+    #[inline(never)]
     pub(crate) fn absorb_declare_view(
         &mut self,
         body: &wz_codecs::lent::DeclareVariant<'_>,
