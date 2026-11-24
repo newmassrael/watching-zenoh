@@ -627,12 +627,14 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
 ///
 /// `filter` is the entity's, `None` when the entity's handle was not a live one.
 /// `listener` is the handle slot, or `None` for the BACKGROUND form, whose listener has no
-/// handle and lives as long as its entity.
+/// handle and lives as long as its entity. A null slot is the background form too, as pico's
+/// background door is its handle door with a null slot (`vendor/zenoh-pico/src/api/api.c` @
+/// `return z_publisher_declare_matching_listener(publisher, NULL, callback);`).
 ///
 /// One body rather than one per form, so the closure-consumption contract and the place cannot
 /// drift between them.
 ///
-/// Refused with nothing declared: a null closure, entity or handle slot with `Z_ERR_NULL`, a
+/// Refused with nothing declared: a null closure or entity with `Z_ERR_NULL`, a
 /// session with every listener place held with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, and a listener the
 /// engine refuses with the code pico's door answers for the refusal ([`refusal_code`]): a
 /// listener that would never be called must not read as `Z_OK`. The handle slot is left null and
@@ -662,10 +664,6 @@ pub(crate) unsafe fn declare_on_filter(
     let Some(filter) = filter else {
         return Z_ERR_NULL;
     };
-    // A handle asked for with no slot to put it in would be a listener no one can undeclare.
-    if listener.is_some() && slot.is_none() {
-        return Z_ERR_NULL;
-    }
     let Some(place) = Slot::<MatchingPlace>::take_entity(filter.engine(), Kind::MatchingListener)
     else {
         return Z_ERR_SYSTEM_OUT_OF_MEMORY;

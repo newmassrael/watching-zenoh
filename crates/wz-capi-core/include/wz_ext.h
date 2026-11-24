@@ -2012,6 +2012,12 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t queriers;
   size_t keyexprs;
   size_t encodings;
+  /* Since interface minor 3: per session, each at most its session limit
+   * (MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS, MAX_MATCHING_LISTENERS);
+   * zero is that limit's bound. */
+  size_t gets;
+  size_t liveliness_gets;
+  size_t matching_listeners;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {
@@ -2549,7 +2555,7 @@ z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
  * side allocates is freed by the other. */
 
 #define WZ_EXT_INTERFACE_MAJOR 1
-#define WZ_EXT_INTERFACE_MINOR 2
+#define WZ_EXT_INTERFACE_MINOR 3
 
 typedef struct wz_ext_interface_version_t {
     uint32_t struct_size;

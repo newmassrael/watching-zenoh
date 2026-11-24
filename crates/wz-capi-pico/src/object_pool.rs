@@ -52,8 +52,8 @@ pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 
 /// How many of each object the program holds at once, as it states them to reserve the pools.
 ///
-/// The entity counts (`publishers` to `liveliness_subscribers`, `queriers` and `keyexprs`) are per
-/// session; the rest are for all sessions together. Zero is read as the module says: the bound of the session's limit where
+/// The entity counts (`publishers` to `liveliness_subscribers`, `queriers`, `keyexprs`, `gets`,
+/// `liveliness_gets` and `matching_listeners`) are per session; the rest are for all sessions together. Zero is read as the module says: the bound of the session's limit where
 /// one bounds the object, none where none does.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -96,6 +96,14 @@ pub struct wz_ext_object_pool_counts_t {
     /// `MAX_ENCODING_SCHEMA_BYTES`, from `z_encoding_from_str` or `z_encoding_clone` to its move
     /// into the call it describes or its drop; a declared publisher keeps the one it was given.
     pub encodings: usize,
+    /// Gets each session holds pending, its queriers' among them, at most its
+    /// `MAX_PENDING_QUERIES`.
+    pub gets: usize,
+    /// Liveliness gets each session holds pending, at most its `MAX_PENDING_LIVELINESS_GETS`.
+    pub liveliness_gets: usize,
+    /// Matching listeners of each session, its publishers' and queriers' together, at most its
+    /// `MAX_MATCHING_LISTENERS`.
+    pub matching_listeners: usize,
 }
 
 impl wz_ext_object_pool_counts_t {
@@ -118,13 +126,9 @@ impl wz_ext_object_pool_counts_t {
             keyexprs: self.keyexprs,
             payload_bytes: self.payload_bytes,
             encodings: self.encodings,
-            // At the bound of the session's `MAX_PENDING_QUERIES` and
-            // `MAX_PENDING_LIVELINESS_GETS`: a get's place is held only while it is pending.
-            gets: 0,
-            liveliness_gets: 0,
-            // At the bound of the session's `MAX_MATCHING_LISTENERS`, as the gets: a listener's
-            // place is held while its entity's write filter can reach it.
-            matching_listeners: 0,
+            gets: self.gets,
+            liveliness_gets: self.liveliness_gets,
+            matching_listeners: self.matching_listeners,
         }
     }
 }
@@ -315,6 +319,9 @@ mod tests {
             queriers: 14,
             keyexprs: 15,
             encodings: 16,
+            gets: 17,
+            liveliness_gets: 18,
+            matching_listeners: 19,
         };
         assert_eq!(
             stated.counts(),
@@ -335,9 +342,9 @@ mod tests {
                 keyexprs: 15,
                 payload_bytes: 13,
                 encodings: 16,
-                gets: 0,
-                liveliness_gets: 0,
-                matching_listeners: 0,
+                gets: 17,
+                liveliness_gets: 18,
+                matching_listeners: 19,
             }
         );
     }
