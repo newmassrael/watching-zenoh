@@ -220,9 +220,9 @@ use {
 mod faces;
 #[cfg(feature = "connectivity")]
 use faces::FacePlane;
-#[cfg(feature = "connectivity")]
-use wz_session_core::face::FaceEventSink;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
+#[cfg(feature = "connectivity")]
+use wz_session_core::face::{FaceEventSink, FaceLinkRow};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 
@@ -3794,6 +3794,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let _ = (kind, face);
     }
 
+    /// The row at cursor `at` of the links of the faces that stand, in the order
+    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends are written
+    /// into the row with nothing allocated. A group's members are read off their snapshots.
+    #[cfg(feature = "connectivity")]
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        for face in self.links.faces() {
+            let Link::Up(wire) = &face.link else {
+                continue;
+            };
+            if !wire.actions.is_established() {
+                continue;
+            }
+            let links = FaceLinkRow::links_of(&*wire.actions);
+            if at < links {
+                return FaceLinkRow::of_actions(&*wire.actions, at);
+            }
+            at -= links;
+        }
+        #[cfg(feature = "group")]
+        for member in self.groups.iter().flat_map(GroupFace::member_snapshots) {
+            if at < member.links.len() {
+                return FaceLinkRow::of_snapshot(&member, at);
+            }
+            at -= member.links.len();
+        }
+        None
+    }
+
     /// The faces that stand: those whose links have completed their handshakes.
     #[cfg(feature = "connectivity")]
     fn standing_faces(&self) -> Vec<FaceSnapshot> {
@@ -6498,6 +6527,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         self.live()
             .map_or_else(Vec::new, |core| core.0.standing_faces())
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        self.live().and_then(|core| core.0.face_link_at(at))
     }
 
     #[cfg(feature = "connectivity")]
