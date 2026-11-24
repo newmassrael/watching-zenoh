@@ -225,10 +225,10 @@ use {
     wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchSink},
 };
 
+/// The watchers of the session's faces and the events queued for them, under the port's mutex
+/// (`connectivity`).
 #[cfg(feature = "connectivity")]
-mod faces;
-#[cfg(feature = "connectivity")]
-use faces::FacePlane;
+type FacePlane = wz_session_core::face_plane::FacePlane<CoopLocks>;
 #[cfg(feature = "connectivity")]
 mod told;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
@@ -2184,6 +2184,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
 }
 
+/// The port's mutex, as the lock the session core's planes keep their state under.
+#[cfg(feature = "connectivity")]
+enum CoopLocks {}
+
+#[cfg(feature = "connectivity")]
+impl wz_session_core::plane_lock::LockFamily for CoopLocks {
+    type Lock<T> = Mutex<T>;
+
+    fn new<T>(value: T) -> Mutex<T> {
+        Mutex::new(value)
+    }
+
+    fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
+        f(&mut lock.lock())
+    }
+}
+
 /// Whether this build holds what a matching listener or a write filter of `plane` counts: the
 /// subscribers a peer declares in every build, and the queryables with a querier or a queryable
 /// (`query`, `queryable`). One of a plane the build does not hold is refused before anything is
@@ -2971,7 +2988,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .faces()
             .get(at)
             .and_then(|face| face.link.wire());
-        let snapshot = lost.and_then(|wire| self.face_of(&wire.actions));
+        let snapshot = lost.and_then(|wire| {
+            self.session
+                .face_of(|| FaceSnapshot::of_actions(&wire.actions))
+        });
         self.transport.end_peer_chains(at);
         // What a replaying listener was told of the face is read while its link is held.
         #[cfg(feature = "connectivity")]
@@ -2981,7 +3001,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .put_link(at, Link::Waiting { at_us: now_us });
         self.rooms.forget(id);
         self.lose_link(id);
-        self.report_face(FaceEventKind::Down, snapshot);
+        self.session.report_face(FaceEventKind::Down, snapshot);
     }
 
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
@@ -3032,9 +3052,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
-        let snapshot = self.face_of(&actions);
+        let snapshot = self.session.face_of(|| FaceSnapshot::of_actions(&actions));
         self.transport.links.establish(at);
-        self.report_face(FaceEventKind::Up, snapshot);
+        self.session.report_face(FaceEventKind::Up, snapshot);
     }
 
     /// Join every group the config lists, each a face of its own whose session is a task of the
@@ -3294,37 +3314,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(face) = self.transport.links.remove_face(at) {
             self.session.registry.borrow_mut().remove_face(face.id);
         }
-    }
-
-    /// The face a link's `actions` are the end of, when something watches the faces (an event is
-    /// the snapshot it carries) and the handshake has told who the peer is. A build without the
-    /// connectivity plane watches nothing, and its snapshot is not linked.
-    fn face_of(&self, actions: &McuActions<C>) -> Option<FaceSnapshot> {
-        #[cfg(feature = "connectivity")]
-        {
-            if !self.session.watchers.watched() {
-                return None;
-            }
-            FaceSnapshot::of_actions(actions)
-        }
-        #[cfg(not(feature = "connectivity"))]
-        {
-            let _ = actions;
-            None
-        }
-    }
-
-    /// Tell the watchers of the faces that `face` came up or went, with the session's other
-    /// deliveries (`face_of` says whether there is anything to tell).
-    /// Out of line: the face lost and the face up each tell, with the snapshot dropped once.
-    #[inline(never)]
-    fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
-        #[cfg(feature = "connectivity")]
-        if let Some(face) = face {
-            self.session.watchers.happened(kind, face);
-        }
-        #[cfg(not(feature = "connectivity"))]
-        let _ = (kind, face);
     }
 
     /// What a lost link takes with it: every subscriber and queryable its peer declared, so a

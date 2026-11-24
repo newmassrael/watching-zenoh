@@ -17,6 +17,10 @@
 use core::cell::{Cell, Ref, RefMut};
 
 use crate::bounded::Storage;
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+use crate::face::{FaceEventKind, FaceSnapshot};
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+use crate::face_plane::FaceReports;
 use crate::key_arena::KeySpace;
 use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
 use crate::wire_id::{EntityId, ExprId, RequestId};
@@ -119,6 +123,32 @@ pub struct SessionState<P: SessionParts> {
     pub lane: P::Lane,
 }
 
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+impl<P: SessionParts> SessionState<P>
+where
+    P::Watchers: FaceReports,
+{
+    /// The face `snapshot` makes, when something watches the faces (an event is the snapshot it
+    /// carries); none, and no snapshot made, otherwise. Watchers that can never watch make none in
+    /// any case, so their build has no snapshot to link.
+    pub fn face_of(&self, snapshot: impl FnOnce() -> Option<FaceSnapshot>) -> Option<FaceSnapshot> {
+        if !<P::Watchers as FaceReports>::WATCHES || !self.watchers.watched() {
+            return None;
+        }
+        snapshot()
+    }
+
+    /// Tell the watchers of the faces that `face` came up or went, with the session's other
+    /// deliveries ([`Self::face_of`] says whether there is anything to tell).
+    // Out of line: the face lost and the face up each tell, with the snapshot dropped once.
+    #[inline(never)]
+    pub fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
+        if let Some(face) = face {
+            self.watchers.happened(kind, face);
+        }
+    }
+}
+
 /// The request ids of a session's gets of its own queryables, counted apart from the ids its links
 /// hand out: from 0, wrapping, as a link's own count does.
 #[derive(Debug, Default)]
@@ -181,30 +211,39 @@ mod tests {
 
     type Tables = SessionTables<NoCallbacks, Profile>;
 
-    /// The parts of an engine whose registry is its tables alone and which keeps no other part.
-    enum TablesOnly {}
+    /// The parts of an engine whose registry is its tables alone, which reports its faces to
+    /// `$watchers` and keeps no other part.
+    macro_rules! tables_only {
+        ($name:ident, $watchers:ty) => {
+            enum $name {}
 
-    impl SessionParts for TablesOnly {
-        type Registry = RefCell<Tables>;
-        type Callbacks = NoCallbacks;
-        type Storage = Profile;
-        type Watchers = ();
-        type Entities = ();
-        type Queryables = ();
-        type PendingGets = ();
-        type Gets = ();
-        type Lane = ();
-        type KeyIds = ();
-        type LocalRequests = LocalRequests;
+            impl SessionParts for $name {
+                type Registry = RefCell<Tables>;
+                type Callbacks = NoCallbacks;
+                type Storage = Profile;
+                type Watchers = $watchers;
+                type Entities = ();
+                type Queryables = ();
+                type PendingGets = ();
+                type Gets = ();
+                type Lane = ();
+                type KeyIds = ();
+                type LocalRequests = LocalRequests;
 
-        fn tables(registry: &Self::Registry) -> Ref<'_, Tables> {
-            registry.borrow()
-        }
+                fn tables(registry: &Self::Registry) -> Ref<'_, Tables> {
+                    registry.borrow()
+                }
 
-        fn tables_mut(registry: &Self::Registry) -> RefMut<'_, Tables> {
-            registry.borrow_mut()
-        }
+                fn tables_mut(registry: &Self::Registry) -> RefMut<'_, Tables> {
+                    registry.borrow_mut()
+                }
+            }
+        };
     }
+
+    tables_only!(Unwatched, ());
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    tables_only!(Watched, crate::face_plane::FacePlane<CellLocks>);
 
     /// One block of an arena's memory, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -228,10 +267,23 @@ mod tests {
             .unwrap()
     }
 
-    fn state() -> SessionState<TablesOnly> {
+    fn state<P>() -> SessionState<P>
+    where
+        P: SessionParts<
+            Registry = RefCell<Tables>,
+            Entities = (),
+            Queryables = (),
+            PendingGets = (),
+            Gets = (),
+            Lane = (),
+            KeyIds = (),
+            LocalRequests = LocalRequests,
+        >,
+        P::Watchers: Default,
+    {
         SessionState {
             registry: RefCell::new(Tables::new()),
-            watchers: (),
+            watchers: Default::default(),
             entities: (),
             keys: keys(64),
             key_ids: (),
@@ -247,7 +299,7 @@ mod tests {
     /// The state numbers the session's entities by the ids its tables hand out, each once.
     #[test]
     fn the_state_takes_each_entity_id_from_its_tables_once() {
-        let state = state();
+        let state = state::<Unwatched>();
         assert_eq!(state.take_entity_id(), Some(1));
         assert_eq!(state.take_entity_id(), Some(2));
         assert_eq!(
@@ -261,7 +313,7 @@ mod tests {
     /// none for a wire that names none.
     #[test]
     fn the_state_names_a_key_by_the_declaration_its_tables_hold() {
-        let state = state();
+        let state = state::<Unwatched>();
         let declared = state.tables_mut().declare_keyexpr("demo/").unwrap();
         assert_eq!(
             state.key_form(declared.id, true),
@@ -294,5 +346,69 @@ mod tests {
         read.read_at(1);
         assert!(!read.moved(1));
         assert!(read.moved(2));
+    }
+
+    /// Locks of one thread, which is all a test needs.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    enum CellLocks {}
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    impl crate::plane_lock::LockFamily for CellLocks {
+        type Lock<T> = RefCell<T>;
+
+        fn new<T>(value: T) -> RefCell<T> {
+            RefCell::new(value)
+        }
+
+        fn with<T, R>(lock: &RefCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
+            f(&mut lock.borrow_mut())
+        }
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn face() -> FaceSnapshot {
+        FaceSnapshot {
+            zid: [7; 16],
+            whatami: 0,
+            is_qos: false,
+            is_multicast: false,
+            is_shm: false,
+            links: std::vec::Vec::new(),
+        }
+    }
+
+    /// A state whose build watches no face makes no snapshot and reports nothing.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[test]
+    fn a_state_that_watches_no_face_makes_no_snapshot() {
+        let state = state::<Unwatched>();
+        let mut made = false;
+        assert!(state
+            .face_of(|| {
+                made = true;
+                Some(face())
+            })
+            .is_none());
+        assert!(!made, "no snapshot is made for nobody");
+        state.report_face(FaceEventKind::Up, Some(face()));
+    }
+
+    /// A state with a plane makes a snapshot only while something watches, and reports it there.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[test]
+    fn a_state_reports_a_face_to_its_plane_while_it_is_watched() {
+        let state = state::<Watched>();
+        assert!(
+            state.face_of(|| Some(face())).is_none(),
+            "nothing watches yet"
+        );
+        state.watchers.watch(alloc::sync::Arc::new(|_, _| {}));
+        let snapshot = state.face_of(|| Some(face()));
+        assert!(snapshot.is_some());
+        state.report_face(FaceEventKind::Down, snapshot);
+        state.report_face(FaceEventKind::Up, None);
+        let (kind, told) = state.watchers.next_event().unwrap();
+        assert_eq!((kind, told.zid), (FaceEventKind::Down, [7; 16]));
+        assert!(state.watchers.next_event().is_none(), "no face, no event");
     }
 }

@@ -66,7 +66,7 @@ use wz_session_mcu::group_drive::{
 };
 #[cfg(feature = "connectivity")]
 use {
-    super::faces::FacePlane,
+    super::FacePlane,
     wz_capi_port::told::{ToldBits, ToldKey, ToldPlane},
     wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, GroupMemberLink},
 };
