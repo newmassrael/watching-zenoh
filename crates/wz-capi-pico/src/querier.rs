@@ -47,9 +47,9 @@ use wz_capi_port::FilterPlane;
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::guarded;
-use crate::get::{issue_get, z_moved_closure_reply_t};
+use crate::get::{issue_get, z_moved_closure_reply_t, GetMoved, GetShape};
 use crate::get::{
-    z_consolidation_mode_t, z_query_consolidation_t, z_query_target_t, Z_CONSOLIDATION_MODE_AUTO,
+    z_query_consolidation_t, z_query_target_t, Z_CONSOLIDATION_MODE_AUTO,
     Z_QUERY_TARGET_BEST_MATCHING,
 };
 use crate::keyexpr::{declared_of, DeclaredKeyexpr};
@@ -215,6 +215,31 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
     };
 }
 
+impl GetShape {
+    /// The shape a querier's `options` state, or [`GetShape::defaults`] for NULL, which
+    /// [`z_querier_options_default`] writes too.
+    ///
+    /// # Safety
+    /// `options` must be null or valid.
+    unsafe fn of_querier(options: *const z_querier_options_t) -> Self {
+        let Some(options) = options.as_ref() else {
+            return Self::defaults();
+        };
+        Self {
+            target: options.target,
+            consolidation: options.consolidation.mode,
+            timeout_ms: options.timeout_ms,
+            accept_replies: options.accept_replies,
+            qos: crate::get::PicoQueryQos {
+                congestion_control: options.congestion_control,
+                priority: options.priority,
+                is_express: options.is_express,
+                destination: options.allowed_destination(),
+            },
+        }
+    }
+}
+
 // --- handle ----------------------------------------------------------------
 
 /// Behind a `z_owned_querier_t`: the declared keyexpr, the options every get
@@ -236,15 +261,10 @@ pub(crate) struct QuerierState {
     /// R311y559 — cached loan of `key` for `z_querier_keyexpr`; bound after
     /// boxing, as everywhere else here.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
-    target: z_query_target_t,
-    consolidation: z_consolidation_mode_t,
-    timeout_ms: u64,
-    accept_replies: z_reply_keyexpr_t,
-    /// R311y551 — the request-QoS trio declared once on the querier and
-    /// inherited by every `z_querier_get`. pico's `z_querier_get_options_t`
-    /// carries no QoS fields, so the per-get call has nothing to override with;
-    /// this is where they have to live.
-    qos: crate::get::PicoQueryQos,
+    /// How every get through it asks, its request QoS included: pico's
+    /// `z_querier_get_options_t` carries no QoS fields, so the per-get call has nothing to
+    /// override them with, and this is where they live.
+    shape: GetShape,
     /// The encoding the querier was declared with: the DEFAULT encoding of a
     /// get's value, which the get's own encoding overrides. pico keeps it in the
     /// querier (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -382,28 +402,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // pico dereferences `options` only when non-null and otherwise takes the
         // defaults, so a null `options` is a valid default querier — which is
         // exactly what `z_get_lat.c` passes.
-        let (target, consolidation, timeout_ms, accept_replies, qos) = if options.is_null() {
-            (
-                Z_QUERY_TARGET_BEST_MATCHING,
-                Z_CONSOLIDATION_MODE_AUTO,
-                0u64,
-                Z_REPLY_KEYEXPR_MATCHING_QUERY,
-                crate::get::PicoQueryQos::defaults(),
-            )
-        } else {
-            (
-                (*options).target,
-                (*options).consolidation.mode,
-                (*options).timeout_ms,
-                (*options).accept_replies,
-                crate::get::PicoQueryQos {
-                    congestion_control: (*options).congestion_control,
-                    priority: (*options).priority,
-                    is_express: (*options).is_express,
-                    destination: (*options).allowed_destination(),
-                },
-            )
-        };
+        let shape = GetShape::of_querier(options);
         // R2959 — pico declares the querier's whole key
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
@@ -436,11 +435,11 @@ pub unsafe extern "C" fn z_declare_querier(
         let filter = match WriteFilter::declare(
             &PicoSession::of(handle),
             FilterPlane::Queryables {
-                complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
+                complete_required: shape.target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
             &key,
             &key.wire(Arc::as_ref(&engine)),
-            qos.destination.allows_local(),
+            shape.qos.destination.allows_local(),
         ) {
             Ok(filter) => filter,
             Err(rc) => return rc,
@@ -452,11 +451,7 @@ pub unsafe extern "C" fn z_declare_querier(
             filter,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            target,
-            consolidation,
-            timeout_ms,
-            accept_replies,
-            qos,
+            shape,
             encoding,
             cancel: CancellationToken::default(),
         }));
@@ -497,11 +492,7 @@ pub unsafe extern "C" fn z_querier_get(
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_querier_get_options_t,
 ) -> ZResult {
-    let len = if parameters.is_null() {
-        0
-    } else {
-        core::ffi::CStr::from_ptr(parameters).to_bytes().len()
-    };
+    let len = crate::get::parameters_strlen(parameters);
     z_querier_get_with_parameters_substr(querier, parameters, len, callback, options)
 }
 
@@ -522,35 +513,21 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
     options: *mut z_querier_get_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Consume the moved payload / attachment FIRST — before the
-        // null-callback return, which is a path they must also be freed on. The
-        // sibling `z_get` takes its bytes first for the same reason.
-        let (payload, attachment, (encoding, source_info), token) = if options.is_null() {
-            (Ok(None), Ok(None), (None, None), None)
+        // The moved parts of the options are taken first, as `z_get` takes its own (`GetMoved`).
+        let moved = if options.is_null() {
+            GetMoved::none()
         } else {
-            (
-                crate::pubsub::take_moved_bytes((*options).payload),
-                crate::pubsub::take_moved_bytes((*options).attachment),
-                // Held here for the call and lent to the get.
-                (
-                    crate::encoding::take_moved_encoding((*options).encoding),
-                    crate::pubsub::source_info_hint_of((*options).source_info()),
-                ),
-                // R311y575 — consumed on the same every-path line as the byte
-                // buffers, for the same reason: upstream's `z_querier_get` drops
-                // it unconditionally once the call is made.
+            GetMoved::take(
+                (*options).payload,
+                (*options).encoding,
+                (*options).attachment,
+                (*options).source_info(),
                 (*options).take_cancellation_token(),
             )
         };
-        if callback.is_null() {
-            return Z_ERR_NULL;
-        }
-        let mut closure = crate::get::adopt_reply_closure(callback);
-        // A payload or an attachment the program moved out of a callback's sample is copied, and
-        // with no room for the copy the get is refused; `closure` drops, reporting it over.
-        let (payload, attachment) = match (payload, attachment) {
-            (Ok(payload), Ok(attachment)) => (payload, attachment),
-            (Err(no_room), _) | (_, Err(no_room)) => return no_room.code(),
+        let (mut held, mut closure) = match moved.adopt(callback) {
+            Ok(adopted) => adopted,
+            Err(code) => return code,
         };
 
         let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
@@ -577,37 +554,16 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             drop(closure);
             return Z_OK;
         }
-        let params_in: &[u8] = if parameters.is_null() || parameters_len == 0 {
-            &[]
-        } else {
-            core::slice::from_raw_parts(parameters as *const u8, parameters_len)
-        };
-        // A get's own encoding wins; without one the value is sent with the
-        // encoding the querier was declared with.
-        let value_meta = crate::get::PicoQueryValueMeta {
-            encoding: encoding
-                .as_ref()
-                .or(state.encoding.as_ref())
-                .map(crate::encoding::OwnedEncoding::view),
-            source_info,
-        };
-        let token = Some(match token {
+        let params_in = crate::get::parameters_in(parameters, parameters_len);
+        let token = Some(match held.token.take() {
             Some(token) => TokenRef::shared(token),
             // SAFETY: the querier's token lies in its place, which is not given back before
             // `free_querier` has cancelled the token, and that waits for every fan on it.
             None => unsafe { TokenRef::placed(&state.cancel) },
         });
-        let ask = crate::get::GetAsk {
-            parameters: params_in,
-            target: state.target,
-            consolidation: state.consolidation,
-            timeout_ms: state.timeout_ms,
-            accept_replies: state.accept_replies,
-            payload: payload.as_ref(),
-            attachment: attachment.as_ref(),
-            qos: state.qos,
-            value_meta,
-        };
+        // A get's own encoding wins; without one the value is sent with the
+        // encoding the querier was declared with.
+        let ask = held.ask(params_in, state.shape, state.encoding.as_ref());
         issue_get(
             &state.shared,
             state.key.literal(),
@@ -812,5 +768,29 @@ mod tests {
         assert_eq!(q.accept_replies, g.accept_replies);
         #[cfg(feature = "local-queryable")]
         assert_eq!(q.allowed_destination, g.allowed_destination);
+    }
+    /// A NULL options pointer shapes a querier as the options `z_querier_options_default` writes
+    /// do, and both are the shape a defaulted `z_get` has: one statement of the defaults.
+    #[test]
+    fn a_null_queriers_shape_is_the_default_options_shape() {
+        let mut options: z_querier_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is a live, writable struct; NULL is read as the defaults.
+        let (defaulted, null) = unsafe {
+            z_querier_options_default(&mut options);
+            (
+                GetShape::of_querier(&options),
+                GetShape::of_querier(core::ptr::null()),
+            )
+        };
+        assert_eq!(defaulted, GetShape::defaults());
+        assert_eq!(null, GetShape::defaults());
+        options.timeout_ms = 77;
+        options.target = crate::get::Z_QUERY_TARGET_ALL_COMPLETE;
+        options.is_express = true;
+        // SAFETY: `options` is a live struct.
+        let set = unsafe { GetShape::of_querier(&options) };
+        assert_eq!(set.timeout_ms, 77);
+        assert_eq!(set.target, crate::get::Z_QUERY_TARGET_ALL_COMPLETE);
+        assert!(set.qos.is_express);
     }
 }

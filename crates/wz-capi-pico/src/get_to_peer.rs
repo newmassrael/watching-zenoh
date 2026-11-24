@@ -19,14 +19,14 @@
 //! refusal the callback's `drop(context)` runs before the door returns, which is the get reported
 //! over with no reply.
 
-use core::ffi::{c_char, CStr};
+use core::ffi::c_char;
 
 use wz_session_core::peer_target::{self, PeerTargetError};
 use wz_session_core::policy::{SessionPolicy, TargetedQuery};
 use wz_session_core::policy_binding::PolicyValue;
 
 use crate::abi::z_loaned_keyexpr_t;
-use crate::get::{get_inner, z_get_options_t, z_moved_closure_reply_t};
+use crate::get::{get_inner, parameters_strlen, z_get_options_t, z_moved_closure_reply_t};
 use crate::prelude::Vec;
 use crate::result::{ZResult, WZ_EXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL};
 use crate::session::z_loaned_session_t;
@@ -86,11 +86,7 @@ pub unsafe extern "C" fn wz_ext_get_to_peer(
     peer: *const z_id_t,
 ) -> ZResult {
     crate::ffi::guarded(|| {
-        let len = if parameters.is_null() {
-            0
-        } else {
-            CStr::from_ptr(parameters).to_bytes().len()
-        };
+        let len = parameters_strlen(parameters);
         // The target is admitted by the snapshot of the session it is asked on; with no session
         // there is no snapshot, and the door answers it as `z_get` answers a null session.
         let target = match crate::session::session_handle(zs) {
