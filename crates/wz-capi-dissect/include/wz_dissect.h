@@ -1429,9 +1429,30 @@
  *     and a packet that holds no row's first byte (a bare acknowledgement, a
  *     message's middle segment) is on no row: the summary's `comments` counts
  *     every commented packet, so a reader can tell the capture has comments
- *     without walking the rows.
+ *     without walking the rows. Such a packet's comments are its flow's
+ *     `unrowed_comments` (below).
  *
  * Per FLOW, beside `flow`:
+ *
+ *   "unrowed_comments":[{"packet":N,"comments":[{"text":..,"utf8":bool}]}]|null
+ *
+ *     (field-document revision 85, row_facts 25) The comments of every packet
+ *     of the flow whose pcapng block carries one and which carries the first
+ *     byte of none of the flow's messages this library holds: a bare
+ *     acknowledgement, a segment holding the middle or only the length prefix
+ *     of a message, a datagram that decoded to nothing, the packet of an lz4
+ *     batch (its messages name no packet). In packet order; `packet` is the
+ *     number a row's `first_byte.packet` uses, and each comment is as in
+ *     `packet_comments`. With the rows' `packet_comments` every comment on a
+ *     packet of the flow is carried exactly once. Which packets carry a first
+ *     byte is read off the messages held, not off the rows a cap or a window
+ *     writes, so every document of one capture lists the same; a message a
+ *     retention ceiling gave up no longer holds its packet. A packet is the
+ *     flow's when it decapsulates to the flow's addresses and ports; a piece of
+ *     a fragmented IP datagram is no flow's and is in no list (the summary
+ *     counts it). `[]` when there is none; `null` when the bytes this call was
+ *     given could not be read again (`capture_reread` false). Written last in
+ *     the flow's object.
  *
  *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
  *              "compression":bool|null,"qos":bool|null,"patch":N|null,
@@ -1803,7 +1824,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":83,"key":"kind","values":[...],
+ *     {"name":"fields","revision":85,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -4392,11 +4413,40 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * string, and its NAME says what it defines: `<package>/msg/<Type>.msg` the
  * type `<package>/msg/<Type>`, and `<package>/srv/<Type>.srv` the two types
  * a service's samples carry, `<package>/srv/<Type>_Request` and
- * `<package>/srv/<Type>_Response`. A field naming another type
- * (`geometry_msgs/Point`, or `Point` within the file's own package) is found
- * among every declared definition, wherever in the text it is. Constants,
- * defaults and comments are passed over, as nothing of them is on the wire.
- * `.action` files are not read.
+ * `<package>/srv/<Type>_Response`, with the two types rosidl derives from them:
+ * `<package>/srv/<Type>_Event`, the message a service's introspection
+ * publishes (`info`, a `service_msgs/msg/ServiceEventInfo`, then `request`
+ * and `response`, each a sequence of at most one), read like any message, and
+ * `<package>/srv/<Type>` itself, which is never a payload and has a type hash.
+ * A field naming another type (`geometry_msgs/Point`, or `Point` within the
+ * file's own package) is found among every declared definition, wherever in
+ * the text it is. Constants, defaults and comments are passed over, as
+ * nothing of them is on the wire. `builtin_interfaces/msg/Time` and
+ * `service_msgs/msg/ServiceEventInfo`, which ROS fixes and every service's
+ * event names, are defined by this library: declare them or not, and a
+ * declared one that defines other fields is refused.
+ *
+ * An ACTION is declared by its `.action` file,
+ * `#@<package>/action/<Type>.action="..."` (its goal, a line `---`, its
+ * result, a line `---`, its feedback), and defines, every name under
+ * `<package>/action/`, what rosidl derives from it: `<Type>_Goal`,
+ * `<Type>_Result` and `<Type>_Feedback` as written; `<Type>_SendGoal_Request`
+ * (`goal_id`, a `unique_identifier_msgs/msg/UUID`, then `goal`) and
+ * `<Type>_SendGoal_Response` (`accepted`, a `bool`, then `stamp`, a
+ * `builtin_interfaces/msg/Time`); `<Type>_GetResult_Request` (`goal_id`) and
+ * `<Type>_GetResult_Response` (`status`, an `int8`, then `result`); the two
+ * services' `_Event` messages; `<Type>_FeedbackMessage` (`goal_id`, then
+ * `feedback`), what an action's feedback topic carries; and the types that
+ * are hashed and never a payload, `<Type>_SendGoal`, `<Type>_GetResult` and
+ * `<Type>`. `unique_identifier_msgs/msg/UUID` (`uint8[16] uuid`) is defined
+ * by this library as the two above are. So
+ * `demo/goal=cdr@<package>/action/<Type>_SendGoal_Request` reads a goal.
+ *
+ * (Declaration-verdict revision 6) A definition file is read when its line is
+ * declared, so one that cannot be read refuses the text at its own line
+ * (WZ_DISSECT_ERR_DECLARATION; wz_dissect_declarations_diagnose names the
+ * file and line), whether or not a rule names one of its types. It used to
+ * install until a rule did.
  *
  * `<keyexpr>=cdr@<package>/msg/<Type>` reads the key's payload as that type.
  * The rule is REFUSED (WZ_DISSECT_ERR_DECLARATION) when the text declares no
@@ -4427,16 +4477,50 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * field, a string not NUL-terminated or not UTF-8, a string or a sequence
  * longer than its bound, a count the bytes left cannot hold, a `bool` other
  * than 0 or 1, more bytes after the message than the three of padding a
- * serializer may append, and a representation other than plain CDR (at byte
- * 0). A `wstring` field is refused by name: its character width differs
- * between serializers, and this library does not guess it.
+ * serializer may append, and (at byte 0) an encapsulation identifier that is a
+ * parameter list of XCDR version 1 (`PL_CDR`, 0x0002 and 0x0003) or that no
+ * CDR representation has.
  *
- * The type hash a ROS 2 key carries (`RIHS01_...`) is NOT computed from the
- * definitions: it is a digest of a canonical type description that includes
- * every field's type identifier and every referenced type, and no reference
- * implementation or vector is available to this library to prove a digest
- * against; a hash that is subtly wrong would report every publisher as
- * mismatched. Compare the type NAME (`schema`) instead.
+ * PAST XCDR VERSION 1. The encapsulation identifier is read, and the three
+ * representations of XCDR version 2 (XTypes 1.3) are read as well:
+ * `PLAIN_CDR2` (0x0006 big-endian, 0x0007 little-endian), `DELIMITED_CDR2`
+ * (0x0008, 0x0009) and `PL_CDR2` (0x000a, 0x000b). In all three an 8-byte
+ * primitive aligns to 4, not 8, and an array or a sequence whose elements are
+ * not primitives (strings, wide strings, messages) is preceded by a DHEADER,
+ * a 4-byte count of its bytes, which must count them exactly. A ROS definition
+ * declares no extensibility, so the identifier is taken as the writer's
+ * statement of it and applied to EVERY structure of the payload, nested ones
+ * included: under `PLAIN_CDR2` a structure is its members (final); under
+ * `DELIMITED_CDR2` a DHEADER precedes each structure (appendable), members a
+ * newer definition appended are passed over to the end it counts, and members
+ * that run past it are refused; under `PL_CDR2` (mutable) a DHEADER precedes
+ * each structure and an EMHEADER each member, naming it by its member id, its
+ * place in the definition from 0. Members are then read in the order they
+ * arrive; an id the definition has no member for is passed over unless its
+ * must-understand flag is set, which is refused, as is a member that appears
+ * twice or one that reads a length other than its EMHEADER gives; a member
+ * that does not appear has no row. Rows and spans are as above in every
+ * representation; a structure's row spans from its first member's first byte,
+ * its headers not included.
+ *
+ * A `wstring` is read as rmw_zenoh's Fast-CDR type support writes it: a
+ * 4-byte count of UTF-16 code units, then each code unit as a 4-byte unsigned
+ * integer, with no terminator; its `typed_value` is the text. A bounded
+ * `wstring<=N` holds at most N code units. A code unit above 0xFFFF and a
+ * surrogate that is not half of a pair are refused, `why` naming the field
+ * and the code unit's byte, as is a wide string longer than its bound or one
+ * whose count the bytes left cannot hold.
+ *
+ * THE TYPE HASH (field-document revision 84, row_facts 24). A `cdr` rule's
+ * `decoded` block carries `type_hash`, the type's RIHS01 hash as rosidl
+ * computes it and a ROS 2 key carries it beside the type name
+ * (`RIHS01_` and 64 lowercase hex digits): SHA-256 over the type's canonical
+ * description, which holds every field's name, type number, capacities and
+ * nested type, of the type and of every type it reaches, defaults, constants
+ * and comments excluded. Compare it with the hash in a publisher's key: a
+ * different hash is a different definition, under the same name or not. It is
+ * computed for every type a declared file defines, a service's derived and
+ * own types included (wz_dissect_declarations_diagnose lists them per file).
  *
  * A `decoded` block then carries
  *
@@ -4447,6 +4531,10 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     `schema`  the body schema the rule names, or `null`. With `typed` it
  *               tells three cases apart: none named; named and read; named
  *               and not read, because the text carries no schema file
+ *     `type_hash`  (field-document revision 84) the body schema's type hash
+ *               where one is computed: the RIHS01 hash of a `cdr` rule's ROS
+ *               type, written after `schema`; `null` for every other
+ *               reading
  *
  * and every entry of its `fields`
  *
@@ -5012,6 +5100,17 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
  *     `segment_rule`       <keyexpr>=<segment profile>   (verdict revision 4)
  *     `key_binding`        #%<id>=<keyexpr>               (verdict revision 5)
+ *
+ * THE TYPES OF A ROS DEFINITION FILE, at verdict revision 6. A `schema_file`
+ * line whose file is a ROS definition (`.msg`, `.srv`) also carries
+ * `types`: every type the file defines, explicit and derived, in the order
+ * rosidl adds them (for a `.srv`: the service's own type, `_Request`,
+ * `_Response`, `_Event`), each `{"name":"<package>/srv/<Type>_Request",
+ * "type_hash":"RIHS01_..."}` with the hash a `decoded` block reports for it
+ * (see THE TYPE HASH above), `null` where the type reaches one no declared
+ * file defines. A `.proto` file's line carries no `types`. A definition file
+ * that cannot be read is refused at its own line, the `message` naming the
+ * file and line within it.
  *
  * A `key_binding` fixes the key id `<id>` (decimal) to `<keyexpr>` for a sender
  * that never declares its ids on the wire; it carries the key as its `pattern`
@@ -6879,7 +6978,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":83,"key":"state",
+ *     "value_families":[{"name":"fields","revision":85,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8725,13 +8824,15 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":4},
+ *     {"document":{"name":"field_values","revision":5},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
  *                  "keyexpr_source":"wire","segment":null,
  *                  "state":"decoded","typed":true,"schema":"pkg.Pose",
+ *                  "type_hash":null,
  *                  "values":[{"path":"1","type":"sint32","typed_value":-3,
- *                             "enum_number":null}]}]}
+ *                             "enum_number":null}],
+ *                  "chosen_by":"rule","encoding_schema":null}]}
  *
  * ONE ENTRY PER RECORD, and a row may batch several: `seq` is the row's number,
  * the one every document of the handle gives it, and `record` the record's place
@@ -8743,6 +8844,19 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * carries `why`, `encoding_mismatch` the encoding the sample `declared`, and
  * `not_on_the_wire` and `keyexpr_unresolved` nothing more. A record no rule
  * covers is not written.
+ *
+ * HOW ITS FORMAT WAS CHOSEN, at values-document revision 5. A `decoded` and a
+ * `refused` record close, after their other keys, on the field document's
+ * `chosen_by` (`rule` when a rule covering the key named the format,
+ * `encoding` when an encoding rule read the sample by its declared encoding)
+ * and `encoding_schema` (the schema suffix of the sample's declared encoding,
+ * `null` when it declared none or one that is not UTF-8), from the same
+ * reading the field document's `payload_decode` block is written from. A
+ * `decoded` record also carries `type_hash` after `schema`: the RIHS01 hash
+ * of a `cdr` rule's ROS type, `null` for every other reading.
+ *
+ * @values field_values chosen_by
+ * @carries field_values chosen_by passenger
  *
  * WHICH KEY, at values-document revision 2. `keyexpr_source` is the field
  * document's word (revision 61): `wire`, `fixed_id` for a key the declarations

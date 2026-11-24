@@ -109,9 +109,10 @@ fn each_record_writes_the_typed_values_of_the_asked_paths_only() {
         doc.contains(
             "{\"seq\":1,\"record\":0,\"time_ns\":0,\"keyexpr\":\"demo/pose\",\
              \"keyexpr_source\":\"wire\",\"segment\":null,\"state\":\"decoded\",\
-             \"typed\":true,\"schema\":\"pkg.Pose\",\"values\":[\
+             \"typed\":true,\"schema\":\"pkg.Pose\",\"type_hash\":null,\"values\":[\
              {\"path\":\"1\",\"type\":\"sint32\",\"typed_value\":-3,\"enum_number\":null},\
-             {\"path\":\"3\",\"type\":\"pkg.Gear\",\"typed_value\":\"GEAR_DRIVE\",\"enum_number\":2}]}"
+             {\"path\":\"3\",\"type\":\"pkg.Gear\",\"typed_value\":\"GEAR_DRIVE\",\"enum_number\":2}],\
+             \"chosen_by\":\"rule\",\"encoding_schema\":null}"
         ),
         "{doc}"
     );
@@ -445,7 +446,74 @@ pub(crate) fn documents_for_the_gates() -> Vec<String> {
         .collect();
     // Revision 2 — the pieces of split messages and a fixed key id.
     docs.extend(crate::key_binding_tests::values_documents_for_the_gates());
+    // Revision 4 — a record whose format its declared encoding chose, the
+    // second word of `chosen_by`.
+    docs.push(encoding_chosen_document());
     docs
+}
+
+/// One record under an encoding rule, read by the JSON its sample declared
+/// with the schema suffix `pkg.Reading`.
+fn encoding_chosen_document() -> String {
+    use crate::payload::tests_support::push_with_encoding;
+    const JSON: u16 = 5;
+    let text = alloc::format!("{}demo/**=encoding\n", declarations());
+    let record = push_with_encoding(
+        "demo/json",
+        Some((JSON, Some("pkg.Reading"))),
+        br#"{"a":1}"#,
+    );
+    let mut d = Dissection::new();
+    let wire = frame_carrying(&record);
+    let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+    d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &pkt);
+    let any = crate::filter::Filter::any();
+    field_values_since(
+        &d,
+        &Numbered,
+        ask(&text, "", &any, "$.a", 0, 1),
+        &mut ValuesMemory::new(),
+        None,
+    )
+    .expect("a document")
+}
+
+/// Revision 4 — a record says how its format was chosen and the schema suffix
+/// its sample's encoding declared, on a `decoded` record after its values and
+/// on a `refused` one after its reason, as the field document's decoding
+/// does; a `decoded` record carries `type_hash` after `schema`, `null` for a
+/// reading that computes none.
+#[test]
+fn a_record_says_how_its_format_was_chosen_and_the_encodings_schema() {
+    let doc = encoding_chosen_document();
+    assert!(
+        doc.contains(
+            "\"state\":\"decoded\",\"typed\":true,\"schema\":null,\"type_hash\":null,\
+             \"values\":[{\"path\":\"$.a\",\"type\":\"number\",\"typed_value\":1,\
+             \"enum_number\":null}],\"chosen_by\":\"encoding\",\"encoding_schema\":\"pkg.Reading\"}"
+        ),
+        "{doc}"
+    );
+    let mut d = Dissection::new();
+    push(&mut d, 0, "demo/pose", &[0x08]);
+    let text = declarations();
+    let any = crate::filter::Filter::any();
+    let refused = field_values_since(
+        &d,
+        &Numbered,
+        ask(&text, "", &any, "1", 0, 1),
+        &mut ValuesMemory::new(),
+        None,
+    )
+    .expect("a document");
+    assert!(
+        refused.contains("\"chosen_by\":\"rule\",\"encoding_schema\":null}"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("\"state\":\"refused\",\"why\":"),
+        "{refused}"
+    );
 }
 
 #[test]

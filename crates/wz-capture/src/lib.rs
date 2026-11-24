@@ -512,9 +512,13 @@ pub mod pcapng;
 /// bytes and its first reading's facts, must produce the same records.
 #[cfg(test)]
 mod redecode_gate;
-/// The ROS message and service definitions (`.msg`, `.srv`) a `cdr` rule
-/// reads by, declared as schema files are.
+/// The ROS message, service and action definitions (`.msg`, `.srv`,
+/// `.action`) a `cdr` rule reads by, declared as schema files are.
 mod ros_msg;
+/// The ROS 2 type hash (RIHS01) of a declared ROS type.
+mod ros_type_hash;
+/// SHA-256, the digest a ROS 2 type hash is.
+mod sha256;
 
 /// Open-debt item 924, step 5 -- the memory matrix: what a dissection holds per
 /// row for every kind of message list, against the report it makes of itself. See

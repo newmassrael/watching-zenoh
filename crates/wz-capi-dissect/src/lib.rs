@@ -11554,7 +11554,7 @@ mod tests {
             over.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":\"application/json\""
             ),
             "a label the bytes refute must not hide the data, and the override \
@@ -11802,9 +11802,12 @@ mod tests {
         // `rule_index`), a failure anywhere (`line`, `text`, `message`) and a
         // failure at a KEY (`pattern`, `chunk`, `offset`, `reason`). The empty
         // text is the success with no lines.
+        // A ROS definition file's line names its types and their hashes
+        // (`types`, `type_hash`), which no other line carries.
         let decl_ok = vec![
             call_declarations_diagnose(""),
             call_declarations_diagnose("demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8"),
+            call_declarations_diagnose("#@demo/srv/Add.srv=\"int64 a\\n---\\nint64 sum\""),
         ];
         let decl_bad = vec![
             call_declarations_diagnose("not a declaration"),
@@ -13335,8 +13338,9 @@ mod tests {
         let doc = call(0);
         assert!(
             doc.contains(
-                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"values\":[\
-                 {\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\"enum_number\":null}]}"
+                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"type_hash\":null,\
+                 \"values\":[{\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\
+                 \"enum_number\":null}],\"chosen_by\":\"rule\",\"encoding_schema\":null}"
             ),
             "{doc}"
         );
@@ -15359,7 +15363,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\""
             ),
             "the covering rule must fire: {decoded}"
@@ -15396,7 +15400,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
-                 \"typed\":true,\"schema\":null,\
+                 \"typed\":true,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"json\""
             ),
             "{decoded}"
@@ -15437,6 +15441,8 @@ mod tests {
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
                  \"typed\":true,\"schema\":\"std_msgs/msg/String\",\
+                 \"type_hash\":\"RIHS01_df668c740482bbd48fb39d76a70dfd4b\
+                 d59db1288021743503259e948f6b1a18\",\
                  \"despite_encoding\":null,\"format\":\"cdr\""
             ),
             "{decoded}"
@@ -15488,7 +15494,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":true,\"schema\":null,\
+                 \"typed\":true,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \
@@ -15561,7 +15567,7 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":6}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
             format!(

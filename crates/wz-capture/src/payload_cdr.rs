@@ -9,7 +9,8 @@
 //!
 //! What a ROS 2 publisher on zenoh sends: the four-byte encapsulation header
 //! of plain CDR (XCDR version 1), `00 01` for little-endian or `00 00` for
-//! big-endian and two option bytes, then the message. Every primitive is
+//! big-endian and two option bytes, then the message. The representations of
+//! XCDR version 2 are read too (see "Past XCDR version 1" below). Every primitive is
 //! aligned to its own size counted from the end of the header, an 8-byte one
 //! to 8. A string is a 4-byte length counting its terminating NUL, then its
 //! bytes and the NUL; a sequence is a 4-byte count, then its elements; a fixed
@@ -35,14 +36,51 @@
 //! field, a string that is not NUL-terminated or not UTF-8, a string or a
 //! sequence longer than its bound, a count the bytes left cannot hold, a
 //! `bool` other than 0 or 1, and more bytes after the message than padding
-//! accounts for. A representation other than plain CDR (a parameter list,
-//! XCDR version 2) is refused at byte 0, naming it.
+//! accounts for. A parameter list of XCDR version 1 (`PL_CDR`, 0x0002 and
+//! 0x0003) and an identifier no representation has are refused at byte 0,
+//! naming them.
 //!
-//! # What is not read
+//! # Past XCDR version 1
 //!
-//! `wstring`: the width of its characters on the wire differs between
-//! serializers, and a guess would be a confident misread. A field of that type
-//! is refused by its path when the reading reaches it.
+//! The encapsulation identifier names the representation (XTypes 1.3, 7.6.3.1.2):
+//! `PLAIN_CDR2` (0x0006 big-endian, 0x0007 little-endian), `DELIMITED_CDR2`
+//! (0x0008, 0x0009) and `PL_CDR2` (0x000a, 0x000b). In all three a primitive is
+//! aligned to its size and at most to 4, so an 8-byte one aligns to 4, and an
+//! array or a sequence whose elements are not primitives (strings, wide strings,
+//! messages) is preceded by a DHEADER, a 4-byte count of the bytes that follow
+//! it, which must be the collection's bytes exactly (7.4.3.5.3).
+//!
+//! The three differ in how a STRUCTURE is written, which is a property of its
+//! extensibility: a final one as its members, an appendable one as a DHEADER
+//! and its members, a mutable one as a DHEADER and each member behind an
+//! EMHEADER that names it by id. A ROS definition declares no extensibility,
+//! so the only statement of it a payload carries is its encapsulation: the
+//! identifier is the writer saying what its top-level type is, `PLAIN_CDR2`
+//! final, `DELIMITED_CDR2` appendable and `PL_CDR2` mutable. That statement is
+//! applied to every structure of the payload, nested ones included, because the
+//! types of one set of definitions are generated under one default and nothing
+//! in a definition can say otherwise. So a DHEADER is read before a structure
+//! only under `DELIMITED_CDR2` and `PL_CDR2`.
+//!
+//! An appendable structure's members are read and then the reading moves to the
+//! end its DHEADER counts, past members a newer definition appended; members
+//! that run past that end are refused. A mutable structure's members are read
+//! in the order the EMHEADERs give, each by its member id, which is its place
+//! in the definition from 0 (the default `@autoid(SEQUENTIAL)`); the length an
+//! EMHEADER's length code gives must be what the member reads; a member id the
+//! definition does not have is passed over, unless its must-understand flag is
+//! set, which is refused; and a member that appears twice is refused. A member
+//! that does not appear has no row.
+//!
+//! # A wide string
+//!
+//! A `wstring` is written as rmw_zenoh writes it, through the Fast-CDR type
+//! support (`rosidl_typesupport_fastrtps_cpp`'s `serialization_helpers.hpp`):
+//! a 4-byte count of UTF-16 code units, then each code unit as a 4-byte
+//! unsigned integer, with no terminator. It is read so and decoded as UTF-16:
+//! a code unit above 0xFFFF, a high surrogate not followed by a low one and a
+//! low surrogate not preceded by a high one are each refused at the byte of
+//! the code unit, and a bounded `wstring<=N` holds at most N code units.
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -53,7 +91,7 @@ use crate::payload::formats::{
     BodySchema, PayloadField, PayloadFormat, PayloadFormatError, TypedValue,
 };
 use crate::proto_decode_json::{bytes_json, float32_json, float_json, integer_json, text_json};
-use crate::ros_msg::{Arity, Base, FieldDef, MessageDef, Primitive, TypeSet};
+use crate::ros_msg::{Arity, Base, FieldDef, MessageDef, Primitive, TypeSet, EMPTY_MEMBER};
 
 /// The format token of a CDR rule, which names its type after the schema
 /// mark: `cdr@<package>/msg/<Type>`.
@@ -65,9 +103,6 @@ const CDR_ENCODINGS: &[&str] = &["application/cdr"];
 /// The encapsulation header's length; every alignment counts from its end.
 const HEADER_LEN: usize = 4;
 
-/// The member rosidl gives a message that declares none.
-const EMPTY_MEMBER: &str = "structure_needs_at_least_one_member";
-
 /// The `cdr` format with the type its rule names, found in the declared
 /// definition files.
 #[derive(Debug, Clone)]
@@ -76,12 +111,22 @@ pub struct CdrFormat {
     type_name: String,
     /// The definitions, read once and shared by every rule of the map.
     set: Rc<TypeSet>,
+    /// The type's RIHS01 hash (`crate::ros_type_hash`), computed once when
+    /// the rule is installed.
+    type_hash: Option<String>,
 }
 
 impl CdrFormat {
-    /// A rule's format: the type it names, checked against `set`.
+    /// A rule's format: the type it names, checked against `set`. The hash
+    /// is `None` only for a type `set` does not define whole, which a rule
+    /// is refused for before it gets here.
     pub(crate) fn new(type_name: String, set: Rc<TypeSet>) -> Self {
-        Self { type_name, set }
+        let type_hash = crate::ros_type_hash::type_hash(&set, &type_name).ok();
+        Self {
+            type_name,
+            set,
+            type_hash,
+        }
     }
 
     /// The rule's format token as it is written after `=`.
@@ -115,6 +160,10 @@ impl PayloadFormat for CdrFormat {
             read: true,
         })
     }
+
+    fn type_hash(&self) -> Option<&str> {
+        self.type_hash.as_deref()
+    }
 }
 
 /// Read `payload` as an instance of `root`, with spans counted from the start
@@ -133,23 +182,15 @@ pub(crate) fn read(
     if payload.len() < HEADER_LEN {
         return Err(PayloadFormatError::Truncated(payload.len()));
     }
-    let little = match [payload[0], payload[1]] {
-        [0x00, 0x00] => false,
-        [0x00, 0x01] => true,
-        [hi, lo] => {
-            return Err(PayloadFormatError::Malformed {
-                at: 0,
-                why: format!(
-                    "the encapsulation header names representation 0x{hi:02x}{lo:02x}, and \
-                     only plain CDR (0x0000 big-endian, 0x0001 little-endian) is read"
-                ),
-            })
-        }
-    };
+    let representation = Representation::of(u16::from_be_bytes([payload[0], payload[1]]))
+        .map_err(|why| PayloadFormatError::Malformed { at: 0, why })?;
     let mut reader = Reader {
         bytes: payload,
         at: HEADER_LEN,
-        little,
+        little: representation.little,
+        max_align: representation.max_align,
+        structure: representation.structure,
+        delimited_collections: representation.delimited_collections,
         rows: Vec::new(),
     };
     let slot = reader.reserve("$", None, String::from(root));
@@ -165,19 +206,99 @@ pub(crate) fn read(
     Ok(reader.rows)
 }
 
-/// A walk over one payload: where it is, its byte order, and the rows so far.
+/// How a structure is written, by its extensibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Structure {
+    /// Its members.
+    Final,
+    /// A DHEADER, then its members.
+    Appendable,
+    /// A DHEADER, then each member behind an EMHEADER.
+    Mutable,
+}
+
+/// What an encapsulation identifier says about the bytes after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Representation {
+    little: bool,
+    /// The largest alignment a primitive takes: 8 in XCDR version 1, 4 in 2.
+    max_align: usize,
+    /// How every structure of the payload is written.
+    structure: Structure,
+    /// Whether a collection of elements that are not primitives is preceded
+    /// by a DHEADER, as XCDR version 2 writes it.
+    delimited_collections: bool,
+}
+
+impl Representation {
+    /// The representation an encapsulation identifier names, or why it is
+    /// not read.
+    fn of(id: u16) -> Result<Self, String> {
+        let (max_align, structure) = match id {
+            0x0000 | 0x0001 => (8, Structure::Final),
+            0x0006 | 0x0007 => (4, Structure::Final),
+            0x0008 | 0x0009 => (4, Structure::Appendable),
+            0x000a | 0x000b => (4, Structure::Mutable),
+            0x0002 | 0x0003 => {
+                return Err(format!(
+                    "the encapsulation header names representation 0x{id:04x}, a parameter \
+                     list of XCDR version 1 (PL_CDR), which is not read"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "the encapsulation header names representation 0x{id:04x}, which no CDR \
+                     representation is"
+                ))
+            }
+        };
+        Ok(Self {
+            little: id & 1 == 1,
+            max_align,
+            structure,
+            delimited_collections: max_align == 4,
+        })
+    }
+}
+
+/// A walk over one payload: where it is, its representation, and the rows so
+/// far.
 struct Reader<'p> {
     bytes: &'p [u8],
     at: usize,
     little: bool,
+    max_align: usize,
+    structure: Structure,
+    delimited_collections: bool,
     rows: Vec<PayloadField>,
 }
 
 impl<'p> Reader<'p> {
-    /// Skip to the next multiple of `size` counted from the end of the header.
+    /// Skip to the next multiple of `size`, or of the representation's
+    /// largest alignment when that is smaller, counted from the end of the
+    /// header.
     fn align(&mut self, size: usize) {
+        let size = size.min(self.max_align);
         let off = self.at - HEADER_LEN;
         self.at += (size - off % size) % size;
+    }
+
+    /// A DHEADER: the byte it stands at and the end it counts to, refused
+    /// when that end is past the payload's.
+    fn dheader(&mut self, path: &str) -> Result<(usize, usize), PayloadFormatError> {
+        let size = self.count(path, "DHEADER")?;
+        let at = self.at - 4;
+        match self.at.checked_add(size as usize) {
+            Some(end) if end <= self.bytes.len() => Ok((at, end)),
+            _ => Err(PayloadFormatError::Malformed {
+                at,
+                why: format!(
+                    "{path}: the DHEADER counts {size} byte(s), past the payload's end at byte \
+                     {}",
+                    self.bytes.len()
+                ),
+            }),
+        }
     }
 
     /// The next `n` bytes, or a refusal naming `path` when the payload ends
@@ -241,24 +362,148 @@ impl<'p> Reader<'p> {
         self.rows[slot].value = value;
     }
 
+    /// A structure's members, written as the representation writes every
+    /// structure.
     fn message(
         &mut self,
         set: &TypeSet,
         def: &MessageDef,
         path: &str,
     ) -> Result<(), PayloadFormatError> {
-        if def.fields.is_empty() {
-            let member = FieldDef {
+        let empty;
+        let members: &[FieldDef] = if def.fields.is_empty() {
+            empty = [FieldDef {
                 name: String::from(EMPTY_MEMBER),
                 base: Base::Primitive(Primitive::Uint8),
                 arity: Arity::One,
+            }];
+            &empty
+        } else {
+            &def.fields
+        };
+        match self.structure {
+            Structure::Final => {
+                for field in members {
+                    self.field(set, field, path)?;
+                }
+                Ok(())
+            }
+            Structure::Appendable => {
+                let (at, end) = self.dheader(path)?;
+                for field in members {
+                    self.field(set, field, path)?;
+                }
+                if self.at > end {
+                    return Err(PayloadFormatError::Malformed {
+                        at,
+                        why: format!(
+                            "{path}: the members run to byte {}, past the end at byte {end} the \
+                             DHEADER counts",
+                            self.at
+                        ),
+                    });
+                }
+                // What is left before the end is members a newer definition
+                // appended, which this one does not name.
+                self.at = end;
+                Ok(())
+            }
+            Structure::Mutable => self.mutable(set, members, path),
+        }
+    }
+
+    /// A mutable structure: a DHEADER, then each member behind an EMHEADER
+    /// that names it by its id, its place among `members` (XTypes 1.3,
+    /// 7.4.3.4.8).
+    fn mutable(
+        &mut self,
+        set: &TypeSet,
+        members: &[FieldDef],
+        path: &str,
+    ) -> Result<(), PayloadFormatError> {
+        let (_, end) = self.dheader(path)?;
+        let mut seen = alloc::vec![false; members.len()];
+        loop {
+            let off = self.at - HEADER_LEN;
+            let next = self.at + (4 - off % 4) % 4;
+            if next >= end {
+                // Nothing but the padding before the end is left.
+                self.at = end;
+                return Ok(());
+            }
+            self.at = next;
+            let header_at = self.at;
+            let raw = self.take(4, path, "EMHEADER")?;
+            let header = u32::from_le_bytes(self.le(raw));
+            let must_understand = header & 0x8000_0000 != 0;
+            let code = (header >> 28) & 0x7;
+            let id = header & 0x0fff_ffff;
+            let length = match code {
+                0..=3 => Some(1usize << code),
+                4 => {
+                    let raw = self.take(4, path, "EMHEADER's NEXTINT")?;
+                    Some(u32::from_le_bytes(self.le(raw)) as usize)
+                }
+                // The NEXTINT is the member's own first four bytes (its length
+                // or its DHEADER), so it is read where it stands and not taken.
+                _ => {
+                    let start = self.at;
+                    let raw = self.take(4, path, "EMHEADER's NEXTINT")?;
+                    let next_int = u32::from_le_bytes(self.le(raw)) as usize;
+                    self.at = start;
+                    let unit = match code {
+                        5 => 1,
+                        6 => 4,
+                        _ => 8,
+                    };
+                    next_int.checked_mul(unit).and_then(|n| n.checked_add(4))
+                }
             };
-            return self.field(set, &member, path);
-        }
-        for field in &def.fields {
+            let value_start = self.at;
+            let Some(value_end) = length
+                .and_then(|length| value_start.checked_add(length))
+                .filter(|value_end| *value_end <= end)
+            else {
+                return Err(PayloadFormatError::Malformed {
+                    at: header_at,
+                    why: format!(
+                        "{path}: the member of id {id} runs past the end at byte {end} the \
+                         DHEADER counts"
+                    ),
+                });
+            };
+            let Some(field) = members.get(id as usize) else {
+                if must_understand {
+                    return Err(PayloadFormatError::Malformed {
+                        at: header_at,
+                        why: format!(
+                            "{path}: the member of id {id} must be understood, and the \
+                             definition has no member of that id"
+                        ),
+                    });
+                }
+                self.at = value_end;
+                continue;
+            };
+            if core::mem::replace(&mut seen[id as usize], true) {
+                return Err(PayloadFormatError::Malformed {
+                    at: header_at,
+                    why: format!("{path}.{}: the member appears twice", field.name),
+                });
+            }
             self.field(set, field, path)?;
+            if self.at != value_end {
+                return Err(PayloadFormatError::Malformed {
+                    at: header_at,
+                    why: format!(
+                        "{path}.{}: the member reads {} byte(s), and its EMHEADER says {}",
+                        field.name,
+                        self.at - value_start,
+                        value_end - value_start
+                    ),
+                });
+            }
         }
-        Ok(())
     }
 
     fn field(
@@ -269,10 +514,21 @@ impl<'p> Reader<'p> {
     ) -> Result<(), PayloadFormatError> {
         let path = format!("{parent}.{}", field.name);
         let spelling = field.spelling();
-        match field.arity {
-            Arity::One => self.value(set, &field.base, &path, Some(&field.name), spelling),
-            Arity::Fixed(n) => self.elements(set, field, &path, n, spelling),
-            Arity::Sequence(bound) => {
+        let (fixed, bound) = match field.arity {
+            Arity::One => return self.value(set, &field.base, &path, Some(&field.name), spelling),
+            Arity::Fixed(n) => (Some(n), None),
+            Arity::Sequence(bound) => (None, bound),
+        };
+        // XCDR version 2 counts the bytes of a collection whose elements are
+        // not primitives before it.
+        let delimited = if self.delimited_collections && !matches!(field.base, Base::Primitive(_)) {
+            Some(self.dheader(&path)?)
+        } else {
+            None
+        };
+        let count = match fixed {
+            Some(n) => n,
+            None => {
                 let count = self.count(&path, "sequence count")?;
                 if let Some(bound) = bound.filter(|bound| count > *bound) {
                     return Err(PayloadFormatError::Malformed {
@@ -283,8 +539,20 @@ impl<'p> Reader<'p> {
                         ),
                     });
                 }
-                self.elements(set, field, &path, count, spelling)
+                count
             }
+        };
+        self.elements(set, field, &path, count, spelling)?;
+        match delimited {
+            Some((at, end)) if self.at != end => Err(PayloadFormatError::Malformed {
+                at,
+                why: format!(
+                    "{path}: the elements run to byte {}, and the DHEADER counts them to byte \
+                     {end}",
+                    self.at
+                ),
+            }),
+            _ => Ok(()),
         }
     }
 
@@ -342,13 +610,7 @@ impl<'p> Reader<'p> {
         match base {
             Base::Primitive(p) => self.primitive(*p, path, name, ty),
             Base::String(bound) => self.string(*bound, path, name, ty),
-            Base::WString(_) => Err(PayloadFormatError::Malformed {
-                at: self.at,
-                why: format!(
-                    "{path}: a wstring is not read, because the width of its characters on \
-                     the wire differs between serializers"
-                ),
-            }),
+            Base::WString(bound) => self.wstring(*bound, path, name, ty),
             Base::Message(inner) => {
                 let Some(def) = set.message(inner) else {
                     return Err(PayloadFormatError::Malformed {
@@ -459,6 +721,97 @@ impl<'p> Reader<'p> {
         });
         Ok(())
     }
+}
+
+impl Reader<'_> {
+    /// A `wstring`: a count of UTF-16 code units, each then a 4-byte unsigned
+    /// integer (the module doc's "A wide string").
+    fn wstring(
+        &mut self,
+        bound: Option<u32>,
+        path: &str,
+        name: Option<&str>,
+        ty: String,
+    ) -> Result<(), PayloadFormatError> {
+        let count = self.count(path, "wstring length")?;
+        let start = self.at - 4;
+        if let Some(bound) = bound.filter(|bound| count > *bound) {
+            return Err(PayloadFormatError::Malformed {
+                at: start,
+                why: format!(
+                    "{path}: a wstring of {count} code unit(s) is longer than its bound {bound}"
+                ),
+            });
+        }
+        // Each code unit takes four bytes, so a count the bytes left cannot hold
+        // is refused before anything is kept for it.
+        let left = self.bytes.len().saturating_sub(self.at);
+        if count as usize > left / 4 {
+            return Err(PayloadFormatError::Malformed {
+                at: self.at,
+                why: format!(
+                    "{path}: {count} code unit(s) of four bytes cannot fit in the {left} byte(s) \
+                     left"
+                ),
+            });
+        }
+        let mut units: Vec<(usize, u16)> = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let at = self.at;
+            let raw = self.take(4, path, "wstring code unit")?;
+            let unit = u32::from_le_bytes(self.le(raw));
+            let Ok(unit) = u16::try_from(unit) else {
+                return Err(PayloadFormatError::Malformed {
+                    at,
+                    why: format!(
+                        "{path}: a wstring holds UTF-16 code units, and 0x{unit:x} is above 0xffff"
+                    ),
+                });
+            };
+            units.push((at, unit));
+        }
+        let text = utf16(&units, path)?;
+        self.rows.push(PayloadField {
+            path: String::from(path),
+            name: name.map(String::from),
+            value: format!("{text:?}"),
+            start,
+            end: self.at,
+            typed: typed(ty, Some(text_json(&text))),
+        });
+        Ok(())
+    }
+}
+
+/// The text a run of UTF-16 code units spells, each with the byte it was read
+/// at, or a refusal at the byte of the first surrogate that is not half of a
+/// pair.
+fn utf16(units: &[(usize, u16)], path: &str) -> Result<String, PayloadFormatError> {
+    let unpaired = |at: usize, unit: u16| PayloadFormatError::Malformed {
+        at,
+        why: format!("{path}: the wstring's code unit 0x{unit:04x} is an unpaired surrogate"),
+    };
+    let mut text = String::with_capacity(units.len());
+    let mut rest = units.iter();
+    while let Some(&(at, unit)) = rest.next() {
+        let code = match unit {
+            0xd800..=0xdbff => match rest.clone().next() {
+                Some(&(_, low @ 0xdc00..=0xdfff)) => {
+                    rest.next();
+                    0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00)
+                }
+                _ => return Err(unpaired(at, unit)),
+            },
+            0xdc00..=0xdfff => return Err(unpaired(at, unit)),
+            _ => u32::from(unit),
+        };
+        // Every value above is a scalar value: a surrogate is never left in it.
+        let Some(c) = char::from_u32(code) else {
+            return Err(unpaired(at, unit));
+        };
+        text.push(c);
+    }
+    Ok(text)
 }
 
 /// The typed reading of a row: its type, and its value as JSON text where it
@@ -617,6 +970,365 @@ mod tests {
         );
     }
 
+    /// A `wstring` as rmw_zenoh's Fast-CDR type support writes it: a count of
+    /// UTF-16 code units, then each as a 4-byte integer, in either byte order;
+    /// a surrogate pair is one character and an empty one holds nothing.
+    #[test]
+    fn a_wide_string_reads_its_utf16_code_units() {
+        let set = set_of(&[("demo/msg/Wide.msg", "wstring w\nwstring<=2 b\nuint8 after")]);
+        // "h" and U+10400, a character past the basic plane: three code units.
+        let little: &[u8] = &[
+            0, 1, 0, 0, // header
+            3, 0, 0, 0, // w's count
+            0x68, 0, 0, 0, // 'h'
+            0x01, 0xd8, 0, 0, // the high surrogate
+            0x00, 0xdc, 0, 0, // the low surrogate
+            0, 0, 0, 0, // b, empty
+            7, // after
+        ];
+        let big: &[u8] = &[
+            0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0x68, 0, 0, 0xd8, 0x01, 0, 0, 0xdc, 0x00, 0, 0, 0, 0,
+            7,
+        ];
+        let wide = text_json("h\u{10400}");
+        let empty = text_json("");
+        let expected = vec![
+            ("$", None, "demo/msg/Wide", None, 4, 25),
+            ("$.w", Some("w"), "wstring", Some(wide.as_str()), 4, 20),
+            ("$.b", Some("b"), "wstring<=2", Some(empty.as_str()), 20, 24),
+            ("$.after", Some("after"), "uint8", Some("7"), 24, 25),
+        ];
+        for bytes in [little, big] {
+            let fields = read(&set, "demo/msg/Wide", bytes).expect("a Wide");
+            assert_eq!(rows(&fields), expected);
+            assert_eq!(fields[1].value, format!("{:?}", "h\u{10400}"));
+        }
+    }
+
+    /// A code unit above 0xFFFF, an unpaired surrogate either way round, a
+    /// wide string longer than its bound and a count the bytes cannot hold are
+    /// each refused at their byte, naming the field.
+    #[test]
+    fn a_wide_string_that_is_not_utf16_is_refused_at_its_code_unit() {
+        let set = set_of(&[("demo/msg/Wide.msg", "wstring<=2 w")]);
+        let refused = |bytes: &[u8]| match read(&set, "demo/msg/Wide", bytes) {
+            Err(PayloadFormatError::Malformed { at, why }) => (at, why),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]),
+            (
+                8,
+                String::from("$.w: a wstring holds UTF-16 code units, and 0x10000 is above 0xffff")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x01, 0xd8, 0, 0, 0x61, 0, 0, 0]),
+            (
+                8,
+                String::from("$.w: the wstring's code unit 0xd801 is an unpaired surrogate")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x61, 0, 0, 0, 0x00, 0xdc, 0, 0]),
+            (
+                12,
+                String::from("$.w: the wstring's code unit 0xdc00 is an unpaired surrogate")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 3, 0, 0, 0]),
+            (
+                4,
+                String::from("$.w: a wstring of 3 code unit(s) is longer than its bound 2")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x61, 0, 0, 0]),
+            (
+                8,
+                String::from("$.w: 2 code unit(s) of four bytes cannot fit in the 4 byte(s) left")
+            )
+        );
+    }
+
+    /// An action's derived request, by the name its samples carry, read
+    /// through a rule over the declared action file: the goal's UUID, as the
+    /// one run of octets ROS fixes it as, then the goal.
+    #[test]
+    fn an_action_goal_request_reads_by_its_derived_type() {
+        let mut map = FormatMap::new();
+        map.declare_all(
+            "#@demo/action/Fib.action=\"int32 order\\n---\\nint32[] sequence\\n---\\nint32[] seq\"\n\
+             demo/goal=cdr@demo/action/Fib_SendGoal_Request",
+        )
+        .expect("the declarations install");
+        let rule = map.matching_rule("demo/goal").expect("the cdr rule");
+        let mut bytes = vec![0u8, 1, 0, 0];
+        bytes.extend(1..=16u8);
+        bytes.extend_from_slice(&5i32.to_le_bytes());
+        let fields = rule.format.decode(&bytes).expect("a goal request");
+        assert_eq!(
+            rows(&fields),
+            vec![
+                ("$", None, "demo/action/Fib_SendGoal_Request", None, 4, 24),
+                (
+                    "$.goal_id",
+                    Some("goal_id"),
+                    "unique_identifier_msgs/msg/UUID",
+                    None,
+                    4,
+                    20
+                ),
+                (
+                    "$.goal_id.uuid",
+                    Some("uuid"),
+                    "uint8[16]",
+                    Some("\"AQIDBAUGBwgJCgsMDQ4PEA==\""),
+                    4,
+                    20
+                ),
+                ("$.goal", Some("goal"), "demo/action/Fib_Goal", None, 20, 24),
+                ("$.goal.order", Some("order"), "int32", Some("5"), 20, 24),
+            ]
+        );
+    }
+
+    /// PLAIN_CDR2 in both byte orders: an 8-byte value aligns to 4, where
+    /// plain CDR would align it to 8, and a sequence of primitives has no
+    /// DHEADER.
+    #[test]
+    fn plain_cdr2_aligns_eight_byte_values_to_four() {
+        let set = set_of(&[
+            (
+                "demo/msg/Outer.msg",
+                "uint32 a\nfloat64 b\nint16[] c\ndemo/Inner inner",
+            ),
+            ("demo/msg/Inner.msg", "bool f\nuint32 n"),
+        ]);
+        let little: &[u8] = &[
+            0, 7, 0, 0, // PLAIN_CDR2, little-endian
+            7, 0, 0, 0, // a
+            0, 0, 0, 0, 0, 0, 0xf8, 0x3f, // b = 1.5, at 4 past the header
+            2, 0, 0, 0, // c's count
+            0xfe, 0xff, 3, 0, // -2, 3
+            1, 0, 0, 0, // inner.f, then padding to 4
+            0x70, 0x11, 0x01, 0x00, // inner.n = 70000
+        ];
+        let big: &[u8] = &[
+            0, 6, 0, 0, 0, 0, 0, 7, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0xff, 0xfe, 0, 3, 1,
+            0, 0, 0, 0x00, 0x01, 0x11, 0x70,
+        ];
+        let expected = vec![
+            ("$", None, "demo/msg/Outer", None, 4, 32),
+            ("$.a", Some("a"), "uint32", Some("7"), 4, 8),
+            ("$.b", Some("b"), "float64", Some("1.5"), 8, 16),
+            ("$.c", Some("c"), "int16[]", None, 20, 24),
+            ("$.c.0", None, "int16", Some("-2"), 20, 22),
+            ("$.c.1", None, "int16", Some("3"), 22, 24),
+            ("$.inner", Some("inner"), "demo/msg/Inner", None, 24, 32),
+            ("$.inner.f", Some("f"), "bool", Some("true"), 24, 25),
+            ("$.inner.n", Some("n"), "uint32", Some("70000"), 28, 32),
+        ];
+        for bytes in [little, big] {
+            let fields = read(&set, "demo/msg/Outer", bytes).expect("an Outer");
+            assert_eq!(rows(&fields), expected);
+        }
+    }
+
+    /// In XCDR version 2 a sequence of strings is preceded by a DHEADER that
+    /// counts its bytes, and a DHEADER that counts other than them is refused.
+    #[test]
+    fn xcdr2_counts_a_collection_of_strings_before_it() {
+        let set = set_of(&[("demo/msg/Names.msg", "string[] names\nuint8 after")]);
+        let bytes: &[u8] = &[
+            0, 7, 0, 0, // PLAIN_CDR2, little-endian
+            10, 0, 0, 0, // DHEADER: the ten bytes after it
+            1, 0, 0, 0, // the count
+            2, 0, 0, 0, b'a', 0, // "a"
+            9, // after
+        ];
+        let fields = read(&set, "demo/msg/Names", bytes).expect("a Names");
+        assert_eq!(
+            rows(&fields),
+            vec![
+                ("$", None, "demo/msg/Names", None, 12, 19),
+                ("$.names", Some("names"), "string[]", None, 12, 18),
+                ("$.names.0", None, "string", Some("\"a\""), 12, 18),
+                ("$.after", Some("after"), "uint8", Some("9"), 18, 19),
+            ]
+        );
+        let mut long = bytes.to_vec();
+        long[4] = 11;
+        assert_eq!(
+            read(&set, "demo/msg/Names", &long),
+            Err(PayloadFormatError::Malformed {
+                at: 4,
+                why: String::from(
+                    "$.names: the elements run to byte 18, and the DHEADER counts them to byte 19"
+                ),
+            })
+        );
+    }
+
+    /// DELIMITED_CDR2: every structure is appendable, so a DHEADER precedes
+    /// the root and each nested one; members a newer definition appended are
+    /// passed over to the end it counts, and members that run past it are
+    /// refused.
+    #[test]
+    fn delimited_cdr2_reads_a_dheader_before_every_structure() {
+        let set = set_of(&[
+            ("demo/msg/Pair.msg", "demo/Point p\nuint8 k"),
+            ("demo/msg/Point.msg", "int32 x\nint32 y"),
+        ]);
+        let bytes: &[u8] = &[
+            0, 9, 0, 0, // DELIMITED_CDR2, little-endian
+            13, 0, 0, 0, // the Pair's DHEADER
+            8, 0, 0, 0, // the Point's DHEADER
+            1, 0, 0, 0, // x
+            2, 0, 0, 0, // y
+            3, // k
+        ];
+        let fields = read(&set, "demo/msg/Pair", bytes).expect("a Pair");
+        assert_eq!(
+            rows(&fields),
+            vec![
+                ("$", None, "demo/msg/Pair", None, 12, 21),
+                ("$.p", Some("p"), "demo/msg/Point", None, 12, 20),
+                ("$.p.x", Some("x"), "int32", Some("1"), 12, 16),
+                ("$.p.y", Some("y"), "int32", Some("2"), 16, 20),
+                ("$.k", Some("k"), "uint8", Some("3"), 20, 21),
+            ]
+        );
+        let newer: &[u8] = &[
+            0, 9, 0, 0, 17, 0, 0, 0, // the Pair's DHEADER
+            12, 0, 0, 0, // the Point's DHEADER, counting a member it does not name
+            1, 0, 0, 0, 2, 0, 0, 0, 9, 9, 9, 9, // x, y and the appended member
+            3,
+        ];
+        let fields = read(&set, "demo/msg/Pair", newer).expect("a newer Pair");
+        assert_eq!(
+            rows(&fields)[4],
+            ("$.k", Some("k"), "uint8", Some("3"), 24, 25)
+        );
+        let short: &[u8] = &[
+            0, 9, 0, 0, 13, 0, 0, 0, 4, 0, 0, 0, // a Point's DHEADER counting x alone
+            1, 0, 0, 0, 2, 0, 0, 0, 3,
+        ];
+        assert_eq!(
+            read(&set, "demo/msg/Pair", short),
+            Err(PayloadFormatError::Malformed {
+                at: 8,
+                why: String::from(
+                    "$.p: the members run to byte 20, past the end at byte 16 the DHEADER counts"
+                ),
+            })
+        );
+    }
+
+    /// A mutable `Point` in PL_CDR2: its DHEADER, then `x` and `y` each behind
+    /// an EMHEADER of length code 2 (four bytes) and its member id.
+    const POINT: [u8; 20] = [
+        16, 0, 0, 0, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 0, 0x20, 2, 0, 0, 0,
+    ];
+
+    /// The PL_CDR2 `Pair`, its root DHEADER counting `members`.
+    fn pl_cdr2(members: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0, 0x0b, 0, 0];
+        bytes.extend_from_slice(&(members.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(members);
+        bytes
+    }
+
+    /// PL_CDR2: every structure is mutable, each member behind an EMHEADER
+    /// naming it by its place in the definition. The length code's NEXTINT is
+    /// the member's own first word (code 5) or a length before it (code 4),
+    /// members are read in the order they arrive, and an id the definition
+    /// does not have is passed over.
+    #[test]
+    fn pl_cdr2_reads_each_member_by_its_id() {
+        let set = set_of(&[
+            ("demo/msg/Pair.msg", "demo/Point p\nuint8 k"),
+            ("demo/msg/Point.msg", "int32 x\nint32 y"),
+        ]);
+        let mut members = vec![0, 0, 0, 0x50]; // p: code 5, id 0
+        members.extend_from_slice(&POINT);
+        members.extend_from_slice(&[1, 0, 0, 0, 3]); // k: code 0, id 1
+        let fields = read(&set, "demo/msg/Pair", &pl_cdr2(&members)).expect("a Pair");
+        assert_eq!(
+            rows(&fields),
+            vec![
+                ("$", None, "demo/msg/Pair", None, 20, 37),
+                ("$.p", Some("p"), "demo/msg/Point", None, 20, 32),
+                ("$.p.x", Some("x"), "int32", Some("1"), 20, 24),
+                ("$.p.y", Some("y"), "int32", Some("2"), 28, 32),
+                ("$.k", Some("k"), "uint8", Some("3"), 36, 37),
+            ]
+        );
+
+        // k first, padding, then p behind code 4 and its length.
+        let mut reordered = vec![1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0x40, 20, 0, 0, 0];
+        reordered.extend_from_slice(&POINT);
+        let fields = read(&set, "demo/msg/Pair", &pl_cdr2(&reordered)).expect("a Pair");
+        let read_rows = rows(&fields);
+        assert_eq!(read_rows[1], ("$.k", Some("k"), "uint8", Some("3"), 12, 13));
+        assert_eq!(
+            read_rows[3],
+            ("$.p.x", Some("x"), "int32", Some("1"), 32, 36)
+        );
+
+        // An id the definition does not have, between p and k, is passed over.
+        let mut unknown = vec![0, 0, 0, 0x50];
+        unknown.extend_from_slice(&POINT);
+        unknown.extend_from_slice(&[7, 0, 0, 0x20, 9, 9, 9, 9, 1, 0, 0, 0, 3]);
+        let fields = read(&set, "demo/msg/Pair", &pl_cdr2(&unknown)).expect("a Pair");
+        assert_eq!(
+            rows(&fields)[4],
+            ("$.k", Some("k"), "uint8", Some("3"), 44, 45)
+        );
+    }
+
+    /// A member id the definition does not have whose must-understand flag is
+    /// set, a member whose EMHEADER's length is not what it reads, and a member
+    /// that appears twice are each refused at the EMHEADER.
+    #[test]
+    fn pl_cdr2_refuses_a_member_it_cannot_account_for() {
+        let set = set_of(&[
+            ("demo/msg/Pair.msg", "demo/Point p\nuint8 k"),
+            ("demo/msg/Point.msg", "int32 x\nint32 y"),
+        ]);
+        let refused = |tail: &[u8]| {
+            let mut members = vec![0, 0, 0, 0x50];
+            members.extend_from_slice(&POINT);
+            members.extend_from_slice(tail);
+            match read(&set, "demo/msg/Pair", &pl_cdr2(&members)) {
+                Err(PayloadFormatError::Malformed { at, why }) => (at, why),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            refused(&[7, 0, 0, 0xa0, 9, 9, 9, 9]),
+            (
+                32,
+                String::from(
+                    "$: the member of id 7 must be understood, and the definition has no member \
+                     of that id"
+                )
+            )
+        );
+        assert_eq!(
+            refused(&[1, 0, 0, 0x20, 3, 0, 0, 0]),
+            (
+                32,
+                String::from("$.k: the member reads 1 byte(s), and its EMHEADER says 4")
+            )
+        );
+        assert_eq!(
+            refused(&[1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 4]),
+            (40, String::from("$.k: the member appears twice"))
+        );
+    }
+
     /// A service's response, by the name its samples carry.
     #[test]
     fn a_service_response_reads_by_its_own_type() {
@@ -697,9 +1409,24 @@ mod tests {
             )
         );
         assert_eq!(
-            refused("std_msgs/msg/String", &[0, 3, 0, 0, 1, 0, 0, 0, 0]).0,
-            0,
-            "a parameter list is not plain CDR"
+            refused("std_msgs/msg/String", &[0, 3, 0, 0, 1, 0, 0, 0, 0]),
+            (
+                0,
+                String::from(
+                    "the encapsulation header names representation 0x0003, a parameter list of \
+                     XCDR version 1 (PL_CDR), which is not read"
+                )
+            )
+        );
+        assert_eq!(
+            refused("std_msgs/msg/String", &[0, 0x0c, 0, 0, 1, 0, 0, 0, 0]),
+            (
+                0,
+                String::from(
+                    "the encapsulation header names representation 0x000c, which no CDR \
+                     representation is"
+                )
+            )
         );
         assert_eq!(
             read(&set, "std_msgs/msg/String", &[0, 1]),
@@ -723,12 +1450,21 @@ mod tests {
         assert_eq!(rule.format.name(), CDR_TOKEN);
         let schema = rule.format.body_schema().expect("a body schema");
         assert_eq!((schema.message, schema.read), ("std_msgs/msg/String", true));
+        assert_eq!(
+            rule.format.type_hash(),
+            Some("RIHS01_df668c740482bbd48fb39d76a70dfd4bd59db1288021743503259e948f6b1a18")
+        );
         assert!(rule.format.reads_types());
         assert_eq!(rule.format.encodings(), Some(&["application/cdr"][..]));
         let fields = rule.format.decode(HELLO).expect("a String");
         assert_eq!(fields[1].path, "$.data");
         let pose = map.matching_rule("pose/a").expect("the protobuf rule");
         assert!(pose.format.reads_types(), "the proto file was read");
+        assert_eq!(
+            pose.format.type_hash(),
+            None,
+            "a .proto type has no ROS hash"
+        );
         assert!(map
             .declarations()
             .iter()

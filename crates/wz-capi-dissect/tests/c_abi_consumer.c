@@ -1907,8 +1907,8 @@ static int check_follow_door(void) {
         rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
         CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":5},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":5},")) ==
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
@@ -1937,8 +1937,8 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && doc != NULL,
               "field_values_since_window rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":5},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":5},")) ==
                   0,
               "the windowed door writes the same document: %s", doc);
         wz_dissect_string_free(doc);
@@ -4247,9 +4247,10 @@ int main(void) {
      * among the rules: the number a field row's matched_rule.index reports.
      * Revision 3 adds the kind `schema_file`, which this text has none of.
      * Revision 4 adds the kind `segment_rule`, which it has none of either,
-     * and revision 5 the kind `key_binding`, nor that. */
+     * and revision 5 the kind `key_binding`, nor that. Revision 6 names the
+     * types of a ROS definition file's line, and this text declares none. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5},"
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":6},"
                  "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
                  "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
                  "\"rule_index\":0}]}") == 0,
@@ -4829,8 +4830,13 @@ int main(void) {
      * chose it. Two keys and one family arrive; a json or cbor decoding is
      * now typed.
      * 83: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
-     * nothing retires. */
-    revisioned[2].revision = 83;
+     * nothing retires.
+     * 84: a `decoded` payload block gains `type_hash`, the ROS type hash of
+     * a `cdr` rule's type and `null` otherwise. A key arrives; nothing
+     * retires.
+     * 85: every flow gains `unrowed_comments`, the comments of its packets
+     * that begin no row. A key arrives; nothing retires. */
+    revisioned[2].revision = 85;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
