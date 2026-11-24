@@ -721,8 +721,6 @@ pub mod handshake_stray;
 /// A session's own zid as a value that is one to sixteen bytes by construction.
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.
-// Totality debt TD-088 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod session_zid;
 /// The zid a node derives from its address and listener ports under the `zid-derivation`
 /// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
