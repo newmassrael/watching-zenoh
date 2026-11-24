@@ -11497,6 +11497,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link.link_driver().tx_fence()
             });
         }
+        // The room check and the mint that open a frame under `tx-lend-only`
+        // ([`Self::open_frame_lent`]): `None` when the conduit's link has no room, and the SN
+        // is minted only once it has. The deadline is read after the check spent from it.
+        #[cfg(feature = "tx-lend-only")]
+        let admit = || {
+            if congested() {
+                return None;
+            }
+            Some(FrameEmit {
+                ext_qos,
+                sn: self.next_outbound_frame_sn(priority, reliable, sn_mask),
+                reliable,
+                mtu,
+                sn_mask,
+                max_reassembly_bytes,
+                deadline: deadline.get(),
+            })
+        };
         let stage_and_emit = |batch: &mut BatchTx| {
             // Whatever this sender does with the conduit, a wait for room included, is a send
             // in progress to a droppable message that finds the conduit held.
@@ -11546,50 +11564,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // the budget leaves as a chain of lent fragments (with
                     // fragmentation) or is refused as oversize (without it).
                     #[cfg(feature = "tx-lend-only")]
-                    {
-                        if congested() {
-                            return Ok(UnicastPush::Congested);
-                        }
-                        let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
-                        return match self.open_lent_batch(
-                            batch,
-                            idx,
-                            sn,
-                            priority,
-                            reliable,
-                            ext_qos,
-                            mtu,
-                            &encode_body,
-                        ) {
-                            LentBatchOpen::Opened => Ok(UnicastPush::Pushed),
-                            #[cfg(feature = "transport-fragmentation")]
-                            LentBatchOpen::Heap(HeapStage::PastBudget) => self
-                                .emit_fragments_encoded(
-                                    batch,
-                                    &encode_body,
-                                    FrameEmit {
-                                        ext_qos,
-                                        sn,
-                                        reliable,
-                                        mtu,
-                                        sn_mask,
-                                        max_reassembly_bytes,
-                                        deadline: deadline.get(),
-                                    },
-                                ),
-                            #[cfg(not(feature = "transport-fragmentation"))]
-                            LentBatchOpen::Heap(HeapStage::PastBudget) => {
-                                Err(SendWireError::LinkRefused(
-                                    self.refuse_tx(crate::link::LinkDropCause::Oversize),
-                                ))
-                            }
-                            LentBatchOpen::Heap(HeapStage::NoSlot | HeapStage::ShortSlot) => {
-                                Err(SendWireError::LinkRefused(
-                                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
-                                ))
-                            }
-                        };
-                    }
+                    return self.open_frame_lent(
+                        batch,
+                        true,
+                        priority,
+                        &admit,
+                        worst_case_payload,
+                        encode_body,
+                    );
                     #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
@@ -11733,55 +11715,55 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Immediate path (batching off or window closed):
             // frame-per-message, mint + encode + emit under the SAME lock
             // hold (pico TX-mutex parity, R311kf).
-            if congested() {
-                return Ok(UnicastPush::Congested);
-            }
-            let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
-            let frame_emit = FrameEmit {
-                ext_qos,
-                sn,
-                reliable,
-                mtu,
-                sn_mask,
-                max_reassembly_bytes,
-                deadline: deadline.get(),
-            };
-            // ARCHITECTURE section 9.1 — a link that lends a slot takes the
-            // frame without a copy: the codec writes it into the slot the link
-            // will send. When the link lends nothing (every driver but the ones
-            // that opt in), or the frame needs fragmenting, nothing was sent and
-            // the frame is built on the heap exactly as before, with the SN
-            // already minted above.
-            //
-            // A frame past the budget is not built on the heap either: it is cut
-            // into a chain whose fragments are each encoded straight into a slot
-            // of their own (`Self::emit_fragments_encoded`, R3251).
-            #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
-            match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => {
-                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
-                    return Ok(UnicastPush::Pushed);
-                }
-                #[cfg(feature = "transport-fragmentation")]
-                FrameLend::PastMtu => {
-                    return self.emit_fragments_encoded(batch, &encode_body, frame_emit);
-                }
-                #[cfg(not(feature = "transport-fragmentation"))]
-                FrameLend::PastMtu => {
-                    batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
-                }
-                FrameLend::Heap => {
-                    batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
-                }
-                // Refused before a byte left, as the oversize path refuses it: the SN minted
-                // above is given back.
-                FrameLend::Refused(refused) => {
-                    self.outbound_frame_sn.unmint(priority, reliable);
-                    return Err(SendWireError::Codec(refused));
-                }
-            }
             #[cfg(not(feature = "tx-lend-only"))]
             {
+                if congested() {
+                    return Ok(UnicastPush::Congested);
+                }
+                let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+                let frame_emit = FrameEmit {
+                    ext_qos,
+                    sn,
+                    reliable,
+                    mtu,
+                    sn_mask,
+                    max_reassembly_bytes,
+                    deadline: deadline.get(),
+                };
+                // ARCHITECTURE section 9.1 — a link that lends a slot takes the
+                // frame without a copy: the codec writes it into the slot the link
+                // will send. When the link lends nothing (every driver but the ones
+                // that opt in), or the frame needs fragmenting, nothing was sent and
+                // the frame is built on the heap exactly as before, with the SN
+                // already minted above.
+                //
+                // A frame past the budget is not built on the heap either: it is cut
+                // into a chain whose fragments are each encoded straight into a slot
+                // of their own (`Self::emit_fragments_encoded`, R3251).
+                #[cfg(feature = "transport-tx-lend")]
+                match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
+                    FrameLend::Sent => {
+                        batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
+                        return Ok(UnicastPush::Pushed);
+                    }
+                    #[cfg(feature = "transport-fragmentation")]
+                    FrameLend::PastMtu => {
+                        return self.emit_fragments_encoded(batch, &encode_body, frame_emit);
+                    }
+                    #[cfg(not(feature = "transport-fragmentation"))]
+                    FrameLend::PastMtu => {
+                        batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
+                    }
+                    FrameLend::Heap => {
+                        batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
+                    }
+                    // Refused before a byte left, as the oversize path refuses it: the SN minted
+                    // above is given back.
+                    FrameLend::Refused(refused) => {
+                        self.outbound_frame_sn.unmint(priority, reliable);
+                        return Err(SendWireError::Codec(refused));
+                    }
+                }
                 let wire = crate::frame_encode::encode_frame_envelope(
                     sn,
                     crate::frame_encode::frame_flags(reliable),
@@ -11791,39 +11773,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 );
                 self.emit_frame_or_fragments(batch, &wire, frame_emit)
             }
-            // Fixed-memory step S4 — under `tx-lend-only` the heap frame is not
-            // an answer: a frame past the budget with fragmentation off is an
-            // oversize refusal, and no slot (or one too short) is a no-slot
-            // refusal, each counted. Nothing was sent in either, and the SN
-            // minted above is spent, as it is for a refused fragment chain.
             #[cfg(feature = "tx-lend-only")]
-            match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => {
-                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
-                    Ok(UnicastPush::Pushed)
-                }
-                #[cfg(feature = "transport-fragmentation")]
-                FrameLend::PastMtu => self.emit_fragments_encoded(batch, &encode_body, frame_emit),
-                #[cfg(not(feature = "transport-fragmentation"))]
-                FrameLend::PastMtu => {
-                    // What only a fragment chain reads is unread here, as in
-                    // `emit_frame_or_fragments` without fragmentation.
-                    let _ = (
-                        frame_emit.sn_mask,
-                        frame_emit.max_reassembly_bytes,
-                        frame_emit.deadline,
-                    );
-                    Err(SendWireError::LinkRefused(
-                        self.refuse_tx(crate::link::LinkDropCause::Oversize),
-                    ))
-                }
-                FrameLend::Heap => Err(SendWireError::LinkRefused(
-                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
-                )),
-                FrameLend::Refused(refused) => {
-                    self.outbound_frame_sn.unmint(priority, reliable);
-                    Err(SendWireError::Codec(refused))
-                }
+            {
+                self.open_frame_lent(
+                    batch,
+                    false,
+                    priority,
+                    &admit,
+                    worst_case_payload,
+                    encode_body,
+                )
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -11982,6 +11941,114 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             pushed => {
                 count_pushed();
                 pushed.map(|_| Dispatched::Sent)
+            }
+        }
+    }
+
+    /// The frame one message opens under `tx-lend-only`, from the room check to the answer:
+    /// `admit` asks the conduit's link for room and mints the SN once it has, and the frame is
+    /// written into a slot that link lends, kept open for the messages after it when the batch
+    /// window is open (`in_window`) or sent at once. A message past the budget leaves as a
+    /// chain of lent fragments, or is refused as oversize without fragmentation; no slot, or one
+    /// short of what the frame needs, is a refusal, as is a message its encoder refuses, whose
+    /// SN is given back. Nothing is staged on the heap, which this profile has no answer in.
+    ///
+    /// One body for the window's opening and for the frame sent whole: the two differ only in
+    /// the slot they write and what keeps it.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline(never)]
+    fn open_frame_lent<P, A>(
+        &self,
+        batch: &mut BatchTx,
+        in_window: bool,
+        priority: Priority,
+        admit: &A,
+        worst_case_payload: usize,
+        encode_body: &P,
+    ) -> Result<UnicastPush, SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
+        A: Fn() -> Option<FrameEmit>,
+    {
+        let Some(emit) = admit() else {
+            return Ok(UnicastPush::Congested);
+        };
+        // An encoder's refusal in the window's slot takes the oversize path, which measures the
+        // message again and answers the refusal (`emit_fragments_encoded`).
+        #[cfg(feature = "transport-batching")]
+        let opened = if in_window {
+            Some(
+                match self.open_lent_batch(
+                    batch,
+                    TxConduits::<R>::conduit_index(priority),
+                    emit.sn,
+                    priority,
+                    emit.reliable,
+                    emit.ext_qos,
+                    emit.mtu,
+                    &encode_body,
+                ) {
+                    LentBatchOpen::Opened => FrameLend::Sent,
+                    LentBatchOpen::Heap(HeapStage::PastBudget) => FrameLend::PastMtu,
+                    LentBatchOpen::Heap(HeapStage::NoSlot | HeapStage::ShortSlot) => {
+                        FrameLend::Heap
+                    }
+                },
+            )
+        } else {
+            None
+        };
+        // A build without batching opens no window.
+        #[cfg(not(feature = "transport-batching"))]
+        let opened: Option<FrameLend> = {
+            let _ = in_window;
+            None
+        };
+        let lent = match opened {
+            Some(lent) => lent,
+            None => {
+                let lent = self.send_frame_lent(&emit, worst_case_payload, &encode_body);
+                if lent == FrameLend::Sent {
+                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
+                }
+                lent
+            }
+        };
+        match lent {
+            FrameLend::Sent => Ok(UnicastPush::Pushed),
+            #[cfg(feature = "transport-fragmentation")]
+            FrameLend::PastMtu => self.emit_fragments_encoded(batch, &encode_body, emit),
+            #[cfg(not(feature = "transport-fragmentation"))]
+            FrameLend::PastMtu => {
+                // What only a fragment chain reads is unread here, as in
+                // `emit_frame_or_fragments` without fragmentation.
+                let _ = (emit.sn_mask, emit.max_reassembly_bytes, emit.deadline);
+                Err(SendWireError::LinkRefused(
+                    self.refuse_tx(crate::link::LinkDropCause::Oversize),
+                ))
+            }
+            FrameLend::Heap => Err(SendWireError::LinkRefused(
+                self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+            )),
+            // Refused before a byte left: the SN minted for it is given back.
+            FrameLend::Refused(refused) => {
+                self.outbound_frame_sn.unmint(priority, emit.reliable);
+                Err(SendWireError::Codec(refused))
             }
         }
     }
