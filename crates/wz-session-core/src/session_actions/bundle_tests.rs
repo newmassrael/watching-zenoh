@@ -544,6 +544,52 @@ mod handshake_records {
         assert_eq!(caps, ACCEPTS, "the caps the InitAck answers");
     }
 
+    /// The zid an InitAck's read made is the one the session records, and facts that name no zid
+    /// record none over the one recorded before. Turned red by a read that hands no zid on, or by
+    /// a record that keeps a zid other than the facts'.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "alloc",
+        feature = "codec-frame",
+        feature = "session-unicast"
+    ))]
+    #[test]
+    fn an_init_ack_records_the_zid_its_read_made() {
+        use crate::inbound::{read_control, ControlFacts, InitFacts};
+        use wz_codecs::wire_const::{FLAG_T_INIT_A, PROTOCOL_VERSION, T_MID_INIT};
+        const ZID: [u8; 2] = [0xAA, 0xBB];
+        let (actions, _link) = bundle();
+        // A 2-byte zid (its length less one in the high nibble), then a 3-byte cookie.
+        let wire = [
+            T_MID_INIT | FLAG_T_INIT_A,
+            PROTOCOL_VERSION,
+            0x12,
+            ZID[0],
+            ZID[1],
+            0x03,
+            0x01,
+            0x02,
+            0x03,
+        ];
+        let (read, _) = read_control(&wire).expect("an InitAck");
+        let facts = read.facts();
+        actions.observe_control(&facts);
+        assert_eq!(
+            actions.fact_remote_peer_zid(|slot| *slot).as_deref(),
+            Some(&ZID[..]),
+            "the zid the read made"
+        );
+        let ControlFacts::Init(init) = facts else {
+            panic!("an Init: {facts:?}");
+        };
+        actions.observe_control(&ControlFacts::Init(InitFacts { zid: None, ..init }));
+        assert_eq!(
+            actions.fact_remote_peer_zid(|slot| *slot),
+            None,
+            "facts that name no zid record none"
+        );
+    }
+
     /// The OpenSyn's echoed cookie, which the admission checks. Its lease is taken by neither
     /// build as it is read: only an admitted OpenSyn gives one.
     #[cfg(feature = "codec-open-body")]
