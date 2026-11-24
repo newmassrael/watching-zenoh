@@ -1668,11 +1668,15 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                         dispatcher,
                         reasm,
                         params,
-                        bytes,
-                        src,
-                        now,
-                        resume.take(),
-                        may_stop,
+                        wz_session_core::multicast_rx::GroupDatagram {
+                            bytes,
+                            src,
+                            now_ms: now,
+                        },
+                        wz_session_core::multicast_rx::GroupWalk {
+                            resume: resume.take(),
+                            may_stop,
+                        },
                         &mut sink,
                         // R2848 — `transport-stats` is never on an MCU lane, so this
                         // loop keeps no counts to record into.

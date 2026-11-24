@@ -71,6 +71,8 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
+#[cfg(feature = "query")]
+use crate::engine::LegId;
 #[cfg(feature = "liveliness")]
 use crate::engine::LivelinessCall;
 use crate::engine::SubscriberCall;
@@ -578,9 +580,9 @@ enum Owed {
     /// A liveliness subscriber's.
     #[cfg(feature = "liveliness")]
     Liveliness(LivelinessCall),
-    /// A get's leg's.
+    /// A get's leg's: a count of the row of its callback ([`LegHolders`]).
     #[cfg(feature = "query")]
-    Reply(Arc<ReplyCallback>),
+    Reply(LegId),
     /// A queryable's: the call begun on its row as the query reached it.
     #[cfg(feature = "queryable")]
     Query(QueryableCall),
@@ -618,11 +620,11 @@ impl Owed {
         }
     }
 
-    /// The callback, when it is a leg's.
+    /// The leg, when it is a leg's callback.
     #[cfg(feature = "query")]
-    fn reply(&self) -> Option<&Arc<ReplyCallback>> {
+    fn reply(&self) -> Option<LegId> {
         match self {
-            Self::Reply(callback) => Some(callback),
+            Self::Reply(leg) => Some(*leg),
             _ => None,
         }
     }
@@ -1039,6 +1041,23 @@ pub(crate) trait AnswersQueries {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64);
 }
 
+/// What holds the callbacks of the legs of the session's gets, each in a row held by count: a
+/// record of the round that owes a leg a reply holds one count of its row from when it is written
+/// to when its call is ended, so the callback outlives every reply held for it.
+#[cfg(feature = "query")]
+pub(crate) trait LegHolders: Send + Sync {
+    /// Take one more count of `leg`'s row: `false` when it names none.
+    fn hold(&self, leg: LegId) -> bool;
+
+    /// Hand `reply` to `leg`'s callback, which a count the caller holds keeps; the callback is
+    /// called with none of the holders' locks held.
+    fn call(&self, leg: LegId, reply: &dyn ReplyView);
+
+    /// Give back one count of `leg`'s row: its callback, taken out of the row, when that was the
+    /// last count, for the caller to drop with no lock held.
+    fn release(&self, leg: LegId) -> Option<ReplyCallback>;
+}
+
 /// The rows waiting to be let go of: as many as the tables of the kinds whose calls the round
 /// ends hold.
 const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS
@@ -1063,6 +1082,10 @@ struct Released {
     /// ended ([`Releasing`]). A delivery that reads none takes no lock for them, and an
     /// undeclaration that waits for its row reads that no drop is under way.
     owed: AtomicUsize,
+    /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
+    /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
+    #[cfg(feature = "query")]
+    legs: Option<Arc<dyn LegHolders>>,
 }
 
 impl Released {
@@ -1070,6 +1093,8 @@ impl Released {
         Self {
             handles: Lock::new(BoundedVec::new_static()),
             owed: AtomicUsize::new(0),
+            #[cfg(feature = "query")]
+            legs: None,
         }
     }
 
@@ -1120,7 +1145,13 @@ impl Released {
             #[cfg(feature = "liveliness")]
             Owed::Liveliness(call) => self.end_liveliness(call),
             #[cfg(feature = "query")]
-            Owed::Reply(callback) => drop(callback),
+            Owed::Reply(leg) => {
+                // The record's count; the callback goes here, with no lock held, when it was the
+                // last.
+                if let Some(legs) = &self.legs {
+                    drop(legs.release(leg));
+                }
+            }
             #[cfg(feature = "queryable")]
             Owed::Query(call) => self.end_query(call),
         }
@@ -1232,8 +1263,8 @@ pub(crate) struct Round {
 // `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
 // kept buffers, whose claims belong to the session's task, are let go of on that task alone;
 // `released` and `answering` behind their own locks, `answering` naming the engine, whose
-// answering is made for any thread; every other field is an atomic or never written after the
-// round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
+// answering is made for any thread, as is the holder of the legs' rows `released` names; every
+// other field is an atomic or never written after the round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
 // them.
@@ -1379,6 +1410,13 @@ impl Round {
     /// once, before the round is shared; a round never told copies every key.
     pub(crate) fn reads_keys_in(&mut self, keys: KeySpace) {
         self.table.get_mut().key_space = Some(keys);
+    }
+
+    /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
+    /// leg's row. Told once, before the round is shared.
+    #[cfg(feature = "query")]
+    pub(crate) fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders>) {
+        self.released.legs = Some(legs);
     }
 
     /// The table, to write, while it is empty or filling: `None` once it is sealed or handed out.
@@ -1765,18 +1803,23 @@ impl Round {
         unsafe { self.filled(table) };
     }
 
-    /// Hold `view`, a reply, for `callback`, the leg's it answers, each part read where it lies
-    /// or written into the table. A reply is the answer a get waits for: one that finds no room is
-    /// counted with the records that hold their sender.
+    /// Hold `view`, a reply, for leg `leg`, whose callback answers it, each part read where it lies
+    /// or written into the table, with a count of the leg's row ([`LegHolders`]). A reply is the
+    /// answer a get waits for: one that finds no room is counted with the records that hold their
+    /// sender.
     ///
     /// # Safety
     /// The caller holds the session's lock.
     #[cfg(feature = "query")]
-    pub(crate) unsafe fn offer_reply(&self, callback: &Arc<ReplyCallback>, view: &dyn ReplyView) {
+    pub(crate) unsafe fn offer_reply(&self, leg: LegId, view: &dyn ReplyView) {
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
         let Some(table) = (unsafe { self.writable() }) else {
+            self.refuse(true);
+            return;
+        };
+        let Some(legs) = self.released.legs.as_deref() else {
             self.refuse(true);
             return;
         };
@@ -1789,6 +1832,10 @@ impl Round {
             self.refuse_unplaced(true);
             return;
         };
+        if !legs.hold(leg) {
+            self.refuse(true);
+            return;
+        }
         let key = reply.key;
         let first = table.callbacks.len();
         let entered = table
@@ -1798,11 +1845,12 @@ impl Round {
         if let (true, Some(held)) = (entered, held) {
             table.hold_key(key, held);
         }
-        let kept = entered
-            && table
-                .callbacks
-                .push(Owed::Reply(Arc::clone(callback)))
-                .is_ok();
+        let kept = entered && table.callbacks.push(Owed::Reply(leg)).is_ok();
+        if !kept {
+            // Refused after its count was taken: given back at once. The sink that offers the
+            // reply holds the row too, so this is never the count that lets the callback go.
+            drop(legs.release(leg));
+        }
         debug_assert!(kept, "the table had the room its checks found");
         // SAFETY: the caller's contract: the session's lock is held.
         unsafe { self.filled(table) };
@@ -2247,8 +2295,11 @@ impl Round {
                 #[cfg(feature = "query")]
                 Held::Reply(reply) => {
                     let view = RoundReply { reply, table };
-                    for callback in owed.iter().filter_map(Owed::reply) {
-                        callback.call(&view);
+                    // A reply was held only for a round told of the legs (`Self::offer_reply`).
+                    if let Some(legs) = self.released.legs.as_deref() {
+                        for leg in owed.iter().filter_map(Owed::reply) {
+                            legs.call(leg, &view);
+                        }
                     }
                 }
                 #[cfg(feature = "queryable")]

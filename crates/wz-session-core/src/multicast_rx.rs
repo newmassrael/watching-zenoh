@@ -248,11 +248,9 @@ where
     walk_multicast_inbound(
         dispatcher,
         params,
-        bytes,
+        GroupDatagram { bytes, src, now_ms },
         #[cfg(feature = "alloc")]
         None,
-        src,
-        now_ms,
         on_event,
         &mut |_: usize| {},
         stats,
@@ -289,10 +287,12 @@ where
     walk_multicast_inbound(
         dispatcher,
         params,
-        unit.as_slice(),
+        GroupDatagram {
+            bytes: unit.as_slice(),
+            src,
+            now_ms,
+        },
         Some(unit),
-        src,
-        now_ms,
         on_event,
         &mut |_: usize| {},
         stats,
@@ -306,14 +306,11 @@ where
 ///
 /// `on_evict` is handed the pool-slot index of a member the walk drops, before
 /// the slot recycles; see [`dispatch_multicast_message`].
-#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
 fn walk_multicast_inbound<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
-    bytes: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     on_evict: &mut E,
     stats: &R,
@@ -323,6 +320,7 @@ where
     E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     #[cfg(feature = "transport-compression")]
     if params.compression {
         // The messages are ranges of the batch the header was taken off, or of the buffer it
@@ -334,11 +332,13 @@ where
         return walk_multicast_batch(
             dispatcher,
             params,
-            &batch,
+            GroupDatagram {
+                bytes: &batch,
+                src,
+                now_ms,
+            },
             #[cfg(feature = "alloc")]
             None,
-            src,
-            now_ms,
             on_event,
             on_evict,
             stats,
@@ -347,11 +347,9 @@ where
     walk_multicast_batch(
         dispatcher,
         params,
-        bytes,
+        GroupDatagram { bytes, src, now_ms },
         #[cfg(feature = "alloc")]
         origin,
-        src,
-        now_ms,
         on_event,
         on_evict,
         stats,
@@ -375,14 +373,11 @@ fn unwrap_batch(params: &MulticastParams, datagram: &[u8]) -> Option<alloc::vec:
 /// [`RxBytes`] that `bytes` was taken from; each message of the batch is handed
 /// to [`dispatch_multicast_message`] with the range of it that starts at that
 /// message.
-#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin and the eviction observer
 fn walk_multicast_batch<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
-    bytes: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     on_evict: &mut E,
     stats: &R,
@@ -392,6 +387,7 @@ where
     E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     let mut pos = 0usize;
     loop {
         // `pos` steps by what each message took of the bytes, so it stays within them.
@@ -401,11 +397,13 @@ where
         let next = dispatch_multicast_message(
             dispatcher,
             params,
-            msg,
+            GroupDatagram {
+                bytes: msg,
+                src,
+                now_ms,
+            },
             #[cfg(feature = "alloc")]
             msg_unit.as_ref(),
-            src,
-            now_ms,
             on_event,
             on_evict,
             stats,
@@ -443,14 +441,11 @@ where
 /// keyed by that index, so the reassembly-running caller aborts them before
 /// the index can be issued to the next member. A caller with no Router passes
 /// an observer that does nothing.
-#[allow(clippy::too_many_arguments)] // the walk's seven plus the range of the datagram the message is and the eviction observer
 fn dispatch_multicast_message<F, R, E, Grow: TableGrowth, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     params: &MulticastParams,
-    bytes: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     on_evict: &mut E,
     stats: &R,
@@ -460,6 +455,7 @@ where
     E: FnMut(usize),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     // A build that lends reads a frame where its datagram lies, whatever unit it came in.
     #[cfg(all(
         feature = "alloc",
@@ -646,7 +642,12 @@ where
         ))]
         Some(wire_const::T_MID_FRAME) => {
             dispatch_multicast_frame_in_place(
-                dispatcher, bytes, src, now_ms, None, false, on_event, stats,
+                dispatcher,
+                GroupDatagram { bytes, src, now_ms },
+                None,
+                false,
+                on_event,
+                stats,
             )
             .next
         }
@@ -864,12 +865,9 @@ struct FrameRead {
         not(feature = "multicast-ingress-gate")
     )
 ))]
-#[allow(clippy::too_many_arguments)] // the message's seven plus where it resumes and whether it may stop
 fn dispatch_multicast_frame_in_place<F, R, Grow: TableGrowth, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
-    bytes: &[u8],
-    src: SocketAddr,
-    now_ms: u64,
+    datagram: GroupDatagram<&[u8]>,
     resume: Option<usize>,
     may_stop: bool,
     on_event: &mut F,
@@ -879,6 +877,7 @@ where
     F: crate::driver_loop::EventSink + ?Sized,
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     let done = |next| FrameRead {
         next,
         #[cfg(feature = "reassembly")]
@@ -942,7 +941,6 @@ where
 /// the group's terms has its chains aborted before its slot is freed, so a
 /// recycled slot index can never continue a dead peer's chain.
 #[cfg(feature = "reassembly")]
-#[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
 pub fn dispatch_multicast_inbound_reassembling<
     F,
     const MAX_PEERS: usize,
@@ -955,9 +953,7 @@ pub fn dispatch_multicast_inbound_reassembling<
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    bytes: &[u8],
-    src: SocketAddr,
-    now_ms: u64,
+    datagram: GroupDatagram<&[u8]>,
     on_event: &mut F,
     stats: &R,
 ) where
@@ -965,15 +961,14 @@ pub fn dispatch_multicast_inbound_reassembling<
     F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     walk_multicast_inbound_reassembling(
         dispatcher,
         reasm,
         params,
-        bytes,
+        GroupDatagram { bytes, src, now_ms },
         #[cfg(feature = "alloc")]
         None,
-        src,
-        now_ms,
         on_event,
         stats,
     )
@@ -985,7 +980,6 @@ pub fn dispatch_multicast_inbound_reassembling<
 /// A completed reassembly chain is still a borrowed slot of the reassembler and
 /// is copied once into a buffer of its own, as it is on the unicast path.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-#[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
 pub fn dispatch_multicast_inbound_reassembling_in<
     F,
     const MAX_PEERS: usize,
@@ -998,9 +992,7 @@ pub fn dispatch_multicast_inbound_reassembling_in<
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    unit: &RxBytes,
-    src: SocketAddr,
-    now_ms: u64,
+    datagram: GroupDatagram<&RxBytes>,
     on_event: &mut F,
     stats: &R,
 ) where
@@ -1008,14 +1000,21 @@ pub fn dispatch_multicast_inbound_reassembling_in<
     F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram {
+        bytes: unit,
+        src,
+        now_ms,
+    } = datagram;
     walk_multicast_inbound_reassembling(
         dispatcher,
         reasm,
         params,
-        unit.as_slice(),
+        GroupDatagram {
+            bytes: unit.as_slice(),
+            src,
+            now_ms,
+        },
         Some(unit),
-        src,
-        now_ms,
         on_event,
         stats,
     )
@@ -1025,7 +1024,6 @@ pub fn dispatch_multicast_inbound_reassembling_in<
 /// datagram's batch, un-wrapped first when the group compresses, as
 /// [`walk_multicast_inbound`] does, then walked ([`walk_multicast_batch_reassembling`]).
 #[cfg(feature = "reassembly")]
-#[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
 fn walk_multicast_inbound_reassembling<
     F,
     const MAX_PEERS: usize,
@@ -1038,10 +1036,8 @@ fn walk_multicast_inbound_reassembling<
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    bytes: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     stats: &R,
 ) where
@@ -1049,6 +1045,7 @@ fn walk_multicast_inbound_reassembling<
     F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     #[cfg(feature = "transport-compression")]
     if params.compression {
         let Some(batch) = unwrap_batch(params, bytes) else {
@@ -1058,11 +1055,13 @@ fn walk_multicast_inbound_reassembling<
             dispatcher,
             reasm,
             params,
-            &batch,
+            GroupDatagram {
+                bytes: &batch,
+                src,
+                now_ms,
+            },
             #[cfg(feature = "alloc")]
             None,
-            src,
-            now_ms,
             on_event,
             stats,
         );
@@ -1071,11 +1070,9 @@ fn walk_multicast_inbound_reassembling<
         dispatcher,
         reasm,
         params,
-        bytes,
+        GroupDatagram { bytes, src, now_ms },
         #[cfg(feature = "alloc")]
         origin,
-        src,
-        now_ms,
         on_event,
         stats,
     )
@@ -1083,7 +1080,6 @@ fn walk_multicast_inbound_reassembling<
 
 /// The walk over one batch, with the reassembly tail run per message.
 #[cfg(feature = "reassembly")]
-#[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
 fn walk_multicast_batch_reassembling<
     F,
     const MAX_PEERS: usize,
@@ -1096,10 +1092,8 @@ fn walk_multicast_batch_reassembling<
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    bytes: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     stats: &R,
 ) where
@@ -1107,6 +1101,7 @@ fn walk_multicast_batch_reassembling<
     F: FnMut(IterationEvent<'_, '_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
     // R311y633 (§17.6) — the SAME walk as the plain entry point, but the tail
     // has to run per MESSAGE: the `Fragment` arm re-parses the bytes it was
     // handed, and parsing from the front of the DATAGRAM would read the message
@@ -1121,11 +1116,13 @@ fn walk_multicast_batch_reassembling<
         let next = dispatch_multicast_message(
             dispatcher,
             params,
-            msg,
+            GroupDatagram {
+                bytes: msg,
+                src,
+                now_ms,
+            },
             #[cfg(feature = "alloc")]
             msg_unit.as_ref(),
-            src,
-            now_ms,
             on_event,
             &mut |idx: usize| abort_peer_chains(reasm, idx),
             stats,
@@ -1142,7 +1139,18 @@ fn walk_multicast_batch_reassembling<
             // the remainder, and a Close ended the peer that the bytes behind it
             // would otherwise re-admit.
             other => {
-                reassembling_tail(dispatcher, reasm, msg, other, src, now_ms, on_event, stats);
+                reassembling_tail(
+                    dispatcher,
+                    reasm,
+                    GroupDatagram {
+                        bytes: msg,
+                        src,
+                        now_ms,
+                    },
+                    other,
+                    on_event,
+                    stats,
+                );
                 return;
             }
         }
@@ -1153,7 +1161,6 @@ fn walk_multicast_batch_reassembling<
 /// [`MulticastRxNext::Done`], shared by the walk of a whole datagram and the walk of one its
 /// transport keeps ([`dispatch_multicast_inbound_kept`]).
 #[cfg(feature = "reassembly")]
-#[allow(clippy::too_many_arguments)] // the message, its verdict and the walk's six
 fn reassembling_tail<
     F,
     const MAX_PEERS: usize,
@@ -1165,10 +1172,8 @@ fn reassembling_tail<
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    msg: &[u8],
+    datagram: GroupDatagram<&[u8]>,
     next: MulticastRxNext,
-    src: SocketAddr,
-    now_ms: u64,
     on_event: &mut F,
     stats: &R,
 ) where
@@ -1176,6 +1181,11 @@ fn reassembling_tail<
     F: crate::driver_loop::EventSink + ?Sized,
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram {
+        bytes: msg,
+        src,
+        now_ms,
+    } = datagram;
     // A build that lends counts no network message of a chain: it has none owned.
     #[cfg(any(
         not(feature = "alloc"),
@@ -1221,13 +1231,15 @@ fn reassembling_tail<
                 ingest_multicast_fragment_in_place(
                     dispatcher,
                     reasm,
-                    src,
-                    head.reliable,
-                    head.sn,
-                    head.more,
-                    head.priority(),
-                    head.markers(),
-                    msg.get(payload_at..).unwrap_or_default(),
+                    crate::multicast_dispatch::GroupFragment {
+                        src,
+                        reliable: head.reliable,
+                        sn: head.sn,
+                        more: head.more,
+                        priority: head.priority(),
+                        markers: head.markers(),
+                        payload: msg.get(payload_at..).unwrap_or_default(),
+                    },
                     now_ms,
                     on_event,
                 );
@@ -1271,13 +1283,15 @@ fn reassembling_tail<
                 ingest_multicast_fragment_counted(
                     dispatcher,
                     reasm,
-                    src,
-                    reliable,
-                    sn,
-                    more,
-                    priority,
-                    markers,
-                    &payload,
+                    crate::multicast_dispatch::GroupFragment {
+                        src,
+                        reliable,
+                        sn,
+                        more,
+                        priority,
+                        markers,
+                        payload: &payload,
+                    },
                     now_ms,
                     &mut |event: IterationEvent<'_, '_>| on_event.event(event),
                     &mut |zid: &[u8], msg: &NetworkMessage| {
@@ -1334,6 +1348,31 @@ fn reassembling_tail<
     }
 }
 
+/// One datagram a group's link received: its bytes (a slice of them, or the buffer the link
+/// lends), the member it came from, and when.
+#[derive(Debug, Clone, Copy)]
+pub struct GroupDatagram<B> {
+    /// The datagram's bytes.
+    pub bytes: B,
+    /// The member that sent it.
+    pub src: SocketAddr,
+    /// When it was received, on the session's clock.
+    pub now_ms: u64,
+}
+
+/// How the walk of a datagram its transport keeps goes on ([`dispatch_multicast_inbound_kept`]):
+/// from where an earlier walk stopped, if it did, and whether it may stop before a record the host
+/// has no room for.
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Clone, Copy)]
+pub struct GroupWalk {
+    /// Where an earlier walk of the same datagram stopped, `None` for its first.
+    pub resume: Option<GroupResume>,
+    /// Whether the walk may stop before a record, which a transport that keeps the datagram
+    /// allows.
+    pub may_stop: bool,
+}
+
 /// Where the walk of a group's datagram the transport keeps stopped because the host had no room
 /// for another record ([`dispatch_multicast_inbound_kept`]): the message it stopped before or in,
 /// and, inside a `Frame`, the record it stopped before. The next walk of the same datagram goes on
@@ -1363,7 +1402,6 @@ pub struct GroupResume {
 ///
 /// [`EventSink::takes_another`]: crate::driver_loop::EventSink::takes_another
 #[cfg(feature = "reassembly")]
-#[allow(clippy::too_many_arguments)] // the reassembling entry point's eight plus where it resumes and whether it may stop
 pub fn dispatch_multicast_inbound_kept<
     const MAX_PEERS: usize,
     const SLOTS: usize,
@@ -1375,11 +1413,8 @@ pub fn dispatch_multicast_inbound_kept<
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    bytes: &[u8],
-    src: SocketAddr,
-    now_ms: u64,
-    resume: Option<GroupResume>,
-    may_stop: bool,
+    datagram: GroupDatagram<&[u8]>,
+    walk: GroupWalk,
     on_event: &mut dyn crate::driver_loop::EventSink,
     stats: &R,
 ) -> Option<GroupResume>
@@ -1387,6 +1422,8 @@ where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     R: MulticastStatsRecorder + ?Sized,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
+    let GroupWalk { resume, may_stop } = walk;
     #[cfg(all(
         feature = "alloc",
         not(all(
@@ -1404,10 +1441,8 @@ where
             dispatcher,
             reasm,
             params,
-            bytes,
+            GroupDatagram { bytes, src, now_ms },
             None,
-            src,
-            now_ms,
             &mut |event: IterationEvent<'_, '_>| on_event.event(event),
             stats,
         );
@@ -1432,18 +1467,22 @@ where
                 dispatcher,
                 reasm,
                 params,
-                bytes,
+                GroupDatagram { bytes, src, now_ms },
                 #[cfg(feature = "alloc")]
                 None,
-                src,
-                now_ms,
                 &mut |event: IterationEvent<'_, '_>| on_event.event(event),
                 stats,
             );
             return None;
         }
         walk_kept(
-            dispatcher, reasm, params, bytes, src, now_ms, resume, may_stop, on_event, stats,
+            dispatcher,
+            reasm,
+            params,
+            GroupDatagram { bytes, src, now_ms },
+            GroupWalk { resume, may_stop },
+            on_event,
+            stats,
         )
     }
 }
@@ -1463,16 +1502,12 @@ where
         )
     )
 ))]
-#[allow(clippy::too_many_arguments)] // the kept entry point's ten
 fn walk_kept<const MAX_PEERS: usize, const SLOTS: usize, const CAP: usize, S, R, Grow>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
-    bytes: &[u8],
-    src: SocketAddr,
-    now_ms: u64,
-    resume: Option<GroupResume>,
-    may_stop: bool,
+    datagram: GroupDatagram<&[u8]>,
+    walk: GroupWalk,
     on_event: &mut dyn crate::driver_loop::EventSink,
     stats: &R,
 ) -> Option<GroupResume>
@@ -1481,6 +1516,8 @@ where
     R: MulticastStatsRecorder + ?Sized,
     Grow: TableGrowth,
 {
+    let GroupDatagram { bytes, src, now_ms } = datagram;
+    let GroupWalk { resume, may_stop } = walk;
     let mut at = resume.map_or(0, |resume| resume.message);
     let mut record = resume.and_then(|resume| resume.record);
     let mut first = true;
@@ -1497,9 +1534,11 @@ where
         let next = if msg.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_FRAME) {
             let read = dispatch_multicast_frame_in_place(
                 dispatcher,
-                msg,
-                src,
-                now_ms,
+                GroupDatagram {
+                    bytes: msg,
+                    src,
+                    now_ms,
+                },
                 record.take(),
                 may_stop,
                 on_event,
@@ -1518,11 +1557,13 @@ where
             dispatch_multicast_message(
                 dispatcher,
                 params,
-                msg,
+                GroupDatagram {
+                    bytes: msg,
+                    src,
+                    now_ms,
+                },
                 #[cfg(feature = "alloc")]
                 None,
-                src,
-                now_ms,
                 &mut |event: IterationEvent<'_, '_>| on_event.event(event),
                 &mut |idx: usize| abort_peer_chains(reasm, idx),
                 stats,
@@ -1531,7 +1572,18 @@ where
         match next {
             MulticastRxNext::Done => at = at.saturating_add(multicast_message_len(msg)?),
             other => {
-                reassembling_tail(dispatcher, reasm, msg, other, src, now_ms, on_event, stats);
+                reassembling_tail(
+                    dispatcher,
+                    reasm,
+                    GroupDatagram {
+                        bytes: msg,
+                        src,
+                        now_ms,
+                    },
+                    other,
+                    on_event,
+                    stats,
+                );
                 return None;
             }
         }
@@ -2058,9 +2110,11 @@ mod batch_walk_tests {
                 &mut d,
                 &mut r,
                 &local,
-                &beacon,
-                src,
-                0,
+                GroupDatagram {
+                    bytes: &beacon,
+                    src,
+                    now_ms: 0,
+                },
                 &mut |_| {},
                 &(),
             );
@@ -2072,9 +2126,11 @@ mod batch_walk_tests {
                 &mut d,
                 &mut r,
                 &local,
-                &markerless_first_fragment(0, b"chain-start-without-a-marker"),
-                src,
-                1,
+                GroupDatagram {
+                    bytes: &markerless_first_fragment(0, b"chain-start-without-a-marker"),
+                    src,
+                    now_ms: 1,
+                },
                 &mut |event| {
                     if let IterationEvent::ReassemblyDropped(reason) = event {
                         drops.push(reason);
@@ -2127,9 +2183,11 @@ mod batch_walk_tests {
                 &mut d,
                 &mut r,
                 &local,
-                dgram,
-                PEER,
-                2 + i as u64,
+                GroupDatagram {
+                    bytes: dgram,
+                    src: PEER,
+                    now_ms: 2 + i as u64,
+                },
                 &mut |event| match event {
                     IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
                         ..
@@ -2185,9 +2243,11 @@ mod batch_walk_tests {
             &mut d,
             &mut r,
             &local,
-            &peer_join(&[0x22; 4]),
-            PEER,
-            0,
+            GroupDatagram {
+                bytes: &peer_join(&[0x22; 4]),
+                src: PEER,
+                now_ms: 0,
+            },
             &mut |_| {},
             &(),
         );
@@ -2225,9 +2285,11 @@ mod batch_walk_tests {
                 &mut d,
                 &mut r,
                 &local,
-                dgram,
-                PEER,
-                1 + i as u64,
+                GroupDatagram {
+                    bytes: dgram,
+                    src: PEER,
+                    now_ms: 1 + i as u64,
+                },
                 &mut |event| match event {
                     IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
                         ..
@@ -2286,9 +2348,11 @@ mod batch_walk_tests {
                 d,
                 r,
                 local,
-                unit,
-                PEER,
-                now_ms,
+                GroupDatagram {
+                    bytes: unit,
+                    src: PEER,
+                    now_ms,
+                },
                 &mut |event| {
                     if let IterationEvent::MulticastPeerLost(departure) = event {
                         lost.push(departure.reason);

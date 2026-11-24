@@ -1346,9 +1346,11 @@ where
                             dispatcher,
                             &mut reasm,
                             params,
-                            &unit,
-                            src,
-                            now,
+                            wz_session_core::multicast_rx::GroupDatagram {
+                                bytes: &unit,
+                                src,
+                                now_ms: now,
+                            },
                             &mut on_event,
                             stats,
                         );

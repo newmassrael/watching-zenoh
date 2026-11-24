@@ -2167,7 +2167,7 @@ kconfig = "WZ_LIMIT_KEY_ARENA_BYTES"
 kind = "parameter"
 range = [1, 4294967291]
 on_heap = "quota"
-default = 95040
+default = 11984
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2176,22 +2176,24 @@ read = "snapshot"
 # `wire` is none: a key that finds no room is refused before anything is sent.
 wire = "none"
 help = '''
-How many bytes of key text the rows of a session's tables hold at once, in one
-arena each row keeps its key in: the session's own declarations, the
-application's tables, its pending gets and what each peer declares to it. Each
-key takes 8 bytes and its length, rounded up to 4. A declaration of the session
-whose key finds no room is refused, as one that finds its table full is; one
-a peer sends is dropped and counted. A key given back is taken again. It must
-be at least 1.
+How many bytes of key text a session holds at once, in one arena every keyed
+row keeps its key in: its declared key expressions, its entities with their
+write filters, Interests and matching listeners, its pending gets and what each
+peer declares to it. A key takes 8 bytes and its length, rounded up to 4, and
+rows that name the same key share its block. It is a budget of key text, not a
+block for each row: a declaration of the session whose key finds no room is
+refused with an out-of-memory error, as one that finds its table full is; one a
+peer sends is dropped and counted. A key given back is taken again. It must be
+at least 1.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds, with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, every row of the engine's record at the build's defaults (224), of the application's tables (40), of one face's pending gets (16) and of what one face's peer declares and asks (80: its aliases, its subscribers, queryables and tokens, its interests), 360 rows and 95,040 bytes, so a build that states nothing refuses no key it took before. The session's own tokens are rows of the engine's record alone: the cooperative engine answers a peer's liveliness Interest from them and keeps no second table of them with keys of its own (crates/wz-capi-coop/src/engine.rs, lend_session)."
+reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The arena is a budget of key text, as zenoh-pico's heap is. The default holds, with keys of the 20 bytes the keys of zenoh-pico's c11 examples average (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`) in blocks of 28 bytes, one key for each of the 332 entities a session holds at the build's defaults (100 subscribers, 100 queryables, 100 publishers, 16 queriers, 8 tokens and 8 liveliness subscribers, whose declarations, write filters, Interests and matching listeners name the same key and share its block), the 16 of one face's pending gets and the 80 rows of what one face's peer declares and asks, 428 keys and 11,984 bytes. Every keyed row holding a key of MAX_KEYEXPR_BYTES (256) apart would take 908 blocks of 264 bytes, 239,712 bytes (the one table set's 548, the engine record's 264, then 16 and 80). A declaration past the budget is refused with an out-of-memory error (crates/wz-capi-pico/src/keyexpr.rs, KeyNotHeld::NoRoom)."
 
 [limit.pico_preset]
-value = 3960
-reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `demo/example/zenoh-pico-pub`). The preset holds, with a key of up to 52 bytes, about twice that, in a block of 60, the 34 rows of the engine's record, the 8 of the application's tables and the 2 of one face's pending gets at the preset's other values, 2,640 bytes, and 22 keys of what the peers declare in the rest, 1,320 bytes."
+value = 4320
+reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count, and drops a peer's declaration its heap cannot hold. The preset is a budget of what zenoh-pico's own tests hold on one session at once: its client test declares a hundred keys under one prefix (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `const char *uri = \"demo/example/\";`), each published, subscribed, queried and answered on that one key, 14 or 15 bytes in a block of 24; with the 80 rows of what its one face's peer declares and asks at that length, 180 keys and 4,320 bytes. Every keyed row at the preset's other values holding a key of 52 bytes apart would take 718 blocks of 60 bytes and 22 of the peers', 44,400 bytes. A declaration past the budget is refused with an out-of-memory error, as zenoh-pico refuses one its heap has no room for."
 
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"

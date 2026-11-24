@@ -1610,9 +1610,9 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
 /* ================================================ callbacks
  *
  * No door of wz's own: this section states how the cooperative engine calls
- * a program's subscriber callbacks (docs/c-abi-architecture.md, section 3,
- * L3). A callback is called as zenoh-pico calls it: with no lock of the
- * library held, on the thread that delivers (the read task, or the thread
+ * a program's subscriber and queryable callbacks (docs/c-abi-architecture.md,
+ * section 3, L3). A callback is called as zenoh-pico calls it: with no lock of
+ * the library held, on the thread that delivers (the read task, or the thread
  * whose zp_read or put reached it), so it may run on two threads at once and
  * may be called again from inside itself:
  *
@@ -1621,6 +1621,12 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *                before the put returns, at any depth, as zenoh-pico's
  *                recursion does; every other subscriber it reaches is
  *                handed it inside the put as well.
+ *   a get        of the session's own made inside a queryable's callback that
+ *                reaches that same queryable calls the callback again from
+ *                inside itself, before the get returns, as zenoh-pico's
+ *                _z_trigger_queryables does; there is no depth limit, so a
+ *                callback that asks itself every time recurses until its
+ *                stack runs out, in zenoh-pico as here.
  *   a liveliness subscriber declared with history is handed the tokens the
  *                session already knows inside the declaration, on the
  *                declaring thread, one at a time with no lock held, before
