@@ -639,8 +639,6 @@ mod process_pool;
 #[cfg(any(feature = "instance-key", feature = "message-payload"))]
 #[cfg(not(wz_additional_apart))]
 pub mod proto_file;
-// Totality debt TD-165 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod pubsub;
 pub mod qos;
 #[cfg(feature = "query")]
