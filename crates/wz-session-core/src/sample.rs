@@ -269,10 +269,53 @@ impl EncodingHint {
     /// reads it with: the codec holds the schema within that bound, so such
     /// an encoding has no frame.
     pub fn to_codec(&self) -> Result<wz_codecs::lent::Encoding<'_>, CodecError> {
-        let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
+        self.view().to_codec()
+    }
+
+    /// This encoding read where it lies, as a publish carries it.
+    pub fn view(&self) -> EncodingRef<'_> {
+        EncodingRef {
+            packed_id: self.packed_id,
+            schema: self.schema.as_deref(),
+        }
+    }
+}
+
+/// An encoding read where its bytes lie: the packed wire word and the schema, borrowed from what
+/// holds them (an [`EncodingHint`], a [`BoundedEncoding`], an object of a C ABI). A publish
+/// carries one of these, so the encoding it sends is copied nowhere on the way to the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct EncodingRef<'a> {
+    /// The packed wire word, as [`EncodingHint::packed_id`].
+    pub packed_id: u32,
+    /// The schema's bytes, as [`EncodingHint::schema`].
+    pub schema: Option<&'a [u8]>,
+}
+
+impl<'a> EncodingRef<'a> {
+    /// The encoding `hint` holds, read where it holds it.
+    #[cfg(feature = "alloc")]
+    pub fn of(hint: &'a EncodingHint) -> Self {
+        hint.view()
+    }
+
+    /// A hint of its own with this encoding, the schema copied.
+    #[cfg(feature = "alloc")]
+    pub fn to_hint(self) -> EncodingHint {
+        EncodingHint {
+            packed_id: self.packed_id,
+            schema: self.schema.map(<[u8]>::to_vec),
+        }
+    }
+
+    /// The codec's encoding over these bytes, as [`EncodingHint::to_codec`] makes it.
+    ///
+    /// `LengthOutOfRange` for a schema past the `u8` length the protocol reads it with.
+    #[cfg(feature = "alloc")]
+    pub fn to_codec(self) -> Result<wz_codecs::lent::Encoding<'a>, CodecError> {
+        let schema_len = self.schema.map(|s| s.len() as u64);
         let schema = self
             .schema
-            .as_deref()
             .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
             .transpose()?;
         Ok(wz_codecs::lent::Encoding {
@@ -280,6 +323,101 @@ impl EncodingHint {
             schema_len,
             schema,
         })
+    }
+}
+
+/// An encoding options carry: read where a holder keeps it for as long as the call runs, or the
+/// options' own, which options kept past the call they were made for hold.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarriedEncoding<'a> {
+    /// Read where its holder keeps it: nothing is copied for the call.
+    Lent(EncodingRef<'a>),
+    /// The options' own.
+    Owned(EncodingHint),
+}
+
+#[cfg(feature = "alloc")]
+impl CarriedEncoding<'_> {
+    /// The encoding, read where it lies.
+    pub fn view(&self) -> EncodingRef<'_> {
+        match self {
+            Self::Lent(encoding) => *encoding,
+            Self::Owned(encoding) => encoding.view(),
+        }
+    }
+
+    /// The encoding as a hint of its own: a lent one copied, an owned one moved.
+    pub fn into_hint(self) -> EncodingHint {
+        match self {
+            Self::Lent(encoding) => encoding.to_hint(),
+            Self::Owned(encoding) => encoding,
+        }
+    }
+
+    /// The encoding as options kept past their call hold it: a lent one copied.
+    pub fn into_owned(self) -> CarriedEncoding<'static> {
+        match self {
+            Self::Lent(encoding) => CarriedEncoding::Owned(encoding.to_hint()),
+            Self::Owned(encoding) => CarriedEncoding::Owned(encoding),
+        }
+    }
+}
+
+// The protocol writes a schema's length in one byte, so no message carries a longer one, and a
+// kept encoding holds its length in one.
+const _: () = assert!(
+    crate::caps::MAX_ENCODING_SCHEMA_BYTES <= u8::MAX as usize,
+    "MAX_ENCODING_SCHEMA_BYTES is past the longest schema a message carries"
+);
+
+/// An encoding kept to be sent later, its schema in room of its own of
+/// [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`] bytes: what a place that holds an encoding past the
+/// call that named it keeps, so that keeping one takes no allocation. A longer schema is refused
+/// when it is kept ([`Self::of`]), never cut short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedEncoding {
+    packed_id: u32,
+    /// The schema's length, `None` for an encoding that carries none (an empty schema is one).
+    len: Option<u8>,
+    /// The schema's bytes, then zeros.
+    schema: [u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES],
+}
+
+/// Why an encoding was not kept: its schema is longer than the room a kept one has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaPastBound {
+    /// The schema's length, in bytes.
+    pub len: usize,
+}
+
+impl BoundedEncoding {
+    /// A kept copy of `encoding`, or the refusal of a schema longer than
+    /// [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`].
+    pub fn of(encoding: EncodingRef<'_>) -> Result<Self, SchemaPastBound> {
+        let mut schema = [0u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES];
+        let len = match encoding.schema {
+            None => None,
+            Some(bytes) => {
+                let past = SchemaPastBound { len: bytes.len() };
+                let room = schema.get_mut(..bytes.len()).ok_or(past)?;
+                room.copy_from_slice(bytes);
+                Some(u8::try_from(bytes.len()).map_err(|_| past)?)
+            }
+        };
+        Ok(Self {
+            packed_id: encoding.packed_id,
+            len,
+            schema,
+        })
+    }
+
+    /// The kept encoding, read where it lies.
+    pub fn view(&self) -> EncodingRef<'_> {
+        EncodingRef {
+            packed_id: self.packed_id,
+            schema: self.len.and_then(|len| self.schema.get(..usize::from(len))),
+        }
     }
 }
 
@@ -1057,6 +1195,51 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// A kept encoding reads as the one it was made from: no schema, an empty one and one that
+    /// fills the room each come back as they went in, the packed word with them.
+    #[test]
+    fn a_kept_encoding_reads_as_the_one_it_was_made_from() {
+        let full = [b's'; crate::caps::MAX_ENCODING_SCHEMA_BYTES];
+        for schema in [None, Some(&b""[..]), Some(&full[..])] {
+            let made = EncodingRef {
+                packed_id: 0x2d,
+                schema,
+            };
+            let kept = BoundedEncoding::of(made).expect("a schema within the room is kept");
+            assert_eq!(kept.view(), made);
+        }
+    }
+
+    /// A schema one byte past the room is refused with its length, not cut short.
+    #[test]
+    fn a_schema_past_the_room_of_a_kept_encoding_is_refused() {
+        let past = [b's'; crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1];
+        let refused = BoundedEncoding::of(EncodingRef {
+            packed_id: 1,
+            schema: Some(&past),
+        });
+        assert_eq!(
+            refused,
+            Err(SchemaPastBound {
+                len: crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1
+            })
+        );
+    }
+
+    /// A hint read where it lies and copied back is the hint, and its codec form is the one the
+    /// view makes.
+    #[test]
+    fn a_hint_read_where_it_lies_is_the_hint() {
+        let hint = EncodingHint {
+            packed_id: 0x0b,
+            schema: Some(b"schema/x".to_vec()),
+        };
+        assert_eq!(hint.view().to_hint(), hint);
+        let codec = hint.to_codec().expect("a short schema has a frame");
+        assert_eq!(codec.packed_id, 0x0b);
+        assert_eq!(codec.schema_len, Some(8));
+    }
 
     /// A session's zid makes the same identity the checked constructor does, at both ends
     /// of the range, and a shorter zid with the same leading bytes is another identity.

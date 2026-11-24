@@ -42,6 +42,7 @@ use crate::abi::{
     z_owned_bytes_t,
 };
 use crate::bytes::{ByteBuf, NoRoom};
+use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
@@ -392,9 +393,9 @@ impl SampleMarshal {
     /// An INDEPENDENT copy, for `z_sample_take_from_loaned` to escape the
     /// callback with.
     ///
-    /// Every owned field is duplicated — including the encoding, whose
-    /// `EncodingState` lives behind a `Box` that the two marshals must not
-    /// share (dropping either would dangle the other). The cached loaned views
+    /// Every owned field is duplicated — including the encoding, whose schema
+    /// the copy keeps in a slot of its own of the pool of encodings, since the
+    /// message the original reads it from may be gone before the copy is. The cached loaned views
     /// are deliberately left UNBOUND: they point at the copy's own fields, so
     /// they can only be set once the copy has reached its final address, which
     /// is [`Self::bind`]'s whole contract.
@@ -404,6 +405,11 @@ impl SampleMarshal {
             Some(attachment) => Some(attachment.try_clone()?),
             None => None,
         };
+        let encoding = self
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()?;
         Ok(Self {
             _pico_keyexpr: [0u8; PICO_SAMPLE_PAYLOAD_OFFSET],
             // Left UNBOUND for the same reason the cached views below are: it
@@ -419,10 +425,7 @@ impl SampleMarshal {
             qos: self.qos,
             reliability: self.reliability,
             source_info: self.source_info,
-            encoding: self
-                .encoding
-                .as_ref()
-                .map(crate::encoding::EncodingState::kept),
+            encoding,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
@@ -1277,9 +1280,11 @@ pub(crate) struct PlainPublisher {
 /// options it passes, so an advanced publisher, which pico builds out of a plain
 /// one, cannot send a publisher's samples with different QoS than the publisher
 /// it wraps.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct PublisherQos {
-    encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// The encoding the publisher was declared with, its constant or kept in its own slot of the pool
+    /// of encodings for as long as the publisher stands, and lent to each put that names none.
+    encoding: Option<OwnedEncoding>,
     congestion_control: wz_session_core::qos::CongestionControl,
     priority: wz_session_core::qos::Priority,
     is_express: bool,
@@ -1312,6 +1317,23 @@ impl PublisherQos {
     /// destination admits session-local traffic has.
     pub(crate) fn counts_local(&self) -> bool {
         self.destination.allows_local()
+    }
+
+    /// These QoS for another publisher of the same declaration, the encoding kept again in a slot
+    /// of its own: `None` when the pool of encodings has no slot free.
+    pub(crate) fn try_clone(&self) -> Option<Self> {
+        let encoding = match &self.encoding {
+            Some(encoding) => Some(crate::encoding::hold(encoding.view())?),
+            None => None,
+        };
+        Some(Self {
+            encoding,
+            congestion_control: self.congestion_control,
+            priority: self.priority,
+            is_express: self.is_express,
+            reliability: self.reliability,
+            destination: self.destination,
+        })
     }
 
     /// What one C `z_publisher_options_t` declares, consuming its moved
@@ -1354,7 +1376,7 @@ impl PublisherQos {
             .with_locality(self.destination);
         if out.encoding.is_none() {
             if let Some(encoding) = &self.encoding {
-                out = out.with_encoding_lent(encoding);
+                out = out.with_encoding_ref(encoding.view());
             }
         }
         out
@@ -1840,13 +1862,14 @@ pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> O
 /// `z_source_info_t` existed, so no C program could build one. `z_source_info_new`
 /// landed in R311y559 and the reason expired with it.
 ///
-/// The options borrow the moved attachment, which `attachment` holds for as long as the put runs.
+/// The options borrow the moved attachment and encoding, which `held` holds for as long as the put
+/// runs.
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
 unsafe fn publisher_put_options<'a>(
     options: *const z_publisher_put_options_t,
-    attachment: &'a mut Option<MovedBytes<'static>>,
+    held: &'a mut PutHeld,
 ) -> Option<PublishOptions<'a>> {
     if options.is_null() {
         return None;
@@ -1857,8 +1880,16 @@ unsafe fn publisher_put_options<'a>(
         attachment: (*options).attachment,
         source_info: (*options).source_info(),
     }
-    .fold(put_options(), attachment);
+    .fold(put_options(), held);
     carried.then_some(opts)
+}
+
+/// What a put holds for as long as it runs and its options borrow: the attachment and the encoding
+/// its options moved in, each sent from where it lies and let go when the put returns.
+#[derive(Default)]
+struct PutHeld {
+    attachment: Option<MovedBytes<'static>>,
+    encoding: Option<OwnedEncoding>,
 }
 
 /// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
@@ -1873,9 +1904,9 @@ struct PutCarried {
 
 impl PutCarried {
     /// `opts` with what the options carry, and whether they carried anything. The moved encoding
-    /// and attachment are consumed on every path; the attachment is read where it lies, held in
-    /// `held` for as long as the options borrow it. One body for both put doors, out of line so
-    /// that neither export holds a copy of it.
+    /// and attachment are consumed on every path; each is read where it lies, held in `held` for
+    /// as long as the options borrow it, so a put with an encoding copies none of it. One body for
+    /// both put doors, out of line so that neither export holds a copy of it.
     ///
     /// # Safety
     /// Each field must be null or valid as the options struct it was read from requires.
@@ -1883,12 +1914,13 @@ impl PutCarried {
     unsafe fn fold<'a>(
         self,
         mut opts: PublishOptions<'a>,
-        held: &'a mut Option<MovedBytes<'static>>,
+        held: &'a mut PutHeld,
     ) -> (PublishOptions<'a>, bool) {
-        *held = read_moved_bytes(self.attachment);
-        let held: &'a Option<MovedBytes<'static>> = held;
-        let attachment = held.as_deref().map(ByteBuf::as_slice);
-        let encoding = crate::encoding::take_moved_encoding(self.encoding);
+        held.attachment = read_moved_bytes(self.attachment);
+        held.encoding = crate::encoding::take_moved_encoding(self.encoding);
+        let held: &'a PutHeld = held;
+        let attachment = held.attachment.as_deref().map(ByteBuf::as_slice);
+        let encoding = held.encoding.as_ref().map(OwnedEncoding::view);
         let timestamp = timestamp_hint_of(self.timestamp);
         let source_info = source_info_hint_of(self.source_info);
         let carried = attachment.is_some()
@@ -1898,8 +1930,8 @@ impl PutCarried {
         if let Some(attachment) = attachment {
             opts = opts.with_attachment(attachment);
         }
-        if let Some(hint) = encoding {
-            opts = opts.with_encoding(hint);
+        if let Some(encoding) = encoding {
+            opts = opts.with_encoding_ref(encoding);
         }
         if let Some(ts) = timestamp {
             opts = opts.with_timestamp(ts);
@@ -1936,7 +1968,7 @@ fn put_options() -> PublishOptions<'static> {
 mod put_options_tests {
     use super::{
         publisher_put_options, z_publisher_put_options_default, z_publisher_put_options_t,
-        z_timestamp_t,
+        z_timestamp_t, PutHeld,
     };
 
     /// A session's put and its delete read their QoS and destination through one body: the same
@@ -1964,7 +1996,7 @@ mod put_options_tests {
             del.priority = 2;
             del.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
             del.is_express = true;
-            let mut held = None;
+            let mut held = PutHeld::default();
             let stated_put = session_put_options(&put, &mut held);
             let stated_del = session_delete_options(&del);
             assert!(stated_put.qos.is_some(), "the stated QoS is set");
@@ -1993,10 +2025,13 @@ mod put_options_tests {
         use wz_session_core::reliability::Reliability;
         use wz_session_core::sample::EncodingHint;
         let declared = PublisherQos {
-            encoding: Some(EncodingHint {
-                packed_id: 2,
-                schema: None,
-            }),
+            encoding: Some(
+                crate::encoding::hold(wz_session_core::sample::EncodingRef {
+                    packed_id: 2,
+                    schema: None,
+                })
+                .expect("a slot for the declared encoding"),
+            ),
             reliability: Reliability::BestEffort,
             ..PublisherQos::pico_default()
         };
@@ -2009,7 +2044,9 @@ mod put_options_tests {
         let sent = declared.apply(call);
         assert_eq!(sent.attachment, Some(&[7u8, 8][..]));
         assert_eq!(
-            sent.encoding.as_ref().map(|encoding| encoding.packed_id),
+            sent.encoding
+                .as_ref()
+                .map(|encoding| encoding.view().packed_id),
             Some(4),
             "the call's encoding is kept"
         );
@@ -2020,7 +2057,9 @@ mod put_options_tests {
         );
         let bare = declared.apply(put_options());
         assert_eq!(
-            bare.encoding.as_ref().map(|encoding| encoding.packed_id),
+            bare.encoding
+                .as_ref()
+                .map(|encoding| encoding.view().packed_id),
             Some(2),
             "the publisher's encoding fills the gap"
         );
@@ -2216,12 +2255,12 @@ mod put_options_tests {
         // SAFETY: each pointer handed over is null or points at a live value of its type, which
         // outlives the call.
         unsafe {
-            assert!(publisher_put_options(core::ptr::null(), &mut None).is_none());
+            assert!(publisher_put_options(core::ptr::null(), &mut PutHeld::default()).is_none());
             let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             assert!(
-                publisher_put_options(&options, &mut None).is_none(),
+                publisher_put_options(&options, &mut PutHeld::default()).is_none(),
                 "default options carry nothing"
             );
             let mut stamp = z_timestamp_t {
@@ -2232,7 +2271,7 @@ mod put_options_tests {
                 time: 42,
             };
             options.timestamp = &mut stamp;
-            let mut held = None;
+            let mut held = PutHeld::default();
             let carried =
                 publisher_put_options(&options, &mut held).expect("a timestamp is carried");
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
@@ -2272,7 +2311,7 @@ mod put_options_tests {
             put.attachment = &mut attachment;
             put.timestamp = &mut stamp;
             put.is_express = true;
-            let mut held = None;
+            let mut held = PutHeld::default();
             let carried = session_put_options(&put, &mut held);
             assert_eq!(carried.attachment, Some(&b"session"[..]));
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
@@ -2288,7 +2327,7 @@ mod put_options_tests {
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             options.attachment = &mut attachment;
-            let mut held = None;
+            let mut held = PutHeld::default();
             let carried =
                 publisher_put_options(&options, &mut held).expect("an attachment is carried");
             assert_eq!(carried.attachment, Some(&b"publisher"[..]));
@@ -2319,7 +2358,7 @@ mod put_options_tests {
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             options.source_info = &mut info;
-            let mut held = None;
+            let mut held = PutHeld::default();
             let carried =
                 publisher_put_options(&options, &mut held).expect("a source info is carried");
             let source = carried.source_info.expect("the source info");
@@ -2328,7 +2367,7 @@ mod put_options_tests {
             let mut unset = z_source_info_t::empty();
             options.source_info = &mut unset;
             assert!(
-                publisher_put_options(&options, &mut None).is_none(),
+                publisher_put_options(&options, &mut PutHeld::default()).is_none(),
                 "pico's null source info is no source info"
             );
         }
@@ -2349,10 +2388,14 @@ mod put_options_tests {
             let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
             z_put_options_default(put.as_mut_ptr());
             let put = put.assume_init();
-            assert!(session_put_options(&put, &mut None).source_info.is_none());
-            assert!(session_put_options(core::ptr::null(), &mut None)
+            assert!(session_put_options(&put, &mut PutHeld::default())
                 .source_info
                 .is_none());
+            assert!(
+                session_put_options(core::ptr::null(), &mut PutHeld::default())
+                    .source_info
+                    .is_none()
+            );
             let mut delete = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
             z_delete_options_default(delete.as_mut_ptr());
             let delete = delete.assume_init();
@@ -2618,13 +2661,14 @@ pub(crate) unsafe fn source_info_hint_of(
 /// own put to its own subscriber, and there is no field through which a program
 /// could ask it to.
 ///
-/// The options borrow the moved attachment, which `attachment` holds for as long as the put runs.
+/// The options borrow the moved attachment and encoding, which `held` holds for as long as the put
+/// runs.
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
 unsafe fn session_put_options<'a>(
     options: *const z_put_options_t,
-    attachment: &'a mut Option<MovedBytes<'static>>,
+    held: &'a mut PutHeld,
 ) -> PublishOptions<'a> {
     let opts = put_options();
     if options.is_null() {
@@ -2641,7 +2685,7 @@ unsafe fn session_put_options<'a>(
         attachment: (*options).attachment,
         source_info,
     }
-    .fold(opts, attachment);
+    .fold(opts, held);
     StatedQos {
         priority: (*options).priority,
         congestion_control: (*options).congestion_control,
@@ -2742,8 +2786,8 @@ pub unsafe extern "C" fn z_put(
     options: *const z_put_options_t,
 ) -> ZResult {
     guarded(|| {
-        let mut attachment = None;
-        let resolved = session_put_options(options, &mut attachment);
+        let mut held = PutHeld::default();
+        let resolved = session_put_options(options, &mut held);
         let Some(buf) = read_moved_bytes(payload) else {
             return Z_ERR_NULL;
         };
@@ -2949,8 +2993,8 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        let mut attachment = None;
-        state.publish(&buf, publisher_put_options(options, &mut attachment))
+        let mut held = PutHeld::default();
+        state.publish(&buf, publisher_put_options(options, &mut held))
     })
 }
 

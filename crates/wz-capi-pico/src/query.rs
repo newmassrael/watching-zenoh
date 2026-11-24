@@ -97,7 +97,8 @@ pub struct z_loaned_query_t {
 /// whatever the responder does with the reply after the call.
 #[derive(Default)]
 struct ReplyMetaOwned {
-    encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// The encoding the options moved in, sent from where it lies for as long as the reply is.
+    encoding: Option<crate::encoding::OwnedEncoding>,
     timestamp: Option<wz_session_core::sample::TimestampHint>,
     source_info: Option<wz_session_core::sample::SourceInfo>,
     /// The `is_express` its options carried, `false` when there were none. pico
@@ -117,7 +118,11 @@ impl ReplyMetaOwned {
         query_qos: wz_session_core::sample::QosLevel,
     ) -> ReplyMeta<'a> {
         ReplyMeta::new()
-            .with_encoding(self.encoding.as_ref())
+            .with_encoding(
+                self.encoding
+                    .as_ref()
+                    .map(crate::encoding::OwnedEncoding::view),
+            )
             .with_timestamp(self.timestamp.as_ref())
             .with_source_info(self.source_info.as_ref())
             .with_attachment(attachment)
@@ -146,7 +151,7 @@ enum PendingReply<'k> {
     /// `_z_encoding_from_moved(opts.encoding));`).
     Err {
         payload: crate::bytes::ByteBuf,
-        encoding: Option<wz_session_core::sample::EncodingHint>,
+        encoding: Option<crate::encoding::OwnedEncoding>,
     },
 }
 
@@ -218,8 +223,8 @@ fn flush_one(
             // `encoding_id` as the content-type prefix and packs it itself, so the
             // packed word would be shifted twice and put a different content type
             // on the wire. The zenoh-c ABI's Err arm does the same projection.
-            let (id, schema) = match encoding.as_ref() {
-                Some(hint) => (Some(hint.packed_id >> 1), hint.schema.as_deref()),
+            let (id, schema) = match encoding.as_ref().map(crate::encoding::OwnedEncoding::view) {
+                Some(encoding) => (Some(encoding.packed_id >> 1), encoding.schema),
                 None => (None, None),
             };
             out.reply_err(id, schema, &payload)
@@ -448,15 +453,13 @@ impl QueryMarshal {
         held: Box<dyn HeldQuery>,
         payload: crate::bytes::ByteBuf,
         attachment: crate::bytes::ByteBuf,
+        encoding: Option<crate::encoding::EncodingState>,
     ) -> Self {
         Self {
             keyexpr: QueryText::Owned(Box::from(self.keyexpr.get())),
             parameters: QueryText::Owned(Box::from(self.parameters.get())),
             anyke: self.anyke,
-            encoding: self
-                .encoding
-                .as_ref()
-                .map(crate::encoding::EncodingState::kept),
+            encoding,
             source_info: self.source_info,
             payload,
             attachment,
@@ -749,11 +752,21 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
         (Ok(payload), Ok(attachment)) => (payload, attachment),
         (Err(no_room), _) | (_, Err(no_room)) => return Err(no_room.code()),
     };
+    // The encoding's schema is kept in a slot of the pool of encodings before the hold too.
+    let encoding = match marshal
+        .encoding
+        .as_ref()
+        .map(crate::encoding::EncodingState::kept)
+        .transpose()
+    {
+        Ok(encoding) => encoding,
+        Err(no_room) => return Err(no_room.code()),
+    };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
     let held = holder.hold_query(marshal);
-    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment));
+    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment, encoding));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -2250,6 +2263,10 @@ mod tests {
 
     impl HeldQuery for NoHold {
         fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
+
+        fn session_closed(&self) -> bool {
+            false
+        }
     }
 
     /// A query's payload and attachment are read where the view holds them, with nothing copied
@@ -2270,7 +2287,13 @@ mod tests {
         );
         let payload = marshal.payload.try_clone().expect("room for the copy");
         let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment);
+        let encoding = marshal
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()
+            .expect("room for the copy");
+        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment, encoding);
         drop(marshal);
         assert_ne!(kept.payload.as_slice().as_ptr(), view.payload.as_ptr());
         assert_eq!(kept.payload.as_slice(), b"in place");
@@ -2311,7 +2334,13 @@ mod tests {
         let held: Box<dyn HeldQuery> = Box::new(NoHold);
         let payload = marshal.payload.try_clone().expect("room for the copy");
         let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let mut kept = marshal.deep_copy_deferred(held, payload, attachment);
+        let encoding = marshal
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()
+            .expect("room for the copy");
+        let mut kept = marshal.deep_copy_deferred(held, payload, attachment, encoding);
         drop(marshal);
         kept.bind();
         let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
@@ -2392,6 +2421,10 @@ mod tests {
         fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
             let mut out = KeyTap(self.0.clone());
             answer(&mut out);
+        }
+
+        fn session_closed(&self) -> bool {
+            false
         }
     }
 

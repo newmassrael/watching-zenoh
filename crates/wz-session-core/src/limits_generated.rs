@@ -4079,7 +4079,7 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
 /// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
 /// stage decides it, so neither snapshot holds it and a document that states it is refused by
 /// name.
-pub static CAPACITY_LIMITS: [&str; 24] = [
+pub static CAPACITY_LIMITS: [&str; 26] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
     "HELD_SESSIONS",
@@ -4090,6 +4090,8 @@ pub static CAPACITY_LIMITS: [&str; 24] = [
     "HELD_CONFIGS",
     "HELD_HELLOS",
     "HELD_PAYLOAD_BYTES",
+    "HELD_ENCODINGS",
+    "MAX_ENCODING_SCHEMA_BYTES",
     "CONFIG_ENTRIES",
     "MAX_SCOUT_HELLOS",
     "SCOUT_HELLO_LOCATORS",

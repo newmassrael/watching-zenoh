@@ -122,7 +122,7 @@ fn full_encoding() -> EncodingHint {
 fn full_metadata<'a>(timestamp: &'a TimestampHint, encoding: &'a EncodingHint) -> PushMetadata<'a> {
     PushMetadata {
         timestamp: Some(timestamp),
-        encoding: Some(encoding),
+        encoding: Some(encoding.view()),
         qos: Some(QosLevel::DEFAULT.with_priority(PRIORITY)),
         ..PushMetadata::default()
     }

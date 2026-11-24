@@ -248,8 +248,9 @@ pub(crate) struct QuerierState {
     /// querier (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `querier->_encoding = encoding == NULL ? _z_encoding_null() : _z_encoding_steal(encoding);`)
     /// and a get without one of its own sends with it (`vendor/zenoh-pico/src/api/api.c` @
-    /// `&querier->_encoding);  // it is safe to use alias`).
-    encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// `&querier->_encoding);  // it is safe to use alias`). Kept as it was moved in, and lent
+    /// to each get that names none.
+    encoding: Option<crate::encoding::OwnedEncoding>,
     /// The release latches of the gets issued through this querier. Undeclaring it waits for
     /// their reply callbacks to finish and their closures to be dropped, as pico's
     /// `_z_sync_group_wait` does.
@@ -521,21 +522,17 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // Consume the moved payload / attachment FIRST — before the
         // null-callback return, which is a path they must also be freed on. The
         // sibling `z_get` takes its bytes first for the same reason.
-        let (payload, attachment, value_meta, token) = if options.is_null() {
-            (
-                Ok(None),
-                Ok(None),
-                crate::get::PicoQueryValueMeta::default(),
-                None,
-            )
+        let (payload, attachment, (encoding, source_info), token) = if options.is_null() {
+            (Ok(None), Ok(None), (None, None), None)
         } else {
             (
                 crate::pubsub::take_moved_bytes((*options).payload),
                 crate::pubsub::take_moved_bytes((*options).attachment),
-                crate::get::PicoQueryValueMeta {
-                    encoding: crate::encoding::take_moved_encoding((*options).encoding),
-                    source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
-                },
+                // Held here for the call and lent to the get.
+                (
+                    crate::encoding::take_moved_encoding((*options).encoding),
+                    crate::pubsub::source_info_hint_of((*options).source_info()),
+                ),
                 // R311y575 — consumed on the same every-path line as the byte
                 // buffers, for the same reason: upstream's `z_querier_get` drops
                 // it unconditionally once the call is made.
@@ -583,10 +580,13 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         };
         // A get's own encoding wins; without one the value is sent with the
         // encoding the querier was declared with.
-        let mut value_meta = value_meta;
-        if value_meta.encoding.is_none() {
-            value_meta.encoding = state.encoding.clone();
-        }
+        let value_meta = crate::get::PicoQueryValueMeta {
+            encoding: encoding
+                .as_ref()
+                .or(state.encoding.as_ref())
+                .map(crate::encoding::OwnedEncoding::view),
+            source_info,
+        };
         let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
             Arc::as_ref(&state.shared),

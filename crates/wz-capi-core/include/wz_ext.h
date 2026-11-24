@@ -1974,9 +1974,9 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  *
  * RESERVING. With nothing reserved, the first object the program makes
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
- * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
- * HELD_PAYLOADS of the owned values, HELD_CONFIGS configs, HELD_HELLOS kept
- * hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
+ * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES, HELD_PAYLOADS
+ * and HELD_ENCODINGS of the owned values, HELD_CONFIGS configs, HELD_HELLOS
+ * kept hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
  * counts of its own reserves them before its first object instead.
  *
  * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
@@ -1987,10 +1987,12 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * z_declare_querier, z_declare_keyexpr, z_liveliness_declare_token,
  * z_liveliness_declare_subscriber, the clone and
  * take_from_loaned of a sample, reply, reply error or query, and the
- * constructors and copies of a payload, a string or a slice, which leave it
- * null). An object let go frees its slot. Key expressions not declared, the
- * handles of strings, slices, string arrays and encodings, closures and the
- * handles of the other wz_ext doors are the heap's in either build. */
+ * constructors and copies of a payload, a string, a slice or an encoding,
+ * which leave it null; an encoding whose schema is longer than
+ * MAX_ENCODING_SCHEMA_BYTES is refused the same way). An object let go frees
+ * its slot. Key expressions not declared, the handles of strings, slices and
+ * string arrays, closures and the handles of the other wz_ext doors are the
+ * heap's in either build. */
 #define WZ_EXT_OBJECT_POOL_CLASSES 11
 
 typedef struct wz_ext_object_pool_counts_t {
@@ -2009,6 +2011,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t payload_bytes;
   size_t queriers;
   size_t keyexprs;
+  size_t encodings;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

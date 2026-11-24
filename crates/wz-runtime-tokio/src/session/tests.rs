@@ -1263,7 +1263,7 @@ fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens()
 
     // The control: the same bytes as a plain value are bytes.
     let mut plain = local();
-    plain.payload = Some(b"local".to_vec());
+    plain.payload = Some(std::borrow::Cow::Owned(b"local".to_vec()));
     session
         .query("home/temp", plain, |_| {}, |_| {})
         .expect("query");
@@ -2015,9 +2015,9 @@ fn publish_options_with_metadata_setters_chain() {
     let ts = opts.timestamp.as_ref().unwrap();
     assert_eq!(ts.time, 0x1122_3344_5566_7788);
     assert_eq!(ts.zid, vec![0xAA, 0xBB]);
-    let enc = opts.encoding.as_ref().unwrap();
+    let enc = opts.encoding.as_ref().unwrap().view();
     assert_eq!(enc.packed_id, 13);
-    assert_eq!(enc.schema.as_deref(), Some(&b"application/json"[..]));
+    assert_eq!(enc.schema, Some(&b"application/json"[..]));
     let si = opts.source_info.as_ref().unwrap();
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
@@ -2081,10 +2081,12 @@ fn loopback_drops_timestamp_when_feature_off() {
 #[test]
 fn loopback_drops_encoding_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.encoding = Some(std::borrow::Cow::Owned(crate::sample::EncodingHint {
-        packed_id: 13,
-        schema: Some("application/json".into()),
-    }));
+    opts.encoding = Some(wz_session_core::publish_options::PublishEncoding::Owned(
+        crate::sample::EncodingHint {
+            packed_id: 13,
+            schema: Some("application/json".into()),
+        },
+    ));
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.encoding.is_none(),
@@ -16537,7 +16539,7 @@ fn an_adv_recovery_selector_reads_as_accept_any() {
 
     let selector = wz_session_core::selector_params::anyke_params(&["_sn=3..".to_string()]);
     let mut opts = QueryOptions::get();
-    opts.parameters = Some(selector.into_bytes());
+    opts.parameters = Some(std::borrow::Cow::Owned(selector.into_bytes()));
     assert_eq!(opts.effective_accept_replies(), ReplyKeyExpr::Any);
 }
 
@@ -18350,7 +18352,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
     };
     let meta = wz_session_core::metadata::PushMetadata {
         timestamp: Some(&stamp),
-        encoding: Some(&encoded),
+        encoding: Some(encoded.view()),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached"),
         qos: Some(QosLevel::from_raw(0x05)),

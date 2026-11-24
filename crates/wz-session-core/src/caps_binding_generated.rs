@@ -334,6 +334,30 @@ pub const HELD_PAYLOAD_BYTES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HELD_ENCODINGS`] is bound.
+pub const HELD_ENCODINGS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ENCODING_SCHEMA_BYTES`] is bound.
+pub const MAX_ENCODING_SCHEMA_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: Some((0, 255)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::CONFIG_ENTRIES`] is bound.
 pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
