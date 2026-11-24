@@ -10212,8 +10212,7 @@ mod tests {
         publication.suffix = Some("/leaf".to_owned());
         let wire = tokio_engine::wire_key(&publication);
         assert!(!wire.is_literal());
-        assert_eq!(wire.mapping_id, 3);
-        assert_eq!(wire.suffix(), Some("/leaf"));
+        assert_eq!(wire.names_in("demo/leaf"), (3, Some("/leaf")));
     }
 
     #[test]

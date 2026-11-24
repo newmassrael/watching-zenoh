@@ -143,7 +143,7 @@ impl TokenState {
             .engine
             .declare_liveliness_token_on_wire(
                 keyexpr,
-                key.wire(Arc::as_ref(&session.engine)),
+                key.wire_holding_declaration(Arc::as_ref(&session.engine)),
                 Some(key.retraction_key(Arc::as_ref(&session.engine))),
             )
             .map_err(|refused| refusal_code(refused, Door::Token))?;
@@ -428,7 +428,7 @@ pub(crate) unsafe fn declare_liveliness_subscriber_in(
     // the closure go.
     let sink = sample_sink_at(state);
     let declared = DeclaredKeyexpr::declare(engine, keyexpr, existing).and_then(|key| {
-        let wire = key.wire(Arc::as_ref(engine));
+        let wire = key.wire_holding_declaration(Arc::as_ref(engine));
         engine
             .declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
             .map(|id| DeclaredSubscriber::new(id, key))

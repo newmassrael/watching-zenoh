@@ -677,7 +677,7 @@ pub enum FilteredPut {
 pub struct WireKey {
     /// The keyexpr declaration the wire names, `0` for none.
     pub mapping_id: wz_session_core::wire_id::ExprId,
-    /// What follows the declared prefix ([`Self::suffix`]).
+    /// What follows the declared prefix ([`Self::names_in`]).
     suffix: Suffix,
     keeps: Keeps,
     /// One hold on the declaration of the key of the entity this key announces, when that is not
@@ -686,9 +686,10 @@ pub struct WireKey {
     also: Option<KeyHold>,
 }
 
-/// The rest of a key past its declared prefix: none, a copy of its own, or text that lies in what
-/// the key keeps ([`WireKey::aliased_in`]), which every copy of the key keeps too.
-#[derive(Clone, Default)]
+/// The rest of a key past its declared prefix: none, a copy of its own, text that lies in what
+/// the key keeps ([`WireKey::aliased_in`]), or the end of the key the wire key is handed with
+/// ([`WireKey::aliased_tail`]), which every engine call takes beside it.
+#[derive(Default)]
 enum Suffix {
     #[default]
     None,
@@ -697,6 +698,33 @@ enum Suffix {
         at: core::ptr::NonNull<u8>,
         len: usize,
     },
+    /// The last bytes of the key, by count.
+    Tail(usize),
+}
+
+impl Suffix {
+    /// The text the key has of its own or is lent; `None` for none and for a tail, which is read
+    /// against the key.
+    fn held(&self) -> Option<&str> {
+        match self {
+            Self::None | Self::Tail(_) => None,
+            Self::Owned(rest) => Some(rest),
+            // SAFETY: lent text lies, unchanged, in what the key keeps (`WireKey::aliased_in`),
+            // and was a `str` there.
+            Self::Lent { at, len } => Some(unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(at.as_ptr(), *len))
+            }),
+        }
+    }
+}
+
+impl core::fmt::Debug for Suffix {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Tail(len) => f.debug_tuple("Tail").field(len).finish(),
+            _ => core::fmt::Debug::fmt(&self.held(), f),
+        }
+    }
 }
 
 // SAFETY: lent text is read only, through shared borrows, and lies in what the key keeps, which
@@ -722,7 +750,7 @@ impl core::fmt::Debug for WireKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix())
+            .field("suffix", &self.suffix)
             .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
             .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
             .finish()
@@ -862,33 +890,53 @@ impl WireKey {
         }
     }
 
-    /// What follows the declared prefix, `None` when it covers the whole key.
-    pub fn suffix(&self) -> Option<&str> {
-        match &self.suffix {
-            Suffix::None => None,
-            Suffix::Owned(rest) => Some(rest),
-            // SAFETY: lent text lies, unchanged, in what this key keeps (`Self::aliased_in`), and
-            // was a `str` there.
-            Suffix::Lent { at, len } => Some(unsafe {
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(at.as_ptr(), *len))
-            }),
+    /// Declaration `mapping_id` followed by the last `rest_len` bytes of the key the wire key is
+    /// handed with (none when it is `0`): the key holds no text, and every engine call that takes
+    /// it takes that key beside it ([`Self::names_in`]).
+    pub fn aliased_tail(mapping_id: wz_session_core::wire_id::ExprId, rest_len: usize) -> Self {
+        Self {
+            mapping_id,
+            suffix: if rest_len == 0 {
+                Suffix::None
+            } else {
+                Suffix::Tail(rest_len)
+            },
+            keeps: Keeps::Nothing,
+            also: None,
         }
     }
 
-    /// What follows the declared prefix, as a string of its own: the key's own taken, lent text
-    /// copied.
-    pub fn into_suffix(self) -> Option<String> {
+    /// How the key goes on the wire, read against `keyexpr`, the key it was made for: the
+    /// declaration's id and what follows it (`None` when it covers the whole key), or `0` and the
+    /// whole of `keyexpr`. A tail that `keyexpr` cannot give (longer than it, or cutting a
+    /// character) was made for another key, so the key is named whole, which every peer reads.
+    pub fn names_in<'a>(
+        &'a self,
+        keyexpr: &'a str,
+    ) -> (wz_session_core::wire_id::ExprId, Option<&'a str>) {
+        if self.mapping_id == 0 {
+            return (0, Some(keyexpr));
+        }
         match self.suffix {
-            Suffix::Owned(rest) => Some(rest),
-            Suffix::None | Suffix::Lent { .. } => self.suffix().map(String::from),
+            Suffix::Tail(len) => match keyexpr
+                .len()
+                .checked_sub(len)
+                .and_then(|at| keyexpr.get(at..))
+            {
+                Some(rest) => (self.mapping_id, Some(rest)),
+                None => (0, Some(keyexpr)),
+            },
+            ref held => (self.mapping_id, held.held()),
         }
     }
 
-    /// A lent rest copied into the key, before what it lies in is let go of.
+    /// A lent rest copied into the key, before what it lies in is let go of. A tail lies in no
+    /// keep, so it stays as it is.
     fn own_suffix(&mut self) {
         if let Suffix::Lent { .. } = self.suffix {
             self.suffix = self
-                .suffix()
+                .suffix
+                .held()
                 .map_or(Suffix::None, |rest| Suffix::Owned(rest.into()));
         }
     }
@@ -907,6 +955,7 @@ impl WireKey {
     /// This key, holding the declaration `hold` holds for as long as a declaration made on it
     /// stays recorded, in the engine's own count and with nothing of its own on the heap. The
     /// hold is given back by whoever takes the key out of what records it ([`Self::into_holds`]).
+    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
     pub fn holding(mut self, hold: KeyHold) -> Self {
         self.own_suffix();
         debug_assert!(
@@ -920,6 +969,7 @@ impl WireKey {
     /// This key, holding besides what it names the declaration `hold` holds, of the key of the
     /// entity it announces, which the entity's retraction names: one more hold in the engine's own
     /// count, with nothing of its own on the heap.
+    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
     pub fn holding_also(mut self, hold: KeyHold) -> Self {
         debug_assert!(
             self.also.is_none(),
@@ -980,14 +1030,13 @@ pub fn interest_on_link(
     keyexpr: &str,
     form: &wz_session_core::declare_form::InterestForm,
 ) -> Option<wz_session_core::declare_form::InterestForm> {
-    wire_on_link(link).map(|wire| wz_session_core::declare_form::InterestForm {
-        suffix: if wire.is_literal() {
-            Some(String::from(keyexpr))
-        } else {
-            wire.into_suffix()
-        },
-        mapping_id: wire.mapping_id,
-        aggregate: form.aggregate,
+    wire_on_link(link).map(|wire| {
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        wz_session_core::declare_form::InterestForm {
+            mapping_id,
+            suffix: suffix.map(String::from),
+            aggregate: form.aggregate,
+        }
     })
 }
 
@@ -1138,6 +1187,35 @@ mod tests {
         assert!(!WireKey::aliased(3, None).is_literal());
     }
 
+    /// A tail is read against the key the wire key is handed with: the end of it, of the length
+    /// the key was made with, and the whole key under no declaration when the key cannot give it
+    /// (shorter, or cut inside a character). Holding a declaration leaves the tail a tail.
+    ///
+    /// # Control
+    ///
+    /// A `names_in` that reads the tail from the front of the key reds the first assertion; one
+    /// that cuts a key it cannot give reds the "shorter" and "cut inside a character" ones; a
+    /// `holding` that drops the tail reds the last.
+    #[test]
+    fn a_tail_is_the_end_of_the_key_it_is_handed_with() {
+        let key = WireKey::aliased_tail(9, "/rest".len());
+        assert_eq!(key.names_in("demo/data/rest"), (9, Some("/rest")));
+        assert_eq!(key.names_in("abc"), (0, Some("abc")), "shorter");
+        assert_eq!(
+            key.names_in("a/\u{d55c}\u{ae00}"),
+            (0, Some("a/\u{d55c}\u{ae00}")),
+            "cut inside a character"
+        );
+        assert_eq!(WireKey::aliased_tail(9, 0).names_in("demo/data"), (9, None));
+        assert_eq!(
+            WireKey::literal().names_in("demo/data"),
+            (0, Some("demo/data"))
+        );
+        let held = key.holding(KeyHold::taken(9));
+        assert_eq!(held.names_in("demo/data/rest"), (9, Some("/rest")));
+        held.let_go(&CountedHolds::default());
+    }
+
     /// A rest that lies in what the key keeps is lent, not copied, to the key; keeping something
     /// else instead copies it first, so it never outlives what it lay in.
     ///
@@ -1151,13 +1229,17 @@ mod tests {
         let rest = text.get("demo/data".len()..).expect("the rest of the key");
         // SAFETY: `rest` lies in the string the keep counts, which nothing changes.
         let key = unsafe { WireKey::aliased_in(9, rest, crate::lodge::Kept::shared(text.clone())) };
-        assert_eq!(key.suffix().map(str::as_ptr), Some(rest.as_ptr()), "lent");
-        assert_eq!((key.mapping_id, key.suffix()), (9, Some("/rest")));
+        assert_eq!(
+            key.names_in("demo/data/rest").1.map(str::as_ptr),
+            Some(rest.as_ptr()),
+            "lent"
+        );
+        assert_eq!(key.names_in("demo/data/rest"), (9, Some("/rest")));
         let other: Arc<dyn Send + Sync> = Arc::new(());
         let rekept = key.keeping(crate::lodge::Kept::shared(other));
-        assert_eq!(rekept.suffix(), Some("/rest"));
+        assert_eq!(rekept.names_in("demo/data/rest"), (9, Some("/rest")));
         assert_ne!(
-            rekept.suffix().map(str::as_ptr),
+            rekept.names_in("demo/data/rest").1.map(str::as_ptr),
             Some(rest.as_ptr()),
             "keeping something else copies the rest first"
         );

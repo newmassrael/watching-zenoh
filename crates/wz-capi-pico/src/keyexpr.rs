@@ -102,25 +102,31 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// read again here: only the declaration is.
 ///
 /// The key holds the declaration it names, for a declaration that records it; whoever takes it
-/// out of the record gives the hold back ([`WireKey::into_holds`]).
+/// out of the record gives the hold back ([`WireKey::into_holds`]). A message sent once names
+/// its key by [`wire_key_of`], which holds nothing.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+#[must_use = "the key holds a declaration, given back by whoever lets the key go"]
+pub(crate) unsafe fn wire_key_holding_declaration_of(
+    ke: *const z_loaned_keyexpr_t,
+    shared: &Engine,
+) -> WireKey {
+    match declared_of(ke) {
+        Some(declared) => declared.wire_holding_declaration(shared),
+        None => WireKey::literal(),
+    }
+}
+
+/// How `ke` goes on `shared`'s wire, holding nothing: for a message sent once, which records
+/// nothing. The rest of the key is named by its length, read against the key's text that goes
+/// with it ([`WireKey::names_in`]).
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
     match declared_of(ke) {
         Some(declared) => declared.wire(shared),
-        None => WireKey::literal(),
-    }
-}
-
-/// How `ke` goes on `shared`'s wire, as [`wire_key_of`] names it, holding nothing: for a
-/// message sent once, which records nothing.
-///
-/// # Safety
-/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
-pub(crate) unsafe fn named_wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
-    match declared_of(ke) {
-        Some(declared) => declared.named_wire(shared),
         None => WireKey::literal(),
     }
 }
@@ -449,29 +455,27 @@ impl DeclaredKeyexpr {
     /// remainder of the key when the declaration is `shared`'s, the literal
     /// otherwise.
     ///
-    /// An aliased key KEEPS its declaration: whatever records it — a registry
-    /// entry replayed onto later faces — holds the id declared for as long as
-    /// it names it, and gives the hold back when it lets the key go
-    /// ([`WireKey::into_holds`]).
+    /// It holds nothing: for a message sent once, or a record that keeps this key itself. The
+    /// remainder is named by its length, read against this key's literal, which every engine
+    /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
         match self.declared_rest(shared) {
-            Some((d, rest)) => Self::aliased_wire(d, rest).holding(d.share_on(shared)),
+            Some((d, rest)) => WireKey::aliased_tail(d.mapping_id(), rest.len()),
             None => WireKey::literal(),
         }
     }
 
-    /// The key as [`Self::wire`] names it, holding nothing: for a message sent once, or a
-    /// record that keeps this key itself.
-    pub(crate) fn named_wire(&self, shared: &Engine) -> WireKey {
+    /// [`Self::wire`], KEEPING the declaration: whatever records it — a registry entry replayed
+    /// onto later faces — holds the id declared for as long as it names it, and gives the hold
+    /// back when it lets the key go ([`WireKey::into_holds`]).
+    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
+    pub(crate) fn wire_holding_declaration(&self, shared: &Engine) -> WireKey {
         match self.declared_rest(shared) {
-            Some((d, rest)) => Self::aliased_wire(d, rest),
+            Some((d, rest)) => {
+                WireKey::aliased_tail(d.mapping_id(), rest.len()).holding(d.share_on(shared))
+            }
             None => WireKey::literal(),
         }
-    }
-
-    /// Declaration `d` followed by `rest`, none when it is empty.
-    fn aliased_wire(d: &WireDeclaration, rest: &str) -> WireKey {
-        WireKey::aliased(d.mapping_id(), (!rest.is_empty()).then(|| rest.to_owned()))
     }
 
     /// The declaration's id and the remainder of the key, borrowed from this key, when the
@@ -1827,13 +1831,15 @@ mod tests {
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.named_wire(Arc::as_ref(&engine));
-        assert_eq!(wire.mapping_id, declarations[0].0);
-        assert_eq!(wire.suffix(), Some("/*/x"));
+        let wire = key.wire(Arc::as_ref(&engine));
+        assert_eq!(
+            wire.names_in(key.literal()),
+            (declarations[0].0, Some("/*/x"))
+        );
 
         let other = session().as_engine();
         assert_eq!(
-            key.named_wire(&*other).mapping_id,
+            key.wire(&*other).mapping_id,
             0,
             "another session's id is not ours"
         );
@@ -1845,7 +1851,7 @@ mod tests {
     ///
     /// # Control
     ///
-    /// A retraction that copies the rest of the key (as one made from `wire` did) reds the count.
+    /// A retraction that copies the rest of the key reds the count.
     #[cfg(feature = "connectivity")]
     #[test]
     fn a_retraction_names_the_rest_of_its_own_key_and_takes_no_memory() {
@@ -1866,6 +1872,35 @@ mod tests {
             key.retraction_key(&*other).names(key.literal()),
             (0, "demo/kd/ret/**")
         );
+    }
+
+    /// A wire key names the rest of its key by its length, read against the key's literal, so
+    /// making one takes no memory, whether it holds the declaration or not.
+    ///
+    /// # Control
+    ///
+    /// A wire key that copies the rest of the key (`WireKey::aliased` over `to_owned`) reds the
+    /// count; one whose length is not the rest's reds the `names_in` assertions.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_wire_key_names_the_rest_of_its_key_and_takes_no_memory() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/wire/*/x", None)
+            .expect("declared");
+        let declared = shared.keyexpr_declarations()[0].0;
+        let mut plain = None;
+        let mut holding = None;
+        let taken = crate::connectivity::tests::allocations(|| {
+            plain = Some(key.wire(Arc::as_ref(&engine)));
+            holding = Some(key.wire_holding_declaration(Arc::as_ref(&engine)));
+        });
+        assert_eq!(taken, 0, "a wire key copies nothing of the key");
+        let plain = plain.expect("the plain key was made");
+        let holding = holding.expect("the holding key was made");
+        assert_eq!(plain.names_in(key.literal()), (declared, Some("/*/x")));
+        assert_eq!(holding.names_in(key.literal()), (declared, Some("/*/x")));
+        holding.let_go(Arc::as_ref(&engine));
     }
 }
 
@@ -2315,7 +2350,7 @@ mod arena_key_tests {
     /// count: a share and a wire key outlive the key they were made from, and the last holder let
     /// go retracts it. Turned red by a copy that takes no hold of its own, which lets the
     /// declaration go with the first holder, or by a wire key that holds nothing (`share_on` in
-    /// `DeclaredKeyexpr::wire` dropped).
+    /// `DeclaredKeyexpr::wire_holding_declaration` dropped).
     #[test]
     fn a_declaration_lasts_as_long_as_its_last_holder() {
         let (session, engine) = listening();
@@ -2329,7 +2364,7 @@ mod arena_key_tests {
             "the declaration takes the last block"
         );
         let shared = key.share();
-        let wire = key.wire(Arc::as_ref(&engine));
+        let wire = key.wire_holding_declaration(Arc::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
         assert!(!room_for(&engine, text.len()), "the share holds it");
@@ -2378,12 +2413,12 @@ mod arena_key_tests {
     /// that holds it while the named one still stands, and is dropped giving nothing back. Turned
     /// red by a named key that takes a hold, which keeps the declaration past its last holder.
     #[test]
-    fn a_named_wire_key_holds_no_declaration() {
+    fn a_wire_key_holds_no_declaration() {
         let (session, engine) = listening();
         let text = "demo/hold/named";
         let held = fill_leaving(&engine, text.len(), 1);
         let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
-        let named = key.named_wire(Arc::as_ref(&engine));
+        let named = key.wire(Arc::as_ref(&engine));
         assert_ne!(named.mapping_id, 0, "the key names the declaration");
         drop(key);
         assert!(

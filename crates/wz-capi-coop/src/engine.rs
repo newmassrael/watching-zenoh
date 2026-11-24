@@ -6799,7 +6799,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
-                (wire.mapping_id, wire.suffix())
+                wire.names_in(keyexpr)
             };
             // The query is written from the options where they lie, with nothing copied.
             let sent = match wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix) {
@@ -7099,7 +7099,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {
-                (wire.mapping_id, wire.suffix())
+                wire.names_in(keyexpr)
             };
             if actions
                 .send_interest_liveliness_get(interest_id, mapping_id, suffix)
