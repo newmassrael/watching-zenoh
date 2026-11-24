@@ -1529,7 +1529,9 @@ fn tables_mut(registry: &RefCell<Registry>) -> core::cell::RefMut<'_, CoopTables
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
 /// under its lock is handed out by the delivery that follows.
 struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
-    core: CoreGuard<'a, L, C>,
+    /// Let go in the hold's own drop, after the seal, so that no caller holds a copy of the lock's
+    /// release beside the call to it.
+    core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
     lane: &'a Round,
 }
 
@@ -1548,11 +1550,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
-    // Out of line, as `CoopEngine::live` is: every operation lets the session go through it.
+    // Out of line, as `CoopEngine::live` is: every operation lets the session go through it, the
+    // round sealed and the lock let go in this one body.
     #[inline(never)]
     fn drop(&mut self) {
-        // SAFETY: the session's lock is held: `core` is let go after this body.
+        // SAFETY: the session's lock is held: `core` is let go below, after the seal.
         unsafe { self.lane.seal() };
+        // SAFETY: this is the hold's drop, so `core` is let go once and nothing reads it after.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.core) };
     }
 }
 
@@ -4347,7 +4352,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return None;
         }
         Some(LiveCore {
-            core: guard,
+            core: core::mem::ManuallyDrop::new(guard),
             lane: self.samples.as_ref(),
         })
     }
@@ -4389,7 +4394,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     return ToPublish::Closed;
                 }
                 return ToPublish::Live(LiveCore {
-                    core: guard,
+                    core: core::mem::ManuallyDrop::new(guard),
                     lane: self.samples.as_ref(),
                 });
             }
