@@ -53,16 +53,16 @@ wrong shows up).
 
 The dev profile by default, and that is not a weakening: a SONAME is a linker
 argument recorded in the dynamic section, with no profile-dependent path
-through `wz_cdylib_build` and nothing LTO can remove. Release is available
-(`--profile release`) for a lane that wants the shipped artifact, and costs
-several minutes because this workspace's release profile is `lto = "thin"`
-with `codegen-units = 1`.
+through `wz_cdylib_build` and nothing LTO can remove. The shipped artifact's
+profile is available (`--profile ship`) for a lane that wants it, and costs
+several minutes because that profile links each library as one program
+(`lto = "fat"`, `codegen-units = 1`).
 
 ## Usage
 
     python3 scripts/lib/cdylib_soname_gate.py              # gate; non-zero on violation
     python3 scripts/lib/cdylib_soname_gate.py --report     # print the table, always 0
-    python3 scripts/lib/cdylib_soname_gate.py --profile release
+    python3 scripts/lib/cdylib_soname_gate.py --profile ship
 """
 
 from __future__ import annotations

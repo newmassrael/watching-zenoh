@@ -1304,6 +1304,11 @@ It states, for the four bundles (the three C ABI libraries the analyzer links an
   `git`. Without it a build with no `.git` names itself `v<version>-release`, where a checkout
   build of the same commit names the commit; with it, both compose the same `zenoh::GIT_VERSION`;
 - the toolchain channel, the manifest, the lockfile and the cargo flags;
+- the directory under the cargo target directory the products are written to (`cargo.product_dir`).
+  **The consumer reads this field** and does not derive the directory from the flags, so a change
+  of the profile the bundles are built with reaches the consumer as a change of this field.
+  `--check` holds it to the directory the flags build into, and `--build` looks for the products
+  there; `offline_build.py --product-dir` prints it;
 - the system tools (`cc`, which is also the linker, `c++`, `ar`, `libclang`) with the commands each
   puts on PATH (`cc` brings `as` and `ld`, which gcc runs by name), every crate of the bundles'
   closures that has a build script with the tools that script calls, and each bundle's tools as

@@ -106,8 +106,9 @@ Neither is a mismatch of the switches; both are planes the pico ABI links and ca
 belong to the reduction list, not to the reference.
 
 The two builds are also built alike: zenoh-pico's `Release` is `-O3`
-(`vendor/zenoh-pico/CMakeLists.txt` @ `add_compile_options(-pipe -O3)`), wz's release profile is
-`opt-level = 3` with thin LTO and one codegen unit.
+(`vendor/zenoh-pico/CMakeLists.txt` @ `add_compile_options(-pipe -O3)`), and the gate builds wz
+with the shipping profile (`ship` in `crates/Cargo.toml`), `opt-level = 3` with fat LTO and one
+codegen unit.
 
 ## 4. The planes of the tokio cases
 
@@ -180,8 +181,8 @@ python3 scripts/lib/capability_cost_gate.py --measure pico-client-small pico-cli
 ```
 
 The attribution of a plane, from two builds of the gate's own commands
-(`cargo build --release -p wz-capi-pico [--no-default-features --features <case>]` in `crates/`,
-the library copied out of `crates/target/release/` after each), by owning scope:
+(`cargo build --profile ship -p wz-capi-pico [--no-default-features --features <case>]` in
+`crates/`, the library copied out of `crates/target/ship/` after each), by owning scope:
 
 ```
 python3 scripts/lib/footprint_attribution.py --old <a.so> --new <b.so> \
