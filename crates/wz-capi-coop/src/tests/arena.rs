@@ -24,6 +24,7 @@ use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
 use super::entity_tables::lowered;
@@ -33,7 +34,7 @@ use super::{
 use crate::arena::{
     AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
-use crate::round::RoundRowCounts;
+use crate::round::{CoopForm, RoundRowCounts};
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -676,8 +677,9 @@ fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
 }
 
 /// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
-/// `DELIVERY_LANE_CALLBACKS` state and two of its longest key, each lowered with its limit, and are
-/// laid out right after the lane's area, the order the open lends them in.
+/// `DELIVERY_LANE_CALLBACKS` state and its longest key, two of it for a round of threads and one for
+/// a round of one thread, each lowered with its limit, and are laid out right after the lane's area,
+/// the order the open lends them in. Turned red by a round of one thread lent two keys.
 #[test]
 fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
     let built =
@@ -705,7 +707,12 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(row(&plan, "delivery records").count, 4);
     assert_eq!(row(&plan, "delivery keys").count, 1);
-    assert_eq!(row(&plan, "delivery keys").entry_bytes, 64);
+    let keys = if <CoopForm as ThreadForm>::OTHER_THREADS {
+        2
+    } else {
+        1
+    };
+    assert_eq!(row(&plan, "delivery keys").entry_bytes, 32 * keys);
     assert!(
         plan.reserved_bytes() < built.reserved_bytes(),
         "the lowered limits lower the arena"

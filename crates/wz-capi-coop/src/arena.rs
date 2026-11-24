@@ -143,7 +143,7 @@ use crate::engine::{CoopTables, FACE_SET_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
-use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
+use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReply;
@@ -1668,7 +1668,11 @@ impl ArenaPlan {
             self.session.round.callbacks,
             CALLBACK_BYTES,
         );
-        self.put(ArenaPart::DeliveryKeys, 1, self.session.round.key_bytes());
+        self.put(
+            ArenaPart::DeliveryKeys,
+            1,
+            self.session.round.key_bytes::<CoopForm>(),
+        );
         // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
         // the handles of it that count nothing.
         self.put(

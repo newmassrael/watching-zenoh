@@ -588,7 +588,8 @@ impl DeclWatches {
     {
         let round = &self.shared.round;
         let mut table = lock(&self.shared.table);
-        // A round of one thread takes one declaration of one catch-up a round, each part a record.
+        // A round of one thread takes one declaration of the catch-ups a round, its one key
+        // (`RecordForm::KEYS`), each part a record.
         let mut part_left = IN_PARTS;
         for Row { watch, cell } in &mut table.rows {
             let Some(watch) = watch.as_mut() else {
@@ -600,8 +601,11 @@ impl DeclWatches {
                     .fold(0usize, usize::saturating_add);
                 let left = count.saturating_sub(watch.told);
                 let records = left.saturating_add(usize::from(watch.lost != 0));
+                let keyed = IN_PARTS && left != 0;
+                let whole = !keyed || (part_left && left == 1);
                 // SAFETY: the caller's contract.
-                if unsafe { round.has_room_for(records, records) } {
+                if whole && unsafe { round.has_room_for(records, records) } {
+                    part_left &= !keyed;
                     watch.catching_up = false;
                     // SAFETY: the caller's contract.
                     unsafe { tell_lost(round, watch, cell) };

@@ -191,6 +191,10 @@ pub trait RecordForm: ThreadForm {
     /// Whether the session's arena lends the records' rows ([`RoundRows::RECORD_BYTES`]).
     const LENT: bool;
 
+    /// How many of the session's longest keys the keys of a round of this form hold
+    /// ([`RoundRowCounts::key_bytes`]).
+    const KEYS: usize;
+
     /// The records of a round of `rows` records, lent from `arena` where the form lends them.
     ///
     /// # Errors
@@ -232,6 +236,10 @@ impl RecordForm for crate::row_callback::Threads {
 
     const LENT: bool = true;
 
+    // The round takes a message while its keys have room for the longest after the keys of the
+    // messages before it ([`Round::has_room`]), so two let it take more than one.
+    const KEYS: usize = 2;
+
     fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused> {
         arena.lend(rows)
     }
@@ -241,6 +249,10 @@ impl RecordForm for crate::row_callback::OneThread {
     type Records<T> = BoundedVec<T, ONE_THREAD_RECORDS, Static>;
 
     const LENT: bool = false;
+
+    // The round takes one message, whose records share its key, and the sources that write
+    // records unasked key one of them a round.
+    const KEYS: usize = 1;
 
     fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T>, LendRefused> {
         Ok(BoundedVec::new_static())
@@ -654,15 +666,16 @@ impl<C: RoundCalls> Owed<C> {
     }
 }
 
-/// The bytes of the keys the table writes, for a key of `KEY` bytes at most: a key the session
-/// resolved from an alias lies in a frame of the dispatch, gone when the callbacks run.
+/// The bytes of the keys the table writes, for a key of `KEY` bytes at most, in the form that holds
+/// the most of them: a key the session resolved from an alias lies in a frame of the dispatch, gone
+/// when the callbacks run.
 const fn key_bytes<const KEY: usize>() -> usize {
-    KEY.saturating_mul(2)
+    KEY.saturating_mul(<crate::row_callback::Threads as RecordForm>::KEYS)
 }
 
 /// How many rows of each table of a round its session's arena lends: its records
 /// (`DELIVERY_LANE_EVENTS`), the callbacks they owe (`DELIVERY_LANE_CALLBACKS`) and its longest
-/// key (`MAX_KEYEXPR_BYTES`), two of which its keys hold.
+/// key (`MAX_KEYEXPR_BYTES`), as many of which as the round's form names its keys hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoundRowCounts {
     /// The records a round holds at once.
@@ -674,10 +687,10 @@ pub struct RoundRowCounts {
 }
 
 impl RoundRowCounts {
-    /// The bytes of the keys a round writes: two of the longest, as a key the session resolved
-    /// and the one before it may both be held.
-    pub const fn key_bytes(&self) -> usize {
-        self.longest_key.saturating_mul(2)
+    /// The bytes of the keys a round of form `F` writes: as many of the longest as it holds at
+    /// once ([`RecordForm::KEYS`]).
+    pub const fn key_bytes<F: RecordForm>(&self) -> usize {
+        self.longest_key.saturating_mul(F::KEYS)
     }
 }
 
@@ -720,7 +733,7 @@ impl<C: RoundCalls> RoundRows<C> {
         Ok(Self {
             records: <C::Form as RecordForm>::records(arena, counts.records)?,
             callbacks: arena.lend(counts.callbacks)?,
-            keys: arena.lend(counts.key_bytes())?,
+            keys: arena.lend(counts.key_bytes::<C::Form>())?,
             longest_key: counts.longest_key,
         })
     }
@@ -755,7 +768,8 @@ struct Table<C: RoundCalls> {
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
     /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows its arena lent.
     callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
-    /// The keys written, two of the session's longest, bytes its arena lent.
+    /// The keys written, as many of the session's longest as the form holds
+    /// ([`RecordForm::KEYS`]), bytes its arena lent.
     keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
     /// The session's longest key: the room a record's key may take of `keys`.
     longest_key: usize,

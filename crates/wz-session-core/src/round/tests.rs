@@ -159,6 +159,27 @@ impl RoundCalls for Single {
     type Form = crate::row_callback::OneThread;
 }
 
+/// [`Kept`] in a build whose calls all run on the thread that steps the session.
+enum KeptSingle {}
+
+impl RoundCalls for KeptSingle {
+    type Subscriber = Call;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Present;
+    type Replies = Present;
+    type Queries = Present;
+    type Watches = Present;
+    type Capture = Present;
+    type Group = Present;
+    type Locks = StdLocks;
+    type Tally = Counted;
+    type Form = crate::row_callback::OneThread;
+}
+
 /// One block of an arena's memory, aligned as an arena's spans start.
 #[derive(Clone, Copy)]
 #[repr(C, align(16))]
@@ -181,7 +202,7 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Placed<Round<C>>
     let bytes: usize = [
         Arena::table_bytes::<Entry<C>>(counts.records),
         Arena::table_bytes::<Owed<C>>(counts.callbacks),
-        Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<u8>(counts.key_bytes::<C::Form>()),
         Arena::table_bytes::<Round<C>>(1),
     ]
     .into_iter()
@@ -209,7 +230,7 @@ fn a_round_placed_in_an_arena_is_built_there_whole() {
     let bytes: usize = [
         Arena::table_bytes::<Entry<Kept>>(counts.records),
         Arena::table_bytes::<Owed<Kept>>(counts.callbacks),
-        Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<u8>(counts.key_bytes::<<Kept as RoundCalls>::Form>()),
         Arena::table_bytes::<Round<Kept>>(1),
     ]
     .into_iter()
@@ -1090,6 +1111,89 @@ fn a_round_of_one_thread_keeps_two_records_in_itself_and_refuses_a_third() {
             "12 sample k/2"
         ]
     );
+}
+
+/// A round of one thread is lent one of the session's longest keys, a round of threads two. The
+/// records of the one message a round of one thread takes share its key, as a token held for its
+/// liveliness subscribers and for the declaration watches does, so both are held; a second key of
+/// that length finds no place, where the round of threads (the CONTROL) places it. Turned red by a
+/// round of one thread lent a key for each record it holds.
+#[test]
+fn a_round_of_one_thread_holds_one_longest_key_its_records_share() {
+    use crate::row_callback::{OneThread, Threads};
+
+    let counts = RoundRowCounts {
+        records: 0,
+        callbacks: 0,
+        longest_key: 40,
+    };
+    assert_eq!(counts.key_bytes::<OneThread>(), 40);
+    assert_eq!(counts.key_bytes::<Threads>(), 80, "CONTROL: two keys");
+    let (first_key, second_key) = (
+        "a".repeat(caps::MAX_KEYEXPR_BYTES),
+        "b".repeat(caps::MAX_KEYEXPR_BYTES),
+    );
+    let (first, second) = (first_key.as_str(), second_key.as_str());
+    let log = Arc::new(Log::default());
+    let call = |row: u32| Call {
+        row,
+        log: log.clone(),
+    };
+    let declared = |keyexpr| DeclEvent {
+        kind: DeclEventKind::Declared,
+        id: 7,
+        keyexpr,
+        peer: None,
+    };
+    let token = LivelinessSample {
+        kind: LivelinessSampleKind::Put,
+        keyexpr: first,
+        token_id: 7,
+    };
+    let shared = round::<KeptSingle>();
+    let single = round::<KeptSingle>();
+    let threads = round::<Kept>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        shared.offer_liveliness(call(1), &token, None);
+        assert!(
+            shared.offer_decl_watch(call(2), declared(first), None),
+            "the watch's record shares the token's key"
+        );
+        assert!(single.offer_decl_watch(call(3), declared(first), None));
+        assert!(
+            !single.offer_decl_watch(call(4), declared(second), None),
+            "a second longest key finds no place"
+        );
+        assert!(threads.offer_decl_watch(call(5), declared(first), None));
+        assert!(
+            threads.offer_decl_watch(call(6), declared(second), None),
+            "CONTROL: a round of threads places a second longest key"
+        );
+        shared.seal();
+        single.seal();
+        threads.seal();
+    }
+    assert_eq!(shared.counts(), RoundCounts::default());
+    assert_eq!(
+        single.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1
+        },
+        "refused as unplaced, which is counted with what was dropped"
+    );
+    assert_eq!(threads.counts(), RoundCounts::default());
+    assert!(shared.deliver() && single.deliver() && threads.deliver());
+    let rows: Vec<u32> = log
+        .handed()
+        .iter()
+        .map(|what| what.split(' ').next().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(rows, [1, 2, 3, 5, 6]);
+    assert_eq!(log.ended(), 6, "the refused event's call is ended too");
 }
 
 /// The queryables one query reaches owe calls of one record, in the order they were reached: a
