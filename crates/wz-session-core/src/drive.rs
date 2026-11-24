@@ -3248,7 +3248,11 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {
+    if !actions
+        .link
+        .lease_armed
+        .load(core::sync::atomic::Ordering::SeqCst)
+    {
         return LeaseCheckOutcome::NotMonitored;
     }
     // The watch of the peer's initial declarations first: the wake may be its own, and a sync
@@ -3813,7 +3817,11 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 fn lease_expiry_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
-    if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {
+    if !actions
+        .link
+        .lease_armed
+        .load(core::sync::atomic::Ordering::SeqCst)
+    {
         return None;
     }
     let inbound = R::with_mutex_mut(&actions.link.last_inbound_at, |g| *g);
@@ -3883,7 +3891,11 @@ impl KeepaliveDeadlines {
 fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<KeepaliveDeadlines> {
-    if !R::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed) {
+    if !actions
+        .link
+        .keepalive_armed
+        .load(core::sync::atomic::Ordering::SeqCst)
+    {
         return None;
     }
     let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
