@@ -38,6 +38,10 @@ const TTL_KEY: &str = "ttl";
 const BIND_KEY: &str = "bind";
 /// `dscp=<value>` (zenoh `DSCP`).
 const DSCP_KEY: &str = "dscp";
+/// `rel=<0|1>` of the metadata span: the reliability the link offers. A group's link offers none.
+const RELIABILITY_KEY: &str = "rel";
+/// The one value of [`RELIABILITY_KEY`] a group's link keeps: best effort.
+const BEST_EFFORT: &str = "0";
 
 /// The shortest text a group endpoint's config span can follow: the shortest multicast address
 /// written (`ff00::`) on port 0.
@@ -171,6 +175,9 @@ pub enum GroupLocatorError {
     NotAGroup,
     /// The key named holds a value no socket is opened with.
     BadValue(&'static str),
+    /// The metadata span states what a group's link does not keep: a reliability other than best
+    /// effort, or a key a group does not read.
+    MetadataNotKept,
 }
 
 impl fmt::Display for GroupLocatorError {
@@ -181,12 +188,16 @@ impl fmt::Display for GroupLocatorError {
             }
             Self::NotAGroup => f.write_str("the endpoint names no udp multicast group"),
             Self::BadValue(key) => write!(f, "the group endpoint's #{key}= holds no usable value"),
+            Self::MetadataNotKept => {
+                f.write_str("the group endpoint's metadata states what a group does not keep")
+            }
         }
     }
 }
 
-/// Read `endpoint` as the group a session joins. The metadata span is not read: no key of it
-/// changes which sockets a group is joined with.
+/// Read `endpoint` as the group a session joins. Its metadata span may state only what a group's
+/// link keeps, best effort (`rel=0`); any other value or key is refused, so an endpoint that asks
+/// for what a group does not do is never joined as if it had not asked.
 pub fn parse_group_locator(endpoint: &str) -> Result<GroupLocator, GroupLocatorError> {
     if endpoint.len() > MAX_GROUP_ENDPOINT_LEN {
         return Err(GroupLocatorError::TooLong);
@@ -199,7 +210,21 @@ pub fn parse_group_locator(endpoint: &str) -> Result<GroupLocator, GroupLocatorE
         .ok()
         .filter(|group| group.ip().is_multicast())
         .ok_or(GroupLocatorError::NotAGroup)?;
+    kept_metadata(parts.metadata)?;
     UdpGroup::read(group, parts.config).map(GroupLocator::Udp)
+}
+
+/// Whether every `key=value` of `metadata` is one a group's link keeps.
+fn kept_metadata(metadata: &str) -> Result<(), GroupLocatorError> {
+    let kept = metadata
+        .split(';')
+        .filter(|pair| !pair.is_empty())
+        .all(|pair| pair.split_once('=') == Some((RELIABILITY_KEY, BEST_EFFORT)));
+    if kept {
+        Ok(())
+    } else {
+        Err(GroupLocatorError::MetadataNotKept)
+    }
 }
 
 #[cfg(test)]
@@ -220,7 +245,7 @@ mod tests {
     #[test]
     fn every_key_is_read_into_its_field() {
         let group = udp(
-            "udp/239.1.2.3:7447?prio=1-3#iface=eth0;ttl=8;join=239.1.2.4;join=;join=239.1.2.5;\
+            "udp/239.1.2.3:7447?rel=0#iface=eth0;ttl=8;join=239.1.2.4;join=;join=239.1.2.5;\
              bind=10.0.0.1:0;dscp=0x10;ttl=9",
         );
         assert_eq!(
@@ -294,6 +319,29 @@ mod tests {
             );
         }
         assert_eq!(udp("udp/239.1.2.3:7447#ttl=").ttl(), None);
+    }
+
+    /// Metadata that asks for what a group's link does not do is refused, as is a key a group
+    /// does not read: a reliable link, a priority range, a reliability that is no value, a key of
+    /// no meaning to it and text that is no `key=value`.
+    #[test]
+    fn metadata_a_group_does_not_keep_is_refused() {
+        for endpoint in [
+            "udp/239.1.2.3:7447?rel=1",
+            "udp/239.1.2.3:7447?rel=0;rel=1#ttl=2",
+            "udp/239.1.2.3:7447?prio=1-3",
+            "udp/239.1.2.3:7447?rel=x",
+            "udp/239.1.2.3:7447?unknown=1",
+            "udp/239.1.2.3:7447?junk",
+        ] {
+            assert_eq!(
+                parse_group_locator(endpoint),
+                Err(GroupLocatorError::MetadataNotKept),
+                "{endpoint}"
+            );
+        }
+        assert!(parse_group_locator("udp/239.1.2.3:7447?#ttl=2").is_ok());
+        assert!(parse_group_locator("udp/239.1.2.3:7447?rel=0").is_ok());
     }
 
     /// An endpoint of `MAX_GROUP_ENDPOINT_LEN` bytes is read, one byte longer is refused by that
