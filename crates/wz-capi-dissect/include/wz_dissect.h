@@ -4302,11 +4302,25 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * string, and its NAME says what it defines: `<package>/msg/<Type>.msg` the
  * type `<package>/msg/<Type>`, and `<package>/srv/<Type>.srv` the two types
  * a service's samples carry, `<package>/srv/<Type>_Request` and
- * `<package>/srv/<Type>_Response`. A field naming another type
- * (`geometry_msgs/Point`, or `Point` within the file's own package) is found
- * among every declared definition, wherever in the text it is. Constants,
- * defaults and comments are passed over, as nothing of them is on the wire.
- * `.action` files are not read.
+ * `<package>/srv/<Type>_Response`, with the two types rosidl derives from them:
+ * `<package>/srv/<Type>_Event`, the message a service's introspection
+ * publishes (`info`, a `service_msgs/msg/ServiceEventInfo`, then `request`
+ * and `response`, each a sequence of at most one), read like any message, and
+ * `<package>/srv/<Type>` itself, which is never a payload and has a type hash.
+ * A field naming another type (`geometry_msgs/Point`, or `Point` within the
+ * file's own package) is found among every declared definition, wherever in
+ * the text it is. Constants, defaults and comments are passed over, as
+ * nothing of them is on the wire. `builtin_interfaces/msg/Time` and
+ * `service_msgs/msg/ServiceEventInfo`, which ROS fixes and every service's
+ * event names, are defined by this library: declare them or not, and a
+ * declared one that defines other fields is refused. `.action` files are not
+ * read.
+ *
+ * (Declaration-verdict revision 6) A definition file is read when its line is
+ * declared, so one that cannot be read refuses the text at its own line
+ * (WZ_DISSECT_ERR_DECLARATION; wz_dissect_declarations_diagnose names the
+ * file and line), whether or not a rule names one of its types. It used to
+ * install until a rule did.
  *
  * `<keyexpr>=cdr@<package>/msg/<Type>` reads the key's payload as that type.
  * The rule is REFUSED (WZ_DISSECT_ERR_DECLARATION) when the text declares no
@@ -4341,12 +4355,16 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * 0). A `wstring` field is refused by name: its character width differs
  * between serializers, and this library does not guess it.
  *
- * The type hash a ROS 2 key carries (`RIHS01_...`) is NOT computed from the
- * definitions: it is a digest of a canonical type description that includes
- * every field's type identifier and every referenced type, and no reference
- * implementation or vector is available to this library to prove a digest
- * against; a hash that is subtly wrong would report every publisher as
- * mismatched. Compare the type NAME (`schema`) instead.
+ * THE TYPE HASH (field-document revision 84, row_facts 24). A `cdr` rule's
+ * `decoded` block carries `type_hash`, the type's RIHS01 hash as rosidl
+ * computes it and a ROS 2 key carries it beside the type name
+ * (`RIHS01_` and 64 lowercase hex digits): SHA-256 over the type's canonical
+ * description, which holds every field's name, type number, capacities and
+ * nested type, of the type and of every type it reaches, defaults, constants
+ * and comments excluded. Compare it with the hash in a publisher's key: a
+ * different hash is a different definition, under the same name or not. It is
+ * computed for every type a declared file defines, a service's derived and
+ * own types included (wz_dissect_declarations_diagnose lists them per file).
  *
  * A `decoded` block then carries
  *
@@ -4357,6 +4375,10 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     `schema`  the body schema the rule names, or `null`. With `typed` it
  *               tells three cases apart: none named; named and read; named
  *               and not read, because the text carries no schema file
+ *     `type_hash`  (field-document revision 84) the body schema's type hash
+ *               where one is computed: the RIHS01 hash of a `cdr` rule's ROS
+ *               type, written after `schema`; `null` for every other
+ *               reading
  *
  * and every entry of its `fields`
  *
@@ -4922,6 +4944,17 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
  *     `segment_rule`       <keyexpr>=<segment profile>   (verdict revision 4)
  *     `key_binding`        #%<id>=<keyexpr>               (verdict revision 5)
+ *
+ * THE TYPES OF A ROS DEFINITION FILE, at verdict revision 6. A `schema_file`
+ * line whose file is a ROS definition (`.msg`, `.srv`) also carries
+ * `types`: every type the file defines, explicit and derived, in the order
+ * rosidl adds them (for a `.srv`: the service's own type, `_Request`,
+ * `_Response`, `_Event`), each `{"name":"<package>/srv/<Type>_Request",
+ * "type_hash":"RIHS01_..."}` with the hash a `decoded` block reports for it
+ * (see THE TYPE HASH above), `null` where the type reaches one no declared
+ * file defines. A `.proto` file's line carries no `types`. A definition file
+ * that cannot be read is refused at its own line, the `message` naming the
+ * file and line within it.
  *
  * A `key_binding` fixes the key id `<id>` (decimal) to `<keyexpr>` for a sender
  * that never declares its ids on the wire; it carries the key as its `pattern`

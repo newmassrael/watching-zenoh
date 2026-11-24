@@ -2799,6 +2799,16 @@ pub mod formats {
         fn reads_types(&self) -> bool {
             self.body_schema().is_some_and(|schema| schema.read)
         }
+
+        /// The type hash of the body schema, in the spelling of the type system
+        /// it belongs to, or `None` where it has none or none is computed:
+        /// the `RIHS01_<hex>` of a `cdr` rule's ROS type. What a row reports as
+        /// `type_hash`, beside `schema`, so a consumer compares it with the
+        /// hash a publisher's key carries. A default for the reason
+        /// [`Self::encodings`] gives.
+        fn type_hash(&self) -> Option<&str> {
+            None
+        }
     }
 
     /// The body schema a rule names. See [`PayloadFormat::body_schema`].
@@ -3803,6 +3813,18 @@ pub mod formats {
                     ))
                 };
             }
+            // A ROS definition file is read here, alone, so a file that is not
+            // one is refused at its own line whether or not a rule names one of
+            // its types. Its name says every type it defines, so no two files
+            // can define one type, and the files read together later (`ros_types`)
+            // cannot be refused for anything this does not find.
+            if crate::ros_msg::is_definition_file(name) {
+                crate::ros_msg::TypeSet::read(&[crate::ros_msg::DefinitionFile {
+                    name,
+                    text: &text,
+                }])
+                .map_err(|why| bad(&why))?;
+            }
             self.schema_files.push(SchemaFileDef {
                 name: name.to_owned(),
                 written: written.to_owned(),
@@ -3869,32 +3891,60 @@ pub mod formats {
             let refused = |why: String| {
                 FormatMapError::BadBodySchema(token.to_owned(), crate::e2e_rule::SchemaRefusal(why))
             };
-            let set = match &self.ros_set {
-                Some(set) => set.clone(),
-                None => {
-                    let files: Vec<crate::ros_msg::DefinitionFile<'_>> = self
-                        .schema_files
-                        .iter()
-                        .filter(|f| crate::ros_msg::is_definition_file(&f.name))
-                        .map(|f| crate::ros_msg::DefinitionFile {
-                            name: &f.name,
-                            text: &f.text,
-                        })
-                        .collect();
-                    if files.is_empty() {
-                        return Err(refused(alloc::format!(
-                            "no declared definition file (`#@<package>/msg/<Type>.msg=\"...\"`) \
-                             defines {type_name}"
-                        )));
-                    }
-                    let set =
-                        alloc::rc::Rc::new(crate::ros_msg::TypeSet::read(&files).map_err(refused)?);
-                    self.ros_set = Some(set.clone());
-                    set
-                }
-            };
+            if !self
+                .schema_files
+                .iter()
+                .any(|f| crate::ros_msg::is_definition_file(&f.name))
+            {
+                return Err(refused(alloc::format!(
+                    "no declared definition file (`#@<package>/msg/<Type>.msg=\"...\"`) \
+                     defines {type_name}"
+                )));
+            }
+            let set = self.ros_types().map_err(refused)?;
             set.check(type_name).map_err(refused)?;
             Ok(set)
+        }
+
+        /// The declared ROS definition files read together, once, and kept
+        /// until a file is declared after them.
+        fn ros_types(&mut self) -> Result<alloc::rc::Rc<crate::ros_msg::TypeSet>, String> {
+            if let Some(set) = &self.ros_set {
+                return Ok(set.clone());
+            }
+            let files: Vec<crate::ros_msg::DefinitionFile<'_>> = self
+                .schema_files
+                .iter()
+                .filter(|f| crate::ros_msg::is_definition_file(&f.name))
+                .map(|f| crate::ros_msg::DefinitionFile {
+                    name: &f.name,
+                    text: &f.text,
+                })
+                .collect();
+            let set = alloc::rc::Rc::new(crate::ros_msg::TypeSet::read(&files)?);
+            self.ros_set = Some(set.clone());
+            Ok(set)
+        }
+
+        /// Every type the declared ROS definition file `file` defines,
+        /// explicit and derived, in the order rosidl adds them, each with its
+        /// RIHS01 hash, or `None` where the type reaches one no declared file
+        /// defines. Empty for a name that is not a declared definition file.
+        pub fn definition_types(&mut self, file: &str) -> Vec<(String, Option<String>)> {
+            // Each file was read alone when it was declared, and nothing else
+            // refuses them read together (`define_schema_file`), so an error
+            // here cannot arise and an empty list is not hiding one.
+            let Ok(set) = self.ros_types() else {
+                return Vec::new();
+            };
+            set.types_of_file(file)
+                .unwrap_or_default()
+                .iter()
+                .map(|name| {
+                    let hash = crate::ros_type_hash::type_hash(&set, name).ok();
+                    (name.clone(), hash)
+                })
+                .collect()
         }
 
         /// A `cdr` rule: the type it names, read by the declared definitions.
@@ -4898,6 +4948,7 @@ pub mod formats {
                             kind: DeclarationKind::SegmentRule,
                             pattern: Some(pattern),
                             rule_index: Some(index),
+                            file: None,
                         });
                     }
                     // The rule lands at the end, so its position is the count
@@ -4912,6 +4963,7 @@ pub mod formats {
                         kind: DeclarationKind::FormatRule,
                         pattern: Some(pattern),
                         rule_index: Some(index),
+                        file: None,
                     })
                 }
                 DeclarationText::Definition { name, layout } => {
@@ -4921,6 +4973,7 @@ pub mod formats {
                         kind: DeclarationKind::FormatDefinition,
                         pattern: None,
                         rule_index: None,
+                        file: None,
                     })
                 }
                 DeclarationText::SchemaFile { name, text } => {
@@ -4930,6 +4983,7 @@ pub mod formats {
                         kind: DeclarationKind::SchemaFile,
                         pattern: None,
                         rule_index: None,
+                        file: Some(name),
                     })
                 }
                 DeclarationText::KeyBinding { id, keyexpr } => {
@@ -4941,6 +4995,7 @@ pub mod formats {
                         kind: DeclarationKind::KeyBinding,
                         pattern: Some(keyexpr),
                         rule_index: None,
+                        file: None,
                     })
                 }
                 DeclarationText::Name {
@@ -4955,6 +5010,7 @@ pub mod formats {
                         kind: DeclarationKind::FieldName,
                         pattern: Some(pattern),
                         rule_index: None,
+                        file: None,
                     })
                 }
             }
@@ -5043,6 +5099,9 @@ pub mod formats {
         /// A segment rule's position is among the SEGMENT rules, the list it is
         /// tried in. `Some` for a rule only.
         pub rule_index: Option<usize>,
+        /// The name of the file a schema file line declares, as read. `Some`
+        /// for that kind only.
+        pub file: Option<String>,
     }
 
     /// The first `:` or `=` in a KEY, in its quoted form, that is not preceded by

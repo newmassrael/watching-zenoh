@@ -53,7 +53,7 @@ use crate::payload::formats::{
     BodySchema, PayloadField, PayloadFormat, PayloadFormatError, TypedValue,
 };
 use crate::proto_decode_json::{bytes_json, float32_json, float_json, integer_json, text_json};
-use crate::ros_msg::{Arity, Base, FieldDef, MessageDef, Primitive, TypeSet};
+use crate::ros_msg::{Arity, Base, FieldDef, MessageDef, Primitive, TypeSet, EMPTY_MEMBER};
 
 /// The format token of a CDR rule, which names its type after the schema
 /// mark: `cdr@<package>/msg/<Type>`.
@@ -65,9 +65,6 @@ const CDR_ENCODINGS: &[&str] = &["application/cdr"];
 /// The encapsulation header's length; every alignment counts from its end.
 const HEADER_LEN: usize = 4;
 
-/// The member rosidl gives a message that declares none.
-const EMPTY_MEMBER: &str = "structure_needs_at_least_one_member";
-
 /// The `cdr` format with the type its rule names, found in the declared
 /// definition files.
 #[derive(Debug, Clone)]
@@ -76,12 +73,22 @@ pub struct CdrFormat {
     type_name: String,
     /// The definitions, read once and shared by every rule of the map.
     set: Rc<TypeSet>,
+    /// The type's RIHS01 hash (`crate::ros_type_hash`), computed once when
+    /// the rule is installed.
+    type_hash: Option<String>,
 }
 
 impl CdrFormat {
-    /// A rule's format: the type it names, checked against `set`.
+    /// A rule's format: the type it names, checked against `set`. The hash
+    /// is `None` only for a type `set` does not define whole, which a rule
+    /// is refused for before it gets here.
     pub(crate) fn new(type_name: String, set: Rc<TypeSet>) -> Self {
-        Self { type_name, set }
+        let type_hash = crate::ros_type_hash::type_hash(&set, &type_name).ok();
+        Self {
+            type_name,
+            set,
+            type_hash,
+        }
     }
 
     /// The rule's format token as it is written after `=`.
@@ -114,6 +121,10 @@ impl PayloadFormat for CdrFormat {
             message: &self.type_name,
             read: true,
         })
+    }
+
+    fn type_hash(&self) -> Option<&str> {
+        self.type_hash.as_deref()
     }
 }
 
@@ -723,12 +734,21 @@ mod tests {
         assert_eq!(rule.format.name(), CDR_TOKEN);
         let schema = rule.format.body_schema().expect("a body schema");
         assert_eq!((schema.message, schema.read), ("std_msgs/msg/String", true));
+        assert_eq!(
+            rule.format.type_hash(),
+            Some("RIHS01_df668c740482bbd48fb39d76a70dfd4bd59db1288021743503259e948f6b1a18")
+        );
         assert!(rule.format.reads_types());
         assert_eq!(rule.format.encodings(), Some(&["application/cdr"][..]));
         let fields = rule.format.decode(HELLO).expect("a String");
         assert_eq!(fields[1].path, "$.data");
         let pose = map.matching_rule("pose/a").expect("the protobuf rule");
         assert!(pose.format.reads_types(), "the proto file was read");
+        assert_eq!(
+            pose.format.type_hash(),
+            None,
+            "a .proto type has no ROS hash"
+        );
         assert!(map
             .declarations()
             .iter()

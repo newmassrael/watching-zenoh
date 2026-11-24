@@ -42,8 +42,9 @@ use wz_session_core::keyexpr_canon::{validate_keyexpr, KeyexprRefusal};
 /// from 0, blank ones included.
 ///
 /// Each entry of `lines` is `{"line":N,"kind":"…"}` plus `"pattern"` (the key as
-/// READ, quotes removed) for the two kinds that have a key and `"rule_index"`
-/// for a format rule. See [`crate::doc_revision`] for the revision this is.
+/// READ, quotes removed) for the kinds that have a key, `"rule_index"` for a
+/// format rule, and `"types"` for a schema file that is a ROS definition. See
+/// [`crate::doc_revision`] for the revision this is.
 pub fn declarations_diagnose_json(declarations: &str) -> String {
     let mut out = String::from("{");
     envelope_into(DECLARATIONS_DIAGNOSE, &mut out);
@@ -69,6 +70,13 @@ pub fn declarations_diagnose_json(declarations: &str) -> String {
                 if let Some(index) = declared.rule_index {
                     out.push_str(&format!(",\"rule_index\":{index}"));
                 }
+                if let Some(file) = declared
+                    .file
+                    .as_deref()
+                    .filter(|file| crate::ros_msg::is_definition_file(file))
+                {
+                    push_definition_types(&mut map, file, &mut out);
+                }
                 out.push('}');
             }
             out.push_str("]}");
@@ -80,6 +88,28 @@ pub fn declarations_diagnose_json(declarations: &str) -> String {
         }
     }
     out
+}
+
+/// `"types"` of a ROS definition file's line: every type the file defines,
+/// explicit and derived, in the order rosidl adds them, as
+/// `{"name":"<pkg>/<kind>/<Type>","type_hash":"RIHS01_<hex>"}`, the hash
+/// `null` where the type reaches one no declared file defines.
+fn push_definition_types(map: &mut FormatMap, file: &str, out: &mut String) {
+    out.push_str(",\"types\":[");
+    for (at, (name, hash)) in map.definition_types(file).iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        escape_into(name, out);
+        out.push_str(",\"type_hash\":");
+        match hash {
+            Some(hash) => escape_into(hash, out),
+            None => out.push_str("null"),
+        }
+        out.push('}');
+    }
+    out.push(']');
 }
 
 /// The keys of a refused declaration text, after `"ok":false`: `line`, `text`,
@@ -449,6 +479,52 @@ mod tests {
         assert_eq!(
             kind_and_pattern("#profile=a:u8"),
             (Some(String::from("\"format_definition\"")), None, None)
+        );
+    }
+
+    /// A ROS definition file's line names every type the file defines, in the
+    /// order rosidl adds them, with its type hash, `null` where the type
+    /// reaches one no declared file defines; a `.proto` file's line names
+    /// none; and a definition that cannot be read is refused at its own line
+    /// though no rule names its types.
+    #[test]
+    fn a_ros_definition_files_line_names_its_types_and_their_hashes() {
+        let doc = declarations_diagnose_json(
+            "#@std_srvs/srv/Empty.srv=\"---\"\n#@demo/msg/Outer.msg=\"demo/Inner inner\"\n\
+             #@a.proto=\"syntax = \\\"proto3\\\";\"",
+        );
+        assert_eq!(top(&doc, "ok"), Some("true"), "{doc}");
+        assert!(
+            doc.contains(
+                "{\"line\":0,\"kind\":\"schema_file\",\"types\":[{\"name\":\"std_srvs/srv/Empty\",\
+                 \"type_hash\":\"RIHS01_5888399dedec5ccc85ea6451949fd2c9\
+                 f97bfdf963f9a588821639fcd31b5d19\"},{\"name\":\"std_srvs/srv/Empty_Request\",\
+                 \"type_hash\":\"RIHS01_"
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("{\"name\":\"std_srvs/srv/Empty_Event\",\"type_hash\":\"RIHS01_"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "{\"line\":1,\"kind\":\"schema_file\",\"types\":[{\"name\":\"demo/msg/Outer\",\
+                 \"type_hash\":null}]}"
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("{\"line\":2,\"kind\":\"schema_file\"}"),
+            "{doc}"
+        );
+
+        let bad = declarations_diagnose_json("demo/a=json\n#@demo/msg/Bad.msg=\"float64\"");
+        assert_eq!(top(&bad, "ok"), Some("false"), "{bad}");
+        assert_eq!(top(&bad, "line"), Some("1"), "{bad}");
+        assert!(
+            bad.contains("demo/msg/Bad.msg:1: `float64` names a type and no field"),
+            "{bad}"
         );
     }
 

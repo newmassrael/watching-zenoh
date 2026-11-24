@@ -10491,6 +10491,7 @@ mod tests {
                 despite_encoding: None,
                 typed: true,
                 schema: None,
+                type_hash: None,
                 chosen_by,
                 encoding_schema: Some(String::from("pkg.Reading")),
             };
@@ -12318,6 +12319,7 @@ mod tests {
                     despite_encoding: None,
                     typed: false,
                     schema: None,
+                    type_hash: None,
                     chosen_by: crate::payload_decode::ChosenBy::Rule,
                     encoding_schema: None,
                 },
@@ -14813,7 +14815,7 @@ mod tests {
             block.starts_with(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\",\"fields\":["
             ),
             "the covering rule must DECODE, naming the topic and the decoder: {block}"
@@ -15970,7 +15972,7 @@ mod tests {
         for expected in [
             "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/json\",\
              \"matched_rule\":{\"index\":0,\"pattern\":\"**\"},\"typed\":true,\
-             \"schema\":null,\"despite_encoding\":null,\"format\":\"json\"",
+             \"schema\":null,\"type_hash\":null,\"despite_encoding\":null,\"format\":\"json\"",
             "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
              \"chosen_by\":\"encoding\",\"encoding_schema\":\"pkg.Reading\"}",
             "\"format\":\"text\",\"fields\":[{\"path\":\"$\",\"name\":null,\

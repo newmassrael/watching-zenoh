@@ -4832,6 +4832,7 @@ fn payload_block(
             despite_encoding,
             typed,
             schema,
+            type_hash,
             chosen_by,
             encoding_schema,
         } => {
@@ -4852,8 +4853,13 @@ fn payload_block(
             // The body schema the rule names, and whether its files were
             // declared: a reader told `as protobuf` alone cannot tell a typed
             // reading from a walk of the wire.
+            // A computed type hash follows the type it hashes, so a reader
+            // compares it with the one the publisher's key carries.
             let schema = match (schema, *typed) {
-                (Some(message), true) => format!(" by {message}"),
+                (Some(message), true) => match type_hash {
+                    Some(hash) => format!(" by {message} ({hash})"),
+                    None => format!(" by {message}"),
+                },
                 (Some(message), false) => {
                     format!(" ({message} named, no schema file declared, so walked by the wire)")
                 }
