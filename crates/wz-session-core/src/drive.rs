@@ -1992,10 +1992,7 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
     // The host is asked before each unit after the first, so the question closes the loop and
     // the walk has one call of `unit_at`.
     if at < datagram.len() {
-        loop {
-            let Some(rest) = datagram.get(at..) else {
-                break;
-            };
+        while let Some(rest) = datagram.get(at..) {
             let (read_by, used, stopped) = unit_at(rest, next_record.take(), &mut *on_event);
             path.get_or_insert(read_by);
             if stopped {

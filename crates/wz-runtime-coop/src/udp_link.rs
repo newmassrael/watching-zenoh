@@ -1594,6 +1594,81 @@ mod tests {
         );
     }
 
+    /// A port over the slots and the rows its session lent reads, sorts and hands a peer's link its
+    /// datagrams with no allocation, every round from the first after the peer's `InitSyn`: each
+    /// datagram is read into a slot and held there, its row is a row of the lent queue, and the
+    /// slot goes back to the table as the link reads it. The CONTROL is the same rounds over memory
+    /// of the port's own, whose first round allocates while the peer's backlog grows past the one
+    /// buffer the `InitSyn`'s read gave back, so the count sees what a port allocates.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn a_port_over_lent_memory_sorts_a_peers_datagrams_without_the_heap() {
+        use crate::table_tests::allocations;
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::byte_cells_bytes(64, 3)
+            .and_then(|cells| Arena::table_bytes::<PortPeerRow>(1).map(|peers| cells + peers))
+            .and_then(|lent| Arena::table_bytes::<QueuedDatagram>(4).map(|queue| lent + queue))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            std::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every slot and row lent from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let table = arena.lend_byte_cells(64, 3).expect("the port's table");
+        let rows = PortRows::over(
+            arena.lend(1).expect("the peers' rows"),
+            arena.lend(4).expect("the queue's rows"),
+        );
+        let book = Rc::new(RefCell::new(PortBook::of(Some(rows))));
+        let lent = Rc::new(
+            UdpPort::lent_in_book(Loop::default(), table, &book).expect("a slot to read into"),
+        );
+        let own = Rc::new(UdpPort::new(Loop::default(), 64));
+        let mut buf = [0u8; 64];
+
+        for (port, over_lent) in [(&lent, true), (&own, false)] {
+            queued(&port.socket, SYN);
+            let peer = UdpPort::take_fresh(port)
+                .expect("the socket reads")
+                .expect("the share of the peer whose InitSyn came");
+            assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+            for round in 0..3 {
+                // The test's socket keeps what it is given on the heap: queued outside the count.
+                queued(&port.socket, b"one");
+                queued(&port.socket, b"two");
+                let (fresh, sorted) =
+                    allocations(|| UdpPort::take_fresh(port).map(|p| p.is_none()));
+                assert_eq!(fresh, Ok(true), "round {round}: no new peer");
+                let (first, read_first) = allocations(|| peer.try_recv(&mut buf));
+                assert_eq!(first, Ok(Some((3, PEER))));
+                assert_eq!(&buf[..3], b"one", "round {round}: in the order they came");
+                let (second, read_second) = allocations(|| peer.try_recv(&mut buf));
+                assert_eq!(second, Ok(Some((3, PEER))));
+                assert_eq!(&buf[..3], b"two", "round {round}: in the order they came");
+                let made = sorted + read_first + read_second;
+                if over_lent {
+                    assert_eq!(
+                        made, 0,
+                        "round {round}: a port over lent slots and rows costs the heap nothing"
+                    );
+                } else if round == 0 {
+                    assert!(
+                        made > 0,
+                        "CONTROL: a backlog past the buffers a port of its own kept allocates"
+                    );
+                }
+            }
+            assert_eq!(port.overflows(), 0, "every datagram was held");
+        }
+        assert_eq!(table.in_use(), 1, "only the slot the next read goes into");
+    }
+
     /// Ports over rows a session lent keep their peers and their datagrams there, and the ports of
     /// one stack share them: a peer past the peers' rows is not taken and its `InitSyn` is counted
     /// as an overflow, and the row a peer held serves the next once its link goes. The CONTROL is
