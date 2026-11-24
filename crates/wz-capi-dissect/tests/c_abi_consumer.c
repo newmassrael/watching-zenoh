@@ -1167,6 +1167,12 @@ static int check_open_bounded_door(void) {
     return 0;
 }
 
+/* Defined below with the replay door's check, which it was written for; the
+ * container doors' checks above that definition build their files with it
+ * too. */
+static size_t pcap_of_frames(unsigned char *out, const unsigned char *frame,
+                             size_t frame_len, size_t n);
+
 /* (ABI 60) -- THE OPTIONS DOOR, driven from C: a sized struct the caller owns,
  * zeroed and given its own size. It refuses a NULL struct, a size below the
  * first published one and a link-type count with no list; and a declared link

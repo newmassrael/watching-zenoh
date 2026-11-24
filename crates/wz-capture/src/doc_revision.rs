@@ -46451,7 +46451,9 @@ mod tests {
             // `reason` learns `not_encrypted`, `not_yet_known` and `not_opened`,
             // nothing retires.
             // To 14 with model 7, as the field document's 68: no key moves.
-            (SESSION_TABLE, 14),
+            // To 15 when every flow said how its halves were told apart:
+            // `direction_basis` arrives with its family, nothing retires.
+            (SESSION_TABLE, 15),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.
