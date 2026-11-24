@@ -937,7 +937,8 @@ PICO_BARE_BUDGET = 126
 #: CURRENT and FUTURE went with the claim, which was wrong, and its line
 #: citation of pico's network header with it.
 #: 1186 -> 1184: two basename line citations went with the code they annotated.
-BASENAME_LINE_BUDGET = 1184
+#: 1184 -> 1183: one more went with the code the int-fix lanes removed.
+BASENAME_LINE_BUDGET = 1183
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
