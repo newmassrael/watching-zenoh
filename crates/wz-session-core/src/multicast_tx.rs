@@ -1849,12 +1849,12 @@ where
         #[cfg(feature = "transport-fragmentation")]
         if lent {
             use crate::frame_encode::{
-                encoded_body_len, write_fragment, BodyEncoder, FragmentBody, FragmentPlan,
-                FragmentSpan,
+                write_fragment, BodyEncoder, FragmentBody, FragmentPlan, FragmentSpan,
             };
+            use crate::tx_buf::try_encoded_len;
             let encode: &BodyEncoder<'_> = &body;
             // A message whose encoder refuses it takes the heap path below, which answers it.
-            if let Ok(body_len) = encoded_body_len(encode) {
+            if let Ok(body_len) = try_encoded_len(encode) {
                 let mut plan = FragmentPlan::new(body_len, mtu, sn, tx_sn.mask(), ext_qos);
                 let mut emitted = 0usize;
                 while let Some(span) = plan.next_span() {
@@ -2568,9 +2568,10 @@ pub fn multicast_tx_emit_lent(
 
     #[cfg(feature = "transport-fragmentation")]
     {
-        use crate::frame_encode::{encoded_body_len, write_fragment, FragmentBody, FragmentPlan};
+        use crate::frame_encode::{write_fragment, FragmentBody, FragmentPlan};
         let encode: &crate::frame_encode::BodyEncoder<'_> = &body;
-        let body_len = encoded_body_len(encode).map_err(|_| MulticastTxRefused::Unencodable)?;
+        let body_len =
+            crate::tx_buf::try_encoded_len(encode).map_err(|_| MulticastTxRefused::Unencodable)?;
         let mut plan = FragmentPlan::new(body_len, mtu, sn, tx_sn.mask(), ext_qos);
         let mut sent = 0usize;
         while let Some(span) = plan.next_span() {

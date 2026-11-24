@@ -1396,20 +1396,6 @@ pub fn write_fragment(
     }
 }
 
-/// How many bytes `encode` writes: the length a lent chain is planned over.
-/// Nothing is written anywhere -- the encoder runs into a window of no bytes,
-/// so its payload writes are counted and skipped, not copied.
-#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
-pub fn encoded_body_len(encode: &BodyEncoder<'_>) -> Result<usize, CodecError> {
-    let mut none = crate::tx_buf::SliceTxBuf::new(&mut []);
-    let mut window = BodyWindow::new(&mut none, 0, 0);
-    {
-        let mut sink = TxSink::new(&mut window);
-        encode(&mut sink)?;
-    }
-    Ok(window.reached())
-}
-
 /// A destination that keeps only the bytes of `[start, end)` of what is written
 /// through it and forwards them to `inner`; every other byte is counted and
 /// dropped. What lets one fragment of a message be encoded straight into its
@@ -1420,13 +1406,11 @@ pub fn encoded_body_len(encode: &BodyEncoder<'_>) -> Result<usize, CodecError> {
 /// an encoder reads back through its sink (`SceSink::position`) and the two must
 /// agree for the encoder to behave as it does over a whole buffer. It is only
 /// ever written through a `TxSink`, which neither reads the written bytes back
-/// nor rolls them back, so `as_slice` answers the bytes forwarded so far and
-/// `truncate` cannot un-forward them.
+/// nor rolls them back: what it forwarded is read from `inner`, so `as_slice`
+/// holds nothing of its own and `truncate` cannot un-forward a byte.
 #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
 struct BodyWindow<'w, 'i> {
     inner: &'w mut (dyn TxBuf<Error = CodecError> + 'i),
-    /// Where `inner` stood when the window opened.
-    inner_at: usize,
     start: usize,
     end: usize,
     /// Message bytes written through the window so far.
@@ -1436,10 +1420,8 @@ struct BodyWindow<'w, 'i> {
 #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
 impl<'w, 'i> BodyWindow<'w, 'i> {
     fn new(inner: &'w mut (dyn TxBuf<Error = CodecError> + 'i), start: usize, end: usize) -> Self {
-        let inner_at = inner.len();
         Self {
             inner,
-            inner_at,
             start,
             end,
             pos: 0,
@@ -1461,13 +1443,19 @@ impl TxBuf for BodyWindow<'_, '_> {
     }
 
     fn as_slice(&self) -> &[u8] {
-        self.inner
-            .as_slice()
-            .get(self.inner_at..)
-            .unwrap_or_default()
+        &[]
     }
 
     fn truncate(&mut self, _len: usize) {}
+
+    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+        let to = self.pos.checked_add(1).ok_or(CodecError::BufferOverflow)?;
+        if (self.start..self.end).contains(&self.pos) {
+            self.inner.append_byte(byte)?;
+        }
+        self.pos = to;
+        Ok(())
+    }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         let from = self.pos;
@@ -3158,7 +3146,7 @@ mod qos_wire_tests {
                     Ok(())
                 };
                 let encode: &BodyEncoder<'_> = &encode;
-                assert_eq!(encoded_body_len(encode), Ok(len));
+                assert_eq!(crate::tx_buf::try_encoded_len(encode), Ok(len));
                 let heap: Vec<Vec<u8>> =
                     FragmentChain::new(&body, true, mtu, 9, mask, ext_qos).collect();
                 let mut plan = FragmentPlan::new(len, mtu, 9, mask, ext_qos);
@@ -3193,6 +3181,38 @@ mod qos_wire_tests {
                     build_fragment_drop_wire(3, true, ext_qos).as_slice()
                 );
             }
+        }
+    }
+
+    /// An encoder that writes its body a byte at a time is cut by the window as one that writes
+    /// it in runs: every byte inside a fragment's range reaches its slot and none outside it.
+    #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+    #[test]
+    fn an_encoded_chain_written_a_byte_at_a_time_is_the_heap_chain() {
+        use crate::tx_buf::SliceTxBuf;
+        let mtu = 40usize;
+        let mask = crate::sn::mask_from_res(0x02);
+        for len in 1..=120usize {
+            let body: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            let encode = |sink: &mut TxSink<'_>| {
+                for byte in &body {
+                    sink.write_u8(*byte)?;
+                }
+                Ok(())
+            };
+            let encode: &BodyEncoder<'_> = &encode;
+            assert_eq!(crate::tx_buf::try_encoded_len(encode), Ok(len));
+            let heap: Vec<Vec<u8>> = FragmentChain::new(&body, true, mtu, 9, mask, None).collect();
+            let mut plan = FragmentPlan::new(len, mtu, 9, mask, None);
+            let mut lent = Vec::new();
+            while let Some(span) = plan.next_span() {
+                let mut storage = [0u8; 64];
+                let mut slot = SliceTxBuf::new(&mut storage);
+                write_fragment(&mut slot, &span, FragmentBody::Encoded(encode), true, None)
+                    .expect("a fragment fits its slot");
+                lent.push(slot.as_slice().to_vec());
+            }
+            assert_eq!(lent, heap, "body of {len} bytes");
         }
     }
 

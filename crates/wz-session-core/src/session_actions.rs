@@ -12873,7 +12873,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the slot of an open window answers its refusal as a message past the budget. It is
         // refused typed, before a byte leaves, with the SN the caller minted for it given back,
         // as `emit_fragment_chain` gives it back for a message past the reassembly cap.
-        let body_len = match crate::frame_encode::encoded_body_len(encode) {
+        let body_len = match crate::tx_buf::try_encoded_len(encode) {
             Ok(len) => len,
             Err(refused) => {
                 self.outbound_frame_sn
@@ -14067,7 +14067,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             };
             let encode_body = crate::frame_encode::push_body(push);
             #[cfg(feature = "transport-tx-lend")]
-            let body_len = crate::frame_encode::encoded_body_len(as_encoder(&encode_body));
+            let body_len = crate::tx_buf::try_encoded_len(as_encoder(&encode_body));
             #[cfg(not(feature = "transport-tx-lend"))]
             let body_len = {
                 let mut buf = alloc::vec::Vec::new();
