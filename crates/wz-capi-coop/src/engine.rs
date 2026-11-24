@@ -5018,14 +5018,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             express: meta.is_express(),
             priority: opts.priority_band(),
         };
-        let leg = LinkLeg {
+        let link_leg = LinkLeg {
             named,
             payload,
             kind: opts.kind,
             meta,
             send,
         };
-        let (outcome, stuck) = self.send_on_links(core, &leg, skip, pass);
+        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
         if stuck.is_some() {
             return (outcome, stuck);
         }
