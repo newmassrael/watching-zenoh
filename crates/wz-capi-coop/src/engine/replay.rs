@@ -30,6 +30,7 @@
 //! with no retry wait or after the no-progress bound, gives the replay up and the link with it
 //! ([`TurnEnd::EndsLink`]).
 
+use super::LinkActions;
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
@@ -37,7 +38,6 @@ use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
 use wz_session_core::wire_id::EntityId;
-use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
 
@@ -80,11 +80,11 @@ pub(super) enum TurnEnd {
 /// `dyn Fn`'s table holds `call` and `call_once` apart, each a copy of a small body.
 pub(super) trait SendTo<C: ClockSource + 'static> {
     /// Send it over `actions`: whether the link took it.
-    fn send_to(&self, actions: &McuActions<C>) -> bool;
+    fn send_to(&self, actions: &LinkActions<C>) -> bool;
 }
 
-impl<C: ClockSource + 'static, F: Fn(&McuActions<C>) -> bool> SendTo<C> for F {
-    fn send_to(&self, actions: &McuActions<C>) -> bool {
+impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>) -> bool> SendTo<C> for F {
+    fn send_to(&self, actions: &LinkActions<C>) -> bool {
         self(actions)
     }
 }
@@ -93,11 +93,11 @@ impl<C: ClockSource + 'static, F: Fn(&McuActions<C>) -> bool> SendTo<C> for F {
 /// whose refusal changes nothing.
 pub(super) trait TellTo<C: ClockSource + 'static> {
     /// Tell it over `actions`.
-    fn tell_to(&self, actions: &McuActions<C>);
+    fn tell_to(&self, actions: &LinkActions<C>);
 }
 
-impl<C: ClockSource + 'static, F: Fn(&McuActions<C>)> TellTo<C> for F {
-    fn tell_to(&self, actions: &McuActions<C>) {
+impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>)> TellTo<C> for F {
+    fn tell_to(&self, actions: &LinkActions<C>) {
         self(actions);
     }
 }
@@ -216,7 +216,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Tell the peer of the declaration at `place`: whether the link took it.
-    fn emit(&self, actions: &McuActions<C>, place: usize) -> bool {
+    fn emit(&self, actions: &LinkActions<C>, place: usize) -> bool {
         let tables = super::tables(&self.session.registry);
         let mut left = place;
         for &table in ORDER {
@@ -239,7 +239,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn begin_replay(
         &mut self,
         at: usize,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
         let owed = self.sequence_len();
@@ -256,7 +256,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn replay_turn(
         &mut self,
         at: usize,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
         // A place with no face has no replay to send.
@@ -323,7 +323,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.places_mut(),
             place,
             OnRefusal::Forget,
-            &|actions: &McuActions<C>| tell(&super::tables(registry), actions, declared),
+            &|actions: &LinkActions<C>| tell(&super::tables(registry), actions, declared),
             &undo_nothing::<C>,
         );
     }
@@ -383,7 +383,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
 /// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
 /// for every such caller, so its call through `&dyn TellTo` is made once.
-fn undo_nothing<C: ClockSource + 'static>(_actions: &McuActions<C>) {}
+fn undo_nothing<C: ClockSource + 'static>(_actions: &LinkActions<C>) {}
 
 /// How many declarations the session holds in the tables before `end` in the replay's order, or
 /// in every table when `end` is `None`: the place of `end`'s first declaration, or the length
@@ -404,7 +404,7 @@ fn held_before(tables: &super::CoopTables, end: Option<DeclaredTable>) -> usize 
 /// that names none has nothing to send, which counts as taken.
 fn tell<C: ClockSource + 'static>(
     tables: &super::CoopTables,
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     declared: DeclaredRow,
 ) -> bool {
     told(tables, actions, declared).unwrap_or(true)
@@ -413,7 +413,7 @@ fn tell<C: ClockSource + 'static>(
 /// [`tell`], `None` when `declared` names no row.
 fn told<C: ClockSource + 'static>(
     tables: &super::CoopTables,
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     declared: DeclaredRow,
 ) -> Option<bool> {
     let bits = declared.row;
