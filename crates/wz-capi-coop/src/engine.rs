@@ -5024,8 +5024,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         let (outcome, stuck) = self.fan_out_in(&core.0, &put, None, begin.pass);
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds.
-        let now_us = if stuck.is_some() { core.0.now_us() } else { 0 };
-        let fanned = run.fanned(stuck, now_us);
+        let fanned = run.fanned(stuck, || core.0.now_us());
         #[cfg(feature = "listen")]
         let waits = match fanned.then {
             Then::WaitForSlots { .. } => core.0.links.owing_waits(),
@@ -5087,7 +5086,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if more.is_err() {
                 outcome = more;
             }
-            let fanned = run.fanned(again, now_us);
+            let fanned = run.fanned(again, || now_us);
             waits = match fanned.then {
                 Then::WaitForSlots { .. } => core.0.links.owing_waits(),
                 Then::Done => Vec::new(),
