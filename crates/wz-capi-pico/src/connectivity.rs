@@ -303,7 +303,7 @@ pub(crate) trait ConnValue: Sized {
 }
 
 fn zid_is_set(zid: &z_id_t) -> bool {
-    zid.id.iter().any(|b| *b != 0)
+    !crate::zid::id_is_zero(zid.id)
 }
 
 impl ConnValue for z_loaned_transport_t {
