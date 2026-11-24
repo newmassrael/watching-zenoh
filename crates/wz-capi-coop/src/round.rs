@@ -179,16 +179,23 @@ pub(crate) fn read_room<
         .max_subscriptions()
         .lent_under(Quota::at_most(SUBS))
         .unwrap_or(SUBS);
-    let liveliness = limits
-        .max_liveliness_subscriptions()
-        .lent_under(Quota::at_most(LIVE))
-        .unwrap_or(LIVE);
+    let liveliness = session_liveliness::<LIVE>(limits);
     let most = most_subscribers(subscribers, liveliness);
     ReadRoom {
         bytes: read_bytes(batch, frag, key, most),
         // A reply owes its leg's callback, whatever the session's subscribers.
         callbacks: most.max(1),
     }
+}
+
+/// The liveliness subscribers the session's `limits` admit, under `LIVE`, the build's value: a value
+/// over it counts as the build's, which the open refuses. What a record of a token owes a callback
+/// to at most, and so what the round's area is sized for ([`read_room`]) and a retraction asks of it.
+pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> usize {
+    limits
+        .max_liveliness_subscriptions()
+        .lent_under(Quota::at_most(LIVE))
+        .unwrap_or(LIVE)
 }
 
 /// `limits` with the round's area long enough for what one record can hand it ([`read_room`] of

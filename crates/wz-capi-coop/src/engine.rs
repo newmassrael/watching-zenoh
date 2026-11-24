@@ -438,19 +438,6 @@ pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     >(config.limits)
 }
 
-/// The callbacks a token's record owes at most: one for each liveliness subscriber the session's
-/// `limits` admit, under `LIVE`, the build's value (a value over it counts as the build's, which the
-/// open refuses), and one at least. The round's area is sized to hold such a record
-/// ([`crate::round::read_room`]), so a retraction asks for no more than the session could give.
-#[cfg(feature = "liveliness")]
-fn token_record_callbacks<const LIVE: usize>(limits: &SessionLimits) -> usize {
-    limits
-        .max_liveliness_subscriptions()
-        .lent_under(wz_session_core::limit_binding::Quota::at_most(LIVE))
-        .unwrap_or(LIVE)
-        .max(1)
-}
-
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
 /// given, and why.
 // Typed and not a text: the C ABIs answer a refusal with a code and never read its words, so the
@@ -3537,9 +3524,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let round = Arc::clone(&self.lane);
         let record_room = crate::round::ReadRoom {
             bytes: 0,
-            callbacks: token_record_callbacks::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
+            // A token's record owes a callback to each liveliness subscriber the session admits.
+            callbacks: crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
                 &resolve_limits(&self.config),
-            ),
+            )
+            .max(1),
         };
         // SAFETY: `Core` is reached under the session's lock alone.
         let mut fits = || unsafe { round.has_room(record_room) };
