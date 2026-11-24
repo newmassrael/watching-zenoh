@@ -59,7 +59,7 @@ use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::query::QueryResponder;
 #[cfg(feature = "local-queryable")]
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
@@ -542,9 +542,11 @@ impl Drop for OwnFinalHold<'_> {
 #[cfg(feature = "local-queryable")]
 pub(super) struct OwnGet<'a> {
     keyexpr: &'a str,
-    opts: &'a QueryOptions,
-    /// The value's encoding when the get carries a value and states no encoding of its own.
-    default_encoding: Option<EncodingHint>,
+    opts: &'a QueryOptionsOf<'a>,
+    /// The value's encoding as the view hands it to a queryable of the session: the one the get
+    /// states, else the default one when it carries a value. A view hands an encoding out as a
+    /// hint, so a lent one is copied for the session's own queryables.
+    encoding: Option<EncodingHint>,
     carries_value: bool,
     rid: wz_session_core::wire_id::RequestId,
     qos: QosLevel,
@@ -554,20 +556,23 @@ pub(super) struct OwnGet<'a> {
 impl<'a> OwnGet<'a> {
     pub(super) fn of(
         keyexpr: &'a str,
-        opts: &'a QueryOptions,
+        opts: &'a QueryOptionsOf<'a>,
         rid: wz_session_core::wire_id::RequestId,
     ) -> Self {
         let payload = opts.payload.as_deref().unwrap_or_default();
-        let stated = opts
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.packed_id >> 1 != 0 || encoding.schema.is_some());
-        let carries_value = !payload.is_empty() || stated;
+        let stated = opts.encoding.as_ref().map(|encoding| encoding.view());
+        let names_one = |encoding: wz_session_core::sample::EncodingRef<'_>| {
+            encoding.packed_id >> 1 != 0 || encoding.schema.is_some()
+        };
+        let carries_value = !payload.is_empty() || stated.is_some_and(names_one);
         Self {
             keyexpr,
             opts,
-            default_encoding: (carries_value && opts.encoding.is_none())
-                .then(EncodingHint::default),
+            encoding: carries_value.then(|| {
+                stated
+                    .map(|encoding| encoding.to_hint())
+                    .unwrap_or_default()
+            }),
             carries_value,
             rid,
             qos: opts.qos.unwrap_or(QosLevel::DEFAULT),
@@ -600,13 +605,7 @@ impl QueryView for OwnGet<'_> {
             .then(|| self.opts.payload.as_deref().unwrap_or_default())
     }
     fn encoding(&self) -> Option<&EncodingHint> {
-        if !self.carries_value {
-            return None;
-        }
-        self.opts
-            .encoding
-            .as_ref()
-            .or(self.default_encoding.as_ref())
+        self.encoding.as_ref()
     }
     fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid

@@ -293,6 +293,12 @@ pub struct EncodingRef<'a> {
 }
 
 impl<'a> EncodingRef<'a> {
+    /// The encoding `hint` holds, read where it holds it.
+    #[cfg(feature = "alloc")]
+    pub fn of(hint: &'a EncodingHint) -> Self {
+        hint.view()
+    }
+
     /// A hint of its own with this encoding, the schema copied.
     #[cfg(feature = "alloc")]
     pub fn to_hint(self) -> EncodingHint {
@@ -317,6 +323,44 @@ impl<'a> EncodingRef<'a> {
             schema_len,
             schema,
         })
+    }
+}
+
+/// An encoding options carry: read where a holder keeps it for as long as the call runs, or the
+/// options' own, which options kept past the call they were made for hold.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarriedEncoding<'a> {
+    /// Read where its holder keeps it: nothing is copied for the call.
+    Lent(EncodingRef<'a>),
+    /// The options' own.
+    Owned(EncodingHint),
+}
+
+#[cfg(feature = "alloc")]
+impl CarriedEncoding<'_> {
+    /// The encoding, read where it lies.
+    pub fn view(&self) -> EncodingRef<'_> {
+        match self {
+            Self::Lent(encoding) => *encoding,
+            Self::Owned(encoding) => encoding.view(),
+        }
+    }
+
+    /// The encoding as a hint of its own: a lent one copied, an owned one moved.
+    pub fn into_hint(self) -> EncodingHint {
+        match self {
+            Self::Lent(encoding) => encoding.to_hint(),
+            Self::Owned(encoding) => encoding,
+        }
+    }
+
+    /// The encoding as options kept past their call hold it: a lent one copied.
+    pub fn into_owned(self) -> CarriedEncoding<'static> {
+        match self {
+            Self::Lent(encoding) => CarriedEncoding::Owned(encoding.to_hint()),
+            Self::Owned(encoding) => CarriedEncoding::Owned(encoding),
+        }
     }
 }
 

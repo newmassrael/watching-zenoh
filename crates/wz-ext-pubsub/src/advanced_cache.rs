@@ -472,7 +472,7 @@ fn answer_from_ring(
             SampleKind::Put => out.reply_keyed_meta(
                 &s.keyexpr,
                 s.bytes(),
-                meta.with_encoding(s.encoding.as_ref())
+                meta.with_encoding(s.encoding.as_ref().map(EncodingHint::view))
                     .with_attachment(s.attachment.as_deref()),
             ),
             SampleKind::Del => out.reply_keyed_del_meta(&s.keyexpr, meta),

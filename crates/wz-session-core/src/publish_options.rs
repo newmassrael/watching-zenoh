@@ -147,32 +147,9 @@ pub struct PublishOptions<'a> {
 }
 
 /// The encoding a publish carries: read where a holder keeps it for as long as the publish runs,
-/// or the options' own, which options kept past the call they were made for hold.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PublishEncoding<'a> {
-    /// Read where its holder keeps it: nothing is copied for the publish.
-    Lent(EncodingRef<'a>),
-    /// The options' own.
-    Owned(EncodingHint),
-}
-
-impl PublishEncoding<'_> {
-    /// The encoding, read where it lies.
-    pub fn view(&self) -> EncodingRef<'_> {
-        match self {
-            Self::Lent(encoding) => *encoding,
-            Self::Owned(encoding) => encoding.view(),
-        }
-    }
-
-    /// The encoding as options kept past their call hold it: a lent one copied.
-    fn into_owned(self) -> PublishEncoding<'static> {
-        match self {
-            Self::Lent(encoding) => PublishEncoding::Owned(encoding.to_hint()),
-            Self::Owned(encoding) => PublishEncoding::Owned(encoding),
-        }
-    }
-}
+/// or the options' own, which options kept past the call they were made for hold. The one carried
+/// encoding of the crate, which a query's options carry too.
+pub type PublishEncoding<'a> = crate::sample::CarriedEncoding<'a>;
 
 impl<'a> PublishOptions<'a> {
     /// These options without their attachment, and the attachment they borrowed: what a holder

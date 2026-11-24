@@ -26,7 +26,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -589,7 +589,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
@@ -608,13 +608,12 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
-        let mut opts = opts.clone();
-        opts.payload = Some(value.bytes().to_vec());
+        let opts = opts.clone().with_payload_lent(value.bytes());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
     }
 

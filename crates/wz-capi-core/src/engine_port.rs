@@ -589,7 +589,7 @@ impl SessionEngine for SharedSession {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &wz_session_core::query_options::QueryOptions,
+        opts: &wz_session_core::query_options::QueryOptionsOf<'_>,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
     ) -> Result<usize, Refusal> {
@@ -597,6 +597,8 @@ impl SessionEngine for SharedSession {
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);
         }
+        // Each leg keeps its options past the call: the slots the caller lent are copied.
+        let opts = &opts.to_owned_options();
         // The registry's fan: one leg per face (and group), and the local plane where the
         // options admit it. A leg whose issue fails (a face mid-teardown, an alias the face was
         // never told) drops its callback with its rolled-back pending entry, so it cannot hold
@@ -623,7 +625,7 @@ impl SessionEngine for SharedSession {
         &self,
         keyexpr: &str,
         _wire: &WireKey,
-        opts: &wz_session_core::query_options::QueryOptions,
+        opts: &wz_session_core::query_options::QueryOptionsOf<'_>,
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
@@ -631,6 +633,8 @@ impl SessionEngine for SharedSession {
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);
         }
+        // Each leg keeps its options past the call: the slots the caller lent are copied.
+        let opts = &opts.to_owned_options();
         // `get_on_wire`'s fan, each leg asking with the chunk (`QueryLeg::query_shm`): a face that
         // negotiated shared memory is sent its descriptor and every other leg the bytes. A query
         // whose value is a chunk names its key literally, as the registry's own getter does, so

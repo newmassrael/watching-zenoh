@@ -3211,7 +3211,7 @@ mod tokio_engine {
                     SampleKind::Delete => None,
                 };
                 let meta = ReplyMeta::new()
-                    .with_encoding(hint.as_ref())
+                    .with_encoding(hint.as_ref().map(|hint| hint.view()))
                     .with_timestamp(timestamp.as_ref())
                     .with_source_info(source_info.as_ref())
                     .with_attachment(attachment.as_deref())

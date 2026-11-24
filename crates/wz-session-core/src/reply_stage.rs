@@ -57,30 +57,13 @@ use crate::limit_binding::Quota;
 use crate::query::QueryReply;
 use crate::query_sink::ReplyError;
 #[cfg(feature = "alloc")]
-use crate::sample::{EncodingHint, TimestampHint};
+use crate::sample::TimestampHint;
 use crate::sample::{QosLevel, SourceInfo};
 
-/// A reply's encoding as borrowed parts: the wire `packed_id` and the optional
-/// schema, a slice of the caller's own string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EncodingParts<'a> {
-    /// The wire-packed id (`id << 1 | schema_present`).
-    pub packed_id: u32,
-    /// The schema's bytes, if the encoding carries one (any bytes: upstream
-    /// holds a schema as bytes).
-    pub schema: Option<&'a [u8]>,
-}
-
-#[cfg(feature = "alloc")]
-impl<'a> EncodingParts<'a> {
-    /// The parts of an owned hint, borrowing its schema.
-    pub fn of(hint: &'a EncodingHint) -> Self {
-        Self {
-            packed_id: hint.packed_id,
-            schema: hint.schema.as_deref(),
-        }
-    }
-}
+/// A reply's encoding as borrowed parts: the wire `packed_id` and the optional schema, read
+/// where their holder keeps them. The one borrowed encoding of the crate, so a reply's encoding
+/// and a publication's are the same value.
+pub type EncodingParts<'a> = crate::sample::EncodingRef<'a>;
 
 /// A reply's value timestamp as borrowed parts: the time and the identity bytes
 /// of the clock that stamped it, a slice of the caller's own buffer.

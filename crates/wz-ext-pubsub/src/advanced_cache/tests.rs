@@ -77,7 +77,8 @@ impl ReplyOut for Rec {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.metas.push((
-            meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+            meta.encoding
+                .map(|e| (e.packed_id, e.schema.map(<[u8]>::to_vec))),
             meta.attachment.map(<[u8]>::to_vec),
         ));
         // Delegate the identity bookkeeping to the arm the pre-y562 tests
@@ -86,7 +87,9 @@ impl ReplyOut for Rec {
         self.reply_keyed_sourced(
             keyexpr,
             payload,
-            meta.encoding,
+            meta.encoding
+                .map(wz_session_core::sample::EncodingRef::to_hint)
+                .as_ref(),
             meta.timestamp.expect("the cache always stamps a timestamp"),
             meta.source_info,
         )
@@ -97,7 +100,8 @@ impl ReplyOut for Rec {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.metas.push((
-            meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+            meta.encoding
+                .map(|e| (e.packed_id, e.schema.map(<[u8]>::to_vec))),
             meta.attachment.map(<[u8]>::to_vec),
         ));
         self.reply_keyed_del_sourced(
