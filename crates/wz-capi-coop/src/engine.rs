@@ -948,8 +948,11 @@ fn session_zid(
 /// session it opens holds a zid.
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
-    let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
-    SessionZid::new(&stated[..len]).map_err(OpenError::InvalidZid)
+    let mut kept: &[u8] = &stated;
+    while let [rest @ .., 0] = kept {
+        kept = rest;
+    }
+    SessionZid::new(kept).map_err(OpenError::InvalidZid)
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
