@@ -725,7 +725,10 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         if self.lost.get().is_some() {
             return false;
         }
-        let mut buf = self.rx_buf.borrow_mut();
+        // A receive from inside `f` finds the buffer lent and reads nothing.
+        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
+            return false;
+        };
         // A link of a pool that holds no buffer and finds none free reads nothing: what its peer
         // sent waits in the stack (`SessionDatagramLink::waits_for_buffer`).
         let Some(bytes) = buf.bytes() else {
@@ -805,7 +808,8 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
 
     /// Whether the link owes the stream anything ([`Owed`]).
     fn owes(&self) -> bool {
-        !self.owed.borrow().is_empty()
+        // A queue being written owes what it held when the write began.
+        !self.owed.try_borrow().is_ok_and(|owed| owed.is_empty())
     }
 
     /// Write what the link owes the stream, oldest first, without waiting: `true` once nothing is
@@ -817,7 +821,10 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                 self.drop_owed();
                 return true;
             }
-            let mut owed = self.owed.borrow_mut();
+            // A queue already being written is left to that write, which owes the rest.
+            let Ok(mut owed) = self.owed.try_borrow_mut() else {
+                return false;
+            };
             let Some(front) = owed.front_mut() else {
                 return true;
             };
@@ -849,9 +856,12 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// gives back slots is one body for all of them.
     #[inline(never)]
     fn drop_owed(&self) {
-        let mut owed = self.owed.borrow_mut();
-        while let Some(done) = owed.pop() {
-            self.tx.release(done.slot);
+        // No caller holds the queue across this call (`write_owed` lets it go before it fails),
+        // so the queue is free here; a holder up the stack would keep its slots to release.
+        if let Ok(mut owed) = self.owed.try_borrow_mut() {
+            while let Some(done) = owed.pop() {
+                self.tx.release(done.slot);
+            }
         }
         self.room_known.set(false);
     }
@@ -905,7 +915,11 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
     /// taken: none for a frame that waits whole behind another.
     fn owe(&self, owed: Owed, skip: usize) -> LinkSendOutcome {
-        let refused = self.owed.borrow_mut().push(owed);
+        // A queue being written takes nothing more until the write ends: the frame is refused.
+        let refused = match self.owed.try_borrow_mut() {
+            Ok(mut queue) => queue.push(owed),
+            Err(_) => Err(owed),
+        };
         match refused {
             Ok(()) => LinkSendOutcome::Sent,
             Err(owed) => {
@@ -1623,6 +1637,21 @@ mod tests {
         assert_eq!(received(&a).as_deref(), Some(&b"kept"[..]), "lent again");
         assert_eq!(pool.in_use(), 0, "and let go");
         assert_eq!(received(&b).as_deref(), Some(&b"waits"[..]));
+    }
+
+    /// A receive asked from inside the lend finds the buffer lent and reads nothing, and the batch
+    /// behind waits for the next receive. Turned red by a receive that borrows its buffer with
+    /// `borrow_mut`, which panics there.
+    #[test]
+    fn a_receive_from_inside_the_lend_reads_nothing() {
+        let link = link();
+        let mut wire = batch(b"one");
+        wire.extend(batch(b"two"));
+        queue(&link, &wire);
+        let mut inner = None;
+        assert!(link.recv_with(&mut |_| inner = Some(received(&link))));
+        assert_eq!(inner, Some(None), "the inner receive reads nothing");
+        assert_eq!(received(&link).as_deref(), Some(&b"two"[..]));
     }
 
     /// A batch the session asks the link to keep, from inside the lend, is lent again whole by the

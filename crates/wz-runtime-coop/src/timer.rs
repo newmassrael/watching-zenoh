@@ -164,13 +164,20 @@ impl TimerQueue {
     }
 
     /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
-    /// runs no code but this module's: a waker it takes out is woken or dropped after.
+    /// runs no code but this module's: a waker it takes out is woken or dropped after. A table
+    /// already borrowed is handed over as one of no entries, which places, holds and wakes nothing.
     fn with_slots<R>(&self, cs: CriticalSection<'_>, f: impl FnOnce(&mut [TimerSlot]) -> R) -> R {
         match &self.slots {
             #[cfg(feature = "session-slot")]
-            Slots::Table(entries) => f(&mut entries.borrow(cs).borrow_mut()),
+            Slots::Table(entries) => match entries.borrow(cs).try_borrow_mut() {
+                Ok(mut slots) => f(&mut slots),
+                Err(_) => f(&mut []),
+            },
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Slots::Owned(owned) => f(&mut owned.borrow(cs).borrow_mut()),
+            Slots::Owned(owned) => match owned.borrow(cs).try_borrow_mut() {
+                Ok(mut slots) => f(&mut slots),
+                Err(_) => f(&mut []),
+            },
         }
     }
 
@@ -205,8 +212,10 @@ impl TimerQueue {
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             if let (Some(grow), Slots::Owned(owned)) = (self.grow, &self.slots) {
-                grow(&mut owned.borrow(cs).borrow_mut(), entry);
-                return true;
+                if let Ok(mut slots) = owned.borrow(cs).try_borrow_mut() {
+                    grow(&mut slots, entry);
+                    return true;
+                }
             }
             // The entry was not placed: its waker goes with it.
             drop(entry);
@@ -369,6 +378,20 @@ mod tests {
         assert_eq!(queue.capacity(), 0);
         assert!(!queue.register(5, noop_waker()));
         assert_eq!(queue.refusals(), 1);
+    }
+
+    /// The table asked for from inside its own borrow is handed over as one of no entries.
+    /// Turned red by a `with_slots` that borrows with `borrow_mut`, which panics there.
+    #[test]
+    fn a_table_asked_for_inside_its_own_borrow_has_no_entries() {
+        let queue = TimerQueue::reserved(2);
+        let inner = crate::cs::with(|cs| {
+            queue.with_slots(cs, |outer| {
+                assert_eq!(outer.len(), 2);
+                queue.with_slots(cs, |inner| inner.len())
+            })
+        });
+        assert_eq!(inner, 0);
     }
 
     /// Only a table that grows places a deadline no entry holds; a reserved one refuses it,
