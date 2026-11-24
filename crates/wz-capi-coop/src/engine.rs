@@ -2235,6 +2235,26 @@ fn next_generation(counter: &AtomicU64) -> u64 {
     }
 }
 
+/// A group member's key (`SessionEngine::next_group_member`): its group's place in the session's
+/// groups in the high half, its place in the group's member table in the low one, so the keys
+/// order by group first. Each half is a `u32`, so the two never overlap.
+#[cfg(feature = "group")]
+fn member_key(group: u32, member: u32) -> u64 {
+    let [g0, g1, g2, g3] = group.to_be_bytes();
+    let [m0, m1, m2, m3] = member.to_be_bytes();
+    u64::from_be_bytes([g0, g1, g2, g3, m0, m1, m2, m3])
+}
+
+/// The group's place and the member's place a key is made of (`member_key`).
+#[cfg(feature = "group")]
+fn member_places(key: u64) -> (u32, u32) {
+    let [g0, g1, g2, g3, m0, m1, m2, m3] = key.to_be_bytes();
+    (
+        u32::from_be_bytes([g0, g1, g2, g3]),
+        u32::from_be_bytes([m0, m1, m2, m3]),
+    )
+}
+
 /// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -5883,7 +5903,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "group")]
     fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
         let core = self.live()?;
-        let (first_group, first_member) = (from >> 32, from & u64::from(u32::MAX));
+        let (first_group, first_member) = member_places(from);
         core.0
             .transport
             .groups
@@ -5891,13 +5911,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .enumerate()
             .skip(usize::try_from(first_group).ok()?)
             .find_map(|(at, group)| {
-                let from_member = if at as u64 == first_group {
+                // A group, or a member, whose place does not fit its half of a key has no key,
+                // and so is not listed.
+                let place = u32::try_from(at).ok()?;
+                let from_member = if place == first_group {
                     first_member
                 } else {
                     0
                 };
                 let (member, zid) = group.member_zid_from(usize::try_from(from_member).ok()?)?;
-                Some((((at as u64) << 32) | member as u64, zid))
+                Some((member_key(place, u32::try_from(member).ok()?), zid))
             })
     }
 
@@ -8067,5 +8090,26 @@ mod generation_tests {
             "LOCAL_QUERY is stepped over"
         );
         assert_eq!(counter.load(Ordering::Relaxed), after);
+    }
+}
+
+#[cfg(all(test, feature = "group"))]
+mod member_key_tests {
+    //! How a group member's key names its group and its place in the group's member table.
+    use super::{member_key, member_places};
+
+    /// A member's key holds its group's place above its own, and gives both back; the key past a
+    /// group's last place is the next group's first.
+    ///
+    /// # Control
+    ///
+    /// Swapping the halves in `member_key` reds the first assertion.
+    #[test]
+    fn a_members_key_holds_its_group_above_its_place() {
+        assert_eq!(member_key(1, 2), 0x0000_0001_0000_0002);
+        assert_eq!(member_places(0x0000_0001_0000_0002), (1, 2));
+        assert_eq!(member_key(u32::MAX, u32::MAX), u64::MAX);
+        assert_eq!(member_places(u64::MAX), (u32::MAX, u32::MAX));
+        assert_eq!(member_places(member_key(3, u32::MAX) + 1), (4, 0));
     }
 }
