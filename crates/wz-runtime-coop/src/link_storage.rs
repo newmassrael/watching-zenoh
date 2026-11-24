@@ -22,7 +22,9 @@ use core::cell::Cell;
 use alloc::vec::Vec;
 
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
-use wz_session_core::link::{TxSlot, TxSlotGrant};
+use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
+use wz_session_core::qos::Priority;
+use wz_session_core::reliability::Reliability;
 
 #[cfg(feature = "alloc")]
 use crate::session_drive::SessionDatagramLink;
@@ -127,8 +129,9 @@ impl RxStore for PooledRx {
 /// encode a frame into (`BoxedLinkDriver::tx_slot_acquire`), so the frame is written once, where
 /// the socket reads it, and no buffer is allocated for it.
 ///
-/// Every link of this crate has storage to lend: a link opened with none given holds one slot as
-/// long as its receive buffer (`HeapTx::for_link`). Its link states the frames it carries
+/// Every link of this crate has storage to lend, because its byte send is a send of a slot it
+/// lends itself ([`copied_send`]): a link opened with none given holds one slot as long as its
+/// receive buffer (`HeapTx::for_link`). Its link states the frames it carries
 /// (`BoxedLinkDriver::link_mtu`, `link_rx_capacity`), because its buffers are the bound. The
 /// storage is a buffer of a table the image declares ([`ByteBuf`], the fixed-memory profile's,
 /// whose sessions have no heap to build a frame on) or buffers the link allocated once (`HeapTx`,
@@ -812,26 +815,11 @@ impl<T: TxStore> TxLender<T> {
         Some((from, end))
     }
 
-    /// A free slot held by the link from here, its first `len` bytes written by `fill`: where a
-    /// link keeps what it owes its stream of a frame the session handed it as bytes. `None` when
-    /// no slot is free or `len` passes a slot.
-    pub fn hold_filled(&self, len: usize, fill: impl FnOnce(&mut [u8])) -> Option<TxSlot> {
-        if len > self.store.slot_len() {
-            return None;
-        }
-        let grant = self.acquire(0)?;
-        let (base, _) = self.storage(grant.slot);
-        // SAFETY: `base` is the first byte of a slot of `slot_len` bytes, at least `len`, which
-        // was just granted, to the link and nobody else.
-        fill(unsafe { core::slice::from_raw_parts_mut(base, len) });
-        Some(grant.slot)
-    }
-
     /// The bytes `from .. end` of `slot`, cut to the slot.
     ///
     /// # Safety
     ///
-    /// The slot is held by the link ([`Self::frame_prefixed`], [`Self::hold_filled`]) and not
+    /// The slot is held by the link ([`Self::frame_prefixed`]) and not
     /// with the session: nothing writes it while the bytes are borrowed.
     pub unsafe fn held(&self, slot: TxSlot, from: usize, end: usize) -> &[u8] {
         let (base, capacity) = self.storage(slot);
@@ -881,6 +869,49 @@ pub fn copied_receive(link: &dyn SessionDatagramLink) -> Option<RxFrame> {
     let mut frame = None;
     link.recv_with(&mut |datagram| frame = Some(RxFrame::new(datagram.to_vec())));
     frame
+}
+
+/// A frame of `bytes` sent by `link` as it sends a slot it lent: a slot asked for as the session
+/// asks for one ([`BoxedLinkDriver::tx_slot_acquire`]), the bytes copied into it behind its
+/// headroom, and the slot handed over ([`BoxedLinkDriver::tx_slot_send`]). The byte send of both
+/// links of this crate, written once over the link's table: a link has one way to put a frame on
+/// its wire, and its byte entries are a call here.
+///
+/// A frame for which the link has no slot free (every one out with the session, or held by frames
+/// its stream has not taken) is refused as a frame it lends no slot for, and one longer than a
+/// slot as oversize, its slot given back: a frame is never kept anywhere but in a slot.
+// Out of line for the reason `copied_receive` is.
+#[inline(never)]
+pub fn copied_send(
+    link: &dyn BoxedLinkDriver,
+    bytes: &[u8],
+    reliability: Reliability,
+    priority: Priority,
+) -> LinkSendOutcome {
+    let Some(grant) = link.tx_slot_acquire(bytes.len(), priority) else {
+        return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
+    };
+    let (base, capacity) = link.tx_slot_storage(grant.slot);
+    let fits = grant
+        .headroom
+        .checked_add(bytes.len())
+        .is_some_and(|end| end <= capacity);
+    if !fits {
+        link.tx_slot_abort(grant.slot);
+        return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+    }
+    // SAFETY: the slot was granted to this call alone, `capacity` bytes from `base`, and the
+    // bytes go behind its headroom, which with them is inside it (`fits`).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(grant.headroom), bytes.len());
+    }
+    link.tx_slot_send(
+        grant.slot,
+        grant.headroom,
+        bytes.len(),
+        reliability,
+        priority,
+    )
 }
 
 #[cfg(test)]

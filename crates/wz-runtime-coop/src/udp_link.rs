@@ -576,9 +576,6 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
     /// The socket's send of `bytes` to the peer, as the outcome the session counts: a send with no
     /// peer yet, or one the stack refuses, is REPORTED (R2371's rule for the lwIP driver), not
     /// swallowed.
-    // Out of line where the link is reached through its table: the byte send's entry and the two
-    // the trait derives from it (`send_prioritized`, `send_urgent`) would each hold a copy.
-    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn send_datagram(&self, bytes: &[u8]) -> LinkSendOutcome {
         let Some(peer) = self.binding.peer() else {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
@@ -593,9 +590,10 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
 impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for UdpDriver<S, B, T>
 {
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
-        // UDP is unreliable; the session's reliable channel recovers a drop.
-        self.send_datagram(bytes)
+    // The bytes are copied into a slot the link lends and sent as one, so the socket's send has
+    // one caller. UDP is unreliable; the session's reliable channel recovers a drop.
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT)
     }
 
     // The session encodes a frame straight into the driver's own storage, and the socket reads it
@@ -2315,6 +2313,39 @@ mod tests {
         );
         assert!(link.socket.sent.borrow().is_empty());
         assert!(link.tx_slot_acquire(4, Priority::Data).is_some());
+    }
+
+    /// A datagram handed over as bytes is copied into a slot the link lends and sent from there:
+    /// refused as one the link lends no slot for while the session holds every slot, refused as
+    /// oversize past a slot with the slot given back, and sent once a slot is free. Turned red by a
+    /// byte send that writes to the socket without a slot, or keeps the slot of an oversize one.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_datagram_of_bytes_is_sent_from_a_slot_the_link_lends() {
+        let link = UdpDriver::initiator_with_buffers(Loop::default(), PEER, 64, HeapTx::new(1, 8));
+        let held = link.tx_slot_acquire(4, Priority::Data).expect("the slot");
+        assert_eq!(
+            link.send_blocking(b"init", Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+        );
+        link.tx_slot_abort(held.slot);
+        assert_eq!(
+            link.send_blocking(b"nine bytes", Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+        );
+        assert!(link.socket.sent.borrow().is_empty(), "nothing sent yet");
+        assert_eq!(
+            link.send_blocking(b"init", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            link.socket.sent.borrow().as_slice(),
+            &[(PEER, b"init".to_vec())]
+        );
+        assert!(
+            link.tx_slot_acquire(4, Priority::Data).is_some(),
+            "the slot is back once it is sent"
+        );
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
