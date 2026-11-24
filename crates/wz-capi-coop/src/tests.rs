@@ -750,7 +750,7 @@ fn run_router(
                         SampleKind::Put,
                     ));
                 }
-                let mut cache = store.query_handler(|| 0);
+                let cache = store.query_handler(|| 0);
                 let asked = counted_queries.clone();
                 answering
                     .borrow_mut()

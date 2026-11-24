@@ -344,10 +344,13 @@ impl CacheStore {
     /// `now` answers the host's wall clock as an NTP64 word, read once per query: the "now" of
     /// the `_time` age filter, from the same base the publisher stamps samples with. The ring
     /// reads no clock of its own.
+    ///
+    /// The handler is a `Fn`, called through a shared borrow from any thread, so an engine that
+    /// keeps a queryable's callback in its row calls it as it calls a C program's.
     pub fn query_handler(
         &self,
-        now: impl Fn() -> u64 + Send + 'static,
-    ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
+        now: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> impl Fn(&dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static {
         let ring = Arc::clone(&self.ring);
         let replies_config = self.replies_config;
         move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
