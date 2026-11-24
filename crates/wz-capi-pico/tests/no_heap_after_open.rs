@@ -281,11 +281,12 @@ enum Round {
     E2eSenderDemux,
     E2eSupervision,
     InstanceKey,
+    MessagePayload,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 29] = [
+    const ALL: [Round; 30] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -315,6 +316,7 @@ impl Round {
         Round::E2eSenderDemux,
         Round::E2eSupervision,
         Round::InstanceKey,
+        Round::MessagePayload,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -335,6 +337,7 @@ impl Round {
                 cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
             }
             Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
+            Round::MessagePayload => cfg!(feature = "message-payload"),
             Round::InstanceKey => {
                 cfg!(all(
                     feature = "instance-key",
@@ -371,7 +374,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 33] = [
+const FAMILIES: [(&str, Round, Part); 34] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -423,6 +426,7 @@ const FAMILIES: [(&str, Round, Part); 33] = [
     ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
     ("e2e-supervision", Round::E2eSupervision, Part::All),
     ("instance-key", Round::InstanceKey, Part::All),
+    ("message-payload", Round::MessagePayload, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -815,6 +819,160 @@ impl Keyed {
     }
 }
 
+/// A catalog the payloads are of: the catalog reader's synthetic one, whose first message is put on
+/// `demo/catalog/pose`.
+#[cfg(feature = "message-payload")]
+const CATALOG: &str = include_str!("../../wz-app-frame/catalog/synthetic.json5");
+
+/// The schema of the catalog message's payload. Synthetic.
+#[cfg(feature = "message-payload")]
+const PAYLOAD_SCHEMA: &CStr = cr#"
+syntax = "proto3";
+package syn.noheap;
+message Point {
+  sint32 x = 1;
+  sint32 y = 2;
+}
+message Pose {
+  uint32 serial = 1;
+  int32 offset = 2;
+  string label = 5;
+  Point origin = 8;
+}
+"#;
+
+/// The room the encoded payload of a round takes, with headroom.
+#[cfg(feature = "message-payload")]
+const PAYLOAD_ROOM: usize = 64;
+
+/// Two payloads of the catalog's first message under one schema, as a sending and a receiving
+/// program hold them: one set by path and encoded, the other decoded and read back.
+#[cfg(feature = "message-payload")]
+struct MessagePayload {
+    sending: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
+    receiving: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
+    serial: u64,
+}
+
+#[cfg(feature = "message-payload")]
+impl MessagePayload {
+    /// Both payloads. The catalog and the schema are dropped once they are made: a payload keeps
+    /// its key expression and holds its schema.
+    unsafe fn new() -> Self {
+        use wz_capi_pico::message_catalog::{
+            wz_ext_message_catalog_drop, wz_ext_message_catalog_move, wz_ext_message_catalog_new,
+            wz_ext_owned_message_catalog_t,
+        };
+        use wz_capi_pico::message_payload::{
+            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop, wz_ext_payload_schema_move,
+            wz_ext_payload_schema_new,
+        };
+        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
+        let text = std::ffi::CString::new(CATALOG).expect("no NUL in the catalog");
+        let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut()),
+            Z_OK,
+            "the synthetic catalog reads"
+        );
+        let files = [wz_ext_proto_file_t {
+            name: c"syn/noheap.proto".as_ptr(),
+            text: PAYLOAD_SCHEMA.as_ptr(),
+        }];
+        let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_payload_schema_new(
+                &mut schema,
+                files.as_ptr(),
+                files.len(),
+                std::ptr::null_mut()
+            ),
+            Z_OK,
+            "the synthetic schema reads"
+        );
+        let payload = Self {
+            sending: Self::payload(&catalog, &schema),
+            receiving: Self::payload(&catalog, &schema),
+            serial: 0,
+        };
+        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(&mut schema));
+        wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog));
+        payload
+    }
+
+    /// A payload of the catalog's first message, of type `syn.noheap.Pose`.
+    unsafe fn payload(
+        catalog: &wz_capi_pico::message_catalog::wz_ext_owned_message_catalog_t,
+        schema: &wz_capi_pico::message_payload::wz_ext_owned_payload_schema_t,
+    ) -> wz_capi_pico::message_payload::wz_ext_owned_message_payload_t {
+        use wz_capi_pico::message_catalog::wz_ext_message_catalog_loan;
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_new, wz_ext_owned_message_payload_t, wz_ext_payload_schema_loan,
+        };
+        let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_message_payload_new(
+                &mut payload,
+                wz_ext_message_catalog_loan(catalog),
+                0,
+                wz_ext_payload_schema_loan(schema),
+                c"syn.noheap.Pose".as_ptr(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a payload of the catalog's first message is made"
+        );
+        payload
+    }
+
+    /// Set two values by path, encode the payload, decode the bytes into the other and read the
+    /// serial back.
+    unsafe fn round(&mut self) {
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_decode, wz_ext_message_payload_encode,
+            wz_ext_message_payload_get_uint, wz_ext_message_payload_loan,
+            wz_ext_message_payload_set_int, wz_ext_message_payload_set_uint,
+        };
+        self.serial += 1;
+        let sending = wz_ext_message_payload_loan(&self.sending);
+        assert_eq!(
+            wz_ext_message_payload_set_uint(sending, c"serial".as_ptr(), self.serial),
+            Z_OK
+        );
+        assert_eq!(
+            wz_ext_message_payload_set_int(sending, c"origin.x".as_ptr(), -3),
+            Z_OK
+        );
+        let mut bytes = [0u8; PAYLOAD_ROOM];
+        let mut written = 0usize;
+        assert_eq!(
+            wz_ext_message_payload_encode(sending, bytes.as_mut_ptr(), bytes.len(), &mut written),
+            Z_OK,
+            "the payload encodes into the room"
+        );
+        let receiving = wz_ext_message_payload_loan(&self.receiving);
+        assert_eq!(
+            wz_ext_message_payload_decode(receiving, bytes.as_ptr(), written),
+            Z_OK,
+            "the bytes decode"
+        );
+        let mut serial = 0u64;
+        assert_eq!(
+            wz_ext_message_payload_get_uint(receiving, c"serial".as_ptr(), &mut serial),
+            Z_OK
+        );
+        assert_eq!(serial, self.serial, "the serial set is the serial read");
+    }
+
+    unsafe fn drop_both(mut self) {
+        use wz_capi_pico::message_payload::{
+            wz_ext_message_payload_drop, wz_ext_message_payload_move,
+        };
+        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.sending));
+        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.receiving));
+    }
+}
+
 /// The streams a supervisor's table has room for, and the bytes each keeps of its last payload.
 #[cfg(feature = "e2e-supervision")]
 const SUPERVISED_STREAMS: usize = 4;
@@ -1160,6 +1318,8 @@ struct Bench {
         feature = "e2e-receiver"
     ))]
     keyed: Keyed,
+    #[cfg(feature = "message-payload")]
+    message_payload: MessagePayload,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
     #[cfg(feature = "advanced")]
@@ -1206,6 +1366,8 @@ impl Bench {
             feature = "e2e-receiver"
         ))]
         let keyed = Keyed::new();
+        #[cfg(feature = "message-payload")]
+        let message_payload = MessagePayload::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
         #[cfg(feature = "advanced")]
@@ -1258,6 +1420,8 @@ impl Bench {
                 feature = "e2e-receiver"
             ))]
             keyed,
+            #[cfg(feature = "message-payload")]
+            message_payload,
             #[cfg(feature = "replay-cache")]
             replay,
             #[cfg(feature = "advanced")]
@@ -1360,6 +1524,10 @@ impl Bench {
                     feature = "e2e-receiver"
                 ))]
                 self.keyed.round();
+            }
+            Round::MessagePayload => {
+                #[cfg(feature = "message-payload")]
+                self.message_payload.round();
             }
         }
     }
@@ -1824,6 +1992,8 @@ impl Bench {
             feature = "e2e-receiver"
         ))]
         self.keyed.drop_all();
+        #[cfg(feature = "message-payload")]
+        self.message_payload.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
         #[cfg(feature = "advanced")]

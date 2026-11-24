@@ -93,6 +93,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "message-payload": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "publisher-declare": {
       "allocs_per_round": 3,
       "locked": false,
@@ -237,6 +242,11 @@
     },
     "message-catalog": {
       "reason": "a catalog is made from its text and read with no session (crates/wz-capi-pico/src/message_catalog.rs:184 and :271); what a session does with one goes through the e2e and supervision doors, which their own rows hold"
+    },
+    "message-payload": {
+      "families": [
+        "message-payload"
+      ]
     },
     "multi-thread": {
       "families": [
