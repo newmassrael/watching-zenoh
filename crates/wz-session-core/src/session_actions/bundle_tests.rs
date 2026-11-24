@@ -798,6 +798,113 @@ mod lent_handshake {
     }
 }
 
+/// Under `tx-lend-only` a frame the link lends no slot for is refused before a byte of it is
+/// written, and the sequence number minted for it is given back: the next frame of the conduit
+/// carries it, so the reliable channel has no gap no frame fills. Turned red by the refusal that
+/// keeps its SN (the `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out), whose
+/// next frame carries SN 1.
+#[cfg(all(feature = "tx-lend-only", feature = "codec-push", feature = "alloc"))]
+mod lent_frame_refusal {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link of one slot that lends it only while `lends` says so, and keeps each frame sent.
+    struct DryLink {
+        lends: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl BoxedLinkDriver for DryLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            self.lends.load(Ordering::SeqCst).then_some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {}
+    }
+
+    /// A reliable plain put on `actions`.
+    fn put(
+        actions: &SessionLinkActions<PlainRuntime, StillClock>,
+    ) -> Option<Result<(), SendWireError>> {
+        let key = crate::named_key::NamedKey::literal("home/gap").expect("a key");
+        actions.send_plain_put_qos(
+            key,
+            b"v",
+            None,
+            super::super::SendAs {
+                reliable: true,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        )
+    }
+
+    #[test]
+    fn a_frame_refused_for_want_of_a_slot_gives_its_sequence_number_back() {
+        let link = Arc::new(DryLink {
+            lends: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 512]),
+            sent: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        assert_eq!(
+            put(&actions),
+            Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
+        link.lends.store(true, Ordering::SeqCst);
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
+        // A frame's second byte is its SN, one byte while it is below 128; `params` starts at 0.
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the refused one gave back"
+        );
+    }
+}
+
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
 /// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
 /// message, and the send answers that as a value.

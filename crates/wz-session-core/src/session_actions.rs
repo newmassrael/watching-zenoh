@@ -962,10 +962,8 @@ impl Drop for SenderInside<'_> {
 /// The number of TX conduits, sized by the build's priority space.
 /// `transport-qos` is `alloc`-required by construction (a host/AP knob, never
 /// an MCU no-alloc one); the OFF build keeps the single conduit it always had.
-#[cfg(feature = "transport-qos")]
-const TX_CONDUITS: usize = Priority::NUM;
-#[cfg(not(feature = "transport-qos"))]
-const TX_CONDUITS: usize = 1;
+/// Named where a link reads it too ([`crate::link::SESSION_TX_SLOTS`]).
+const TX_CONDUITS: usize = crate::link::SESSION_TX_CONDUITS;
 
 /// The entry of `rows`, one per conduit, that `priority` rides: its own under `transport-qos`,
 /// where the wire priority is the conduit, and the single one otherwise. Gated as its readers
@@ -5816,9 +5814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         F: FnOnce(&mut crate::tx_lease::TxLease<'_, R::Driver>) -> Result<(), E>,
     {
         self.with_conduit_link(reliability, priority, |link| {
-            let Some(mut slot) =
-                crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
-            else {
+            let Some(mut slot) = self.lease_on(link, want, priority) else {
                 return Lend::NoSlot;
             };
             if let Err(why) = fill(&mut slot) {
@@ -5827,6 +5823,82 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
             Lend::Sent
         })
+    }
+
+    /// ARCHITECTURE section 9.1 -- a slot `link` lends for one frame of this session, the lend of
+    /// every frame the session encodes into a slot. A conduit keeps the slot of its open batch
+    /// across the calls of a window, so a link may find every slot held by batches that could
+    /// leave now while another conduit has a frame to open: those batches are sent first, out of
+    /// their band's turn (each conduit's frames keep their own SN order), and the slot that frees
+    /// is lent. `None` only when the link has none even then, which a link that lends
+    /// [`crate::link::SESSION_TX_SLOTS`] of its own never answers.
+    #[cfg(all(
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn lease_on<'l>(
+        &self,
+        link: &'l LinkState<R>,
+        want: usize,
+        priority: Priority,
+    ) -> Option<crate::tx_lease::TxLease<'l, R::Driver>> {
+        let driver = link.link_driver();
+        if let Some(slot) = crate::tx_lease::TxLease::acquire(driver, want, priority) {
+            return Some(slot);
+        }
+        // With one conduit the only batch a link can hold open is the caller's, whose lock it
+        // holds: there is nothing else to send.
+        #[cfg(feature = "transport-batching")]
+        if TX_CONDUITS > 1 && self.send_open_lent_batches(link) {
+            return crate::tx_lease::TxLease::acquire(driver, want, priority);
+        }
+        None
+    }
+
+    /// Send the batches open in slots `link` lent, each as its conduit's flush sends it
+    /// ([`Self::flush_conduit`]), under that conduit's lock taken only if free: the caller holds
+    /// its own conduit's, and a conduit a sender holds is that sender's to send. Whether any
+    /// conduit was taken, so a slot may have come back.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn send_open_lent_batches(&self, link: &LinkState<R>) -> bool {
+        let mut taken = false;
+        for (idx, record) in link.batch_slots.iter().enumerate() {
+            if !record.is_held() {
+                continue;
+            }
+            let priority = TxConduits::<R>::conduit_priority(idx);
+            taken |= R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                self.flush_conduit(idx, priority, batch)
+            })
+            .is_some();
+        }
+        taken
     }
 
     /// ARCHITECTURE section 9.1 -- open a conduit's batch frame in a slot the
@@ -5841,8 +5913,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// occupies at most one slot, for exactly the span its heap stage would hold
     /// a vector, and the occupancy is bounded by the conduit count.
     ///
-    /// It never waits for a slot. A link that lends none, or has none free, or
-    /// lends one that cannot hold the whole batch budget answers
+    /// It never waits for a slot. A link that lends none, or has none free once
+    /// the batches other conduits hold open in its slots have left
+    /// ([`Self::lease_on`]), or lends one that cannot hold the whole batch budget answers
     /// [`LentBatchOpen::Heap`] and the frame is staged on the heap with the reason
     /// counted, so a consumer slow to return slots costs copies and never stalls
     /// another sender. A slot short of the budget is refused rather than used
@@ -5886,9 +5959,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } = head;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
-            let Some(mut slot) =
-                crate::tx_lease::TxLease::acquire(link.link_driver(), mtu, priority)
-            else {
+            let Some(mut slot) = self.lease_on(link, mtu, priority) else {
                 return LentBatchOpen::Heap(HeapStage::NoSlot);
             };
             // Dropping the lease on any refusal below gives the slot back.
@@ -6797,9 +6868,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "transport-compression", not(feature = "tx-lend-only")))]
         if self.compresses_batches() {
             // A lent slot is NOT sent here: the wire bytes are the compressed
-            // copy, so the slot is dropped unsent when this call returns, which
-            // gives it back to its link.
+            // copy, so the slot goes back to its link before the copy is
+            // handed over, which a link that copies bytes into a slot of its
+            // own may need it for.
             let wrapped = crate::compression::compress_batch(frame);
+            if let Some(slot) = lent {
+                slot.give_back();
+            }
             // transport-stats — count the ACTUAL wire bytes (post-compression).
             let outcome = if urgent {
                 link.link_driver().send_urgent(&wrapped, reliability)
@@ -12596,9 +12671,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     self.refuse_tx(crate::link::LinkDropCause::Oversize),
                 ))
             }
-            FrameLend::Heap => Err(SendWireError::LinkRefused(
-                self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
-            )),
+            // No slot, or one short of the frame: nothing of it was written, so the SN minted for
+            // it is given back, as a refused encode's is, and the conduit's next frame carries it.
+            // Kept, it would be a gap in a reliable channel that no frame fills.
+            FrameLend::Heap => {
+                self.outbound_frame_sn.unmint(priority, emit.reliable);
+                Err(SendWireError::LinkRefused(
+                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                ))
+            }
             // Refused before a byte left: the SN minted for it is given back.
             FrameLend::Refused(refused) => {
                 self.outbound_frame_sn.unmint(priority, emit.reliable);

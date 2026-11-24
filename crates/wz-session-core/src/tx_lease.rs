@@ -304,6 +304,16 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
         self.driver
             .tx_slot_send(self.slot, self.headroom, self.len, reliability, priority)
     }
+
+    /// Give the slot back unsent, once, for a caller that holds the lease by reference and is
+    /// done with it before the reference goes (the emit seam, which sends a copy of the frame
+    /// instead). The lease's drop is the same, for a lease that is let go of.
+    pub(crate) fn give_back(&mut self) {
+        if !self.sent {
+            self.sent = true;
+            self.driver.tx_slot_abort(self.slot);
+        }
+    }
 }
 
 impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
@@ -378,9 +388,7 @@ impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
 
 impl<D: BoxedLinkDriver + ?Sized> Drop for TxLease<'_, D> {
     fn drop(&mut self) {
-        if !self.sent {
-            self.driver.tx_slot_abort(self.slot);
-        }
+        self.give_back();
     }
 }
 
