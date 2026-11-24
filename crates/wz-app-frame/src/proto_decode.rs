@@ -989,6 +989,7 @@ impl<'b> Visit<'b> for Listing<'_, '_> {
 
 /// Where one field path of a message stands in its bytes, as a protobuf parser reads it: the last
 /// occurrence of the field wins, and the occurrences of a message field are one message.
+#[cfg(any(test, feature = "instance-key"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum AtPath<'b> {
     /// The field is there, with this value.
@@ -1000,6 +1001,7 @@ pub(crate) enum AtPath<'b> {
 }
 
 /// The walk that reads one field path ([`SchemaSet::read_path`]) and keeps nothing else.
+#[cfg(any(test, feature = "instance-key"))]
 struct PathRead<'p, 'b> {
     /// The field numbers along the path, the outermost first.
     path: &'p [u64],
@@ -1012,6 +1014,7 @@ struct PathRead<'p, 'b> {
     found: Option<Item<'b>>,
 }
 
+#[cfg(any(test, feature = "instance-key"))]
 impl<'b> Visit<'b> for PathRead<'_, 'b> {
     fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
         if self.matched == self.depth
@@ -1043,6 +1046,7 @@ impl<'b> Visit<'b> for PathRead<'_, 'b> {
     }
 }
 
+#[cfg(any(test, feature = "instance-key"))]
 impl SchemaSet {
     /// The value at the field path `numbers` (the outermost field's number first) of `bytes` read
     /// as `message`, as [`AtPath`] says a parser reads it. The bytes are read and refused as
@@ -1081,6 +1085,7 @@ impl SchemaSet {
 
 /// What a walk of a message's bytes tells a reader that keeps values of its own
 /// ([`SchemaSet::walk_fields`]), in the order the bytes hold them.
+#[cfg(feature = "message-payload")]
 pub(crate) trait FieldEvents<'b> {
     /// A value of field `number`, which the schema knows: one per occurrence, and one per element
     /// of a packed run.
@@ -1097,12 +1102,14 @@ pub(crate) trait FieldEvents<'b> {
 
 /// The walk as [`FieldEvents`] see it: a map's entries are kept whole, and nothing inside one is
 /// told.
+#[cfg(feature = "message-payload")]
 struct Events<'e, F> {
     events: &'e mut F,
     /// How many map entries the walk is inside.
     in_map: usize,
 }
 
+#[cfg(feature = "message-payload")]
 impl<'b, F: FieldEvents<'b>> Visit<'b> for Events<'_, F> {
     fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
         if self.in_map == 0 {
@@ -1136,6 +1143,7 @@ impl<'b, F: FieldEvents<'b>> Visit<'b> for Events<'_, F> {
     }
 }
 
+#[cfg(feature = "message-payload")]
 impl SchemaSet {
     /// Walk `bytes` read as `message`, telling `events` what they hold. The bytes are read and
     /// refused as [`Self::decode`] reads and refuses them, and the walk allocates nothing unless
