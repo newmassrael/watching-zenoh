@@ -154,12 +154,18 @@ impl QueryPeer {
     /// staging replies into `pending_replies` and the Final it owes into
     /// `pending_final_rids`, as [`Self::dispatch_messages`] does for an owned
     /// one. See the module docs for what it hands to the owned projection.
-    pub(super) fn dispatch_request_in_place<L: LocalQueryables, X, S: crate::bounded::Storage>(
+    pub(super) fn dispatch_request_in_place<
+        L: LocalQueryables,
+        X,
+        S: crate::bounded::Storage,
+        PS: crate::bounded::Storage,
+        OS: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         request: &RequestView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
     ) where
@@ -212,12 +218,18 @@ impl QueryPeer {
 
     /// The lent dispatch itself: [`Self::dispatch_request`]'s steps over the
     /// Request where it lies.
-    fn dispatch_lent<L: LocalQueryables, X, S: crate::bounded::Storage>(
+    fn dispatch_lent<
+        L: LocalQueryables,
+        X,
+        S: crate::bounded::Storage,
+        PS: crate::bounded::Storage,
+        OS: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         request: &RequestView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
         envelope: QueryEnvelope,
         replies: &mut ReplyStage<S>,
     ) -> Result<DispatchOutcome, Fallback>
@@ -258,12 +270,18 @@ impl QueryPeer {
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
     /// it always did. Heap profile only, and not a build that lends only (`rx-lent-only`).
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection<L: LocalQueryables, X, S: crate::bounded::Storage>(
+    fn dispatch_owned_projection<
+        L: LocalQueryables,
+        X,
+        S: crate::bounded::Storage,
+        PS: crate::bounded::Storage,
+        OS: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         request: &RequestView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
     ) where

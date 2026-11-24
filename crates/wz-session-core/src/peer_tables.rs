@@ -787,7 +787,7 @@ mod tests {
                 let key = std::format!("bound/{id}");
                 tables.subscribers.absorb_declare(
                     &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, &key)),
-                    None,
+                    None::<crate::wireexpr_resolve::OwnSpace<'_, crate::bounded::Static>>,
                 );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
@@ -853,7 +853,7 @@ mod tests {
             for (id, key) in [(1u64, "abc"), (2, "ab")] {
                 tables.subscribers.absorb_declare(
                     &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
-                    None,
+                    None::<crate::wireexpr_resolve::OwnSpace<'_, crate::bounded::Static>>,
                 );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
@@ -1321,7 +1321,7 @@ mod lent_tests {
 
         tables.subscribers.absorb_declare(
             &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
-            None,
+            None::<crate::wireexpr_resolve::OwnSpace<'_, crate::bounded::Static>>,
         );
     }
 

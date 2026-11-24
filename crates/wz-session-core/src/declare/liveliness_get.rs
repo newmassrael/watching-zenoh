@@ -543,10 +543,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// drops silently (mirror of the sibling registries' "no resolved
     /// keyexpr → no fire" contract). Other inner variants are ignored.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, PS: Storage, OS: Storage>(
         &mut self,
         declare: &DeclareOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let interest_id = match declare.interest_id {
@@ -582,10 +582,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         feature = "codec-declare",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view<'a, 'f>(
+    pub fn dispatch_declare_view<'a, 'f, PS: Storage, OS: Storage>(
         &mut self,
         declare: &wz_codecs::lent::Declare<'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         use wz_codecs::lent::DeclareVariant;
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -625,10 +625,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// resolves keyexprs). Non-`Declare` variants are no-ops here — the
     /// liveliness-get reply path lives entirely in the `Declare` MID.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
@@ -646,10 +646,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {

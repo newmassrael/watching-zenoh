@@ -3172,7 +3172,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// now goes through [`MappingSpaces::peer`], which cannot be reached
     /// without first holding the pair.
     #[cfg(feature = "storage-profile")]
-    pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
+    pub fn mapping_spaces(&self) -> MappingSpaces<'_, P> {
         self.naming.spaces()
     }
 
@@ -3180,15 +3180,11 @@ impl<P: Storage> SubscriberPeer<P> {
     /// here: the session's table set of the subscriptions the peer's messages are delivered to
     /// ([`LocalSubscribers::own_space`]). A space a host installs is read first.
     #[cfg(feature = "storage-profile")]
-    pub fn mapping_spaces_over<'a>(
+    pub fn mapping_spaces_over<'a, O: Storage>(
         &'a self,
-        own: Option<crate::wireexpr_resolve::OwnSpace<'a>>,
-    ) -> MappingSpaces<'a> {
-        let spaces = self.naming.spaces();
-        match own {
-            Some(own) if !spaces.has_own() => spaces.over_own(own),
-            _ => spaces,
-        }
+        own: Option<crate::wireexpr_resolve::OwnSpace<'a, O>>,
+    ) -> MappingSpaces<'a, P, O> {
+        self.naming.spaces_over(own)
     }
 
     /// R237 — single-id resolver mirroring R234
@@ -3354,10 +3350,10 @@ impl<P: Storage> SubscriberPeer<P> {
     /// has always been. A peer that re-declares an id it holds is replacing, and
     /// needs no room.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub(crate) fn absorb_declare(
+    pub(crate) fn absorb_declare<O: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_, O>>,
     ) {
         match body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
@@ -3466,10 +3462,10 @@ impl<P: Storage> SubscriberPeer<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub(crate) fn absorb_declare_view(
+    pub(crate) fn absorb_declare_view<O: Storage>(
         &mut self,
         body: &wz_codecs::lent::DeclareVariant<'_>,
-        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_, O>>,
     ) {
         use wz_codecs::lent::DeclareVariant;
         match body {
@@ -3527,21 +3523,35 @@ impl<P: Storage> SubscriberPeer<P> {
 impl<P: Storage> PeerNaming<P> {
     /// The two id spaces this session resolves a keyexpr against: the peer's
     /// aliases and, when installed, our own.
-    fn spaces(&self) -> MappingSpaces<'_> {
+    fn spaces(&self) -> MappingSpaces<'_, P> {
+        self.spaces_over(None)
+    }
+
+    /// [`Self::spaces`] with `tables`, the session's table of its declarations, as our own space
+    /// where no space is installed here: a space a host installs is read first.
+    fn spaces_over<'a, O: Storage>(
+        &'a self,
+        tables: Option<crate::wireexpr_resolve::OwnSpace<'a, O>>,
+    ) -> MappingSpaces<'a, P, O> {
         #[cfg(feature = "alloc")]
         let own = self
             .own_mapping_space
             .as_ref()
-            .map(|own| &**own as &dyn crate::wireexpr_resolve::OwnMappingSpace);
-        // A session in a slot installs no own space: it reads an `M=0` alias as the
-        // relay face does, which refuses it.
+            .map(|own| {
+                crate::wireexpr_resolve::OwnSpace::of_handle(
+                    &**own as &dyn crate::wireexpr_resolve::OwnMappingSpace,
+                )
+            })
+            .or(tables);
+        // A session in a slot installs no space of its own: it reads an `M=0` alias out of its
+        // tables where it is handed them, and refuses it as the relay face does where it is not.
         #[cfg(not(feature = "alloc"))]
-        let own = None;
+        let own = tables;
         #[cfg(feature = "shared-key-ids")]
         if let Some(ids) = &self.shared_key_ids {
-            return MappingSpaces::for_aliases::<P>(&self.aliases, own).with_shared(ids);
+            return MappingSpaces::<P, O>::of_aliases(&self.aliases, own).with_shared(ids);
         }
-        MappingSpaces::for_aliases::<P>(&self.aliases, own)
+        MappingSpaces::<P, O>::of_aliases(&self.aliases, own)
     }
 }
 
@@ -4264,13 +4274,16 @@ pub trait LocalSubscribers {
     type Sink;
     /// The id the table gives a subscription's row, which a delivery names it by.
     type RowId: Copy;
+    /// The storage policy of the table of the key expressions the session declared, which
+    /// [`Self::own_space`] is read under.
+    type OwnPolicy: Storage;
 
     /// Our own id space, when the subscriptions are kept in the session's one table set, which
     /// holds the key expressions the session declared: what an `M=0` key of a peer's message is
     /// read against where no space is installed on the peer's side. `None` for a table of
     /// subscriptions alone.
     #[cfg(feature = "storage-profile")]
-    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_, Self::OwnPolicy>> {
         None
     }
 
@@ -4378,6 +4391,7 @@ pub struct PeerDelivery {
 impl<C, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
     type Sink = C;
     type RowId = SubscriptionId;
+    type OwnPolicy = P;
 
     fn epoch(&self) -> u64 {
         self.epoch
@@ -4595,7 +4609,7 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
 
     /// [`SubscriberPeer::mapping_spaces`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
-    pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
+    pub fn mapping_spaces(&self) -> MappingSpaces<'_, P> {
         self.peer.mapping_spaces()
     }
 
@@ -7063,7 +7077,10 @@ mod tests {
             let body = body
                 .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                 .unwrap();
-            registry.peer.absorb_declare(&body, None);
+            registry.peer.absorb_declare(
+                &body,
+                None::<crate::wireexpr_resolve::OwnSpace<'_, crate::bounded::Static>>,
+            );
             assert!(
                 registry.mapping_spaces().peer().is_empty(),
                 "{name} arm must not mutate the peer keyexpr table"

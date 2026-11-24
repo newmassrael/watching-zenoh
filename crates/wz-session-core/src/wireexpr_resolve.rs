@@ -55,9 +55,9 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
-use crate::bounded::{BoundedString, Static, Storage};
+use crate::bounded::{BoundedString, KeyBacking, Static, Storage};
 use crate::caps;
-use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
+use crate::id_map::{IdMap, PeerAliases};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use sce_forge_runtime::codec::Lent;
@@ -308,63 +308,74 @@ pub type SharedOwnMappingSpace = alloc::rc::Rc<dyn OwnMappingSpace>;
 /// deliberate — a constructor that silently substituted the peer's table for a
 /// missing own space would reintroduce the wrong-space read this type exists to
 /// prevent.
-#[derive(Clone, Copy)]
-pub struct MappingSpaces<'a> {
-    peer: PeerSpace<'a>,
-    own: Option<OwnSpace<'a>>,
+///
+/// `P` is the storage policy of the peer's alias table and `O` the one of our own
+/// declarations' table: each half is read by the policy that keeps it, chosen when the pair is
+/// built, so a build reads only the policies it keeps. They are two parameters because the
+/// two tables are two values a caller may hold under two policies (a peer's side and a
+/// session's tables).
+pub struct MappingSpaces<'a, P: Storage, O: Storage = P> {
+    peer: PeerSpace<'a, P>,
+    own: Option<OwnSpace<'a, O>>,
     /// The key ids every node of the deployment shares, when the session holds them
     /// ([`Self::with_shared`]): read for an id the space its `M` bit names does not hold.
     #[cfg(feature = "shared-key-ids")]
     shared: Option<&'a crate::shared_key_ids::KeyIds>,
 }
 
-/// OUR id space as a [`MappingSpaces`] reads it: the session's one table of the key expressions
-/// it declared, read where it lies, of whatever storage policy keeps it
-/// ([`Storage::own_space`]), or a space a host keeps behind a handle of its own.
-///
-/// Closed, as [`PeerSpace`] is: a session that keeps its declarations in its own table set is
-/// read with no call through a vtable, and only a host's handle is one.
-#[derive(Clone, Copy)]
-pub struct OwnSpace<'a>(OwnSpaceRepr<'a>);
-
-#[derive(Clone, Copy)]
-enum OwnSpaceRepr<'a> {
-    /// A space a host keeps behind a handle (a link's table, a test's map).
-    Handle(&'a dyn OwnMappingSpace),
-    /// The growable policy's table of the session's declarations.
-    #[cfg(feature = "alloc")]
-    Heap(&'a crate::session_tables::Keyexprs<crate::bounded::Heap>),
-    /// The static policy's table of the session's declarations.
-    Static(&'a crate::session_tables::Keyexprs<Static>),
-    /// The lent policy's table of the session's declarations, whose keys lie in the session's key
-    /// arena.
-    Lent(&'a crate::session_tables::Keyexprs<crate::bounded::Lent>),
+// By hand rather than derived: a derive would ask the policies themselves to be `Copy`, and
+// the pair holds only references to their tables.
+impl<P: Storage, O: Storage> Clone for MappingSpaces<'_, P, O> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
-impl<'a> OwnSpace<'a> {
+impl<P: Storage, O: Storage> Copy for MappingSpaces<'_, P, O> {}
+
+/// OUR id space as a [`MappingSpaces`] reads it: the session's one table of the key expressions
+/// it declared under the storage policy `P`, read where it lies, or a space a host keeps behind a
+/// handle of its own.
+///
+/// Closed, as [`PeerSpace`] is: a session that keeps its declarations in its own table set is
+/// read with no call through a vtable, and only a host's handle is one. The policy is a type
+/// parameter and not an arm, so the table is read by the one policy the space was built over.
+pub struct OwnSpace<'a, P: Storage>(OwnSpaceRepr<'a, P>);
+
+impl<P: Storage> Clone for OwnSpace<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for OwnSpace<'_, P> {}
+
+enum OwnSpaceRepr<'a, P: Storage> {
+    /// A space a host keeps behind a handle (a link's table, a test's map).
+    Handle(&'a dyn OwnMappingSpace),
+    /// The session's table of its declarations; under the lent policy its keys lie in the
+    /// session's key arena.
+    Table(&'a crate::session_tables::Keyexprs<P>),
+}
+
+impl<P: Storage> Clone for OwnSpaceRepr<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for OwnSpaceRepr<'_, P> {}
+
+impl<'a, P: Storage> OwnSpace<'a, P> {
     /// A space a host keeps behind a handle.
     pub fn of_handle(own: &'a dyn OwnMappingSpace) -> Self {
         Self(OwnSpaceRepr::Handle(own))
     }
 
-    /// The growable policy's table of the session's declarations, as its own space.
-    #[cfg(feature = "alloc")]
-    pub(crate) fn of_heap_keyexprs(
-        table: &'a crate::session_tables::Keyexprs<crate::bounded::Heap>,
-    ) -> Self {
-        Self(OwnSpaceRepr::Heap(table))
-    }
-
-    /// The static policy's table of the session's declarations, as its own space.
-    pub(crate) fn of_static_keyexprs(table: &'a crate::session_tables::Keyexprs<Static>) -> Self {
-        Self(OwnSpaceRepr::Static(table))
-    }
-
-    /// The lent policy's table of the session's declarations, as its own space.
-    pub(crate) fn of_lent_keyexprs(
-        table: &'a crate::session_tables::Keyexprs<crate::bounded::Lent>,
-    ) -> Self {
-        Self(OwnSpaceRepr::Lent(table))
+    /// The session's table of its declarations, as its own space.
+    #[cfg(feature = "storage-profile")]
+    pub(crate) fn of_keyexprs(table: &'a crate::session_tables::Keyexprs<P>) -> Self {
+        Self(OwnSpaceRepr::Table(table))
     }
 
     /// The literal a table of the session's declarations holds for `id`, read where it lies;
@@ -372,16 +383,7 @@ impl<'a> OwnSpace<'a> {
     fn literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
         match self.0 {
             OwnSpaceRepr::Handle(_) => None,
-            #[cfg(feature = "alloc")]
-            OwnSpaceRepr::Heap(table) => table
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(_, row)| row.key()),
-            OwnSpaceRepr::Static(table) => table
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(_, row)| row.key()),
-            OwnSpaceRepr::Lent(table) => table
+            OwnSpaceRepr::Table(table) => table
                 .iter()
                 .find(|(_, row)| row.id() == id)
                 .map(|(_, row)| row.key()),
@@ -389,12 +391,12 @@ impl<'a> OwnSpace<'a> {
     }
 }
 
-impl OwnMappingSpace for OwnSpace<'_> {
+impl<P: Storage> OwnMappingSpace for OwnSpace<'_, P> {
     #[cfg(feature = "alloc")]
     fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         match self.0 {
             OwnSpaceRepr::Handle(own) => own.resolve_own_mapping(id),
-            _ => self.literal(id).map(String::from),
+            OwnSpaceRepr::Table(_) => self.literal(id).map(String::from),
         }
     }
 
@@ -405,61 +407,69 @@ impl OwnMappingSpace for OwnSpace<'_> {
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         match self.0 {
             OwnSpaceRepr::Handle(own) => own.append_own_mapping(id, out),
-            _ => self.literal(id).map(|literal| out.push_str(literal)),
+            OwnSpaceRepr::Table(_) => self.literal(id).map(|literal| out.push_str(literal)),
         }
     }
 }
 
-/// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
-/// face, a multicast peer, a test) or the table a session of the static or the lent
-/// storage policy keeps ([`PeerAliases`] of [`Static`], or of the lent policy, whose rows
-/// hold their keys in the session's key arena).
+/// The peer's id space as a [`MappingSpaces`] reads it: the alias table a session of the
+/// storage policy `P` keeps ([`PeerAliases`]), or, with an allocator, a plain map (a router
+/// face, a multicast peer, a test) or our own table standing in the sender's half.
 ///
-/// Closed, and not a trait object: the tables are the representations a storage
-/// policy has, and which of them a given [`PeerAliases`] is the policy says
-/// ([`Storage::peer_space`]), so a reader never needs to know the policy.
-#[derive(Clone, Copy)]
-pub struct PeerSpace<'a>(PeerSpaceRepr<'a>);
+/// Closed, and not a trait object: the policy of the alias table is a type parameter, so a
+/// build reads the tables of the policies it holds and no other, and a reader never needs to
+/// know which one it is.
+pub struct PeerSpace<'a, P: Storage>(PeerSpaceRepr<'a, P>);
 
-#[derive(Clone, Copy)]
-enum PeerSpaceRepr<'a> {
-    /// The growable policy's plain map; a build with no allocator has none.
+impl<P: Storage> Clone for PeerSpace<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for PeerSpace<'_, P> {}
+
+enum PeerSpaceRepr<'a, P: Storage> {
+    /// A plain map; a build with no allocator has none.
     #[cfg(feature = "alloc")]
     Map(&'a HashMap<u64, String>),
     /// Our own table standing in the sender's half, for a message this node sends
     /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate.
     #[cfg(feature = "alloc")]
     Ours(&'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>),
-    /// The static policy's bounded table.
-    Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
-    /// The lent policy's bounded table, whose rows hold their keys in the session's key arena.
-    LentTable(&'a PeerAliases<crate::bounded::Lent>),
+    /// The alias table of the session's policy; under the lent policy its keys lie in the
+    /// session's key arena.
+    Aliases(&'a PeerAliases<P>),
 }
 
-impl<'a> PeerSpace<'a> {
-    /// The growable policy's table, as a peer space.
+impl<P: Storage> Clone for PeerSpaceRepr<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for PeerSpaceRepr<'_, P> {}
+
+impl<'a, P: Storage> PeerSpace<'a, P> {
+    /// A plain map, as a peer space.
     #[cfg(feature = "alloc")]
-    pub(crate) fn of_map(map: &'a HashMap<u64, String>) -> Self {
+    fn of_map(map: &'a HashMap<u64, String>) -> Self {
         Self(PeerSpaceRepr::Map(map))
     }
 
-    /// The static policy's table, as a peer space.
-    pub(crate) fn of_table(
-        table: &'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
-    ) -> Self {
-        Self(PeerSpaceRepr::Table(table))
-    }
-
-    /// The lent policy's table, as a peer space.
-    pub(crate) fn of_lent_table(table: &'a PeerAliases<crate::bounded::Lent>) -> Self {
-        Self(PeerSpaceRepr::LentTable(table))
+    /// The alias table of the session's policy, as a peer space.
+    pub(crate) fn of_aliases(table: &'a PeerAliases<P>) -> Self {
+        Self(PeerSpaceRepr::Aliases(table))
     }
 
     /// The key the peer declared for `id`, when its table keeps it in the session's key arena (the
     /// lent policy's): the row's own key, whose block a holder may keep. `None` on any other table.
     fn held(&self, id: crate::wire_id::ExprId) -> Option<&'a crate::key_arena::KeyRef> {
         match self.0 {
-            PeerSpaceRepr::LentTable(table) => table.find(crate::wire_id::peer_key(id)),
+            PeerSpaceRepr::Aliases(table) => table
+                .find(crate::wire_id::peer_key(id))
+                .and_then(KeyBacking::held),
+            #[cfg(feature = "alloc")]
             _ => None,
         }
     }
@@ -476,18 +486,24 @@ impl<'a> PeerSpace<'a> {
             PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Ours(table) => table.literal(id),
-            PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
-            PeerSpaceRepr::LentTable(table) => table.find(key).map(|text| text.as_str()),
+            PeerSpaceRepr::Aliases(table) => table.find(key).map(KeyBacking::as_str),
         }
     }
 }
 
 /// The peer's half of a [`MappingSpaces`] as a table to inspect: what
 /// [`MappingSpaces::peer`] answers, on every storage policy.
-#[derive(Clone, Copy)]
-pub struct PeerSpaceView<'a>(PeerSpace<'a>);
+pub struct PeerSpaceView<'a, P: Storage>(PeerSpace<'a, P>);
 
-impl<'a> PeerSpaceView<'a> {
+impl<P: Storage> Clone for PeerSpaceView<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for PeerSpaceView<'_, P> {}
+
+impl<'a, P: Storage> PeerSpaceView<'a, P> {
     /// The literal the peer declared for `id`.
     pub fn get(&self, id: &crate::wire_id::ExprId) -> Option<&'a str> {
         self.0.literal(*id)
@@ -500,8 +516,7 @@ impl<'a> PeerSpaceView<'a> {
             PeerSpaceRepr::Map(map) => map.len(),
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Ours(table) => table.len(),
-            PeerSpaceRepr::Table(table) => table.count(),
-            PeerSpaceRepr::LentTable(table) => table.count(),
+            PeerSpaceRepr::Aliases(table) => table.count(),
         }
     }
 
@@ -515,7 +530,7 @@ impl<'a> PeerSpaceView<'a> {
 /// that reads a message WE send resolves its `M=1` through the ids this node declared
 /// and its `M=0` through the ones the peer did, so the peer's table is the "own" half
 /// of that pair. Whatever table the storage policy keeps it in.
-impl OwnMappingSpace for PeerSpaceView<'_> {
+impl<P: Storage> OwnMappingSpace for PeerSpaceView<'_, P> {
     #[cfg(feature = "alloc")]
     fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.get(&id).map(String::from)
@@ -530,34 +545,12 @@ impl OwnMappingSpace for PeerSpaceView<'_> {
     }
 }
 
-impl<'a> MappingSpaces<'a> {
+impl<'a, P: Storage, O: Storage> MappingSpaces<'a, P, O> {
     /// This pair without its own space: the peer's half alone, for a reader whose wire
     /// form names its key in the sender's space only (the `ext_keyexpr` of an
     /// undeclaration) and must not be handed an `M=0` half it would silently read.
     pub fn without_own(self) -> Self {
         Self { own: None, ..self }
-    }
-
-    /// Only the peer's space is known. `M=0` aliases refuse.
-    #[cfg(feature = "alloc")]
-    pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
-        Self {
-            peer: PeerSpace::of_map(peer),
-            own: None,
-            #[cfg(feature = "shared-key-ids")]
-            shared: None,
-        }
-    }
-
-    /// Both spaces are known. `M=1` reads the peer's, `M=0` reads ours.
-    #[cfg(feature = "alloc")]
-    pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
-        Self {
-            peer: PeerSpace::of_map(peer),
-            own: Some(OwnSpace::of_handle(own)),
-            #[cfg(feature = "shared-key-ids")]
-            shared: None,
-        }
     }
 
     /// This pair with the key ids every node of the deployment shares beside it. An id the
@@ -586,54 +579,24 @@ impl<'a> MappingSpaces<'a> {
         None
     }
 
-    /// The pair for a message this node SENDS: its `M=1` names the ids we declared
-    /// (`ours`, keyed by the `ExprId`s we allocate) and its `M=0` the ones the peer
-    /// declared (`theirs`), the reverse of a message received.
-    #[cfg(feature = "alloc")]
-    pub fn as_sent(
-        ours: &'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>,
-        theirs: &'a dyn OwnMappingSpace,
-    ) -> Self {
-        Self {
-            peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
-            own: Some(OwnSpace::of_handle(theirs)),
-            #[cfg(feature = "shared-key-ids")]
-            shared: None,
-        }
-    }
-
-    /// The pair a session holds: the peer's aliases in whatever table its storage
-    /// policy keeps them in ([`PeerAliases`]) and our own space when one is
-    /// installed.
-    ///
-    /// On the growable policy that table IS the plain map, so this is
-    /// [`Self::peer_only`] / [`Self::with_own`] by another name; on the static one
-    /// it is the bounded table, which no `HashMap` constructor can take.
-    pub fn for_aliases<P: Storage>(
-        peer: &'a PeerAliases<P>,
-        own: Option<&'a dyn OwnMappingSpace>,
-    ) -> Self {
-        Self {
-            peer: P::peer_space(peer),
-            own: own.map(OwnSpace::of_handle),
-            #[cfg(feature = "shared-key-ids")]
-            shared: None,
-        }
-    }
-
     /// This pair with `own` as its own space, the peer's half unchanged: what a
     /// caller that holds the peer's table through a pair and has an own space of
     /// its own to put beside it needs, without a table type to name.
     pub fn with_own_space(self, own: &'a dyn OwnMappingSpace) -> Self {
-        self.over_own(OwnSpace::of_handle(own))
+        Self {
+            own: Some(OwnSpace::of_handle(own)),
+            ..self
+        }
     }
 
-    /// This pair with `own` as its own space, the peer's half unchanged: the session's own table
-    /// of its declarations, read where it lies, in place of any handle the pair held.
-    pub fn over_own(self, own: OwnSpace<'a>) -> Self {
+    /// The pair over the peer's aliases in the table of its storage policy, with `own` as our own
+    /// space: the session's table of its declarations, or a space a host keeps behind a handle.
+    pub(crate) fn of_aliases(peer: &'a PeerAliases<P>, own: Option<OwnSpace<'a, O>>) -> Self {
         Self {
-            own: Some(own),
-            ..self
+            peer: PeerSpace::of_aliases(peer),
+            own,
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
         }
     }
 
@@ -658,7 +621,7 @@ impl<'a> MappingSpaces<'a> {
     /// of an id, how many ids, none at all) whatever table the policy keeps: the
     /// growable policy's map is not lent as a `HashMap`, because a pair of the static
     /// policy has none to lend and the answer must not depend on which it holds.
-    pub fn peer(&self) -> PeerSpaceView<'a> {
+    pub fn peer(&self) -> PeerSpaceView<'a, P> {
         PeerSpaceView(self.peer)
     }
 
@@ -679,9 +642,57 @@ impl<'a> MappingSpaces<'a> {
     }
 }
 
+impl<'a, P: Storage> MappingSpaces<'a, P> {
+    /// The pair a session holds: the peer's aliases in the table of its storage policy
+    /// ([`PeerAliases`]) and our own space when one is installed. The caller names the policy
+    /// (`MappingSpaces::<P, P>::for_aliases`): a table type does not say which policy keeps it.
+    pub fn for_aliases(peer: &'a PeerAliases<P>, own: Option<&'a dyn OwnMappingSpace>) -> Self {
+        Self::of_aliases(peer, own.map(OwnSpace::of_handle))
+    }
+}
+
+/// The pairs over a plain map, which only a build with an allocator has: the growable policy's.
+#[cfg(feature = "alloc")]
+impl<'a> MappingSpaces<'a, crate::bounded::Heap> {
+    /// Only the peer's space is known. `M=0` aliases refuse.
+    pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
+        Self {
+            peer: PeerSpace::of_map(peer),
+            own: None,
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
+        }
+    }
+
+    /// Both spaces are known. `M=1` reads the peer's, `M=0` reads ours.
+    pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
+        Self {
+            peer: PeerSpace::of_map(peer),
+            own: Some(OwnSpace::of_handle(own)),
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
+        }
+    }
+
+    /// The pair for a message this node SENDS: its `M=1` names the ids we declared
+    /// (`ours`, keyed by the `ExprId`s we allocate) and its `M=0` the ones the peer
+    /// declared (`theirs`), the reverse of a message received.
+    pub fn as_sent(
+        ours: &'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>,
+        theirs: &'a dyn OwnMappingSpace,
+    ) -> Self {
+        Self {
+            peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
+            own: Some(OwnSpace::of_handle(theirs)),
+            #[cfg(feature = "shared-key-ids")]
+            shared: None,
+        }
+    }
+}
+
 /// A bare peer table IS a valid pair — the one with no own space in it.
 ///
-/// This exists so the registry fan can take `impl Into<MappingSpaces<'a>>` and
+/// This exists so the registry fan can take `impl Into<MappingSpaces<'a, P, O>>` and
 /// accept both forms: production hands over the pair (via
 /// `SubscriberRegistry::mapping_spaces`), while a caller that has only the
 /// peer's table — a relay face, a unit test pinning peer-side behaviour — passes
@@ -697,7 +708,7 @@ impl<'a> MappingSpaces<'a> {
 /// [`MappingSpaces::peer_only`], so an `M=0` alias still refuses. The conversion
 /// cannot invent a space the caller does not have.
 #[cfg(feature = "alloc")]
-impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
+impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a, crate::bounded::Heap> {
     fn from(peer: &'a HashMap<u64, String>) -> Self {
         Self::peer_only(peer)
     }
@@ -705,9 +716,9 @@ impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
 
 /// The static policy's table is a valid pair for the same reason, and on the
 /// same terms: no own space in it.
-impl<'a> From<&'a PeerAliases<Static>> for MappingSpaces<'a> {
+impl<'a> From<&'a PeerAliases<Static>> for MappingSpaces<'a, Static> {
     fn from(peer: &'a PeerAliases<Static>) -> Self {
-        Self::for_aliases::<Static>(peer, None)
+        Self::for_aliases(peer, None)
     }
 }
 
@@ -721,9 +732,9 @@ impl<'a> From<&'a PeerAliases<Static>> for MappingSpaces<'a> {
 /// mappings from 1, so a wrong-space read very likely FINDS an entry and
 /// returns a confident, wrong keyexpr.
 #[cfg(feature = "alloc")]
-pub fn resolve_wireexpr_in<S: WireexprStorage>(
+pub fn resolve_wireexpr_in<S: WireexprStorage, P: Storage, O: Storage>(
     body: &WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'_>,
+    spaces: MappingSpaces<'_, P, O>,
 ) -> Option<String> {
     // The variant tag IS the mapping bit, so the arms cannot be folded: our
     // codec's `WireexprLocal` is `M=1` (the SENDER's space — the peer's, on an
@@ -916,22 +927,29 @@ pub fn id_and_suffix_view<'k, D: WireexprLentStorage>(
 /// in place does exactly that (`pubsub::SubscriberRegistry`), and counts it.
 // The frame's lifetime `'f` is its own: the borrowed wireexpr is invariant in it, so it cannot
 // shrink to the caller's buffer, and the suffix it lends outlives the answer.
-pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
+pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage, P: Storage, O: Storage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    resolve_wireexpr_view_over(body, spaces, None, out)
+    resolve_wireexpr_view_over(body, spaces, None::<OwnSpace<'_, O>>, out)
 }
 
 /// [`resolve_wireexpr_view`] with our own space given apart from the pair, read where the pair
 /// holds none: an `M=0` key is copied out of `own` into `out`, so the answer borrows the
 /// frame, the peer's table and `out` alone, and the table `own` was read from may be written as
 /// soon as this returns (the session's table set, which the delivery of the key then writes).
-pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
+pub fn resolve_wireexpr_view_over<
+    'k,
+    'f: 'k,
+    D: WireexprLentStorage,
+    P: Storage,
+    O: Storage,
+    T: Storage,
+>(
     body: &WireexprVariantIn<Lent<'f, D>>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix) = id_and_suffix_view(body);
@@ -947,10 +965,17 @@ pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
 /// that keeps its keys there (`PeerSpace::held`). Every other answer, a suffix joined, our own
 /// space's key copied, the shared dictionary's, is as `resolve_wireexpr_view_over` gives it, with
 /// no key.
-pub fn resolve_wireexpr_view_held_over<'k, 'f: 'k, D: WireexprLentStorage>(
+pub fn resolve_wireexpr_view_held_over<
+    'k,
+    'f: 'k,
+    D: WireexprLentStorage,
+    P: Storage,
+    O: Storage,
+    T: Storage,
+>(
     body: &WireexprVariantIn<Lent<'f, D>>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
     if let WireexprVariantIn::WireexprLocal(_) = body {
@@ -985,9 +1010,9 @@ pub fn id_suffix_and_space_viewed<'f>(
 /// wireexpr has no list, so each arm is its own view). The arm is copied into the codec's variant
 /// (an id and a reference to the suffix, a few words) and the rule is the one rule.
 #[cfg(any(feature = "codec-request", feature = "codec-response"))]
-pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
+pub fn resolve_wireexpr_viewed<'k, 'f: 'k, P: Storage, O: Storage>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
@@ -1001,9 +1026,9 @@ pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
 /// [`resolve_wireexpr_viewed`], with the key of the session's key arena the answer is the whole
 /// text of, when it is one ([`resolve_wireexpr_view_held_over`]).
 #[cfg(any(feature = "codec-request", feature = "codec-response"))]
-pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
+pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k, P: Storage, O: Storage>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
@@ -1011,7 +1036,7 @@ pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
         V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
         V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
     };
-    resolve_wireexpr_view_held_over(&body, spaces, None, out)
+    resolve_wireexpr_view_held_over(&body, spaces, None::<OwnSpace<'_, O>>, out)
 }
 
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
@@ -1026,20 +1051,20 @@ pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
 /// absorb of one declaration is allocation-free once the message exists. On the
 /// growable backing `out` is a growable string and this allocates exactly when
 /// [`resolve_wireexpr_in`] did.
-pub fn resolve_wireexpr_into<'k, S: WireexprStorage>(
+pub fn resolve_wireexpr_into<'k, S: WireexprStorage, P: Storage, O: Storage>(
     body: &'k WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    resolve_wireexpr_into_over(body, spaces, None, out)
+    resolve_wireexpr_into_over(body, spaces, None::<OwnSpace<'_, O>>, out)
 }
 
 /// [`resolve_wireexpr_into`] with our own space given apart from the pair
 /// ([`resolve_wireexpr_view_over`]).
-pub fn resolve_wireexpr_into_over<'k, S: WireexprStorage>(
+pub fn resolve_wireexpr_into_over<'k, S: WireexprStorage, P: Storage, O: Storage, T: Storage>(
     body: &'k WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix) = id_and_suffix(body);
@@ -1053,24 +1078,31 @@ pub fn resolve_wireexpr_into_over<'k, S: WireexprStorage>(
 /// [`resolve_wireexpr_view`] over the parts [`crate::plain_push`] reads out of a
 /// record: `sender_mapping` is the `M` flag (the id is in the sender's space), and the
 /// rule and the answer are the same as for the codec's own forms.
-pub fn resolve_plain_parts<'k>(
+pub fn resolve_plain_parts<'k, P: Storage, O: Storage>(
     sender_mapping: bool,
     id: crate::wire_id::ExprId,
     suffix: Option<&'k str>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    resolve_plain_parts_over(sender_mapping, id, suffix, spaces, None, out)
+    resolve_plain_parts_over(
+        sender_mapping,
+        id,
+        suffix,
+        spaces,
+        None::<OwnSpace<'_, O>>,
+        out,
+    )
 }
 
 /// [`resolve_plain_parts`] with our own space given apart from the pair
 /// ([`resolve_wireexpr_view_over`]).
-pub fn resolve_plain_parts_over<'k>(
+pub fn resolve_plain_parts_over<'k, P: Storage, O: Storage, T: Storage>(
     sender_mapping: bool,
     id: crate::wire_id::ExprId,
     suffix: Option<&'k str>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let arm = if sender_mapping {
@@ -1086,12 +1118,12 @@ pub fn resolve_plain_parts_over<'k>(
 /// ours or answers `None` when no own space was given, and an id the space does
 /// not hold is `None`. A keyexpr that has to be composed lies in `out`. `own`, when given,
 /// stands for the pair's own space.
-fn resolve_parts<'k>(
+fn resolve_parts<'k, P: Storage, O: Storage, T: Storage>(
     arm: Space,
     id: crate::wire_id::ExprId,
     suffix_opt: Option<&'k str>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
@@ -1203,9 +1235,9 @@ fn resolve_parts<'k>(
 /// exactly the pre-existing behaviour: with no second space there is nothing to
 /// disagree with, and the rule collapses to the one-space lookup.
 #[cfg(feature = "alloc")]
-pub fn resolve_declared_keyexpr<S: WireexprStorage>(
+pub fn resolve_declared_keyexpr<S: WireexprStorage, P: Storage, O: Storage>(
     body: &WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'_>,
+    spaces: MappingSpaces<'_, P, O>,
 ) -> Option<String> {
     // The arm is deliberately NOT read for a space here — see the docblock.
     // Both variants carry the same two fields; only the tag differs, and on
@@ -1246,20 +1278,26 @@ pub fn resolve_declared_keyexpr<S: WireexprStorage>(
 /// lies against the peer's, which is borrowed; the answer is then built over
 /// whichever of the two the rule picks. [`KeyexprPastBound`] is the one answer a
 /// bounded buffer adds, as for [`resolve_wireexpr_into`].
-pub fn resolve_declared_keyexpr_into<'k, S: WireexprStorage>(
+pub fn resolve_declared_keyexpr_into<'k, S: WireexprStorage, P: Storage, O: Storage>(
     body: &'k WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    resolve_declared_keyexpr_into_over(body, spaces, None, out)
+    resolve_declared_keyexpr_into_over(body, spaces, None::<OwnSpace<'_, O>>, out)
 }
 
 /// [`resolve_declared_keyexpr_into`] with our own space given apart from the pair
 /// ([`resolve_wireexpr_view_over`]).
-pub fn resolve_declared_keyexpr_into_over<'k, S: WireexprStorage>(
+pub fn resolve_declared_keyexpr_into_over<
+    'k,
+    S: WireexprStorage,
+    P: Storage,
+    O: Storage,
+    T: Storage,
+>(
     body: &'k WireexprOwnedVariant<S>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix_opt) = id_and_suffix(body);
@@ -1269,20 +1307,27 @@ pub fn resolve_declared_keyexpr_into_over<'k, S: WireexprStorage>(
 /// [`resolve_declared_keyexpr_into`] over a wireexpr read where its frame lies:
 /// the same rule through one shared function, so a declaration the receive path
 /// lends is bound under exactly the keyexpr the owned one is.
-pub fn resolve_declared_keyexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
+pub fn resolve_declared_keyexpr_view<'k, 'f: 'k, D: WireexprLentStorage, P: Storage, O: Storage>(
     body: &WireexprVariantIn<Lent<'f, D>>,
-    spaces: MappingSpaces<'k>,
+    spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    resolve_declared_keyexpr_view_over(body, spaces, None, out)
+    resolve_declared_keyexpr_view_over(body, spaces, None::<OwnSpace<'_, O>>, out)
 }
 
 /// [`resolve_declared_keyexpr_view`] with our own space given apart from the pair
 /// ([`resolve_wireexpr_view_over`]).
-pub fn resolve_declared_keyexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
+pub fn resolve_declared_keyexpr_view_over<
+    'k,
+    'f: 'k,
+    D: WireexprLentStorage,
+    P: Storage,
+    O: Storage,
+    T: Storage,
+>(
     body: &WireexprVariantIn<Lent<'f, D>>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix_opt) = id_and_suffix_view(body);
@@ -1291,11 +1336,11 @@ pub fn resolve_declared_keyexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
 
 /// The rule of [`resolve_declared_keyexpr`] over the parts of a wireexpr,
 /// whichever form carried them.
-fn resolve_declared_parts<'k>(
+fn resolve_declared_parts<'k, P: Storage, O: Storage, T: Storage>(
     id: crate::wire_id::ExprId,
     suffix_opt: Option<&'k str>,
-    spaces: MappingSpaces<'k>,
-    own: Option<OwnSpace<'_>>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
@@ -1340,9 +1385,9 @@ fn resolve_declared_parts<'k>(
 /// Our own literal for `id` appended to `out`: read from the space the pair holds, and when it holds
 /// none, from `own`, the session's table set apart from the pair. A host that installs a space of
 /// its own keeps reading it; a session that installs none reads its tables.
-fn own_append(
-    spaces: MappingSpaces<'_>,
-    own: Option<OwnSpace<'_>>,
+fn own_append<P: Storage, O: Storage, T: Storage>(
+    spaces: MappingSpaces<'_, P, O>,
+    own: Option<OwnSpace<'_, T>>,
     id: crate::wire_id::ExprId,
     out: &mut dyn KeyexprOut,
 ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
@@ -1409,7 +1454,7 @@ mod bounded_space_tests {
     use super::*;
     use crate::bounded::InlineKeys;
     use crate::codec_owned::owned_string;
-    use crate::id_map::key_text_as;
+    use crate::id_map::{key_text_as, FixedIdMap};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 

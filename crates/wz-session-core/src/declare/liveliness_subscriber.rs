@@ -691,10 +691,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
 
     /// [`LivelinessSubscriberTable::dispatch_declare`] for this registry's peer.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_declare(&mut self.peer, body, peer_keyexpr_table);
@@ -703,10 +703,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// [`LivelinessSubscriberTable::dispatch_declare_historical`] for this
     /// registry's peer.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_historical<'a>(
+    pub fn dispatch_declare_historical<'a, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         historical: bool,
     ) {
         self.table.dispatch_declare_historical(
@@ -747,10 +747,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
 
     /// [`LivelinessSubscriberTable::dispatch_messages`] for this registry's peer.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_messages(&mut self.peer, messages, peer_keyexpr_table);
@@ -759,10 +759,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// [`LivelinessSubscriberTable::dispatch_messages_unclaimed`] for this
     /// registry's peer.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a>(
+    pub fn dispatch_messages_unclaimed<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         self.table.dispatch_messages_unclaimed(
@@ -776,10 +776,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// [`LivelinessSubscriberTable::dispatch_iteration_event`] for this
     /// registry's peer.
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_iteration_event(&mut self.peer, event, peer_keyexpr_table);
@@ -788,10 +788,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// [`LivelinessSubscriberTable::dispatch_iteration_event_unclaimed`] for this
     /// registry's peer.
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a>(
+    pub fn dispatch_iteration_event_unclaimed<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         self.table.dispatch_iteration_event_unclaimed(
@@ -1054,22 +1054,22 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// the two share one body, the way `dispatch_messages` shares
     /// [`dispatch_messages_unclaimed`](Self::dispatch_messages_unclaimed)'s.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a, Q: Storage>(
+    pub fn dispatch_declare<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         peer.dispatch_declare_historical(self, &mut (), body, peer_keyexpr_table, false);
     }
 
     /// [`PeerTokens::dispatch_declare_historical`] with the slots' own sinks.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_historical<'a, Q: Storage>(
+    pub fn dispatch_declare_historical<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         historical: bool,
     ) {
         peer.dispatch_declare_historical(self, &mut (), body, peer_keyexpr_table, historical);
@@ -1081,11 +1081,11 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view_historical<'a, 'f, Q: Storage>(
+    pub fn dispatch_declare_view_historical<'a, 'f, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         body: &DeclareVariant<'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         historical: bool,
     ) {
         peer.dispatch_declare_view_historical(self, &mut (), body, peer_keyexpr_table, historical);
@@ -1192,22 +1192,22 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// sends, so the snapshot-complete signal never fired on a real
     /// wz<->wz / wz<->pico exchange.)
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a, Q: Storage>(
+    pub fn dispatch_messages<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, &|_| false);
     }
 
     /// [`PeerTokens::dispatch_messages_unclaimed`] with the slots' own sinks.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a, Q: Storage>(
+    pub fn dispatch_messages_unclaimed<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         peer.dispatch_messages_unclaimed(self, &mut (), messages, peer_keyexpr_table, claimed);
@@ -1219,22 +1219,22 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// no-ops here (the liveliness signal path lives entirely in the
     /// `Declare` / `Interest` MIDs).
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a, Q: Storage>(
+    pub fn dispatch_iteration_event<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_iteration_event_unclaimed(peer, event, peer_keyexpr_table, &|_| false);
     }
 
     /// [`PeerTokens::dispatch_iteration_event_unclaimed`] with the slots' own sinks.
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage>(
+    pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut PeerTokens<Q>,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         peer.dispatch_iteration_event_unclaimed(self, &mut (), event, peer_keyexpr_table, claimed);
@@ -1327,12 +1327,18 @@ impl<P: Storage> PeerTokens<P> {
     /// rather than pico: the two disagree, and this gate is the side that keeps
     /// `history = false` truthful.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_historical<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_declare_historical<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X,
+        PS: Storage,
+        OS: Storage,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         historical: bool,
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
@@ -1385,12 +1391,19 @@ impl<P: Storage> PeerTokens<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view_historical<'a, 'f, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_declare_view_historical<
+        'a,
+        'f,
+        L: LocalLivelinessSubscribers,
+        X,
+        PS: Storage,
+        OS: Storage,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         body: &DeclareVariant<'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         historical: bool,
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
@@ -1532,13 +1545,15 @@ impl<P: Storage> PeerTokens<P> {
         E: crate::ext_view::ExtEntryView,
         L: LocalLivelinessSubscribers,
         X,
+        PS: Storage,
+        OS: Storage,
     >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         id: u64,
         exts: Option<&'k [E]>,
-        peer_keyexpr_table: MappingSpaces<'k>,
+        peer_keyexpr_table: MappingSpaces<'k, PS, OS>,
         historical: bool,
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
@@ -1821,12 +1836,18 @@ impl<P: Storage> PeerTokens<P> {
     /// The two entry points share ONE body: `dispatch_messages` is this with a
     /// closure that claims nothing.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_messages_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X,
+        PS: Storage,
+        OS: Storage,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
@@ -1927,12 +1948,18 @@ impl<P: Storage> PeerTokens<P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_iteration_event_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X,
+        PS: Storage,
+        OS: Storage,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,

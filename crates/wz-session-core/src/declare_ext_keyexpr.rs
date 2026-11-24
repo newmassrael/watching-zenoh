@@ -257,9 +257,9 @@ pub fn set_ext_keyexpr_literal(
 /// `&HashMap` (a router face) or the [`MappingSpaces`] a session holds, of which
 /// the PEER half is read, since this extension carries no mapping bit.
 #[cfg(feature = "alloc")]
-pub fn resolve_ext_keyexpr<'a>(
+pub fn resolve_ext_keyexpr<'a, PS: crate::bounded::Storage, OS: crate::bounded::Storage>(
     exts: Option<&Vec<ExtEntryOwned>>,
-    table: impl Into<MappingSpaces<'a>>,
+    table: impl Into<MappingSpaces<'a, PS, OS>>,
 ) -> Option<String> {
     let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts.map(Vec::as_slice))?;
     let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
@@ -284,9 +284,9 @@ pub fn resolve_ext_keyexpr<'a>(
 /// Heap profile only: it reads the owned chain, a `Vec`; the borrowed chain's form is
 /// [`resolve_ext_keyexpr_in`].
 #[cfg(feature = "alloc")]
-pub fn resolve_ext_keyexpr_into<'k>(
+pub fn resolve_ext_keyexpr_into<'k, PS: crate::bounded::Storage, OS: crate::bounded::Storage>(
     exts: Option<&'k Vec<ExtEntryOwned>>,
-    table: impl Into<MappingSpaces<'k>>,
+    table: impl Into<MappingSpaces<'k, PS, OS>>,
     out: &'k mut crate::wireexpr_resolve::KeyexprBuf,
 ) -> Result<Option<&'k str>, crate::wireexpr_resolve::KeyexprPastBound> {
     resolve_ext_keyexpr_in(exts.map(Vec::as_slice), table, out)
@@ -295,9 +295,14 @@ pub fn resolve_ext_keyexpr_into<'k>(
 /// [`resolve_ext_keyexpr_into`] over any chain a reader can ask
 /// ([`ExtEntryView`]): the owned one, or the chain of an undeclaration read where
 /// its frame lies. The one body both forms resolve through.
-pub fn resolve_ext_keyexpr_in<'k, E: ExtEntryView>(
+pub fn resolve_ext_keyexpr_in<
+    'k,
+    E: ExtEntryView,
+    PS: crate::bounded::Storage,
+    OS: crate::bounded::Storage,
+>(
     exts: Option<&'k [E]>,
-    table: impl Into<MappingSpaces<'k>>,
+    table: impl Into<MappingSpaces<'k, PS, OS>>,
     out: &'k mut crate::wireexpr_resolve::KeyexprBuf,
 ) -> Result<Option<&'k str>, crate::wireexpr_resolve::KeyexprPastBound> {
     use crate::wireexpr_resolve::KeyexprPastBound;
