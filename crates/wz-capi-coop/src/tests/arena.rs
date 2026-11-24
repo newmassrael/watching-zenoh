@@ -1583,11 +1583,15 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
-        // pool's one area of the rows its faces share, the watchers' one row of the spans of
-        // their lists, and the session's table set one area of its tables, not a row of each.
+        // The lane's row is one buffer of the limit's bytes, the key arena's and the advanced
+        // cache's ring one area of them, a pool's one area of the rows its faces share, the
+        // watchers' one row of the spans of their lists, and the session's table set one area of
+        // its tables, not a row of each. The udp ports' slots and their queue are a listening
+        // session's, which the preset's client is not: it holds none whatever the limit.
         if row.basis == "DELIVERY_LANE_BYTES"
             || row.basis == "KEY_ARENA_BYTES"
+            || row.basis == "ADVANCED_CACHE_BYTES"
+            || row.basis == "UDP_PORT_SLOTS"
             || row.basis == "MAX_DECL_OBSERVERS"
             || row.part == "session tables"
             || POOL_PARTS.contains(&row.part)
