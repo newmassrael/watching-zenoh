@@ -187,13 +187,25 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
 
     /// Dial the sink: a session of this node opens towards it.
     fn dial(&mut self) -> Result<Opened, DialRefused> {
+        self.dial_offering(wz_session_core::policy::SnResolution::Bits32)
+    }
+
+    /// Dial the sink with parameters that offer the width of sequence numbers `width`.
+    fn dial_offering(
+        &mut self,
+        width: wz_session_core::policy::SnResolution,
+    ) -> Result<Opened, DialRefused> {
         let zid = 0xb0 + self.next;
         self.next += 1;
         self.host.dial(
             &self.links,
             DialTarget::address(std::net::SocketAddr::from(([127, 0, 0, 1], self.sink_port))),
             Counting(zid),
-            || params(zid),
+            || {
+                let mut stated = params(zid);
+                stated.seq_num_res = width;
+                stated
+            },
             config(),
             |_| {
                 self.layers.set(self.layers.get() + 1);
@@ -394,4 +406,65 @@ fn a_dial_with_no_task_cell_left_is_refused_before_its_initsyn_leaves() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let rig = Rig::new(Rc::new(link), 7814, &RUNTIME, &SESSIONS, &PUMPS, &SOCKETS);
     dial_then_refuse(rig, N, Why::Task);
+}
+
+/// A dial whose parameters offer a width of sequence numbers the build's `sn-resolution` domain
+/// leaves out is refused with the width once its slot is built, before a pump cell or a task is
+/// claimed: no `InitSyn` leaves, no table counts it, and its socket and slot are given back, so a
+/// node of one slot then dials the width its build holds.
+#[test]
+fn a_dial_of_a_width_outside_the_sn_resolution_domain_is_refused_and_gives_everything_back() {
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    static RUNTIME: RuntimeCell<Frozen, 3, 256, 4> = RuntimeCell::new();
+    static SESSIONS: Slots<1> = SessionSlots::new();
+    static PUMPS: Pumps<1> = PumpSlots::new();
+    static SOCKETS: SessionRxPool<1> = SessionRxPool::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let mut rig = Rig::new(Rc::new(link), 7815, &RUNTIME, &SESSIONS, &PUMPS, &SOCKETS);
+
+    for width in SnResolution::WIDTHS {
+        if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            continue;
+        }
+        let refused = rig.dial_offering(width);
+        for _ in 0..3 {
+            rig.turn();
+        }
+        assert!(
+            matches!(
+                refused,
+                Err(DialRefused::Open(OpenRefused::SnResolution(OutsideDomain { value })))
+                    if value == width
+            ),
+            "{}: the dial is refused with its width",
+            width.id()
+        );
+        assert_eq!(rig.init_syns, 0, "{}: no InitSyn left", width.id());
+        assert_eq!(rig.layers.get(), 0, "{}: no layer was made", width.id());
+        assert_eq!(rig.sockets.in_use(), 0, "{}: sockets", width.id());
+        assert_eq!(rig.sessions.in_use(), 0, "{}: session slots", width.id());
+        assert_eq!(rig.pumps.in_use(), 0, "{}: pump cells", width.id());
+        assert_eq!(
+            rig.sockets.refusals(),
+            0,
+            "{}: no socket refusal",
+            width.id()
+        );
+        assert_eq!(rig.sessions.refused(), 0, "{}: no slot refusal", width.id());
+        assert_eq!(rig.pumps.refused(), 0, "{}: no pump refusal", width.id());
+    }
+
+    let _opened = rig
+        .dial_offering(SnResolution::DEFAULT)
+        .unwrap_or_else(|why| panic!("the build's own width was refused: {why:?}"));
+    for _ in 0..3 {
+        rig.turn();
+    }
+    assert_eq!(
+        rig.init_syns, 1,
+        "the dial of the build's width sent its InitSyn"
+    );
+    assert_eq!(rig.sessions.in_use(), 1);
 }

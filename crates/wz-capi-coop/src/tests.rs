@@ -2738,6 +2738,59 @@ fn a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
     }
 }
 
+/// A group whose width of sequence numbers the build's `sn-resolution` domain leaves out is
+/// refused at the open with that width, before the group is looked at, whether or not the build
+/// has groups; a width the domain holds is not refused for its width.
+#[test]
+fn a_group_of_a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
+    use crate::OpenError;
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    for width in SnResolution::WIDTHS {
+        let refused = Engine::open(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            CoopConfig {
+                groups: vec![GroupJoin {
+                    endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+                    profile: GroupProfile {
+                        lease_ms: 10_000,
+                        join_interval_ms: 2_500,
+                        max_sessions: None,
+                        seq_num_res: width,
+                        req_id_res: 0x02,
+                        batch_size: 2_048,
+                        is_qos: false,
+                        compression: false,
+                        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+                    },
+                    is_shm: false,
+                    declarations: GroupDeclarations::Entities,
+                }],
+                ..client_config()
+            },
+        )
+        .err();
+        if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            assert!(
+                !matches!(refused, Some(OpenError::SnResolution(_))),
+                "{}: a held width is not refused for its width",
+                width.id()
+            );
+        } else {
+            assert_eq!(
+                refused,
+                Some(OpenError::SnResolution(OutsideDomain { value: width })),
+                "{}",
+                width.id()
+            );
+        }
+    }
+}
+
 /// A build without groups refuses a session that names one by name, before it dials anything,
 /// and opens no group instead of it: the session would be missing the group it was told to join.
 #[cfg(not(feature = "group"))]

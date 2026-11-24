@@ -7795,6 +7795,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// The width of sequence numbers this session offers in its Init, as its parameters state it:
+    /// what a host that builds the session in place holds to the build's domain
+    /// ([`crate::sn::sn_resolution_admitted`]) before the session may run.
+    pub fn offered_sn_resolution(&self) -> crate::policy::SnResolution {
+        self.params.seq_num_res
+    }
+
     /// R311kb — the session's negotiated SN ring mask
     /// ([`crate::sn::mask_from_res`] over `min(own, peer)` `seq_num_res`),
     /// the zenoh-pico `_z_transport_common_t._sn_res` equivalent. `min` is

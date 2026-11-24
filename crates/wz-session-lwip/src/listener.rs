@@ -82,6 +82,10 @@ pub struct ListenerCounts {
     pub refused_no_pump_cell: u32,
     /// `InitSyn`s dropped because the task table refused the session's task.
     pub refused_no_task_cell: u32,
+    /// `InitSyn`s dropped because the node's sessions offer a width of sequence numbers the
+    /// build's `sn-resolution` domain leaves out: no session of the node can be accepted until
+    /// its parameters change.
+    pub refused_sn_resolution: u32,
     /// Datagrams from a peer with no session that were not an `InitSyn`.
     pub strays: u32,
 }
@@ -93,6 +97,7 @@ impl ListenerCounts {
             .saturating_add(self.refused_no_session_slot)
             .saturating_add(self.refused_no_pump_cell)
             .saturating_add(self.refused_no_task_cell)
+            .saturating_add(self.refused_sn_resolution)
     }
 }
 
@@ -203,6 +208,7 @@ impl<const LANES: usize> SessionListener<LANES> {
                 refused_no_session_slot: 0,
                 refused_no_pump_cell: 0,
                 refused_no_task_cell: 0,
+                refused_sn_resolution: 0,
                 strays: 0,
             }),
             high: Cell::new(wz_session_core::pool_gauge::HighWater::new()),
@@ -351,6 +357,10 @@ impl<const LANES: usize> SessionListener<LANES> {
                             counts.refused_no_task_cell =
                                 counts.refused_no_task_cell.saturating_add(1);
                         }
+                        OpenRefused::SnResolution(_) => {
+                            counts.refused_sn_resolution =
+                                counts.refused_sn_resolution.saturating_add(1);
+                        }
                     });
                     pass.refused += 1;
                 }
@@ -388,5 +398,22 @@ impl<const LANES: usize> wz_session_core::pool_gauge::PoolList for SessionListen
 impl<const LANES: usize> Default for SessionListener<LANES> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListenerCounts;
+
+    /// An `InitSyn` dropped for the node's width of sequence numbers is one the listener answered
+    /// with nothing, beside those a table refused.
+    #[test]
+    fn a_refusal_of_the_width_counts_among_the_refused() {
+        let counts = ListenerCounts {
+            refused_no_lane: 1,
+            refused_sn_resolution: 2,
+            ..ListenerCounts::default()
+        };
+        assert_eq!(counts.refused(), 3);
     }
 }
