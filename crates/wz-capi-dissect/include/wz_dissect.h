@@ -4366,8 +4366,31 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * field, a string not NUL-terminated or not UTF-8, a string or a sequence
  * longer than its bound, a count the bytes left cannot hold, a `bool` other
  * than 0 or 1, more bytes after the message than the three of padding a
- * serializer may append, and a representation other than plain CDR (at byte
- * 0).
+ * serializer may append, and (at byte 0) an encapsulation identifier that is a
+ * parameter list of XCDR version 1 (`PL_CDR`, 0x0002 and 0x0003) or that no
+ * CDR representation has.
+ *
+ * PAST XCDR VERSION 1. The encapsulation identifier is read, and the three
+ * representations of XCDR version 2 (XTypes 1.3) are read as well:
+ * `PLAIN_CDR2` (0x0006 big-endian, 0x0007 little-endian), `DELIMITED_CDR2`
+ * (0x0008, 0x0009) and `PL_CDR2` (0x000a, 0x000b). In all three an 8-byte
+ * primitive aligns to 4, not 8, and an array or a sequence whose elements are
+ * not primitives (strings, wide strings, messages) is preceded by a DHEADER,
+ * a 4-byte count of its bytes, which must count them exactly. A ROS definition
+ * declares no extensibility, so the identifier is taken as the writer's
+ * statement of it and applied to EVERY structure of the payload, nested ones
+ * included: under `PLAIN_CDR2` a structure is its members (final); under
+ * `DELIMITED_CDR2` a DHEADER precedes each structure (appendable), members a
+ * newer definition appended are passed over to the end it counts, and members
+ * that run past it are refused; under `PL_CDR2` (mutable) a DHEADER precedes
+ * each structure and an EMHEADER each member, naming it by its member id, its
+ * place in the definition from 0. Members are then read in the order they
+ * arrive; an id the definition has no member for is passed over unless its
+ * must-understand flag is set, which is refused, as is a member that appears
+ * twice or one that reads a length other than its EMHEADER gives; a member
+ * that does not appear has no row. Rows and spans are as above in every
+ * representation; a structure's row spans from its first member's first byte,
+ * its headers not included.
  *
  * A `wstring` is read as rmw_zenoh's Fast-CDR type support writes it: a
  * 4-byte count of UTF-16 code units, then each code unit as a 4-byte unsigned
