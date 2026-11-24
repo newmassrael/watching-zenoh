@@ -1086,6 +1086,68 @@ const fn holds_answer(role: ExtChainRole) -> bool {
     HELD_ANSWER_SLOTS != 0 && matches!(role, ExtChainRole::InitAck | ExtChainRole::OpenSyn)
 }
 
+/// The message one lend-only control send writes into the slot its link lends
+/// (`SessionLinkActions::send_control_lent`). The message is named and not handed over as a
+/// writer, so the lend, the two refusals and the emit are one body for every control send.
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(
+        all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
+        feature = "codec-close",
+    )
+))]
+enum ControlBody<
+    // Only the Init borrows (the cookie an InitAck carries), and a build without it has no use
+    // for a lifetime.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))] 'c,
+> {
+    /// An InitSyn or InitAck: `caps` and `cookie_override` as
+    /// [`encode_init_into`](crate::handshake_encode::encode_init_into) takes them, with the chain
+    /// staged for `role`.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    Init {
+        caps: crate::handshake_encode::InitCaps,
+        is_ack: bool,
+        cookie_override: Option<&'c [u8]>,
+        role: ExtChainRole,
+    },
+    /// An OpenSyn or OpenAck: its head, echoing the peer's cookie where it lies when
+    /// `echo_inbound_cookie`, then the chain staged for `role`.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    Open {
+        initial_sn: u64,
+        is_ack: bool,
+        echo_inbound_cookie: bool,
+        has_ext: bool,
+        role: ExtChainRole,
+    },
+    /// A Close of `reason`.
+    #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
+    Close { reason: u8 },
+    /// The establishment answer held for a replay, the very bytes that went out.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    HeldAnswer,
+}
+
 /// R2923 / R2924 — the outbound queue configuration and its upstream
 /// defaults live with the per-session parameters that carry them
 /// ([`crate::session_init_params::TxQueueConf`]).
@@ -7005,12 +7067,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `tx-lend-only` replaces, and it has no counterpart here: with no slot there
     /// is no frame, which is the point.
     ///
-    /// `fill` writes the message into the lent buffer and answers whether it
-    /// fitted. A slot too short to hold it is a refusal like a missing one: the
+    /// `body` names the message, which [`Self::write_control`] writes into the lent
+    /// buffer. A slot too short to hold it is a refusal like a missing one: the
     /// lease's drop gives the slot back and the message is not sent, because a
     /// handshake message cut short is not a message. Both are
     /// [`LinkDropCause::NoTxSlot`](crate::link::LinkDropCause::NoTxSlot),
-    /// counted ([`Self::tx_refusals`]).
+    /// counted ([`Self::tx_refusals`]). Every control message is reliable.
     ///
     /// The link is this binding's own, as `send_wire_this_link`'s is and
     /// `send_wire`'s is for a session that does not aggregate links, which the
@@ -7025,14 +7087,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-close",
         )
     ))]
+    // Out of line: every lend-only control send reaches it, and each send that inlined it carried
+    // the lend, the refusals and the emit again.
+    #[inline(never)]
     fn send_control_lent(
         &self,
-        reliability: Reliability,
         priority: Priority,
         want: usize,
-        fill: impl FnOnce(
-            &mut crate::tx_buf::EncodeBuf<'_>,
-        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        body: ControlBody,
     ) -> Result<(), crate::link::LinkDropCause> {
         let link = &self.link;
         // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
@@ -7040,11 +7102,145 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = lent.as_mut() else {
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         };
-        if fill(&mut *slot).is_err() {
+        if self.write_control(&mut *slot, body).is_err() {
             // Dropping the lease gives the slot back unsent.
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         }
-        self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
+        self.emit_on_link(
+            link,
+            &[],
+            Some(slot),
+            Reliability::Reliable,
+            priority,
+            false,
+        );
+        Ok(())
+    }
+
+    /// The message `body` names, written into `buf` ([`Self::send_control_lent`]'s slot). An
+    /// Init or an Open is written from the parameters and the chain staged for its role where
+    /// they lie, under one session mutex at a time: the per-profile mutexes are not reentrant.
+    /// The acceptor's InitAck and the initiator's OpenSyn are held, as written, for a replay.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ))]
+    fn write_control(
+        &self,
+        buf: &mut crate::tx_buf::EncodeBuf<'_>,
+        body: ControlBody,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        #[cfg(all(
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        let start = buf.len();
+        #[cfg(all(
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        let mut answer = false;
+        match body {
+            #[cfg(all(
+                feature = "tx-lend-only",
+                feature = "codec-init-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ))]
+            ControlBody::Init {
+                caps,
+                is_ack,
+                cookie_override,
+                role,
+            } => {
+                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                    crate::handshake_encode::encode_init_into(
+                        buf,
+                        &self.params,
+                        caps,
+                        is_ack,
+                        crate::ext_chain::ChainRef::from(&*chain),
+                        cookie_override,
+                    )
+                })?;
+                answer = holds_answer(role);
+            }
+            #[cfg(all(
+                feature = "tx-lend-only",
+                feature = "codec-open-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ))]
+            ControlBody::Open {
+                initial_sn,
+                is_ack,
+                echo_inbound_cookie,
+                has_ext,
+                role,
+            } => {
+                use crate::handshake_encode::encode_open_head_into;
+                // The head under the cookie's mutex when it echoes one, then the staged chain
+                // under the chain's: the two scopes stay disjoint.
+                if echo_inbound_cookie {
+                    self.fact_inbound_cookie(|cookie| {
+                        encode_open_head_into(
+                            buf,
+                            &self.params,
+                            initial_sn,
+                            is_ack,
+                            cookie.as_deref(),
+                            has_ext,
+                        )
+                    })?;
+                } else {
+                    encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
+                }
+                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                    crate::handshake_encode::encode_held_chain_into(
+                        buf,
+                        crate::ext_chain::ChainRef::from(&*chain),
+                    )
+                })?;
+                answer = holds_answer(role);
+            }
+            #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
+            ControlBody::Close { reason } => crate::handshake_encode::encode_close_into(
+                buf,
+                reason,
+                self.close_scope_is_session(),
+            )?,
+            #[cfg(all(
+                feature = "tx-lend-only",
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ))]
+            ControlBody::HeldAnswer => {
+                // An empty hold is refused as a slot too short: there is nothing to send again.
+                let Some(slot) = self.held_answer.first() else {
+                    return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
+                };
+                R::with_mutex_mut(slot, |held| {
+                    if held.is_empty() {
+                        return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
+                    }
+                    buf.append(&held[..])
+                })?;
+            }
+        }
+        #[cfg(all(
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        if answer {
+            self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
+        }
         Ok(())
     }
 
@@ -7123,30 +7319,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
-        let caps = self.init_caps(is_ack);
         // Written once, into a slot lent for the most a handshake message can be: a slot
         // shorter than this message refuses the write, and the send with it.
         self.send_control_lent(
-            Reliability::Reliable,
             HANDSHAKE_LANE,
             crate::handshake_encode::HANDSHAKE_LEND_WANT,
-            |buf| {
-                let start = buf.len();
-                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                    crate::handshake_encode::encode_init_into(
-                        buf,
-                        &self.params,
-                        caps,
-                        is_ack,
-                        crate::ext_chain::ChainRef::from(&*chain),
-                        cookie_override,
-                    )
-                })?;
-                // The acceptor's InitAck is the answer a replay sends again, as written.
-                if holds_answer(role) {
-                    self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
-                }
-                Ok(())
+            ControlBody::Init {
+                caps: self.init_caps(is_ack),
+                is_ack,
+                cookie_override,
+                role,
             },
         )
     }
@@ -7167,7 +7349,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         echo_inbound_cookie: bool,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
-        use crate::handshake_encode::encode_open_head_into;
         // The bound this node announces for the peer (Item 751, decided when the peer's Init or
         // OpenSyn was admitted) and the Open's origin are read in one hold of the facts.
         let (bound, derived) = self.with_facts(|f| {
@@ -7197,36 +7378,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Written once, into a slot lent for the most a handshake message can be, as
         // the Init is (`send_init_lent`).
         self.send_control_lent(
-            Reliability::Reliable,
             HANDSHAKE_LANE,
             crate::handshake_encode::HANDSHAKE_LEND_WANT,
-            |buf| {
-                let start = buf.len();
-                if echo_inbound_cookie {
-                    self.fact_inbound_cookie(|cookie| {
-                        encode_open_head_into(
-                            buf,
-                            &self.params,
-                            initial_sn,
-                            is_ack,
-                            cookie.as_deref(),
-                            has_ext,
-                        )
-                    })?;
-                } else {
-                    encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
-                }
-                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                    crate::handshake_encode::encode_held_chain_into(
-                        buf,
-                        crate::ext_chain::ChainRef::from(&*chain),
-                    )
-                })?;
-                // The initiator's OpenSyn is the answer a replay sends again, as written.
-                if holds_answer(role) {
-                    self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
-                }
-                Ok(())
+            ControlBody::Open {
+                initial_sn,
+                is_ack,
+                echo_inbound_cookie,
+                has_ext,
+                role,
             },
         )
     }
@@ -7238,9 +7397,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
     fn send_close_lent(&self, reason: u8) -> Result<(), crate::link::LinkDropCause> {
         const WANT: usize = 1 + wz_codecs::close::Close::MAX_ENCODED_BYTES;
-        self.send_control_lent(Reliability::Reliable, Priority::Background, WANT, |buf| {
-            crate::handshake_encode::encode_close_into(buf, reason, self.close_scope_is_session())
-        })
+        self.send_control_lent(Priority::Background, WANT, ControlBody::Close { reason })
     }
 
     /// The one write of a Close of `reason` on this link, counted as the close it is: the
@@ -10826,15 +10983,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if len == 0 {
                 return false;
             }
-            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
-                R::with_mutex_mut(slot, |held| {
-                    if held.is_empty() {
-                        return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
-                    }
-                    buf.append(&held[..])
-                })
-            })
-            .is_ok()
+            self.send_control_lent(HANDSHAKE_LANE, len, ControlBody::HeldAnswer)
+                .is_ok()
         }
     }
 
