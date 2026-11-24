@@ -151,10 +151,8 @@ use wz_session_core::reply_hold::HeldReply;
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaRow {
-    /// What holds the bytes.
-    pub part: &'static str,
-    /// The limit whose number sizes the row.
-    pub basis: &'static str,
+    /// What holds the bytes, and the limit whose number sizes the row.
+    pub name: ArenaPart,
     /// How many items the row counts.
     pub count: usize,
     /// The bytes of one item.
@@ -162,6 +160,16 @@ pub struct ArenaRow {
 }
 
 impl ArenaRow {
+    /// What holds the bytes ([`ArenaPart::part`]).
+    pub const fn part(&self) -> &'static str {
+        self.name.part()
+    }
+
+    /// The limit whose number sizes the row ([`ArenaPart::basis`]).
+    pub const fn basis(&self) -> &'static str {
+        self.name.basis()
+    }
+
     /// The row's bytes: its count times its entry. `None` past the address space.
     pub const fn bytes(&self) -> Option<usize> {
         self.count.checked_mul(self.entry_bytes)
@@ -172,6 +180,224 @@ impl ArenaRow {
         match self.bytes() {
             Some(bytes) => Arena::span(bytes),
             None => None,
+        }
+    }
+}
+
+/// What a row of an arena holds, a table's flags and its entries two parts: a byte for each row a
+/// plan lays out, so laying a plan out passes no text, and only what reports a row reads the names
+/// [`Self::part`] and [`Self::basis`] give, from the one table of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArenaPart {
+    EndpointTexts,
+    LinkReceiveFlags,
+    LinkReceiveBuffers,
+    LinkTransmitFlags,
+    LinkTransmitSlots,
+    LinkPlaces,
+    LinkGroupReceiveFlags,
+    LinkGroupReceiveBuffers,
+    LinkPortDatagramFlags,
+    LinkPortDatagramSlots,
+    UdpPortPeers,
+    UdpPortQueue,
+    DeliveryRecords,
+    DeliveryCallbacks,
+    DeliveryKeys,
+    ReassemblyFlags,
+    ReassemblyBuffers,
+    HandedLegFlags,
+    HandedLegPlaces,
+    HandedLegs,
+    DeclarationWatchers,
+    PendingGets,
+    EndedLegs,
+    LegCallbacks,
+    PendingLegs,
+    HeldReplies,
+    FaceTables,
+    HeldFaces,
+    PeerTables,
+    PeerAliasPool,
+    PeerDeclarationPools,
+    PeerInterestPool,
+    OwedTokens,
+    HeldFinals,
+    RefusedFinals,
+    CacheRingFlag,
+    CacheRing,
+    SessionTables,
+    KeyArena,
+    LinkCellFlags,
+    LinkCells,
+    LinkGateFlags,
+    LinkGates,
+    LinkActionsFlags,
+    LinkActions,
+    LinkHalvesFlags,
+    LinkHalves,
+    SessionHandleFlag,
+    SessionHandle,
+    PublisherPlaceFlags,
+    PublisherPlaces,
+    SubscriberPlaceFlags,
+    SubscriberPlaces,
+    QueryablePlaceFlags,
+    QueryablePlaces,
+    TokenPlaceFlags,
+    TokenPlaces,
+    LivelinessSubscriberPlaceFlags,
+    LivelinessSubscriberPlaces,
+    QuerierPlaceFlags,
+    QuerierPlaces,
+    PendingGetPlaceFlags,
+    PendingGetPlaces,
+    PendingLivelinessGetPlaceFlags,
+    PendingLivelinessGetPlaces,
+    MatchingListenerPlaceFlags,
+    MatchingListenerPlaces,
+    DeclWatchPlaceFlags,
+    DeclWatchPlaces,
+    TransportEventsListenerPlaceFlags,
+    TransportEventsListenerPlaces,
+    AdvancedPublisherPlaceFlags,
+    AdvancedPublisherPlaces,
+    AdvancedSubscriberPlaceFlags,
+    AdvancedSubscriberPlaces,
+    LinkEventsListenerPlaceFlags,
+    LinkEventsListenerPlaces,
+}
+
+impl ArenaPart {
+    /// What holds the bytes.
+    pub const fn part(self) -> &'static str {
+        self.names().0
+    }
+
+    /// The limit whose number sizes the row.
+    pub const fn basis(self) -> &'static str {
+        self.names().1
+    }
+
+    /// Each part's name and the limit whose number sizes it, a row each.
+    const fn names(self) -> (&'static str, &'static str) {
+        const GETS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
+        match self {
+            Self::EndpointTexts => ("endpoint texts", "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS"),
+            Self::LinkReceiveFlags => ("link receive flags", RX_BASIS),
+            Self::LinkReceiveBuffers => ("link receive buffers", RX_BASIS),
+            Self::LinkTransmitFlags => ("link transmit flags", TX_BASIS),
+            Self::LinkTransmitSlots => ("link transmit slots", TX_BASIS),
+            Self::LinkPlaces => ("link places", LINK_BASIS),
+            Self::LinkGroupReceiveFlags => {
+                ("link group receive flags", "PICO_MULTICAST_BATCH_BYTES")
+            }
+            Self::LinkGroupReceiveBuffers => {
+                ("link group receive buffers", "PICO_MULTICAST_BATCH_BYTES")
+            }
+            Self::LinkPortDatagramFlags => ("link port datagram flags", "UDP_PORT_SLOTS"),
+            Self::LinkPortDatagramSlots => ("link port datagram slots", "UDP_PORT_SLOTS"),
+            Self::UdpPortPeers => ("udp port peers", LINK_BASIS),
+            Self::UdpPortQueue => ("udp port queue", "UDP_PORT_SLOTS"),
+            Self::DeliveryRecords => ("delivery records", "DELIVERY_LANE_EVENTS"),
+            Self::DeliveryCallbacks => ("delivery callbacks", "DELIVERY_LANE_CALLBACKS"),
+            Self::DeliveryKeys => ("delivery keys", "MAX_KEYEXPR_BYTES"),
+            Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
+            Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
+            Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
+            Self::HandedLegPlaces => ("handed leg places", "HANDED_LEG_BYTES"),
+            Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
+            Self::DeclarationWatchers => ("declaration watchers", "MAX_DECL_OBSERVERS"),
+            Self::PendingGets => ("pending gets", GETS),
+            Self::EndedLegs => ("ended legs", GETS),
+            Self::LegCallbacks => ("leg callbacks", GETS),
+            Self::PendingLegs => ("pending legs", GETS),
+            Self::HeldReplies => ("held replies", "MAX_PENDING_REPLIES"),
+            Self::FaceTables => ("face tables", "MAX_FACES + 1"),
+            Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
+            Self::PeerTables => ("peer tables", "MAX_PENDING_DECLARES + MAX_PENDING_FINALS"),
+            Self::PeerAliasPool => ("peer alias pool", ALIAS_LIMITS.session),
+            Self::PeerDeclarationPools => ("peer declaration pools", DECL_LIMITS.session),
+            Self::PeerInterestPool => ("peer interest pool", INTEREST_LIMITS.session),
+            Self::OwedTokens => ("owed tokens", "SESSION_MAX_REMOTE_DECLS"),
+            Self::HeldFinals => ("held finals", "MAX_PENDING_FINALS"),
+            Self::RefusedFinals => ("refused finals", "MAX_PENDING_FINALS"),
+            Self::CacheRingFlag => ("cache ring flag", "ADVANCED_CACHE_BYTES"),
+            Self::CacheRing => ("cache ring", "ADVANCED_CACHE_BYTES"),
+            Self::SessionTables => ("session tables", "MAX_DECLARED_KEYEXPRS"),
+            Self::KeyArena => ("key arena", "KEY_ARENA_BYTES"),
+            Self::LinkCellFlags => ("link cell flags", LINK_BASIS),
+            Self::LinkCells => ("link cells", LINK_BASIS),
+            Self::LinkGateFlags => ("link gate flags", LINK_BASIS),
+            Self::LinkGates => ("link gates", LINK_BASIS),
+            Self::LinkActionsFlags => ("link actions flags", LINK_BASIS),
+            Self::LinkActions => ("link actions", LINK_BASIS),
+            Self::LinkHalvesFlags => ("link halves flags", LINK_BASIS),
+            Self::LinkHalves => ("link halves", LINK_BASIS),
+            Self::SessionHandleFlag => ("session handle flag", ""),
+            Self::SessionHandle => ("session handle", ""),
+            Self::PublisherPlaceFlags => ("publisher place flags", "MAX_PUBLISHERS"),
+            Self::PublisherPlaces => ("publisher places", "MAX_PUBLISHERS"),
+            Self::SubscriberPlaceFlags => ("subscriber place flags", "MAX_SUBSCRIPTIONS"),
+            Self::SubscriberPlaces => ("subscriber places", "MAX_SUBSCRIPTIONS"),
+            Self::QueryablePlaceFlags => ("queryable place flags", "MAX_QUERYABLES"),
+            Self::QueryablePlaces => ("queryable places", "MAX_QUERYABLES"),
+            Self::TokenPlaceFlags => ("token place flags", "MAX_LOCAL_TOKENS"),
+            Self::TokenPlaces => ("token places", "MAX_LOCAL_TOKENS"),
+            Self::LivelinessSubscriberPlaceFlags => (
+                "liveliness subscriber place flags",
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+            ),
+            Self::LivelinessSubscriberPlaces => (
+                "liveliness subscriber places",
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+            ),
+            Self::QuerierPlaceFlags => ("querier place flags", "MAX_QUERIERS"),
+            Self::QuerierPlaces => ("querier places", "MAX_QUERIERS"),
+            Self::PendingGetPlaceFlags => ("pending get place flags", "MAX_PENDING_QUERIES"),
+            Self::PendingGetPlaces => ("pending get places", "MAX_PENDING_QUERIES"),
+            Self::PendingLivelinessGetPlaceFlags => (
+                "pending liveliness get place flags",
+                "MAX_PENDING_LIVELINESS_GETS",
+            ),
+            Self::PendingLivelinessGetPlaces => (
+                "pending liveliness get places",
+                "MAX_PENDING_LIVELINESS_GETS",
+            ),
+            Self::MatchingListenerPlaceFlags => {
+                ("matching listener place flags", "MAX_MATCHING_LISTENERS")
+            }
+            Self::MatchingListenerPlaces => ("matching listener places", "MAX_MATCHING_LISTENERS"),
+            Self::DeclWatchPlaceFlags => ("declaration watch place flags", "MAX_DECL_WATCHES"),
+            Self::DeclWatchPlaces => ("declaration watch places", "MAX_DECL_WATCHES"),
+            Self::TransportEventsListenerPlaceFlags => (
+                "transport events listener place flags",
+                "MAX_TRANSPORT_EVENTS_LISTENERS",
+            ),
+            Self::TransportEventsListenerPlaces => (
+                "transport events listener places",
+                "MAX_TRANSPORT_EVENTS_LISTENERS",
+            ),
+            Self::AdvancedPublisherPlaceFlags => {
+                ("advanced publisher place flags", "MAX_ADVANCED_PUBLISHERS")
+            }
+            Self::AdvancedPublisherPlaces => {
+                ("advanced publisher places", "MAX_ADVANCED_PUBLISHERS")
+            }
+            Self::AdvancedSubscriberPlaceFlags => (
+                "advanced subscriber place flags",
+                "MAX_ADVANCED_SUBSCRIBERS",
+            ),
+            Self::AdvancedSubscriberPlaces => {
+                ("advanced subscriber places", "MAX_ADVANCED_SUBSCRIBERS")
+            }
+            Self::LinkEventsListenerPlaceFlags => (
+                "link events listener place flags",
+                "MAX_LINK_EVENTS_LISTENERS",
+            ),
+            Self::LinkEventsListenerPlaces => {
+                ("link events listener places", "MAX_LINK_EVENTS_LISTENERS")
+            }
         }
     }
 }
@@ -270,72 +496,44 @@ const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
-/// The two rows of `kind`'s places, the flags and the places, and the limit that counts them, as
-/// the plan names them.
-const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static str) {
+/// The two parts of `kind`'s places, the flags and the places.
+const fn place_parts(kind: EntityKind) -> [ArenaPart; 2] {
     match kind {
-        EntityKind::Publisher => (
-            "publisher place flags",
-            "publisher places",
-            "MAX_PUBLISHERS",
-        ),
-        EntityKind::Subscriber => (
-            "subscriber place flags",
-            "subscriber places",
-            "MAX_SUBSCRIPTIONS",
-        ),
-        EntityKind::Queryable => (
-            "queryable place flags",
-            "queryable places",
-            "MAX_QUERYABLES",
-        ),
-        EntityKind::Token => ("token place flags", "token places", "MAX_LOCAL_TOKENS"),
-        EntityKind::LivelinessSubscriber => (
-            "liveliness subscriber place flags",
-            "liveliness subscriber places",
-            "MAX_LIVELINESS_SUBSCRIPTIONS",
-        ),
-        EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
-        EntityKind::PendingGet => (
-            "pending get place flags",
-            "pending get places",
-            "MAX_PENDING_QUERIES",
-        ),
-        EntityKind::PendingLivelinessGet => (
-            "pending liveliness get place flags",
-            "pending liveliness get places",
-            "MAX_PENDING_LIVELINESS_GETS",
-        ),
-        EntityKind::MatchingListener => (
-            "matching listener place flags",
-            "matching listener places",
-            "MAX_MATCHING_LISTENERS",
-        ),
-        EntityKind::DeclWatch => (
-            "declaration watch place flags",
-            "declaration watch places",
-            "MAX_DECL_WATCHES",
-        ),
-        EntityKind::TransportEventsListener => (
-            "transport events listener place flags",
-            "transport events listener places",
-            "MAX_TRANSPORT_EVENTS_LISTENERS",
-        ),
-        EntityKind::AdvancedPublisher => (
-            "advanced publisher place flags",
-            "advanced publisher places",
-            "MAX_ADVANCED_PUBLISHERS",
-        ),
-        EntityKind::AdvancedSubscriber => (
-            "advanced subscriber place flags",
-            "advanced subscriber places",
-            "MAX_ADVANCED_SUBSCRIBERS",
-        ),
-        EntityKind::LinkEventsListener => (
-            "link events listener place flags",
-            "link events listener places",
-            "MAX_LINK_EVENTS_LISTENERS",
-        ),
+        EntityKind::Publisher => [ArenaPart::PublisherPlaceFlags, ArenaPart::PublisherPlaces],
+        EntityKind::Subscriber => [ArenaPart::SubscriberPlaceFlags, ArenaPart::SubscriberPlaces],
+        EntityKind::Queryable => [ArenaPart::QueryablePlaceFlags, ArenaPart::QueryablePlaces],
+        EntityKind::Token => [ArenaPart::TokenPlaceFlags, ArenaPart::TokenPlaces],
+        EntityKind::LivelinessSubscriber => [
+            ArenaPart::LivelinessSubscriberPlaceFlags,
+            ArenaPart::LivelinessSubscriberPlaces,
+        ],
+        EntityKind::Querier => [ArenaPart::QuerierPlaceFlags, ArenaPart::QuerierPlaces],
+        EntityKind::PendingGet => [ArenaPart::PendingGetPlaceFlags, ArenaPart::PendingGetPlaces],
+        EntityKind::PendingLivelinessGet => [
+            ArenaPart::PendingLivelinessGetPlaceFlags,
+            ArenaPart::PendingLivelinessGetPlaces,
+        ],
+        EntityKind::MatchingListener => [
+            ArenaPart::MatchingListenerPlaceFlags,
+            ArenaPart::MatchingListenerPlaces,
+        ],
+        EntityKind::DeclWatch => [ArenaPart::DeclWatchPlaceFlags, ArenaPart::DeclWatchPlaces],
+        EntityKind::TransportEventsListener => [
+            ArenaPart::TransportEventsListenerPlaceFlags,
+            ArenaPart::TransportEventsListenerPlaces,
+        ],
+        EntityKind::AdvancedPublisher => [
+            ArenaPart::AdvancedPublisherPlaceFlags,
+            ArenaPart::AdvancedPublisherPlaces,
+        ],
+        EntityKind::AdvancedSubscriber => [
+            ArenaPart::AdvancedSubscriberPlaceFlags,
+            ArenaPart::AdvancedSubscriberPlaces,
+        ],
+        EntityKind::LinkEventsListener => [
+            ArenaPart::LinkEventsListenerPlaceFlags,
+            ArenaPart::LinkEventsListenerPlaces,
+        ],
     }
 }
 
@@ -627,17 +825,17 @@ impl<T> LinkCells<T> {
     }
 }
 
-/// The names of the two rows of each table of [`LinkCells`], in [`LinkCells::into_array`]'s
+/// The parts of the two rows of each table of [`LinkCells`], in [`LinkCells::into_array`]'s
 /// order: its flags, then its cells.
-const CELL_ROWS_NAMED: [[&str; 2]; 4] = [
-    ["link cell flags", "link cells"],
-    ["link gate flags", "link gates"],
-    ["link actions flags", "link actions"],
-    ["link halves flags", "link halves"],
+const CELL_PARTS: [[ArenaPart; 2]; 4] = [
+    [ArenaPart::LinkCellFlags, ArenaPart::LinkCells],
+    [ArenaPart::LinkGateFlags, ArenaPart::LinkGates],
+    [ArenaPart::LinkActionsFlags, ArenaPart::LinkActions],
+    [ArenaPart::LinkHalvesFlags, ArenaPart::LinkHalves],
 ];
 
-/// The limits a table of a cell for each link is sized by.
-const CELL_BASIS: &str = "MAX_FACES + MAX_ACCEPT_PENDING";
+/// The limits a table of a row for each link is sized by.
+const LINK_BASIS: &str = "MAX_FACES + MAX_ACCEPT_PENDING";
 
 /// The rows of a session's transport ([`ArenaPlan::transport`]): its links' buffers and the
 /// cells of their drivers, gates and actions, the reassembly buffers its links share, and the
@@ -1047,35 +1245,23 @@ impl ArenaPlan {
                 .zip(Arena::table_bytes::<LocatorText>(listen_rows))
                 .and_then(|(dial, listen)| dial.checked_add(listen)),
         );
-        self.put(
-            "endpoint texts",
-            "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
-            1,
-            texts,
-        );
+        self.put(ArenaPart::EndpointTexts, 1, texts);
         // The links' rows are lent when the session opens, in this order
         // (`TransportRows::links_from`).
         self.put_table(
-            ["link receive flags", "link receive buffers"],
-            RX_BASIS,
+            [ArenaPart::LinkReceiveFlags, ArenaPart::LinkReceiveBuffers],
             self.transport.rx_buffers,
             link_bytes,
         );
         self.put_table(
-            ["link transmit flags", "link transmit slots"],
-            TX_BASIS,
+            [ArenaPart::LinkTransmitFlags, ArenaPart::LinkTransmitSlots],
             self.transport.tx_slots,
             link_bytes,
         );
         // A place for each link, which bounds the links that open where the slots are a pool:
         // the flags of a table of buffers of no bytes.
         #[cfg(feature = "listen")]
-        self.put(
-            "link places",
-            "MAX_FACES + MAX_ACCEPT_PENDING",
-            links,
-            LentByteCells::FLAG_BYTES,
-        );
+        self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
         // A receive buffer for each group the session may join, lent with the links' tables
         // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
@@ -1093,8 +1279,10 @@ impl ArenaPlan {
                 .min(limits.pico_multicast_batch_bytes());
             self.transport.group_rx = (buffers, bytes);
             self.put_table(
-                ["link group receive flags", "link group receive buffers"],
-                "PICO_MULTICAST_BATCH_BYTES",
+                [
+                    ArenaPart::LinkGroupReceiveFlags,
+                    ArenaPart::LinkGroupReceiveBuffers,
+                ],
                 buffers,
                 bytes,
             );
@@ -1114,8 +1302,10 @@ impl ArenaPlan {
             let slots = if listens { slots } else { 0 };
             self.transport.port_rx = (slots, link_bytes);
             self.put_table(
-                ["link port datagram flags", "link port datagram slots"],
-                "UDP_PORT_SLOTS",
+                [
+                    ArenaPart::LinkPortDatagramFlags,
+                    ArenaPart::LinkPortDatagramSlots,
+                ],
                 slots,
                 link_bytes,
             );
@@ -1125,38 +1315,25 @@ impl ArenaPlan {
             let peers = if listens { links } else { 0 };
             self.transport.port_peers = peers;
             let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(peers));
-            self.put(
-                "udp port peers",
-                "MAX_FACES + MAX_ACCEPT_PENDING",
-                1,
-                peer_rows,
-            );
+            self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
             let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-            self.put("udp port queue", "UDP_PORT_SLOTS", 1, queue_rows);
+            self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
         }
         // The round's tables (`crate::round::RoundRows::lent`).
         self.put(
-            "delivery records",
-            "DELIVERY_LANE_EVENTS",
+            ArenaPart::DeliveryRecords,
             self.session.round.records,
             RECORD_BYTES,
         );
         self.put(
-            "delivery callbacks",
-            "DELIVERY_LANE_CALLBACKS",
+            ArenaPart::DeliveryCallbacks,
             self.session.round.callbacks,
             CALLBACK_BYTES,
         );
-        self.put(
-            "delivery keys",
-            "MAX_KEYEXPR_BYTES",
-            1,
-            self.session.round.key_bytes(),
-        );
+        self.put(ArenaPart::DeliveryKeys, 1, self.session.round.key_bytes());
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
-            ["reassembly flags", "reassembly buffers"],
-            "PICO_FRAG_MAX_BYTES",
+            [ArenaPart::ReassemblyFlags, ArenaPart::ReassemblyBuffers],
             self.transport.reassembly_chains,
             self.transport.reassembly_bytes,
         );
@@ -1183,13 +1360,12 @@ impl ArenaPlan {
             };
             self.transport.handed_legs = legs;
             self.put_table(
-                ["handed leg flags", "handed leg places"],
-                "HANDED_LEG_BYTES",
+                [ArenaPart::HandedLegFlags, ArenaPart::HandedLegPlaces],
                 legs,
                 link_bytes,
             );
             let rows = self.sized(Arena::table_bytes::<Handed>(legs));
-            self.put("handed legs", "HANDED_LEG_BYTES", 1, rows);
+            self.put(ArenaPart::HandedLegs, 1, rows);
         }
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
@@ -1204,12 +1380,7 @@ impl ArenaPlan {
         let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
             watchers,
         ));
-        self.put(
-            "declaration watchers",
-            "MAX_DECL_OBSERVERS",
-            1,
-            watcher_bytes,
-        );
+        self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
             self.lent(
@@ -1242,34 +1413,25 @@ impl ArenaPlan {
         #[cfg(feature = "query")]
         {
             let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
-            self.put(
-                "pending gets",
-                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
-                self.session.gets.tables,
-                get_bytes,
-            );
+            self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
         // The ends of the legs, the rows of their callbacks and the session's note of each leg
         // pending, a row of each for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
-            const BASIS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
             let legs = self.sized(self.session.gets.legs());
             self.put(
-                "ended legs",
-                BASIS,
+                ArenaPart::EndedLegs,
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
             );
             self.put(
-                "leg callbacks",
-                BASIS,
+                ArenaPart::LegCallbacks,
                 legs,
                 core::mem::size_of::<Option<crate::engine::LegRow>>(),
             );
             self.put(
-                "pending legs",
-                BASIS,
+                ArenaPart::PendingLegs,
                 legs,
                 core::mem::size_of::<crate::engine::PendingGet>(),
             );
@@ -1284,8 +1446,7 @@ impl ArenaPlan {
                 caps::MAX_PENDING_REPLIES,
             );
             self.put(
-                "held replies",
-                "MAX_PENDING_REPLIES",
+                ArenaPart::HeldReplies,
                 self.session.held_replies,
                 core::mem::size_of::<HeldReply<u64, Lent>>(),
             );
@@ -1301,40 +1462,29 @@ impl ArenaPlan {
         // The sets of face tables themselves, one for each face, in one table
         // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
         self.put(
-            "face tables",
-            "MAX_FACES + 1",
+            ArenaPart::FaceTables,
             self.session.peers.sets(),
             FACE_SET_BYTES,
         );
         // Which face holds which set, a row for each set.
         self.put(
-            "held faces",
-            "MAX_FACES + 1",
+            ArenaPart::HeldFaces,
             self.session.peers.sets(),
             HELD_SET_BYTES,
         );
         let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
-        self.put(
-            "peer tables",
-            "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
-            self.session.peers.tables,
-            peer_bytes,
-        );
+        self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
         if SHARES_ROWS {
             let pools = self.session.peers.pools;
-            for (part, kind, bytes) in [
-                ("peer alias pool", &ALIAS_LIMITS, pools.alias_bytes()),
-                ("peer declaration pools", &DECL_LIMITS, pools.decl_bytes()),
-                (
-                    "peer interest pool",
-                    &INTEREST_LIMITS,
-                    pools.interest_bytes(),
-                ),
+            for (part, bytes) in [
+                (ArenaPart::PeerAliasPool, pools.alias_bytes()),
+                (ArenaPart::PeerDeclarationPools, pools.decl_bytes()),
+                (ArenaPart::PeerInterestPool, pools.interest_bytes()),
             ] {
                 let bytes = self.sized(bytes);
-                self.put(part, kind.session, 1, bytes);
+                self.put(part, 1, bytes);
             }
         }
         // The tokens the faces that went still owe, lent with the pools
@@ -1342,8 +1492,7 @@ impl ArenaPlan {
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
         if self.session.peers.owed_tokens() > 0 {
             self.put(
-                "owed tokens",
-                "SESSION_MAX_REMOTE_DECLS",
+                ArenaPart::OwedTokens,
                 self.session.peers.owed_tokens(),
                 core::mem::size_of::<
                     wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
@@ -1365,14 +1514,12 @@ impl ArenaPlan {
         {
             let held = self.session.held_queries;
             self.put(
-                "held finals",
-                "MAX_PENDING_FINALS",
+                ArenaPart::HeldFinals,
                 held,
                 core::mem::size_of::<crate::engine::FinalHold>(),
             );
             self.put(
-                "refused finals",
-                "MAX_PENDING_FINALS",
+                ArenaPart::RefusedFinals,
                 held,
                 core::mem::size_of::<crate::engine::RefusedFinal>(),
             );
@@ -1386,8 +1533,7 @@ impl ArenaPlan {
             );
             if self.session.cache_bytes != 0 {
                 self.put_table(
-                    ["cache ring flag", "cache ring"],
-                    "ADVANCED_CACHE_BYTES",
+                    [ArenaPart::CacheRingFlag, ArenaPart::CacheRing],
                     1,
                     self.session.cache_bytes,
                 );
@@ -1438,12 +1584,12 @@ impl ArenaPlan {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.
         let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
-        self.put("session tables", "MAX_DECLARED_KEYEXPRS", 1, tables);
+        self.put(ArenaPart::SessionTables, 1, tables);
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`TableLender::keys`), not a row of
         // each.
         let keys = self.sized(KeySpace::span_bytes(self.session.key_bytes));
-        self.put("key arena", "KEY_ARENA_BYTES", 1, keys);
+        self.put(ArenaPart::KeyArena, 1, keys);
     }
 
     /// How many rows each table of the session's round of deliveries is lent.
@@ -1523,10 +1669,9 @@ impl ArenaPlan {
     /// a row past them is refused as an arena past what the plan can lay out, which the plan keeps
     /// as its refusal unless it holds an earlier one ([`Self::settled`]).
     #[inline(never)]
-    fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
+    fn put(&mut self, name: ArenaPart, count: usize, entry_bytes: usize) {
         let row = ArenaRow {
-            part,
-            basis,
+            name,
             count,
             entry_bytes,
         };
@@ -1535,19 +1680,12 @@ impl ArenaPlan {
         }
     }
 
-    /// Add the two rows of a table of `count` entries of `entry_bytes` named `parts`: its flags,
-    /// then its entries, as an arena lends a table of cells.
+    /// Add the two rows of a table of `count` entries of `entry_bytes`, the parts `flags` and
+    /// `entries`: its flags, then its entries, as an arena lends a table of cells.
     #[inline(never)]
-    fn put_table(
-        &mut self,
-        parts: [&'static str; 2],
-        basis: &'static str,
-        count: usize,
-        entry_bytes: usize,
-    ) {
-        let [flags, entries] = parts;
-        self.put(flags, basis, count, LentByteCells::FLAG_BYTES);
-        self.put(entries, basis, count, entry_bytes);
+    fn put_table(&mut self, [flags, entries]: [ArenaPart; 2], count: usize, entry_bytes: usize) {
+        self.put(flags, count, LentByteCells::FLAG_BYTES);
+        self.put(entries, count, entry_bytes);
     }
 
     /// Keep `refused` as the plan's refusal unless it holds an earlier one.
@@ -1624,8 +1762,7 @@ impl ArenaPlan {
             if handle.size() != 0 && self.places.handle_bytes == 0 {
                 self.places.handle_bytes = handle.size();
                 self.put_table(
-                    ["session handle flag", "session handle"],
-                    "",
+                    [ArenaPart::SessionHandleFlag, ArenaPart::SessionHandle],
                     1,
                     handle.size(),
                 );
@@ -1643,8 +1780,7 @@ impl ArenaPlan {
             if place.size() == 0 || count == 0 || laid != 0 {
                 continue;
             }
-            let (flags, places, basis) = place_rows(kind);
-            self.put_table([flags, places], basis, count, place.size());
+            self.put_table(place_parts(kind), count, place.size());
             if let Some(bytes) = self.places.entity_bytes.get_mut(kind as usize) {
                 *bytes = place.size();
             }
@@ -1661,10 +1797,10 @@ impl ArenaPlan {
     /// where it lies; a refused one is no plan to open by.
     pub fn holding_cells(&mut self, bytes: LinkCells<usize>) -> Result<(), ArenaRefused> {
         let mut laid = self.transport.cell_bytes.into_array();
-        for ((laid, asked), parts) in laid.iter_mut().zip(bytes.into_array()).zip(CELL_ROWS_NAMED) {
+        for ((laid, asked), parts) in laid.iter_mut().zip(bytes.into_array()).zip(CELL_PARTS) {
             if *laid == 0 && asked != 0 {
                 *laid = asked;
-                self.put_table(parts, CELL_BASIS, self.transport.links, asked);
+                self.put_table(parts, self.transport.links, asked);
             }
         }
         self.transport.cell_bytes = LinkCells::from_array(laid);
@@ -2356,10 +2492,10 @@ mod tests {
     fn a_row_past_the_plan_is_refused_and_the_rows_it_holds_stay() {
         let mut plan = empty_plan();
         for _ in 0..ARENA_ROWS {
-            plan.put("part", "BASIS", 1, 8);
+            plan.put(ArenaPart::EndpointTexts, 1, 8);
         }
         assert_eq!(plan.refused, None);
-        plan.put("one more", "BASIS", 1, 8);
+        plan.put(ArenaPart::KeyArena, 1, 8);
         assert_eq!(plan.rows().count(), ARENA_ROWS);
         assert_eq!(plan.settled(), Err(ArenaRefused::TooLarge));
     }
@@ -2374,7 +2510,7 @@ mod tests {
         assert_eq!(plan.lent("FIRST_LIMIT", Quota::at_most(9), 4), 0);
         assert_eq!(plan.sized(None), 0);
         for _ in 0..=ARENA_ROWS {
-            plan.put("part", "BASIS", 1, 8);
+            plan.put(ArenaPart::EndpointTexts, 1, 8);
         }
         assert_eq!(
             plan.settled(),
@@ -2420,7 +2556,7 @@ mod tests {
             .expect("the handle fits");
         plan.holding(&HeldPlaces::handle(place))
             .expect("held already");
-        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| row.part).collect();
+        let parts: alloc::vec::Vec<_> = plan.rows().map(ArenaRow::part).collect();
         assert_eq!(parts, ["session handle flag", "session handle"]);
         assert_eq!(plan.handle_bytes(), place.size());
     }
@@ -2440,7 +2576,7 @@ mod tests {
         };
         plan.holding_cells(asked).expect("the cells fit");
         plan.holding_cells(asked).expect("held already");
-        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| row.part).collect();
+        let parts: alloc::vec::Vec<_> = plan.rows().map(ArenaRow::part).collect();
         assert_eq!(
             parts,
             [
@@ -2465,20 +2601,20 @@ mod tests {
     fn a_plan_reads_the_rows_it_put_and_none_past_them() {
         let mut plan = empty_plan();
         assert_eq!(plan.rows().count(), 0);
-        plan.put("first", "BASIS", 1, 8);
-        plan.put("second", "BASIS", 2, 16);
-        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| (row.part, row.count)).collect();
-        assert_eq!(parts, [("first", 1), ("second", 2)]);
+        plan.put(ArenaPart::EndpointTexts, 1, 8);
+        plan.put(ArenaPart::DeliveryRecords, 2, 16);
+        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| (row.part(), row.count)).collect();
+        assert_eq!(parts, [("endpoint texts", 1), ("delivery records", 2)]);
         assert_eq!(
             plan.reserved_bytes(),
             plan.rows()
                 .try_fold(0usize, |sum, row| sum.checked_add(row.span()?))
         );
         let mut same = empty_plan();
-        same.put("first", "BASIS", 1, 8);
-        same.put("second", "BASIS", 2, 16);
+        same.put(ArenaPart::EndpointTexts, 1, 8);
+        same.put(ArenaPart::DeliveryRecords, 2, 16);
         assert_eq!(plan, same);
-        same.put("third", "BASIS", 1, 8);
+        same.put(ArenaPart::DeliveryKeys, 1, 8);
         assert_ne!(plan, same);
     }
 
@@ -2488,9 +2624,9 @@ mod tests {
     #[test]
     fn plans_of_the_same_rows_differ_by_their_refusal() {
         let mut plan = empty_plan();
-        plan.put("first", "BASIS", 1, 8);
+        plan.put(ArenaPart::EndpointTexts, 1, 8);
         let mut refused = empty_plan();
-        refused.put("first", "BASIS", 1, 8);
+        refused.put(ArenaPart::EndpointTexts, 1, 8);
         assert_eq!(plan, refused);
         refused.refuse(ArenaRefused::TooLarge);
         assert_ne!(plan, refused);
