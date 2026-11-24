@@ -29,7 +29,7 @@ pub struct SubscribeOptions {
     pub allowed_origin: Locality,
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].
-    retraction_key: Option<RetractionKey>,
+    retraction_key: Option<RetractionName>,
     /// Whether the callback sees the timestamp of a sample, when the declaration says: see
     /// [`Self::with_expose_timestamp`].
     expose_timestamp: Option<bool>,
@@ -42,6 +42,28 @@ pub struct SubscribeOptions {
 /// [`crate::session::QueryableOptions`], whose retractions take the same shape,
 /// and defined in session-core, which a C ABI over another engine also names.
 pub use wz_session_core::declare_form::RetractionKey;
+
+/// What a retraction names beside the entity's id, as the session keeps it until the entity's
+/// drop sends it: the declaration's id and the rest of the entity's key, or `0` and the whole
+/// key. The session keeps its own copy of the text a [`RetractionKey`] reads against the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetractionName {
+    /// The declaration's id, `0` for the whole key.
+    pub mapping_id: wz_session_core::wire_id::ExprId,
+    /// What the retraction names after the id.
+    pub suffix: String,
+}
+
+impl RetractionName {
+    /// What `key` names of `keyexpr`, the entity's own key ([`RetractionKey::names`]).
+    pub fn of(key: RetractionKey, keyexpr: &str) -> Self {
+        let (mapping_id, rest) = key.names(keyexpr);
+        Self {
+            mapping_id,
+            suffix: rest.into(),
+        }
+    }
+}
 
 impl SubscribeOptions {
     /// Default options — `allowed_origin = Locality::Any`, id-only retraction.
@@ -64,13 +86,13 @@ impl SubscribeOptions {
     /// The two reference libraries disagree, so it is a declaring ABI's choice
     /// and not this session's — and the key is the ABI's too, since pico names
     /// the subscription's own key where it announced the caller's.
-    pub fn with_retraction_naming(mut self, key: Option<RetractionKey>) -> Self {
+    pub fn with_retraction_naming(mut self, key: Option<RetractionName>) -> Self {
         self.retraction_key = key;
         self
     }
 
     /// See [`Self::with_retraction_naming`].
-    pub fn retraction_key(&self) -> Option<&RetractionKey> {
+    pub fn retraction_key(&self) -> Option<&RetractionName> {
         self.retraction_key.as_ref()
     }
 

@@ -171,6 +171,7 @@ scout-datagram = [
 # attachment, and the error reply) and a query a C program keeps past its callback. What
 # `wz-capi-core`'s `queryable` names on its runtime, named on session-core.
 queryable = [
+    "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-queryable",
     "wz-session-core/reply-source-info",
@@ -203,8 +204,7 @@ local-subscriber = []
 # pools (`peer-row-pools`), so a face that goes gives its set back at once.
 listen = [
     "interest-answer",
-    "wz-runtime-coop/session-unicast-accept",
-    "wz-runtime-coop/udp-listen",
+    "wz-runtime-coop/listen",
     "wz-session-core/peer-row-pools",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
@@ -223,6 +223,7 @@ app-transport = ["wz-runtime-coop/app-link"]
 # (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
 group = [
     "interest-answer",
+    "wz-runtime-coop/group",
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
     "wz-session-core/peer-row-pools",
@@ -254,7 +255,7 @@ local-queryable = ["query", "queryable"]
 # transport and its links, and the events a watcher is told when one comes up or goes down. What
 # `wz-capi-core`'s `connectivity` names on its runtime. It needs nothing of session-core that the
 # engine does not already have.
-connectivity = []
+connectivity = ["wz-runtime-coop/connectivity"]
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
@@ -271,6 +272,7 @@ liveliness-get = ["liveliness", "query", "wz-session-core/liveliness-get"]
 # consolidation, attachment, parameters, source info, value) and everything a reply carries back
 # to it. What `wz-capi-core`'s `query` names on its runtime, named on session-core.
 query = [
+    "wz-runtime-coop/query",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-get",
     "wz-session-core/query-reply",
@@ -291,7 +293,11 @@ query = [
 # the dictionary it is opened with, every link of it reads an id only the dictionary names, and a
 # key goes on the wire as the session's key-wire form says. Without it a session opened with a
 # form other than `declared` is refused.
-shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids"]
+shared-key-ids = [
+    "wz-runtime-coop/shared-key-ids",
+    "wz-session-core/shared-key-ids",
+    "wz-capi-port/shared-key-ids",
+]
 # The session's transport counters (`CoopEngine::transport_stats`): each link's session counts
 # what it sends, receives and drops, as the tokio engine's sessions do under the same session-core
 # feature, and the engine counts the publishes it drops before they reach a link. Off, which is

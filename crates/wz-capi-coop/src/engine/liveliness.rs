@@ -76,10 +76,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
         };
         let form = tables.wire_of(row.key());
         let wire = wire_key_of(form);
-        let retraction = row.key().names_key().then(|| RetractionKey {
-            mapping_id: form.mapping,
-            suffix: String::from(form.suffix),
-        });
+        let retraction = row
+            .key()
+            .names_key()
+            .then(|| RetractionKey::declared(form.mapping, form.suffix));
         self.transport
             .announce_to_groups(super::group::GroupEntity {
                 what: wz_session_core::declare_form::GroupDeclaration::Token,

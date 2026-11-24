@@ -105,8 +105,8 @@ use wz_runtime_tokio::session::{DeclEvent, DeclListener};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryAliasError, QueryOptions, Queryable,
-    QueryableOptions, RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
-    WireProbe, WireReservation, WireRoom,
+    QueryableOptions, RetractionKey, RetractionName, SubscribeOptions, Subscriber,
+    TokioQueryHolder, TokioSession, WireProbe, WireReservation, WireRoom,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -3548,7 +3548,11 @@ impl SharedSession {
                 &entry.wire,
                 SubscribeOptions::default()
                     .with_allowed_origin(entry.allowed_origin)
-                    .with_retraction_naming(entry.retraction.clone()),
+                    .with_retraction_naming(
+                        entry
+                            .retraction
+                            .map(|key| RetractionName::of(key, &entry.keyexpr)),
+                    ),
                 FaceEnds::new(&self.zid, held.peer_zid.as_deref()),
                 (entry.sink)(),
             ) {
@@ -3572,8 +3576,11 @@ impl SharedSession {
                 &session,
                 &entry.keyexpr,
                 &entry.wire,
-                queryable_options(entry.complete, entry.allowed_origin)
-                    .with_retraction_naming(entry.retraction.clone()),
+                queryable_options(entry.complete, entry.allowed_origin).with_retraction_naming(
+                    entry
+                        .retraction
+                        .map(|key| RetractionName::of(key, &entry.keyexpr)),
+                ),
                 (entry.sink)(&TokioQueryHolder::Unicast(session.clone())),
             ) {
                 qbls.insert(entry.id, qbl);
@@ -6292,7 +6299,9 @@ impl SharedSession {
                 &wire,
                 SubscribeOptions::default()
                     .with_allowed_origin(allowed_origin)
-                    .with_retraction_naming(retraction.clone()),
+                    .with_retraction_naming(
+                        retraction.map(|key| RetractionName::of(key, &keyexpr)),
+                    ),
                 FaceEnds::new(&self.zid, face.peer_zid.as_deref()),
                 sink(),
             ) {
@@ -7274,8 +7283,9 @@ impl SharedSession {
                 &face.session,
                 &keyexpr,
                 &wire,
-                queryable_options(complete, allowed_origin)
-                    .with_retraction_naming(retraction.clone()),
+                queryable_options(complete, allowed_origin).with_retraction_naming(
+                    retraction.map(|key| RetractionName::of(key, &keyexpr)),
+                ),
                 callback,
             ) {
                 face.qbls.insert(id, qbl);

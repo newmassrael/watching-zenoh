@@ -474,8 +474,8 @@ pub(super) struct Registry {
 }
 
 /// The faces as the session's state reaches them (`SessionState`): a
-/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, and the
-/// earliest deadline of the gets pending on them.
+/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
+/// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
 impl SessionFaces for Registry {
     fn end_leg(&mut self, face: FaceId, kind: GetKind) {
         #[cfg(feature = "query")]
@@ -504,6 +504,11 @@ impl SessionFaces for Registry {
         {
             None
         }
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
+        Registry::retract_owed(self, room)
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    FilterPlane, HeldQueryId, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
     ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -293,14 +293,14 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::new(Mutex::new(None));
     let slot = kept.clone();
     declare(
         &engine,
         "demo/lq/**",
         Locality::Any,
         move |holder, query, _out| {
-            *slot.lock().unwrap() = Some(holder.hold_query(query));
+            *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
         },
     );
 
@@ -326,7 +326,7 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
     );
 
     let held = kept.lock().unwrap().take().expect("the kept query");
-    held.reply(&mut |out| {
+    engine.reply_held(held, &mut |out| {
         out.reply_keyed("demo/lq/a", b"later")
             .expect("a reply on the query's own key");
     });
@@ -338,7 +338,7 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
             [(ReplyKind::Put, "demo/lq/a".to_owned(), b"later".to_vec())]
         );
     }
-    drop(held);
+    engine.release_held(held);
     assert!(leg.lock().unwrap().ended, "the last hold let go: the Final");
 }
 
@@ -524,7 +524,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
     settle(&router, &engine, Command::Silence);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::new(Mutex::new(None));
     let asked = Arc::new(AtomicUsize::new(0));
     let (slot, count) = (kept.clone(), asked.clone());
     declare(
@@ -533,7 +533,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
         Locality::Any,
         move |holder, query, _out| {
             count.fetch_add(1, Ordering::SeqCst);
-            *slot.lock().unwrap() = Some(holder.hold_query(query));
+            *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
         },
     );
     let (issued, first) = ask(
@@ -574,8 +574,8 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
     }
     assert_eq!(router.seen(|s| s.queries), 0, "nothing was sent");
 
-    let held = kept.lock().unwrap().take();
-    drop(held);
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    engine.release_held(held);
     assert!(
         first.lock().unwrap().ended,
         "the kept query let go: its Final"

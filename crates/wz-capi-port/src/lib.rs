@@ -118,8 +118,8 @@ pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
 };
 pub use query::{
-    HeldQuery, QblId, QueryHolder, QueryableSink, RawQueryCallback, RawQueryFn, ReplyCallback,
-    SharedQueryFn,
+    HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, RawQueryCallback, RawQueryFn,
+    ReplyCallback, SharedQueryFn,
 };
 pub use refusal::Refusal;
 pub use scout_ask::ScoutAsk;

@@ -11,17 +11,59 @@
 //! moved here when the pico C ABI over the cooperative engine (`docs/capi-pico-on-coop-engine.md`)
 //! had to hand them to an engine without naming that one.
 
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
 use alloc::string::String;
 
 /// The key an entity's `Undeclare*` names beside its id, in the wire form it is held under: a
 /// declared prefix's id and the rest of the key, or `0` and the whole literal. A subscriber's
 /// retraction and a queryable's take the same shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The rest is named by its length and read against the entity's own key ([`Self::names`]),
+/// which every engine keeps for as long as the entity stands: so this holds no text, and handing
+/// it to an engine copies none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetractionKey {
     /// The prefix's mapping id, or `0` for a literal.
     pub mapping_id: crate::wire_id::ExprId,
-    /// The rest of the key after the prefix; the whole key when `mapping_id` is `0`.
-    pub suffix: String,
+    /// How many bytes at the end of the key follow the prefix; not read for a literal.
+    rest_len: usize,
+}
+
+impl RetractionKey {
+    /// The whole key, under no declaration.
+    pub const fn literal() -> Self {
+        Self {
+            mapping_id: 0,
+            rest_len: 0,
+        }
+    }
+
+    /// Declaration `mapping_id` followed by `rest`, the end of the entity's key past the declared
+    /// prefix (empty when the declaration covers all of it).
+    pub const fn declared(mapping_id: crate::wire_id::ExprId, rest: &str) -> Self {
+        Self {
+            mapping_id,
+            rest_len: rest.len(),
+        }
+    }
+
+    /// What the retraction names of `keyexpr`, the entity's own key: the declaration's id and the
+    /// rest of the key past it, or `0` and the whole key. A key the rest does not end (shorter
+    /// than it, or cut by it inside a character) is not the key this was made for, and is named
+    /// whole, which every peer reads.
+    pub fn names<'k>(&self, keyexpr: &'k str) -> (crate::wire_id::ExprId, &'k str) {
+        if self.mapping_id == 0 {
+            return (0, keyexpr);
+        }
+        match keyexpr
+            .len()
+            .checked_sub(self.rest_len)
+            .and_then(|at| keyexpr.get(at..))
+        {
+            Some(rest) => (self.mapping_id, rest),
+            None => (0, keyexpr),
+        }
+    }
 }
 
 /// Open-debt item 913 — the kind of entity a session announces on a multicast group or retracts
@@ -119,6 +161,36 @@ impl InterestForm {
             suffix: self.suffix.as_deref(),
             aggregate: self.aggregate,
         }
+    }
+}
+
+#[cfg(test)]
+mod retraction_tests {
+    use super::RetractionKey;
+
+    /// A literal names the whole key; a declaration names its id and the end of the key it was
+    /// made from, read against the key it is handed with, an empty rest included.
+    ///
+    /// # Control
+    ///
+    /// Reading the rest from the front of the key reds the second assertion.
+    #[test]
+    fn a_retraction_names_the_rest_of_the_key_it_is_read_against() {
+        let key = "demo/example/**";
+        assert_eq!(RetractionKey::literal().names(key), (0, key));
+        assert_eq!(RetractionKey::declared(4, "/**").names(key), (4, "/**"));
+        assert_eq!(RetractionKey::declared(4, "").names(key), (4, ""));
+        assert_eq!(RetractionKey::declared(0, "/**").names(key), (0, key));
+    }
+
+    /// A key the rest does not end is named whole: one shorter than the rest, and one the rest
+    /// would cut inside a character.
+    #[test]
+    fn a_key_the_rest_does_not_end_is_named_whole() {
+        let short = RetractionKey::declared(9, "/a/b/c/d");
+        assert_eq!(short.names("x"), (0, "x"));
+        let cut = RetractionKey::declared(9, "b");
+        assert_eq!(cut.names("aé"), (0, "aé"));
     }
 }
 

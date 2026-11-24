@@ -194,6 +194,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_PENDING_REPLIES", "WZ_LIMIT_MAX_PENDING_REPLIES", 8),
     ("MAX_PENDING_FINALS", "WZ_LIMIT_MAX_PENDING_FINALS", 8),
     (
+        "HELD_QUERY_PARAMS_BYTES",
+        "WZ_LIMIT_HELD_QUERY_PARAMS_BYTES",
+        256,
+    ),
+    (
         "MAX_REPLY_PAYLOAD_BYTES",
         "WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES",
         1024,

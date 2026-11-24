@@ -240,12 +240,14 @@ impl Open {
 impl OpenClosures {
     /// One more held open here: a closure counted in the owner, or a leg of a get, which lets it
     /// go with [`Self::close_one`].
+    #[cfg(feature = "query")]
     pub(crate) fn open_one(&self) {
         self.count_one(false);
     }
 
     /// One closure let go of: `true` when it was the last one held and the owner has let go of
     /// its place, which this closure then gives back.
+    #[cfg(feature = "query")]
     pub(crate) fn close_one(&self) -> bool {
         self.uncount_one(false)
     }

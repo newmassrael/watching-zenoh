@@ -103,6 +103,13 @@ pub trait SessionFaces {
 
     /// When the earliest get pending on any face is due.
     fn next_get_deadline_ms(&self) -> Option<u64>;
+
+    /// Retract the tokens the peers of lost links declared, a token at a time while `room` says
+    /// the round of deliveries takes its `Delete` now: whether none is owed any more. Faces that
+    /// keep no token owe none and ask no room.
+    fn retract_owed(&mut self, _room: &mut dyn FnMut() -> bool) -> bool {
+        true
+    }
 }
 
 /// A face's tables of pending gets, as a leg's entry is ended in them and their earliest deadline
@@ -225,5 +232,26 @@ mod tests {
         let mut ends = Ends(Vec::new());
         leg(4, 7).unregister(&mut ends);
         assert_eq!(ends.0, [(4, GetKind::Query(7))]);
+    }
+
+    /// Faces that keep no token owe no retraction and ask the round for no room.
+    #[test]
+    fn faces_that_keep_no_token_owe_no_retraction() {
+        struct Tokenless;
+        impl SessionFaces for Tokenless {
+            fn end_leg(&mut self, _face: u64, _kind: GetKind) {}
+
+            fn lose_face(&mut self, _face: u64) {}
+
+            fn next_get_deadline_ms(&self) -> Option<u64> {
+                None
+            }
+        }
+        let mut asked = false;
+        assert!(Tokenless.retract_owed(&mut || {
+            asked = true;
+            false
+        }));
+        assert!(!asked, "no room asked");
     }
 }
