@@ -216,6 +216,9 @@ buffer-pool-session-rx-slim = ["lwip-link", "wz/buffer-pool-session-rx-slim"]
 # on the host integration-test path (the QEMU bin supplies the cortex-m
 # impl at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }
+# The tests select every value of a policy, which `policy-selection` keeps in its domain for the
+# test build alone.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["policy-selection"] }
 
 [lints]
 workspace = true

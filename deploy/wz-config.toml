@@ -5162,9 +5162,11 @@ cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Number of keep-alive messages 
 # The build narrows each policy to its domain, the values a later stage may select: one
 # `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (Kconfig: one `default y` bool per value), `off`
 # leaving the value out and `on` keeping it. An unset name allows its value on a target with an
-# operating system; on a target with none it allows only the policy's default, so an image pays
-# for a second value only where it states one. `WZ_POLICY_DOMAINS` = `full` or `defaults` forces
-# either rule; it is not a cargo feature, which would unify across a graph and narrow host builds.
+# operating system in a build where a stage after it selects a policy (a door, a document: the
+# `policy-selection` feature of wz-session-core, which only widens, so unified across a graph it
+# never narrows a build that has a door); otherwise it allows only the policy's default, so an
+# image pays for a second value only where it states one, and a build with no door links no value
+# it cannot reach. `WZ_POLICY_DOMAINS` = `full` or `defaults` forces either rule.
 # The build's value of the policy is always inside its domain; a domain of one value makes the
 # policy a constant of the build, held in no byte.
 [[policy]]

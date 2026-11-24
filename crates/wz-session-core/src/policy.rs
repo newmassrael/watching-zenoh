@@ -109,16 +109,16 @@ pub const fn policy_allows(stated: Option<&str>, unstated: bool) -> Option<bool>
 
 /// Whether an allowance the build does not state keeps only the build default of its policy, from
 /// what the build states as `WZ_POLICY_DOMAINS`: `full` allows every such value, `defaults` keeps
-/// the default alone, and a build that states nothing gets the rule of its target. A target with
-/// no operating system keeps the default alone, so an image pays for a second value only where it
-/// allows one on purpose; every other target allows every value. A target and not a cargo
-/// feature decides it: features unify across a graph, and one crate's choice would narrow the
-/// host builds of every other. `None` is any other word, which the generated module refuses to
-/// build with.
+/// the default alone, and a build that states nothing gets `unstated_keeps_default` of its
+/// target and of whether anything in it selects a policy (the `policy-selection` feature).
+/// `None` is any other word, which the generated module refuses to build with.
 #[doc(hidden)]
 pub const fn policy_defaults_only(stated: Option<&str>) -> Option<bool> {
     let Some(text) = stated else {
-        return Some(cfg!(target_os = "none"));
+        return Some(unstated_keeps_default(
+            cfg!(target_os = "none"),
+            cfg!(feature = "policy-selection"),
+        ));
     };
     if same(text, "full") {
         Some(false)
@@ -127,6 +127,16 @@ pub const fn policy_defaults_only(stated: Option<&str>) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// The rule of an allowance the build does not state: the default alone on a target with no
+/// operating system (`no_os`), so an image pays for a second value only where it allows one on
+/// purpose, and in a build where nothing selects a policy after it (`!selects`), where a second
+/// value could never be reached; every value otherwise. The feature that says `selects` only
+/// widens: unified across a graph, one crate's door widens the others' builds and never narrows
+/// its own.
+const fn unstated_keeps_default(no_os: bool, selects: bool) -> bool {
+    no_os || !selects
 }
 
 /// The value the build states, found by its word in `choices` and taken from `values` at the
@@ -400,13 +410,23 @@ mod tests {
         assert_eq!(policy_allows(Some("y"), false), None);
     }
 
-    /// `WZ_POLICY_DOMAINS` forces either rule, and a build that states nothing gets its target's:
-    /// the default alone with no operating system, every value otherwise.
+    /// `WZ_POLICY_DOMAINS` forces either rule, and a build that states nothing gets the rule of
+    /// its target and of its `policy-selection`, which this crate's tests always name.
     #[test]
     fn the_domain_rule_is_stated_or_the_targets() {
         assert_eq!(policy_defaults_only(Some("full")), Some(false));
         assert_eq!(policy_defaults_only(Some("defaults")), Some(true));
         assert_eq!(policy_defaults_only(None), Some(cfg!(target_os = "none")));
+    }
+
+    /// An unstated allowance keeps the default alone on a target with no operating system and in
+    /// a build where nothing selects a policy, and allows its value only where both are false.
+    #[test]
+    fn an_unstated_allowance_keeps_the_default_where_no_stage_selects_a_policy() {
+        assert!(!unstated_keeps_default(false, true));
+        assert!(unstated_keeps_default(true, true));
+        assert!(unstated_keeps_default(false, false));
+        assert!(unstated_keeps_default(true, false));
     }
 
     #[test]
