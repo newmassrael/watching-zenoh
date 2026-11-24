@@ -241,7 +241,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The place of the declaration at `rank` of `kind`'s list in the replay's order.
-    fn place(&self, kind: Kind, rank: usize) -> usize {
+    pub(super) fn place(&self, kind: Kind, rank: usize) -> usize {
         self.start_of(kind).saturating_add(rank)
     }
 

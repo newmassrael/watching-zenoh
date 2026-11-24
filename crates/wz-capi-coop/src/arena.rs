@@ -316,9 +316,9 @@ impl ArenaPart {
             Self::FaceTables => ("face tables", "MAX_FACES + 1"),
             Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
             Self::PeerTables => ("peer tables", "MAX_PENDING_DECLARES + MAX_PENDING_FINALS"),
-            Self::PeerAliasPool => ("peer alias pool", ALIAS_LIMITS.session),
-            Self::PeerDeclarationPools => ("peer declaration pools", DECL_LIMITS.session),
-            Self::PeerInterestPool => ("peer interest pool", INTEREST_LIMITS.session),
+            Self::PeerAliasPool => ("peer alias pool", ALIAS_LIMITS.session.name()),
+            Self::PeerDeclarationPools => ("peer declaration pools", DECL_LIMITS.session.name()),
+            Self::PeerInterestPool => ("peer interest pool", INTEREST_LIMITS.session.name()),
             Self::OwedTokens => ("owed tokens", "SESSION_MAX_REMOTE_DECLS"),
             Self::HeldFinals => ("held finals", "MAX_PENDING_FINALS"),
             Self::RefusedFinals => ("refused finals", "MAX_PENDING_FINALS"),
@@ -611,6 +611,102 @@ pub const LINK_TX_SLOTS: usize = 1;
 // A link of a pool holds one slot at a time (`wz_runtime_coop::link_storage::PooledTx`).
 const _: () = assert!(LINK_TX_SLOTS == 1);
 
+/// A limit an arena is sized by, as a refusal names it ([`ArenaRefused::Limit`]): a byte, so
+/// laying a plan out passes no text, and only what reports a refusal reads [`Self::name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArenaLimit {
+    MaxFaces,
+    MaxStaticConnect,
+    MaxAdminLocators,
+    MaxAcceptPending,
+    PicoFragMaxBytes,
+    DeliveryLaneEvents,
+    DeliveryLaneCallbacks,
+    MaxKeyexprBytes,
+    KeyArenaBytes,
+    UdpPortSlots,
+    HandedLegBytes,
+    MaxDeclObservers,
+    MaxPendingQueries,
+    MaxPendingLivelinessGets,
+    MaxPendingReplies,
+    MaxPendingFinals,
+    AdvancedCacheBytes,
+    PicoUnicastBatchBytes,
+    MaxSubscriptions,
+    MaxQueryables,
+    MaxLocalTokens,
+    MaxLivelinessSubscriptions,
+    MaxDeclaredKeyexprs,
+    MaxPublishers,
+    MaxQueriers,
+    MaxMatchingListeners,
+    MaxDeclWatches,
+    MaxTransportEventsListeners,
+    MaxAdvancedPublishers,
+    MaxAdvancedSubscribers,
+    MaxLinkEventsListeners,
+    MaxPeerKeyexprAliases,
+    SessionMaxPeerKeyexprAliases,
+    MaxRemoteDecls,
+    SessionMaxRemoteDecls,
+    MaxInboundSubInterests,
+    SessionMaxInboundSubInterests,
+    MaxReplyPayloadBytes,
+    MaxPendingDeclares,
+    RxPoolBuffers,
+    TxPoolSlots,
+}
+
+impl ArenaLimit {
+    /// The limit's id, as the build and a session's limits name it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MaxFaces => "MAX_FACES",
+            Self::MaxStaticConnect => "MAX_STATIC_CONNECT",
+            Self::MaxAdminLocators => "MAX_ADMIN_LOCATORS",
+            Self::MaxAcceptPending => "MAX_ACCEPT_PENDING",
+            Self::PicoFragMaxBytes => "PICO_FRAG_MAX_BYTES",
+            Self::DeliveryLaneEvents => "DELIVERY_LANE_EVENTS",
+            Self::DeliveryLaneCallbacks => "DELIVERY_LANE_CALLBACKS",
+            Self::MaxKeyexprBytes => "MAX_KEYEXPR_BYTES",
+            Self::KeyArenaBytes => "KEY_ARENA_BYTES",
+            Self::UdpPortSlots => "UDP_PORT_SLOTS",
+            Self::HandedLegBytes => "HANDED_LEG_BYTES",
+            Self::MaxDeclObservers => "MAX_DECL_OBSERVERS",
+            Self::MaxPendingQueries => "MAX_PENDING_QUERIES",
+            Self::MaxPendingLivelinessGets => "MAX_PENDING_LIVELINESS_GETS",
+            Self::MaxPendingReplies => "MAX_PENDING_REPLIES",
+            Self::MaxPendingFinals => "MAX_PENDING_FINALS",
+            Self::AdvancedCacheBytes => "ADVANCED_CACHE_BYTES",
+            Self::PicoUnicastBatchBytes => "PICO_UNICAST_BATCH_BYTES",
+            Self::MaxSubscriptions => "MAX_SUBSCRIPTIONS",
+            Self::MaxQueryables => "MAX_QUERYABLES",
+            Self::MaxLocalTokens => "MAX_LOCAL_TOKENS",
+            Self::MaxLivelinessSubscriptions => "MAX_LIVELINESS_SUBSCRIPTIONS",
+            Self::MaxDeclaredKeyexprs => "MAX_DECLARED_KEYEXPRS",
+            Self::MaxPublishers => "MAX_PUBLISHERS",
+            Self::MaxQueriers => "MAX_QUERIERS",
+            Self::MaxMatchingListeners => "MAX_MATCHING_LISTENERS",
+            Self::MaxDeclWatches => "MAX_DECL_WATCHES",
+            Self::MaxTransportEventsListeners => "MAX_TRANSPORT_EVENTS_LISTENERS",
+            Self::MaxAdvancedPublishers => "MAX_ADVANCED_PUBLISHERS",
+            Self::MaxAdvancedSubscribers => "MAX_ADVANCED_SUBSCRIBERS",
+            Self::MaxLinkEventsListeners => "MAX_LINK_EVENTS_LISTENERS",
+            Self::MaxPeerKeyexprAliases => "MAX_PEER_KEYEXPR_ALIASES",
+            Self::SessionMaxPeerKeyexprAliases => "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+            Self::MaxRemoteDecls => "MAX_REMOTE_DECLS",
+            Self::SessionMaxRemoteDecls => "SESSION_MAX_REMOTE_DECLS",
+            Self::MaxInboundSubInterests => "MAX_INBOUND_SUB_INTERESTS",
+            Self::SessionMaxInboundSubInterests => "SESSION_MAX_INBOUND_SUB_INTERESTS",
+            Self::MaxReplyPayloadBytes => "MAX_REPLY_PAYLOAD_BYTES",
+            Self::MaxPendingDeclares => "MAX_PENDING_DECLARES",
+            Self::RxPoolBuffers => "RX_POOL_BUFFERS",
+            Self::TxPoolSlots => "TX_POOL_SLOTS",
+        }
+    }
+}
+
 /// Why a session's open reserved no arena, and so bound, joined and dialled nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArenaRefused {
@@ -618,7 +714,7 @@ pub enum ArenaRefused {
     /// the build states none.
     Limit {
         /// The limit's id.
-        limit: &'static str,
+        limit: ArenaLimit,
         /// Why.
         why: UnlentRows,
     },
@@ -1142,20 +1238,24 @@ impl ArenaPlan {
         config: &CoopConfig<E>,
         limits: &SessionLimits,
     ) -> Result<(), ArenaRefused> {
-        hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
         hold(
-            "MAX_STATIC_CONNECT",
+            ArenaLimit::MaxFaces,
+            config.max_faces,
+            admitted_faces(limits)?,
+        )?;
+        hold(
+            ArenaLimit::MaxStaticConnect,
             config.endpoints.count(),
             caps::MAX_STATIC_CONNECT,
         )?;
         hold(
-            "MAX_ADMIN_LOCATORS",
+            ArenaLimit::MaxAdminLocators,
             config.listen.count(),
             caps::MAX_ADMIN_LOCATORS,
         )?;
         if config.listen.count() > 0 {
             hold(
-                "MAX_ACCEPT_PENDING",
+                ArenaLimit::MaxAcceptPending,
                 config.accept_pending,
                 admitted_handshakes(limits)?,
             )?;
@@ -1185,7 +1285,7 @@ impl ArenaPlan {
         // The largest message a link rejoins is decided before the lane that hands it on, so a
         // value over the build's is refused under its own name.
         self.transport.reassembly_bytes = self.lent(
-            "PICO_FRAG_MAX_BYTES",
+            ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
             caps::PICO_FRAG_MAX_BYTES,
         );
@@ -1200,14 +1300,14 @@ impl ArenaPlan {
         {
             self.transport.rx_buffers = self
                 .lent(
-                    "RX_POOL_BUFFERS",
+                    ArenaLimit::RxPoolBuffers,
                     Quota::at_most(limits.rx_pool_buffers()),
                     caps::RX_POOL_BUFFERS,
                 )
                 .min(links);
             self.transport.tx_slots = self
                 .lent(
-                    "TX_POOL_SLOTS",
+                    ArenaLimit::TxPoolSlots,
                     Quota::at_most(limits.tx_pool_slots()),
                     caps::TX_POOL_SLOTS,
                 )
@@ -1215,23 +1315,23 @@ impl ArenaPlan {
         }
         self.session.round = RoundRowCounts {
             records: self.lent(
-                "DELIVERY_LANE_EVENTS",
+                ArenaLimit::DeliveryLaneEvents,
                 limits.delivery_lane_events(),
                 caps::DELIVERY_LANE_EVENTS,
             ),
             callbacks: self.lent(
-                "DELIVERY_LANE_CALLBACKS",
+                ArenaLimit::DeliveryLaneCallbacks,
                 limits.delivery_lane_callbacks(),
                 caps::DELIVERY_LANE_CALLBACKS,
             ),
             longest_key: self.lent(
-                "MAX_KEYEXPR_BYTES",
+                ArenaLimit::MaxKeyexprBytes,
                 limits.max_keyexpr_bytes(),
                 caps::MAX_KEYEXPR_BYTES,
             ),
         };
         self.session.key_bytes = self.lent(
-            "KEY_ARENA_BYTES",
+            ArenaLimit::KeyArenaBytes,
             Quota::at_most(limits.key_arena_bytes()),
             caps::KEY_ARENA_BYTES,
         );
@@ -1294,7 +1394,7 @@ impl ArenaPlan {
         #[cfg(feature = "listen")]
         {
             let slots = self.lent(
-                "UDP_PORT_SLOTS",
+                ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
@@ -1343,7 +1443,7 @@ impl ArenaPlan {
         #[cfg(any(feature = "listen", feature = "group"))]
         {
             let bytes = self.lent(
-                "HANDED_LEG_BYTES",
+                ArenaLimit::HandedLegBytes,
                 Quota::at_most(limits.handed_leg_bytes()),
                 caps::HANDED_LEG_BYTES,
             );
@@ -1373,7 +1473,7 @@ impl ArenaPlan {
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
         let watchers = self.lent(
-            "MAX_DECL_OBSERVERS",
+            ArenaLimit::MaxDeclObservers,
             limits.max_decl_observers(),
             caps::MAX_DECL_OBSERVERS,
         );
@@ -1384,7 +1484,7 @@ impl ArenaPlan {
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
             self.lent(
-                "MAX_PENDING_QUERIES",
+                ArenaLimit::MaxPendingQueries,
                 limits.max_pending_queries(),
                 caps::MAX_PENDING_QUERIES,
             )
@@ -1393,7 +1493,7 @@ impl ArenaPlan {
         };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
             self.lent(
-                "MAX_PENDING_LIVELINESS_GETS",
+                ArenaLimit::MaxPendingLivelinessGets,
                 limits.max_pending_liveliness_gets(),
                 caps::MAX_PENDING_LIVELINESS_GETS,
             )
@@ -1441,7 +1541,7 @@ impl ArenaPlan {
         #[cfg(feature = "query")]
         {
             self.session.held_replies = self.lent(
-                "MAX_PENDING_REPLIES",
+                ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
@@ -1501,7 +1601,7 @@ impl ArenaPlan {
         }
         self.session.held_queries = if cfg!(feature = "queryable") {
             self.lent(
-                "MAX_PENDING_FINALS",
+                ArenaLimit::MaxPendingFinals,
                 limits.max_pending_finals(),
                 caps::MAX_PENDING_FINALS,
             )
@@ -1527,7 +1627,7 @@ impl ArenaPlan {
         #[cfg(feature = "advanced-cache")]
         {
             self.session.cache_bytes = self.lent(
-                "ADVANCED_CACHE_BYTES",
+                ArenaLimit::AdvancedCacheBytes,
                 Quota::at_most(caps::ADVANCED_CACHE_BYTES),
                 caps::ADVANCED_CACHE_BYTES,
             );
@@ -1700,7 +1800,7 @@ impl ArenaPlan {
     /// the build's value of the limit. A value over it is kept as the plan's refusal, under the
     /// limit's own name, and answers `0`.
     #[inline(never)]
-    fn lent(&mut self, limit: &'static str, value: Quota, ceiling: usize) -> usize {
+    fn lent(&mut self, limit: ArenaLimit, value: Quota, ceiling: usize) -> usize {
         match lent_under(limit, value, ceiling) {
             Ok(rows) => rows,
             Err(refused) => {
@@ -1838,14 +1938,14 @@ impl ArenaPlan {
 /// capacity the build gives the table's type (a `BoundedVec<T, CEILING, Lent>` is lent at most
 /// that many rows): the build sizes the storage and the snapshot chooses within it.
 #[inline]
-fn lent<const CEILING: usize>(limit: &'static str, value: Quota) -> Result<usize, ArenaRefused> {
+fn lent<const CEILING: usize>(limit: ArenaLimit, value: Quota) -> Result<usize, ArenaRefused> {
     lent_under(limit, value, CEILING)
 }
 
 /// [`lent`] with the build's value a value: one body for every limit, the ceiling a const of the
 /// caller's alone.
 #[inline(never)]
-fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize, ArenaRefused> {
+fn lent_under(limit: ArenaLimit, value: Quota, ceiling: usize) -> Result<usize, ArenaRefused> {
     value
         .lent_under(Quota::at_most(ceiling))
         .map_err(|why| ArenaRefused::Limit { limit, why })
@@ -1857,13 +1957,13 @@ fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize
 /// is refused, as a stage after the build only lowers the memory the build fixes.
 fn link_batch<E>(config: &CoopConfig<E>, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
     let ceiling = lent::<{ caps::PICO_UNICAST_BATCH_BYTES }>(
-        "PICO_UNICAST_BATCH_BYTES",
+        ArenaLimit::PicoUnicastBatchBytes,
         Quota::at_most(limits.pico_unicast_batch_bytes()),
     )?;
     let advertised = usize::from(config.batch_size);
     if advertised > ceiling {
         return Err(ArenaRefused::Limit {
-            limit: "PICO_UNICAST_BATCH_BYTES",
+            limit: ArenaLimit::PicoUnicastBatchBytes,
             why: UnlentRows::OverCeiling {
                 value: advertised,
                 ceiling,
@@ -1877,42 +1977,48 @@ fn link_batch<E>(config: &CoopConfig<E>, limits: &SessionLimits) -> Result<usize
 fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
     Ok(EntityRows {
         subscribers: lent::<{ caps::MAX_SUBSCRIPTIONS }>(
-            "MAX_SUBSCRIPTIONS",
+            ArenaLimit::MaxSubscriptions,
             limits.max_subscriptions(),
         )?,
         queryables: if cfg!(feature = "queryable") {
-            lent::<{ caps::MAX_QUERYABLES }>("MAX_QUERYABLES", limits.max_queryables())?
+            lent::<{ caps::MAX_QUERYABLES }>(ArenaLimit::MaxQueryables, limits.max_queryables())?
         } else {
             0
         },
         tokens: if cfg!(feature = "liveliness") {
-            lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?
+            lent::<{ caps::MAX_LOCAL_TOKENS }>(
+                ArenaLimit::MaxLocalTokens,
+                limits.max_local_tokens(),
+            )?
         } else {
             0
         },
         liveliness_subscribers: if cfg!(feature = "liveliness") {
             lent::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                ArenaLimit::MaxLivelinessSubscriptions,
                 limits.max_liveliness_subscriptions(),
             )?
         } else {
             0
         },
         keyexprs: lent::<{ caps::MAX_DECLARED_KEYEXPRS }>(
-            "MAX_DECLARED_KEYEXPRS",
+            ArenaLimit::MaxDeclaredKeyexprs,
             limits.max_declared_keyexprs(),
         )?,
-        publishers: lent::<{ caps::MAX_PUBLISHERS }>("MAX_PUBLISHERS", limits.max_publishers())?,
-        queriers: lent::<{ caps::MAX_QUERIERS }>("MAX_QUERIERS", limits.max_queriers())?,
+        publishers: lent::<{ caps::MAX_PUBLISHERS }>(
+            ArenaLimit::MaxPublishers,
+            limits.max_publishers(),
+        )?,
+        queriers: lent::<{ caps::MAX_QUERIERS }>(ArenaLimit::MaxQueriers, limits.max_queriers())?,
         matching_listeners: lent::<{ caps::MAX_MATCHING_LISTENERS }>(
-            "MAX_MATCHING_LISTENERS",
+            ArenaLimit::MaxMatchingListeners,
             limits.max_matching_listeners(),
         )?,
         // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
         // holds pending takes one row of every face's table, so no more are pending at once.
         pending_gets: if cfg!(feature = "query") {
             lent::<{ caps::MAX_PENDING_QUERIES }>(
-                "MAX_PENDING_QUERIES",
+                ArenaLimit::MaxPendingQueries,
                 limits.max_pending_queries(),
             )?
         } else {
@@ -1920,7 +2026,7 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
         },
         pending_liveliness_gets: if cfg!(feature = "liveliness-get") {
             lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
-                "MAX_PENDING_LIVELINESS_GETS",
+                ArenaLimit::MaxPendingLivelinessGets,
                 limits.max_pending_liveliness_gets(),
             )?
         } else {
@@ -1930,13 +2036,16 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         )) {
-            lent::<{ caps::MAX_DECL_WATCHES }>("MAX_DECL_WATCHES", limits.max_decl_watches())?
+            lent::<{ caps::MAX_DECL_WATCHES }>(
+                ArenaLimit::MaxDeclWatches,
+                limits.max_decl_watches(),
+            )?
         } else {
             0
         },
         transport_events_listeners: if cfg!(feature = "connectivity") {
             lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
-                "MAX_TRANSPORT_EVENTS_LISTENERS",
+                ArenaLimit::MaxTransportEventsListeners,
                 limits.max_transport_events_listeners(),
             )?
         } else {
@@ -1944,7 +2053,7 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
         },
         advanced_publishers: if cfg!(feature = "advanced") {
             lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
-                "MAX_ADVANCED_PUBLISHERS",
+                ArenaLimit::MaxAdvancedPublishers,
                 limits.max_advanced_publishers(),
             )?
         } else {
@@ -1952,7 +2061,7 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
         },
         advanced_subscribers: if cfg!(feature = "advanced") {
             lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
-                "MAX_ADVANCED_SUBSCRIBERS",
+                ArenaLimit::MaxAdvancedSubscribers,
                 limits.max_advanced_subscribers(),
             )?
         } else {
@@ -1960,7 +2069,7 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
         },
         link_events_listeners: if cfg!(feature = "connectivity") {
             lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
-                "MAX_LINK_EVENTS_LISTENERS",
+                ArenaLimit::MaxLinkEventsListeners,
                 limits.max_link_events_listeners(),
             )?
         } else {
@@ -2024,35 +2133,35 @@ fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, Arena
 /// takes each of its two.
 #[inline]
 fn limit_rows<const CEILING: usize>(
-    limit: &'static str,
+    limit: ArenaLimit,
     value: Quota,
-) -> Result<(&'static str, usize), ArenaRefused> {
+) -> Result<(ArenaLimit, usize), ArenaRefused> {
     Ok((limit, lent::<CEILING>(limit, value)?))
 }
 
 /// The two limits that bound one kind of what the peers of a session write, by id: one face's, and
 /// all the faces' together.
 struct PoolLimit {
-    face: &'static str,
-    session: &'static str,
+    face: ArenaLimit,
+    session: ArenaLimit,
 }
 
 /// The limits of the peers' keyexpr aliases.
 const ALIAS_LIMITS: PoolLimit = PoolLimit {
-    face: "MAX_PEER_KEYEXPR_ALIASES",
-    session: "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+    face: ArenaLimit::MaxPeerKeyexprAliases,
+    session: ArenaLimit::SessionMaxPeerKeyexprAliases,
 };
 
 /// The limits of the peers' declarations of one kind.
 const DECL_LIMITS: PoolLimit = PoolLimit {
-    face: "MAX_REMOTE_DECLS",
-    session: "SESSION_MAX_REMOTE_DECLS",
+    face: ArenaLimit::MaxRemoteDecls,
+    session: ArenaLimit::SessionMaxRemoteDecls,
 };
 
 /// The limits of the peers' subscriber interests.
 const INTEREST_LIMITS: PoolLimit = PoolLimit {
-    face: "MAX_INBOUND_SUB_INTERESTS",
-    session: "SESSION_MAX_INBOUND_SUB_INTERESTS",
+    face: ArenaLimit::MaxInboundSubInterests,
+    session: ArenaLimit::SessionMaxInboundSubInterests,
 };
 
 /// The rows of one kind of what the peers of a session of `faces` faces write: the fewer of the
@@ -2062,8 +2171,8 @@ const INTEREST_LIMITS: PoolLimit = PoolLimit {
 /// faces, the face's for one of one face, unless the session's is the lower.
 pub(crate) fn kind_rows(
     faces: usize,
-    face: (&'static str, usize),
-    session: (&'static str, usize),
+    face: (ArenaLimit, usize),
+    session: (ArenaLimit, usize),
 ) -> Result<usize, ArenaRefused> {
     let all = face.1.saturating_mul(faces);
     let (limit, rows) = if session.1 < all {
@@ -2095,21 +2204,27 @@ pub(crate) fn kind_rows(
 /// build's here, so a value over it refuses the open by its name as before.
 fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
     if cfg!(feature = "queryable") {
-        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?;
+        lent::<{ caps::MAX_PENDING_REPLIES }>(
+            ArenaLimit::MaxPendingReplies,
+            limits.max_pending_replies(),
+        )?;
         lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
-            "MAX_REPLY_PAYLOAD_BYTES",
+            ArenaLimit::MaxReplyPayloadBytes,
             limits.max_reply_payload_bytes(),
         )?;
     }
     Ok(PeerRows {
         pending_declares: lent::<{ caps::MAX_PENDING_DECLARES }>(
-            "MAX_PENDING_DECLARES",
+            ArenaLimit::MaxPendingDeclares,
             limits.max_pending_declares(),
         )?,
         replies: 0,
         reply_bytes: 0,
         finals: if cfg!(feature = "queryable") {
-            lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
+            lent::<{ caps::MAX_PENDING_FINALS }>(
+                ArenaLimit::MaxPendingFinals,
+                limits.max_pending_finals(),
+            )?
         } else {
             0
         },
@@ -2121,7 +2236,7 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
 /// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
 /// the build's.
 pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
-    lent::<{ caps::MAX_FACES }>("MAX_FACES", limits.max_faces())
+    lent::<{ caps::MAX_FACES }>(ArenaLimit::MaxFaces, limits.max_faces())
 }
 
 /// The inbound links in their handshake at once that `limits` admit: the session's
@@ -2129,13 +2244,13 @@ pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
 /// [`CoopConfig::accept_pending`], which [`ArenaPlan::of`] holds the config of a session that
 /// listens to. Refused when the session's value is over the build's.
 pub fn admitted_handshakes(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
-    lent::<{ caps::MAX_ACCEPT_PENDING }>("MAX_ACCEPT_PENDING", limits.max_accept_pending())
+    lent::<{ caps::MAX_ACCEPT_PENDING }>(ArenaLimit::MaxAcceptPending, limits.max_accept_pending())
 }
 
 /// `asked`, what a session's config states of the limit `limit`, held to `admitted`, the session's
 /// value of it under the build's: a config over it is refused, as a stage after the build only
 /// lowers the memory the build fixes.
-fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaRefused> {
+fn hold(limit: ArenaLimit, asked: usize, admitted: usize) -> Result<(), ArenaRefused> {
     if asked > admitted {
         return Err(ArenaRefused::Limit {
             limit,
@@ -2507,7 +2622,7 @@ mod tests {
     #[test]
     fn a_settled_plan_answers_the_first_refusal_with_its_limit() {
         let mut plan = empty_plan();
-        assert_eq!(plan.lent("FIRST_LIMIT", Quota::at_most(9), 4), 0);
+        assert_eq!(plan.lent(ArenaLimit::MaxFaces, Quota::at_most(9), 4), 0);
         assert_eq!(plan.sized(None), 0);
         for _ in 0..=ARENA_ROWS {
             plan.put(ArenaPart::EndpointTexts, 1, 8);
@@ -2515,7 +2630,7 @@ mod tests {
         assert_eq!(
             plan.settled(),
             Err(ArenaRefused::Limit {
-                limit: "FIRST_LIMIT",
+                limit: ArenaLimit::MaxFaces,
                 why: UnlentRows::OverCeiling {
                     value: 9,
                     ceiling: 4,
@@ -2630,5 +2745,71 @@ mod tests {
         assert_eq!(plan, refused);
         refused.refuse(ArenaRefused::TooLarge);
         assert_ne!(plan, refused);
+    }
+
+    /// A limit's name is its id as the build states it, the variant's own name in the build's
+    /// case, and no two limits share one: a refusal names the limit it was refused by. Turned red
+    /// by an arm that names another limit or misspells one.
+    #[test]
+    fn each_limit_names_its_own_id() {
+        use ArenaLimit::*;
+        let all = [
+            MaxFaces,
+            MaxStaticConnect,
+            MaxAdminLocators,
+            MaxAcceptPending,
+            PicoFragMaxBytes,
+            DeliveryLaneEvents,
+            DeliveryLaneCallbacks,
+            MaxKeyexprBytes,
+            KeyArenaBytes,
+            UdpPortSlots,
+            HandedLegBytes,
+            MaxDeclObservers,
+            MaxPendingQueries,
+            MaxPendingLivelinessGets,
+            MaxPendingReplies,
+            MaxPendingFinals,
+            AdvancedCacheBytes,
+            PicoUnicastBatchBytes,
+            MaxSubscriptions,
+            MaxQueryables,
+            MaxLocalTokens,
+            MaxLivelinessSubscriptions,
+            MaxDeclaredKeyexprs,
+            MaxPublishers,
+            MaxQueriers,
+            MaxMatchingListeners,
+            MaxDeclWatches,
+            MaxTransportEventsListeners,
+            MaxAdvancedPublishers,
+            MaxAdvancedSubscribers,
+            MaxLinkEventsListeners,
+            MaxPeerKeyexprAliases,
+            SessionMaxPeerKeyexprAliases,
+            MaxRemoteDecls,
+            SessionMaxRemoteDecls,
+            MaxInboundSubInterests,
+            SessionMaxInboundSubInterests,
+            MaxReplyPayloadBytes,
+            MaxPendingDeclares,
+            RxPoolBuffers,
+            TxPoolSlots,
+        ];
+        let mut names = alloc::vec::Vec::new();
+        for limit in all {
+            let mut id = alloc::string::String::new();
+            for (at, c) in alloc::format!("{limit:?}").char_indices() {
+                if at > 0 && c.is_ascii_uppercase() {
+                    id.push('_');
+                }
+                id.push(c.to_ascii_uppercase());
+            }
+            assert_eq!(limit.name(), id);
+            names.push(limit.name());
+        }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), all.len(), "two limits share a name");
     }
 }
