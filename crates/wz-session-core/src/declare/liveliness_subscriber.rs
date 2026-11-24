@@ -1654,6 +1654,23 @@ impl<P: Storage> PeerTokens<P> {
         }
     }
 
+    /// The key of the session's key arena the token `token_id`'s row keeps, when the policy keeps
+    /// its keys there: what a context that keeps a sample of the token may hold. None on a backing
+    /// with no peer token table.
+    fn held_key(&self, token_id: u64) -> Option<&crate::key_arena::KeyRef> {
+        #[cfg(feature = "storage-profile")]
+        {
+            self.table
+                .find(token_id)
+                .and_then(crate::bounded::KeyBacking::held)
+        }
+        #[cfg(not(feature = "storage-profile"))]
+        {
+            let _ = token_id;
+            None
+        }
+    }
+
     /// R311y790 — replay the peer tokens this session ALREADY knows to the one
     /// subscriber `interest_id` names, as `Put` samples. Returns how many were
     /// replayed. Called by [`register`](LivelinessSubscriberTable::register) for a `history = true`
@@ -1714,10 +1731,7 @@ impl<P: Storage> PeerTokens<P> {
                 break;
             };
             // The token's row keeps its key, which a context that keeps the sample may hold.
-            let held = self
-                .table
-                .find(token_id)
-                .and_then(crate::bounded::KeyBacking::held);
+            let held = self.held_key(token_id);
             L::Sink::tell_held(
                 cx,
                 id,
