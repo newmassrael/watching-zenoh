@@ -774,7 +774,12 @@ fn lend_session(
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
-    let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
+    let mut samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
+    // The round is not shared yet: it reads the keys a peer's aliases keep in the session's key
+    // arena where they lie.
+    if let Some(round) = Arc::get_mut(&mut samples) {
+        round.reads_keys_in(keys);
+    }
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in a table the plan counts.
     #[cfg(feature = "queryable")]

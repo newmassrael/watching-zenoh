@@ -465,6 +465,22 @@ impl KeySpace {
         None
     }
 
+    /// The text of the key a holder keeps apart ([`KeyRef::into_raw`], [`KeyRef::hold_apart`]),
+    /// read where its block lies. Read on any thread: nothing writes a block while it has a
+    /// holder, and reading takes no count.
+    ///
+    /// # Safety
+    /// `at` and `len` are what `into_raw` gave for a key of this arena, whose holder they still
+    /// are for as long as the text is read.
+    pub unsafe fn held_text(&self, at: u32, len: u32) -> &str {
+        if at == NIL {
+            return "";
+        }
+        // SAFETY: the caller's contract: the block is held, so it holds the `len` bytes of the
+        // `str` it was made from and nothing writes them.
+        unsafe { core::str::from_utf8_unchecked(self.store().text(at, len)) }
+    }
+
     /// The key a holder kept as [`KeyRef::into_raw`] gave it, one of its block's holders again.
     ///
     /// # Safety
@@ -599,6 +615,24 @@ impl KeyRef {
         }
         // SAFETY: as `as_str`.
         held_bytes(unsafe { self.store.as_ref() }.word(self.at, SIZE)) as usize
+    }
+
+    /// Where the key's block lies and the key's length, taking no count: what tells two keys of
+    /// one arena apart. Reading the key by them needs a holder ([`Self::hold_apart`]).
+    pub fn parts(&self) -> (u32, u32) {
+        (self.at, self.len)
+    }
+
+    /// Whether the key is one of `space`'s: its block, if it has one, lies in that arena.
+    pub fn is_of(&self, space: &KeySpace) -> bool {
+        self.store == space.store
+    }
+
+    /// One more holder of the key's block, kept apart as [`Self::into_raw`] keeps one: what a
+    /// holder outside the arena owner's lock reads the key by ([`KeySpace::held_text`]) and hands
+    /// back to [`KeySpace::adopt`] under that lock. Taken under the lock, as a clone is.
+    pub fn hold_apart(&self) -> (u32, u32) {
+        self.clone().into_raw()
     }
 
     /// The key as its block's place and its length, still one of the block's holders, which
@@ -1073,6 +1107,33 @@ mod tests {
         assert_eq!(key.as_str(), "demo/raw");
         drop(key);
         assert_eq!(keys.counts().used, 0);
+    }
+
+    /// A holder kept apart keeps the block after the row that held the key lets go of it: the text
+    /// reads back where it lies, and the block is given back once the holder is adopted and
+    /// dropped. A key is of its own arena alone. Turned red by a hold that takes no count, which
+    /// gives the block back with the row.
+    #[test]
+    fn a_holder_kept_apart_keeps_the_block_past_its_row() {
+        let keys = keys_of(128);
+        let other = keys_of(128);
+        let row = keys.key("demo/held").expect("room");
+        assert!(row.is_of(&keys));
+        assert!(!row.is_of(&other), "a key is of its own arena alone");
+        let (at, len) = row.hold_apart();
+        drop(row);
+        assert!(
+            keys.counts().used > 0,
+            "the holder kept apart holds the block"
+        );
+        // SAFETY: the parts are a holder of a key of this arena, read while held.
+        assert_eq!(unsafe { keys.held_text(at, len) }, "demo/held");
+        // SAFETY: the parts are the holder's, adopted once.
+        drop(unsafe { keys.adopt(at, len) });
+        assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
+        let (at, len) = keys.key("").expect("the empty key").hold_apart();
+        // SAFETY: the empty key holds no block, and reads as itself.
+        assert_eq!(unsafe { keys.held_text(at, len) }, "");
     }
 
     /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered

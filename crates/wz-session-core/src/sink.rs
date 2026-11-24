@@ -78,6 +78,15 @@ pub trait SampleView {
     /// Link-layer reliability classification of the carrying frame.
     fn reliability(&self) -> Reliability;
 
+    /// The key of the session's key arena whose whole text [`Self::keyexpr`] is, when the view
+    /// read the keyexpr out of a row that keeps it there (a peer's alias with no suffix): a
+    /// holder that keeps the sample past the call may hold the key's block
+    /// ([`KeyRef::hold_apart`](crate::key_arena::KeyRef::hold_apart)) and read the keyexpr there
+    /// rather than copy it. Defaults to `None`.
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        None
+    }
+
     /// QoS level decoded from the Push outer extension chain, if any.
     /// Defaults to `None` for views carrying no QoS.
     #[cfg(feature = "storage-profile")]
