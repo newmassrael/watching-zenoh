@@ -374,6 +374,7 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
 /// holder settles the round after the delivery; one in which no record reads goes back at once.
 /// Turned red by a round that lets go of the buffer a delivery reads, or keeps one it reads
 /// nothing in.
+#[cfg(feature = "group")]
 #[test]
 fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
     static RX: ByteCells<16, 2> = ByteCells::new();
