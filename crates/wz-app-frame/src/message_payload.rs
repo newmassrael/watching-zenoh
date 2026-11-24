@@ -608,8 +608,9 @@ impl<St: Storage> Table<St> {
     }
 
     /// Remove the slots `pick` names, with every slot inside one of them: the slots after move
-    /// down, keeping their order, and each parent is the slot's new place.
-    fn remove(&mut self, pick: impl Fn(usize, &Entry) -> bool) {
+    /// down, keeping their order, and each parent is the slot's new place. `pick` is dispatched:
+    /// the compaction is the same whichever slots it names.
+    fn remove(&mut self, pick: &dyn Fn(usize, &Entry) -> bool) {
         let len = self.len;
         let entries = self.store.entries_mut();
         let Some(entries) = entries.get_mut(..len) else {
@@ -652,7 +653,7 @@ impl<St: Storage> Table<St> {
     /// message at `parent`.
     fn clear_oneof(&mut self, parent: u32, holder: &Msg, field: &Fld) {
         if let Some(oneof) = field.oneof {
-            self.remove(|_, e| {
+            self.remove(&|_, e| {
                 e.parent == parent
                     && e.number != field.number
                     && !matches!(e.slot, Slot::Kept(_))
@@ -666,7 +667,7 @@ impl<St: Storage> Table<St> {
 
     /// Remove every value of field `number` of the message at `parent`.
     fn remove_field(&mut self, parent: u32, number: u64) {
-        self.remove(|_, e| {
+        self.remove(&|_, e| {
             e.parent == parent && e.number == number && !matches!(e.slot, Slot::Kept(_))
         });
     }
@@ -1387,7 +1388,7 @@ impl<S: Borrow<SchemaSet>, St: Storage> Payload<S, St> {
             Some(index) if index >= len => return Err(past_end(path, &last, len)),
             Some(index) => {
                 if let Some(at) = self.table.nth(parent, number, index) {
-                    self.table.remove(|i, _| i == at);
+                    self.table.remove(&|i, _| i == at);
                 }
             }
         }
