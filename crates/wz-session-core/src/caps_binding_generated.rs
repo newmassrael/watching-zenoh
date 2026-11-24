@@ -562,6 +562,18 @@ pub const MAX_PENDING_FINALS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HELD_QUERY_PARAMS_BYTES`] is bound.
+pub const HELD_QUERY_PARAMS_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_REPLY_PAYLOAD_BYTES`] is bound.
 pub const MAX_REPLY_PAYLOAD_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

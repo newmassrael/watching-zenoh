@@ -230,7 +230,7 @@ impl PicoSubscriberForms {
         let carrier = match entity {
             Entity::Subscriber => self.base.share(),
             Entity::LatePublishers | Entity::Heartbeat | Entity::Token => {
-                self.base.extended(keyexpr)
+                self.base.extended(keyexpr).ok()?
             }
         };
         let (key, announced) = match entity {

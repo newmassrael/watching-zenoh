@@ -55,10 +55,7 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
         .declare_liveliness_token_on_wire(
             "demo/alive/a",
             WireKey::literal(),
-            Some(RetractionKey {
-                mapping_id: 0,
-                suffix: "demo/alive/a".to_owned(),
-            }),
+            Some(RetractionKey::literal()),
         )
         .expect("the engine has liveliness");
     let bare = engine
@@ -155,10 +152,7 @@ fn a_token_holds_the_declaration_its_key_is_named_by() {
         .declare_liveliness_token_on_wire(
             "demo/alive/x",
             WireKey::aliased(prefix, Some("/x".to_owned())),
-            Some(RetractionKey {
-                mapping_id: prefix,
-                suffix: "/x".to_owned(),
-            }),
+            Some(RetractionKey::declared(prefix, "/x")),
         )
         .expect("the engine has liveliness");
     let on_wire = u64::from(token);

@@ -182,6 +182,15 @@ impl KeyText {
         self.key.as_str()
     }
 
+    /// `text` kept where this key's text is: in the same session's key arena when this is a block
+    /// of one, refused as [`Self::of_session`] refuses; a copy of its own otherwise.
+    pub(crate) fn beside(&self, text: &str) -> Result<Self, ZResult> {
+        match &self.engine {
+            Some(engine) => Self::of_session(engine, text),
+            None => Ok(Self::owned(text)),
+        }
+    }
+
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
     /// copy for one of its own.
     #[inline(never)]
@@ -226,14 +235,17 @@ impl Drop for KeyText {
 
 /// The key arena of `engine`'s session: the cooperative engine always keeps one and is reached as
 /// its own type, so a key's hold, share and release are calls resolved when the build is made.
+///
+/// Both arms take the `Arc` a holder keeps: on the tokio engine `Engine` is a trait object, and an
+/// `&Arc<Engine>` handed where an `&Engine` is asked would be unsized, not dereferenced.
 #[cfg(not(feature = "engine-tokio"))]
-fn key_arena(engine: &Engine) -> Option<&Engine> {
-    Some(engine)
+fn key_arena(engine: &Arc<Engine>) -> Option<&Engine> {
+    Some(Arc::as_ref(engine))
 }
 
 /// The key arena of the session behind the port, when its engine keeps one.
 #[cfg(feature = "engine-tokio")]
-fn key_arena(engine: &Engine) -> Option<&dyn SessionKeys> {
+fn key_arena(engine: &Arc<Engine>) -> Option<&dyn SessionKeys> {
     engine.key_arena()
 }
 
@@ -337,15 +349,18 @@ impl DeclaredKeyexpr {
     /// the joined text, which can in principle rewrite the seam, and a
     /// declaration naming bytes the key no longer starts with would put the
     /// wrong key on the wire.
-    pub(crate) fn extended(&self, literal: &str) -> Self {
+    ///
+    /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
+    /// refuses it.
+    pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
         let declaration = self.declaration.clone().filter(|d| {
             literal.get(..d.prefix_len).is_some()
                 && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
         });
-        Self {
-            literal: KeyText::owned(literal),
+        Ok(Self {
+            literal: self.literal.beside(literal)?,
             declaration,
-        }
+        })
     }
 
     fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
@@ -421,17 +436,9 @@ impl DeclaredKeyexpr {
     /// (`vendor/zenoh-pico/src/net/liveliness.c` @
     /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
     pub(crate) fn retraction_key(&self, shared: &Engine) -> RetractionKey {
-        let wire = self.wire(shared);
-        if wire.mapping_id == 0 {
-            RetractionKey {
-                mapping_id: 0,
-                suffix: self.literal().to_owned(),
-            }
-        } else {
-            RetractionKey {
-                mapping_id: wire.mapping_id,
-                suffix: wire.into_suffix().unwrap_or_default(),
-            }
+        match self.declared_rest(shared) {
+            Some((d, rest)) => RetractionKey::declared(d.hold.mapping_id(), rest),
+            None => RetractionKey::literal(),
         }
     }
 
@@ -1207,14 +1214,17 @@ pub unsafe extern "C" fn z_keyexpr_concat(
 
 /// The result of extending `left` to `literal`: `left`'s declaration kept when
 /// `left` is a declared key (pico `_z_declared_keyexpr_concat` / `_join`), a
-/// plain literal otherwise.
+/// plain literal otherwise. Refused as [`DeclaredKeyexpr::extended`] refuses.
 ///
 /// # Safety
 /// `left` must be null or a live loaned keyexpr.
-unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> DeclaredKeyexpr {
+unsafe fn extended_from(
+    left: *const z_loaned_keyexpr_t,
+    literal: &str,
+) -> Result<DeclaredKeyexpr, ZResult> {
     match declared_of(left) {
         Some(declared) => declared.extended(literal),
-        None => DeclaredKeyexpr::literal_only(literal),
+        None => Ok(DeclaredKeyexpr::literal_only(literal)),
     }
 }
 
@@ -1250,8 +1260,13 @@ unsafe fn store_joined(
     else {
         return Z_ERR_INVALID;
     };
-    store_owned_keyexpr(key, extended_from(left, canon));
-    Z_OK
+    match extended_from(left, canon) {
+        Ok(joined) => {
+            store_owned_keyexpr(key, joined);
+            Z_OK
+        }
+        Err(code) => code,
+    }
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1749,6 +1764,35 @@ mod tests {
             key.wire(&*other).mapping_id,
             0,
             "another session's id is not ours"
+        );
+    }
+
+    /// What a retraction names is the declaration and the length of the rest of the key, read
+    /// against the entity's key, so making it takes no memory; on a session that did not make the
+    /// declaration it names the literal.
+    ///
+    /// # Control
+    ///
+    /// A retraction that copies the rest of the key (as one made from `wire` did) reds the count.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_retraction_names_the_rest_of_its_own_key_and_takes_no_memory() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/ret/**", None)
+            .expect("declared");
+        let declared = shared.keyexpr_declarations()[0].0;
+        let mut named = None;
+        let taken = crate::connectivity::tests::allocations(|| {
+            named = Some(key.retraction_key(Arc::as_ref(&engine)));
+        });
+        assert_eq!(taken, 0, "a retraction copies nothing of the key");
+        let named = named.expect("the retraction was made");
+        assert_eq!(named.names(key.literal()), (declared, "/**"));
+        let other = session().as_engine();
+        assert_eq!(
+            key.retraction_key(&*other).names(key.literal()),
+            (0, "demo/kd/ret/**")
         );
     }
 }
@@ -2311,6 +2355,37 @@ mod arena_key_tests {
             Some(Z_EINVAL)
         );
         drop((key, shared));
+        close(session);
+    }
+
+    /// A key extended from a key of the session's arena (a concatenation, a join, an advanced
+    /// subscriber's carriers) is a block of the same arena and keeps the declaration its literal
+    /// still begins with; one too long for the session is refused.
+    ///
+    /// # Control
+    ///
+    /// Extending into a copy of its own reds the first assertion.
+    #[test]
+    fn an_extended_key_is_a_block_of_the_session() {
+        let (session, engine) = listening();
+        let base =
+            DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/ext/**", None).expect("room");
+        let extended = base.extended("demo/ext/**/x").expect("room");
+        assert!(
+            extended.literal.is_session(),
+            "the text is a block of the arena"
+        );
+        assert_eq!(extended.literal(), "demo/ext/**/x");
+        assert!(
+            extended.declaration_hold().is_some(),
+            "the declared prefix still begins the key"
+        );
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            base.extended(&"k".repeat(longest + 1)).err(),
+            Some(Z_EINVAL)
+        );
+        drop((base, extended));
         close(session);
     }
 

@@ -12224,9 +12224,10 @@ layer_c1g_cargo_test_observer() {
     # 32 KB: a value of it passed through an install cost the node's main function 69 KB of
     # frame on the kit. The cell is built in place, once, lent one holder at a time and
     # dropped with the cell; the stack a build needs is read off the image's own binary, not
-    # off a host test. 9 = what that command PRINTED.
+    # off a host test. 7 = the file's tests: the refusals the panicking borrow's three
+    # tests pinned are read through `try_borrow_mut` by two.
     wz_test_args wz-session-core slot_observer_cell
-    _runci_guarded_test C1g 9 \
+    _runci_guarded_test C1g 7 \
         cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # S9b, row R7 -- the admin space with no allocator. The crate's lib suite on the
     # fixed backing WITH the admin surface and the Err reply (`+`, for the reason the

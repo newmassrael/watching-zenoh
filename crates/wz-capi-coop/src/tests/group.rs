@@ -554,8 +554,8 @@ mod asked {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{
-        HeldQuery, QueryHolder, QueryableSink, Refusal, ReplyCallback, SessionDrive, SessionEngine,
-        WireKey,
+        HeldQueryId, QueryHolder, QueryableSink, Refusal, ReplyCallback, SessionDrive,
+        SessionEngine, WireKey,
     };
     use wz_session_core::locality::Locality;
     use wz_session_core::query_options::QueryOptions;
@@ -682,7 +682,7 @@ mod asked {
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
-        let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+        let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&kept);
         second
             .declare_queryable_on_wire(
@@ -695,7 +695,8 @@ mod asked {
                     move |query: &dyn QueryView,
                           _out: &mut dyn ReplyOut,
                           holder: &dyn QueryHolder| {
-                        *slot.lock().unwrap() = Some(holder.hold_query(query));
+                        *slot.lock().unwrap() =
+                            holder.keep_query(query).expect("room to keep the query");
                     },
                 ),
             )
@@ -731,7 +732,7 @@ mod asked {
         );
 
         let held = kept.lock().unwrap().take().expect("the kept query");
-        held.reply(&mut |out| {
+        second.reply_held(held, &mut |out| {
             out.reply_keyed("demo/group/kept", b"kept-answer")
                 .expect("a reply on the query's own key");
         });
@@ -742,11 +743,11 @@ mod asked {
                 .any(|datagram| carries(datagram, b"kept-answer")),
             "the reply is on the group before the answering call returns"
         );
-        drop(held);
+        second.release_held(held);
         assert_eq!(
             sent_by_second().len(),
             after_reply.len() + 1,
-            "the Final is on the group before the drop returns"
+            "the Final is on the group before the release returns"
         );
         eventually("the leg to end", || seen.lock().unwrap().ended);
         assert_eq!(
