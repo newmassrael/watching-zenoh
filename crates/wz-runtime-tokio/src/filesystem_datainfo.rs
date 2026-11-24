@@ -329,10 +329,8 @@ pub fn decode(bytes: &[u8]) -> Result<DataInfo, DataInfoError> {
     };
     Ok(DataInfo {
         encoding,
-        timestamp: TimestampHint {
-            time,
-            zid: id_bytes[..significant].to_vec(),
-        },
+        timestamp: TimestampHint::new(time, &id_bytes[..significant])
+            .ok_or(DataInfoError::Corrupt("timestamp id is past sixteen bytes"))?,
     })
 }
 
@@ -344,10 +342,7 @@ mod tests {
     fn info(zid: &[u8], encoding: Option<EncodingHint>) -> DataInfo {
         DataInfo {
             encoding,
-            timestamp: TimestampHint {
-                time: 0x0102_0304_0506_0708,
-                zid: zid.to_vec(),
-            },
+            timestamp: TimestampHint::new(0x0102_0304_0506_0708, &zid).unwrap(),
         }
     }
 

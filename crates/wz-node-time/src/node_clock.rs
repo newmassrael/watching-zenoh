@@ -816,10 +816,7 @@ impl NodeHlc {
         {
             let clock = self.clock.as_deref()?;
             let time = clock.hlc.new_timestamp().ok()?.as_word();
-            Some(wz_session_core::sample::TimestampHint {
-                time,
-                zid: clock.zid.clone(),
-            })
+            wz_session_core::sample::TimestampHint::new(time, &clock.zid)
         }
         #[cfg(not(feature = "time-hlc"))]
         {

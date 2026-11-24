@@ -80,6 +80,108 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryStorage};
 #[cfg(test)]
 use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
 
+/// The zenoh id a timestamp names its clock by: the bytes the wire carries for it, zero to sixteen
+/// (the codec's `zid_len` and its bound), held inline with their length.
+///
+/// The form [`crate::session_zid::SessionZid`] gives a session's own zid, for a value that may be
+/// shorter: a timestamp's id may come from any peer and the hint's `Default` has none. It reads as
+/// the byte slice it holds (`Deref<Target = [u8]>`), so a caller that passes it on as `&[u8]`
+/// needs no conversion, and it compares equal to the same bytes in a slice, an array or a `Vec`.
+/// The bytes past the length are always zero, which is what makes the derived equality and hash the
+/// equality and hash of the ids. Making one holds nothing on the heap: a put that carries a
+/// timestamp copies sixteen bytes and a length.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct TimestampZid {
+    bytes: [u8; crate::session_zid::ZID_MAX],
+    len: u8,
+}
+
+impl TimestampZid {
+    /// The id `src` spells, or `None` past sixteen bytes, which no zenoh id is and no timestamp
+    /// on the wire can carry.
+    pub fn new(src: &[u8]) -> Option<Self> {
+        let mut bytes = [0u8; crate::session_zid::ZID_MAX];
+        bytes.get_mut(..src.len())?.copy_from_slice(src);
+        Some(Self {
+            bytes,
+            len: u8::try_from(src.len()).ok()?,
+        })
+    }
+
+    /// The bytes the wire carries.
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+}
+
+impl core::ops::Deref for TimestampZid {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for TimestampZid {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl core::fmt::Debug for TimestampZid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+impl From<crate::session_zid::SessionZid> for TimestampZid {
+    /// A session's zid is one to sixteen bytes, so it is always a timestamp's id.
+    fn from(zid: crate::session_zid::SessionZid) -> Self {
+        Self {
+            bytes: zid.to_padded(),
+            len: zid.as_slice().len() as u8,
+        }
+    }
+}
+
+impl PartialEq<[u8]> for TimestampZid {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl PartialEq<&[u8]> for TimestampZid {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for TimestampZid {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for TimestampZid {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PartialEq<Vec<u8>> for TimestampZid {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PartialEq<TimestampZid> for Vec<u8> {
+    fn eq(&self, other: &TimestampZid) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
 /// SCE-emitted codec structs intentionally derive only `Default` so the
@@ -92,35 +194,48 @@ use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
 /// `Clone`/`Debug`/`PartialEq` derives a `Sample` field reasonably
 /// needs.
 ///
-/// The heap profile's value (`zid` is a `Vec`). The per-session slot profile reads
-/// a timestamp where its frame lies, through the codec's borrowed view.
+/// The id is held inline ([`TimestampZid`]), so a timestamp is a value of fixed size with nothing
+/// on the heap; one whose id is longer than sixteen bytes cannot be made ([`Self::new`]). The
+/// per-session slot profile reads a timestamp where its frame lies, through the codec's borrowed
+/// view.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct TimestampHint {
     /// NTP64 time word. zenoh-pico mirror: `_z_timestamp_t._time`.
     pub time: u64,
-    /// Zenoh ID prefix bytes (variable length per the wire `zid_len`
-    /// VLE; the codec stores exactly the on-wire byte count, no
-    /// 16-byte right-pad). zenoh-pico mirror: `_z_timestamp_t._id`.
-    pub zid: Vec<u8>,
+    /// Zenoh ID prefix bytes, as many as the wire carries (the `zid_len` VLE), no 16-byte
+    /// right-pad. zenoh-pico mirror: `_z_timestamp_t._id`.
+    pub zid: TimestampZid,
 }
 
 #[cfg(feature = "alloc")]
 impl TimestampHint {
+    /// The timestamp of `time` on the clock `zid` names, or `None` for an id longer than
+    /// sixteen bytes, which no timestamp carries.
+    pub fn new(time: u64, zid: &[u8]) -> Option<Self> {
+        Some(Self {
+            time,
+            zid: TimestampZid::new(zid)?,
+        })
+    }
+
+    /// The id's bytes, as many as the wire carries.
+    pub fn zid_prefix(&self) -> &[u8] {
+        self.zid.as_slice()
+    }
+
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
-    /// into a wz-owned [`TimestampHint`].
+    /// into a wz-owned [`TimestampHint`]. The codec holds the zid within the
+    /// sixteen bytes a zenoh id has, so the projection keeps every byte; a
+    /// longer one, which the codec does not make, is an empty id.
+    /// (Generic over the storage profile since R3011: both a received
+    /// message's timestamp and a transport one's are projected here.)
     pub fn from_codec<S: wz_codecs::timestamp::TimestampStorage>(
         ts: &wz_codecs::timestamp::TimestampOwned<S>,
     ) -> Self {
         Self {
             time: ts.time,
-            // The codec holds the zid in its profile's container within the
-            // zid's bound; this AP-side hint retains an alloc `Vec<u8>`
-            // (Decision 2: AP retention is alloc), so copy it out at the
-            // boundary. (Generic over the storage profile since R3011: both a
-            // received message's timestamp and a transport one's are
-            // projected here.)
-            zid: ts.zid.as_bytes().into_inner().to_vec(),
+            zid: TimestampZid::new(ts.zid.as_bytes().into_inner()).unwrap_or_default(),
         }
     }
 
@@ -130,7 +245,7 @@ impl TimestampHint {
     pub fn from_view(ts: &wz_codecs::lent::Timestamp<'_>) -> Self {
         Self {
             time: ts.time,
-            zid: ts.zid.to_vec(),
+            zid: TimestampZid::new(&ts.zid).unwrap_or_default(),
         }
     }
 
@@ -140,9 +255,8 @@ impl TimestampHint {
     /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
     /// shape (NTP64 `time` word + variable-length `zid` prefix).
     ///
-    /// `LengthOutOfRange` for a zid past the 16 bytes a zenoh id has: the
-    /// codec holds the zid within that bound, so such a timestamp has no
-    /// frame.
+    /// `LengthOutOfRange` stays the answer for an id the codec cannot hold, which a hint made by
+    /// [`Self::new`] never is.
     pub fn to_codec(&self) -> Result<wz_codecs::lent::Timestamp<'_>, CodecError> {
         Ok(wz_codecs::lent::Timestamp {
             time: self.time,
@@ -1333,10 +1447,7 @@ mod tests {
     #[test]
     fn with_setters_chain_through_metadata_fields() {
         let sample = Sample::new_put("topic/a", b"data".to_vec())
-            .with_timestamp(TimestampHint {
-                time: 0x1234_5678_9ABC_DEF0,
-                zid: vec![0x11, 0x22, 0x33],
-            })
+            .with_timestamp(TimestampHint::new(0x1234_5678_9ABC_DEF0, &[0x11, 0x22, 0x33]).unwrap())
             .with_encoding(EncodingHint {
                 packed_id: 5,
                 schema: Some("application/json".into()),

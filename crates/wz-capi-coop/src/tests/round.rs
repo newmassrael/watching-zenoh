@@ -145,10 +145,7 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
             packed_id: 7,
             schema: Some(b"text".to_vec()),
         })
-        .with_timestamp(TimestampHint {
-            time: 42,
-            zid: vec![1, 2, 3],
-        })
+        .with_timestamp(TimestampHint::new(42, &[1, 2, 3]).unwrap())
         .with_qos(QosLevel::from_raw(5))
         .with_source_info(source.clone())
         .with_reliability(Reliability::BestEffort);

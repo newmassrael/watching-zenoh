@@ -82,8 +82,8 @@ struct LentReply<'r, 'f> {
     // service it was sent at, both read off the Response's own chain.
     responder: Option<(&'r [u8], u32)>,
     qos: Option<crate::sample::QosLevel>,
-    // The owned hint a sink asks for by `timestamp`, built on the first ask: it owns a
-    // heap field, so a build with no allocator reads the stamp as `timestamp_parts`.
+    // The owned hint a sink asks for by `timestamp`, built on the first ask; a build with no
+    // allocator reads the stamp as `timestamp_parts`.
     #[cfg(feature = "alloc")]
     timestamp_hint: OnceCell<TimestampHint>,
 }
@@ -116,9 +116,10 @@ impl ReplyView for LentReply<'_, '_> {
     #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
+        // The codec holds the id within the sixteen bytes a zenoh id has, so every byte is kept.
         Some(self.timestamp_hint.get_or_init(|| TimestampHint {
             time: ts.time,
-            zid: ts.zid.into_inner().to_vec(),
+            zid: crate::sample::TimestampZid::new(ts.zid.into_inner()).unwrap_or_default(),
         }))
     }
     fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
@@ -491,10 +492,9 @@ mod tests {
                 .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
-            timestamp: view.timestamp_parts().map(|stamp| TimestampHint {
-                time: stamp.time,
-                zid: stamp.zid.to_vec(),
-            }),
+            timestamp: view
+                .timestamp_parts()
+                .map(|stamp| TimestampHint::new(stamp.time, &stamp.zid).unwrap()),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
             #[cfg(feature = "pubsub-ts-stack")]
@@ -618,10 +618,7 @@ mod tests {
     #[test]
     fn every_reply_kind_is_delivered_lent_as_the_owned_path_delivers_it() {
         let info = SourceInfo::new(&[1, 2, 3, 4], 7, 11);
-        let stamp = TimestampHint {
-            time: 0x1234_5678,
-            zid: alloc::vec![9, 8, 7],
-        };
+        let stamp = TimestampHint::new(0x1234_5678, &[9, 8, 7]).unwrap();
         let schema = EncodingHint {
             packed_id: 0x0B,
             schema: Some(b"text".to_vec()),

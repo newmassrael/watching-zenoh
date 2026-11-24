@@ -332,11 +332,8 @@ mod tests {
     #[test]
     fn a_hidden_view_shows_no_timestamp_and_everything_else_as_the_inner_view_does() {
         use crate::sample::{Sample, TimestampHint};
-        let sample =
-            Sample::new_put("home/a", b"payload".as_slice()).with_timestamp(TimestampHint {
-                time: 7,
-                zid: [1u8, 2].as_slice().into(),
-            });
+        let sample = Sample::new_put("home/a", b"payload".as_slice())
+            .with_timestamp(TimestampHint::new(7, &[1u8, 2]).unwrap());
         assert_eq!(SampleView::timestamp(&sample).map(|t| t.time), Some(7));
         let hidden = HiddenTimestamp(&sample);
         assert!(SampleView::timestamp(&hidden).is_none());

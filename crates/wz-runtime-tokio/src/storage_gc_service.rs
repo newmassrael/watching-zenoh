@@ -202,10 +202,8 @@ mod tests {
     fn register_stale_wildcard(state: &Arc<Mutex<StorageState<MemoryStorage>>>) {
         let mut g = state.lock().unwrap();
         g.apply_sample(
-            &Sample::new_del("demo/**").with_timestamp(TimestampHint {
-                time: 10u64 << 32,
-                zid: vec![0x01],
-            }),
+            &Sample::new_del("demo/**")
+                .with_timestamp(TimestampHint::new(10u64 << 32, &[0x01]).unwrap()),
             || unreachable!(),
         );
         assert_eq!(
@@ -263,10 +261,8 @@ mod tests {
         {
             let mut g = state.lock().unwrap();
             g.apply_sample(
-                &Sample::new_del("demo/**").with_timestamp(TimestampHint {
-                    time: wall_clock_ntp64(),
-                    zid: vec![0x01],
-                }),
+                &Sample::new_del("demo/**")
+                    .with_timestamp(TimestampHint::new(wall_clock_ntp64(), &[0x01]).unwrap()),
                 || unreachable!(),
             );
             assert_eq!(g.wildcard_registry_lens(), (0, 1));
