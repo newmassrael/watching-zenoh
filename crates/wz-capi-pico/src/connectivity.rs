@@ -436,7 +436,8 @@ fn rows(engine: &Engine) -> impl Iterator<Item = FaceLinkRow> + '_ {
     let mut at = 0;
     core::iter::from_fn(move || {
         let row = SessionEngine::face_link_at(engine, at)?;
-        at += 1;
+        // No engine holds a row at `usize::MAX`, so the walk ends there.
+        at = at.saturating_add(1);
         Some(row)
     })
 }
@@ -915,7 +916,7 @@ fn next_in<S: Listened, const N: usize>(
 ) -> Option<(*mut S, HeldIn)> {
     let table = lock(table);
     while let Some(row) = table.rows.get(*at) {
-        *at += 1;
+        *at = at.saturating_add(1);
         if let Some(entry) = row {
             // SAFETY: the entry's place stands while the entry holds it, which it does under the
             // lock held here.
@@ -971,16 +972,19 @@ unsafe fn admit<S: Listened, const N: usize>(
 ) -> Option<usize> {
     // SAFETY: the caller's: the owner holds the place.
     let held = unsafe { hold_entity::<S, S::Kept>(object) };
-    let mut rows = lock(table);
+    let mut guard = lock(table);
+    let rows: &mut Table<S, N> = &mut guard;
     let id = rows.last_id.wrapping_add(1);
     if let Some(at) = rows.free_row() {
-        rows.last_id = id;
-        name(id);
-        rows.rows[at] = Some(Entry { id, object, held });
-        rows.replaying[at] = replays;
-        return Some(at);
+        if let (Some(row), Some(replaying)) = (rows.rows.get_mut(at), rows.replaying.get_mut(at)) {
+            rows.last_id = id;
+            name(id);
+            *row = Some(Entry { id, object, held });
+            *replaying = replays;
+            return Some(at);
+        }
     }
-    drop(rows);
+    drop(guard);
     retire_entry(Entry { id, object, held });
     // SAFETY: the caller's: the owner lets go of the place once, here, with no other hold left.
     unsafe { retire_entity::<S, S::Kept>(object) };
