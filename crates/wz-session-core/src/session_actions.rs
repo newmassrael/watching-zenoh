@@ -6831,36 +6831,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
         let caps = self.init_caps(is_ack);
-        // The message's own length, so the link lends a slot that holds this
-        // InitSyn / InitAck. An Init body has no size constant to ask for instead:
-        // its cookie's bound is upstream's u16 length.
-        let want = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::handshake_encode::init_frame_len(
-                &self.params,
-                caps,
-                is_ack,
-                crate::ext_chain::ChainRef::from(&*chain),
-                cookie_override,
-            )
-        });
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
-            let start = buf.len();
-            R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                crate::handshake_encode::encode_init_into(
-                    buf,
-                    &self.params,
-                    caps,
-                    is_ack,
-                    crate::ext_chain::ChainRef::from(&*chain),
-                    cookie_override,
-                )
-            })?;
-            // The acceptor's InitAck is the answer a replay sends again, as written.
-            if holds_answer(role) {
-                self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
-            }
-            Ok(())
-        })
+        // Written once, into a slot lent for the most a handshake message can be: a slot
+        // shorter than this message refuses the write, and the send with it.
+        self.send_control_lent(
+            Reliability::Reliable,
+            HANDSHAKE_LANE,
+            crate::handshake_encode::HANDSHAKE_LEND_WANT,
+            |buf| {
+                let start = buf.len();
+                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                    crate::handshake_encode::encode_init_into(
+                        buf,
+                        &self.params,
+                        caps,
+                        is_ack,
+                        crate::ext_chain::ChainRef::from(&*chain),
+                        cookie_override,
+                    )
+                })?;
+                // The acceptor's InitAck is the answer a replay sends again, as written.
+                if holds_answer(role) {
+                    self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
+                }
+                Ok(())
+            },
+        )
     }
 
     /// Fixed-memory step S4 — the lend-only OpenSyn / OpenAck, as
@@ -6879,7 +6874,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         echo_inbound_cookie: bool,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
-        use crate::handshake_encode::{encode_open_head_into, open_head_len};
+        use crate::handshake_encode::encode_open_head_into;
         let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
         // The Open is written in two steps, each under ONE session mutex: the
         // header and the body under the cookie's, when it echoes one, then the
@@ -6888,51 +6883,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // why. Taken out of its slot instead, so that one encoder could be handed
         // both, the chain was a copy of the whole bounded chain in this frame on
         // the fixed profile, under the socket send of the handshake's answer.
-        // The chain counted here is the one written below: the send is the
+        // The header's Z flag is read off the chain before either: the send is the
         // chain's only consumer, and the drive loop is one task on this profile.
-        let (has_ext, chain_len) = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            let chain = crate::ext_chain::ChainRef::from(&*chain);
-            (!chain.is_empty(), crate::ext_chain::ext_chain_len(chain))
+        let has_ext = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            !crate::ext_chain::ChainRef::from(&*chain).is_empty()
         });
-        // The message's own length, so the link lends a slot that holds this
-        // OpenSyn / OpenAck. An Open body has no size constant to ask for instead:
-        // its cookie's length is a `usize`.
-        let head_len = if echo_inbound_cookie {
-            self.fact_inbound_cookie(|cookie| {
-                open_head_len(&self.params, initial_sn, is_ack, cookie.as_deref())
-            })
-        } else {
-            open_head_len(&self.params, initial_sn, is_ack, None)
-        };
-        let want = head_len.saturating_add(chain_len);
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
-            let start = buf.len();
-            if echo_inbound_cookie {
-                self.fact_inbound_cookie(|cookie| {
-                    encode_open_head_into(
+        // Written once, into a slot lent for the most a handshake message can be, as
+        // the Init is (`send_init_lent`).
+        self.send_control_lent(
+            Reliability::Reliable,
+            HANDSHAKE_LANE,
+            crate::handshake_encode::HANDSHAKE_LEND_WANT,
+            |buf| {
+                let start = buf.len();
+                if echo_inbound_cookie {
+                    self.fact_inbound_cookie(|cookie| {
+                        encode_open_head_into(
+                            buf,
+                            &self.params,
+                            initial_sn,
+                            is_ack,
+                            cookie.as_deref(),
+                            has_ext,
+                        )
+                    })?;
+                } else {
+                    encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
+                }
+                R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                    crate::handshake_encode::encode_held_chain_into(
                         buf,
-                        &self.params,
-                        initial_sn,
-                        is_ack,
-                        cookie.as_deref(),
-                        has_ext,
+                        crate::ext_chain::ChainRef::from(&*chain),
                     )
                 })?;
-            } else {
-                encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
-            }
-            R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                crate::handshake_encode::encode_held_chain_into(
-                    buf,
-                    crate::ext_chain::ChainRef::from(&*chain),
-                )
-            })?;
-            // The initiator's OpenSyn is the answer a replay sends again, as written.
-            if holds_answer(role) {
-                self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
-            }
-            Ok(())
-        })
+                // The initiator's OpenSyn is the answer a replay sends again, as written.
+                if holds_answer(role) {
+                    self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
+                }
+                Ok(())
+            },
+        )
     }
 
     /// Fixed-memory step S4 — the lend-only Close: the header (the S flag derived
