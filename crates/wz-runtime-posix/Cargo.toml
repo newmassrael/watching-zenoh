@@ -100,5 +100,10 @@ host-multicast = ["alloc", "dep:log"]
 # profile's, as the engine's serial links are.
 serial = ["alloc", "wz-runtime-coop/serial"]
 
+# The host's named FIFOs as the ends of the cooperative engine's `unixpipe/` links (`unixpipe`:
+# `PosixFifo`, opened and locked as zenoh's unixpipe link opens its own, on Linux and Android).
+# The heap profile's, as the engine's unixpipe links are.
+unixpipe = ["alloc", "wz-runtime-coop/unixpipe"]
+
 [lints]
 workspace = true

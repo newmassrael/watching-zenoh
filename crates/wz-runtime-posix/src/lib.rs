@@ -105,6 +105,10 @@ pub mod serial;
 pub mod slot;
 #[cfg(unix)]
 pub mod stream;
+/// The host's named FIFOs as the ends of the cooperative engine's unixpipe links, on Linux and
+/// Android.
+#[cfg(feature = "unixpipe")]
+pub mod unixpipe;
 #[cfg(windows)]
 pub mod windows;
 // The Windows host's arithmetic, compiled where the tests run so that a Linux build checks it.

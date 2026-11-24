@@ -122,6 +122,12 @@ pub trait FifoOpen {
     /// keeps; [`LinkOpenError::Refused`] when it cannot be made or opened.
     fn reader(&self, path: &str, mode: u32) -> Result<Self::Fifo, LinkOpenError>;
 
+    /// The request FIFO of a listener at `path`, created with `mode` when there is none, open for
+    /// reading and locked as [`Self::reader`] opens one, and read as one that never ends: dials
+    /// come and go on it, and one that let it go is no end of the listener.
+    /// [`LinkOpenError::AddressInUse`] when another listener holds it.
+    fn listen(&self, path: &str, mode: u32) -> Result<Self::Fifo, LinkOpenError>;
+
     /// The request FIFO of a listener at `path`, open for writing: [`LinkOpenError::Refused`]
     /// when no listener reads it, a node there is none of or one whose lock nobody holds
     /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `bail!("no listener...")`).
@@ -717,7 +723,7 @@ where
             return self.links.open_listener(at);
         };
         let mode = at.file_mask.unwrap_or(UNIXPIPE_DEFAULT_FILE_MASK);
-        let request = self.opener.reader(&request_path(at.path.as_str()), mode)?;
+        let request = self.opener.listen(&request_path(at.path.as_str()), mode)?;
         Ok(Box::new(UnixpipeListener {
             opener: self.opener.clone(),
             at,
@@ -825,6 +831,10 @@ mod tests {
                 queue,
                 reads: Some((String::from(path), Rc::clone(&self.0))),
             })
+        }
+
+        fn listen(&self, path: &str, mode: u32) -> Result<TestFifo, LinkOpenError> {
+            self.reader(path, mode)
         }
 
         fn request(&self, path: &str) -> Result<TestFifo, LinkOpenError> {

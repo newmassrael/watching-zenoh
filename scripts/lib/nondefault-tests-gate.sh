@@ -770,6 +770,9 @@ transport-link-unixpipe,transport-link-ws|"
     # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
     # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
     "wz-runtime-posix|hook|serial|"
+    # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
+    # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
+    "wz-runtime-posix|hook|unixpipe|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
