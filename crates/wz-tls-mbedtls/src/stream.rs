@@ -34,7 +34,7 @@ use wz_runtime_coop::ClockSource;
 use crate::channel::{Identity, Io, Role, Session, Step, TlsError, Transport, Trust, Want, Zid};
 
 /// The stream under a session, as the session's transport: a write blocks until the stream took
-/// it (as [`StreamSocket::send_parts`] does), a read never blocks.
+/// it all ([`StreamSocket::write_all`]), a read never blocks.
 struct Lower<S: StreamSocket> {
     socket: S,
     /// The stream's last failure, for the caller of the call that met it.
@@ -43,7 +43,7 @@ struct Lower<S: StreamSocket> {
 
 impl<S: StreamSocket> Transport for Lower<S> {
     fn send(&self, buf: &[u8]) -> Io {
-        match self.socket.send_parts(&[buf]) {
+        match self.socket.write_all(buf) {
             Ok(()) => Io::Done(buf.len()),
             Err(e) => {
                 self.error.set(Some(e));
@@ -146,24 +146,24 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         self.lower.socket.peer()
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), Self::Error> {
+    // The channel's write takes every byte: its records leave through the stream under it, which
+    // takes all of each before it returns.
+    fn write(&self, bytes: &[u8]) -> Result<usize, Self::Error> {
         let mut session = self
             .session
             .try_borrow_mut()
             .map_err(|_| TlsStreamError::Tls(REENTERED))?;
-        for part in parts {
-            let mut rest = *part;
-            while !rest.is_empty() {
-                match session.write(&self.lower, rest) {
-                    Ok(Step::Done(n)) => rest = &rest[n..],
-                    // The stream under takes every byte before it returns, so the session
-                    // only waits on itself here: call again.
-                    Ok(Step::Wait(_)) => {}
-                    Err(e) => return Err(self.transport_error(e)),
-                }
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            match session.write(&self.lower, rest) {
+                Ok(Step::Done(n)) => rest = &rest[n..],
+                // The stream under takes every byte before it returns, so the session only
+                // waits on itself here: call again.
+                Ok(Step::Wait(_)) => {}
+                Err(e) => return Err(self.transport_error(e)),
             }
         }
-        Ok(())
+        Ok(bytes.len())
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -179,12 +179,8 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
 
     // The channel's records leave through the stream under it, which takes every byte before it
     // returns: that stream's room is the channel's.
-    fn wait_writable(&self, timeout_us: u64) -> bool {
+    fn wait_writable(&self, timeout_us: u64) -> (bool, u64) {
         self.lower.socket.wait_writable(timeout_us)
-    }
-
-    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
-        self.lower.socket.wait_writable_timed(timeout_us)
     }
 
     // The same room, waited on from another thread: the stream's own wait, handed out.

@@ -89,9 +89,7 @@ fn a_host_holds_more_sessions_than_the_librarys_default_key_store_could() {
             let (all_live, config) = (all_live.clone(), config.clone());
             thread::spawn(move || {
                 let stream = provider(&config).dial(at(port))?;
-                stream
-                    .send_parts(&[b"ping".as_slice()])
-                    .expect("the stream takes bytes");
+                stream.write_all(b"ping").expect("the stream takes bytes");
                 let mut buf = [0u8; 4];
                 let deadline = Instant::now() + Duration::from_secs(20);
                 let mut got = 0;
@@ -124,9 +122,7 @@ fn a_host_holds_more_sessions_than_the_librarys_default_key_store_could() {
                     }
                 }
                 assert_eq!(&buf[..got], b"ping");
-                stream
-                    .send_parts(&[b"pong".as_slice()])
-                    .expect("the stream takes bytes");
+                stream.write_all(b"pong").expect("the stream takes bytes");
                 held.push(stream);
             }
             Ok(None) => thread::sleep(Duration::from_millis(2)),

@@ -96,17 +96,18 @@ where
         SocketAddr::V4(self.peer)
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), TcpError> {
+    // The write waits for the send buffer, up to its bound, and returns once it took every byte.
+    fn write(&self, bytes: &[u8]) -> Result<usize, TcpError> {
         let started = self.link.now_ms();
         loop {
-            match self.socket.borrow_mut().send_parts(parts) {
+            match self.socket.borrow_mut().send_parts(&[bytes]) {
                 Err(TcpError::WouldBlock)
                     if self.link.now_ms().wrapping_sub(started) < SEND_TIMEOUT_MS =>
                 {
                     // The send buffer drains as the peer acknowledges: poll lwIP and ask again.
                     pump(&self.link, self.service);
                 }
-                other => return other,
+                other => return other.map(|()| bytes.len()),
             }
         }
     }
@@ -469,7 +470,7 @@ mod tests {
         );
 
         assert_eq!(stream.try_read(&mut [0; 8]), Ok(None), "nothing yet");
-        stream.send_parts(&[b"he", b"llo"]).unwrap();
+        assert_eq!(stream.write(b"hello"), Ok(5));
         stream.wait_readable(2_000);
         let mut got = [0u8; 8];
         assert_eq!(stream.try_read(&mut got), Ok(Some(5)));
@@ -517,7 +518,7 @@ mod tests {
         let stream = dial(&link)
             .dial(SocketAddr::from(([127, 0, 0, 1], 47_302)))
             .expect("dial");
-        stream.send_parts(&[b"bye"]).unwrap();
+        assert_eq!(stream.write(b"bye"), Ok(3));
         stream.wait_readable(2_000);
         assert_eq!(stream.try_read(&mut [0; 8]), Ok(Some(0)));
         stream.shutdown();
@@ -562,7 +563,7 @@ mod tests {
         );
         assert_eq!(stream.peer(), to);
 
-        stream.send_parts(&[b"hi"]).unwrap();
+        assert_eq!(stream.write(b"hi"), Ok(2));
         stream.wait_readable(2_000);
         let mut got = [0u8; 4];
         assert_eq!(stream.try_read(&mut got), Ok(Some(2)));

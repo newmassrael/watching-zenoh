@@ -21,8 +21,9 @@
 //!
 //! # The remainder
 //!
-//! This engine's stream seam takes every byte or fails ([`StreamSocket::send_parts`]), where the
-//! program may take part of them or none (would-block). What the program did not take is held in
+//! This engine's stream seam takes every byte or fails ([`StreamSocket::write`] of a stream that
+//! does not write without waiting), where the program may take part of them or none
+//! (would-block). What the program did not take is held in
 //! the transport's table ([`AppLinkTable::hold_remainder`](wz_session_core::app_link_table::AppLinkTable::hold_remainder)),
 //! behind anything held before, and offered to the program again at the start of every send and
 //! every turn of the link's loop (each read and wait), so the stream's bytes leave in order once
@@ -516,22 +517,19 @@ impl Held {
         }
     }
 
-    /// Send `parts` in order behind what is held: what the program does not take now is held
-    /// for it.
-    fn send_all(&self, parts: &[&[u8]]) -> Result<(), AppLinkError> {
+    /// Send `bytes` behind what is held: what the program does not take now is held for it.
+    fn send_all(&self, bytes: &[u8]) -> Result<(), AppLinkError> {
         self.flush()?;
-        for part in parts {
-            let held = self
-                .transport
-                .with(|table| table.holds_remainder(self.handle));
-            let taken = if held { 0 } else { self.send_once(part)? };
-            if taken < part.len() {
-                // What the program did not take of this part: `taken` is below its length here.
-                let rest = part.get(taken..).unwrap_or_default();
-                self.transport
-                    .with(|table| table.hold_remainder(self.handle, rest))
-                    .map_err(|_| AppLinkError::Full)?;
-            }
+        let held = self
+            .transport
+            .with(|table| table.holds_remainder(self.handle));
+        let taken = if held { 0 } else { self.send_once(bytes)? };
+        if taken < bytes.len() {
+            // What the program did not take: `taken` is below the length here.
+            let rest = bytes.get(taken..).unwrap_or_default();
+            self.transport
+                .with(|table| table.hold_remainder(self.handle, rest))
+                .map_err(|_| AppLinkError::Full)?;
         }
         Ok(())
     }
@@ -712,8 +710,9 @@ impl StreamSocket for AppStreamSocket {
         self.peer
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), AppLinkError> {
-        self.held.send_all(parts)
+    // Every byte is taken: what the program does not take now is held for it.
+    fn write(&self, bytes: &[u8]) -> Result<usize, AppLinkError> {
+        self.held.send_all(bytes).map(|()| bytes.len())
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -721,9 +720,10 @@ impl StreamSocket for AppStreamSocket {
     }
 
     // The program's would-block is the stream's full buffer: a link that holds bytes for the
-    // program takes no more until the program says it is writable.
-    fn wait_writable(&self, timeout_us: u64) -> bool {
-        self.held.wait_writable(timeout_us.div_ceil(1_000))
+    // program takes no more until the program says it is writable. The wait keeps no clock.
+    fn wait_writable(&self, timeout_us: u64) -> (bool, u64) {
+        let room = self.held.wait_writable(timeout_us.div_ceil(1_000));
+        (room, if room { 0 } else { timeout_us })
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, AppLinkError> {
@@ -1740,13 +1740,11 @@ mod tests {
         .dial(PEER)
         .unwrap();
         // The seam takes every byte: two leave, the rest is held.
-        stream
-            .send_parts(&[b"ab", b"cd", b"ef"])
-            .expect("held, not failed");
+        assert_eq!(stream.write(b"abcdef"), Ok(6), "held, not failed");
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"ab");
         assert_eq!(held(&transport, stream.held.handle), b"cdef");
         // A later send queues behind the remainder rather than overtaking it.
-        stream.send_parts(&[b"gh"]).unwrap();
+        assert_eq!(stream.write(b"gh"), Ok(2));
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"ab");
         transport
             .event(stream.held.handle, ProgramEvent::Writable)
@@ -1769,7 +1767,7 @@ mod tests {
         }
         .dial(PEER)
         .unwrap();
-        assert_eq!(stream.send_parts(&[b"abcdef"]), Err(AppLinkError::Full));
+        assert_eq!(stream.write(b"abcdef"), Err(AppLinkError::Full));
     }
 
     #[test]
@@ -2667,7 +2665,7 @@ mod tests {
 
         // The program takes two bytes of six: the rest is held, and the wait ends at once.
         *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2)];
-        stream.send_parts(&[b"abcdef"]).expect("held, not failed");
+        assert_eq!(stream.write(b"abcdef"), Ok(6), "held, not failed");
         let started = Instant::now();
         waits.wait(&ready, 10_000);
         assert!(
