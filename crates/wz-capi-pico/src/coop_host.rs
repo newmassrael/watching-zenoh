@@ -139,11 +139,17 @@ mod windows_host {
 // has none: refused here by name, rather than by the empty runtime crate the open would reach.
 #[cfg(all(
     any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    not(any(target_os = "linux", target_os = "android", target_os = "nto", windows))
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "nto",
+        target_os = "macos",
+        windows
+    ))
 ))]
 compile_error!(
     "wz-capi-pico: the cooperative engine's host is `wz-runtime-posix`, which has Linux, Android, \
-     QNX Neutrino and Windows; another host names its clock, random source, wall clock and \
+     QNX Neutrino, macOS and Windows; another host names its clock, random source, wall clock and \
      sockets there and a module of its own in src/coop_host.rs"
 );
 

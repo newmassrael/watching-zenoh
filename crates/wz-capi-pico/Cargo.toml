@@ -128,7 +128,8 @@ std = [
 # linked.
 #
 # Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
-# (`wz-runtime-posix`: Linux, Android, QNX Neutrino, and Winsock on Windows), so each selects `std`.
+# (`wz-runtime-posix`: Linux, Android, QNX Neutrino, macOS, and Winsock on Windows), so each selects
+# `std`.
 #
 # The cooperative engine on a host (`engine-coop`, `os-posix`, `os-windows`) announces a session's
 # initial sequence number by the session core's compact function of the two zids
@@ -170,7 +171,7 @@ os-zephyr = [
 # `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
 # sockets, clock and random source as `engine-coop` runs it (`wz-runtime-posix`: Linux, Android,
-# QNX Neutrino), the host layer of `src/os/unix.rs` under the platform exports, the port's `os`
+# QNX Neutrino, macOS), the host layer of `src/os/unix.rs` under the platform exports, the port's `os`
 # and the runtime's critical sections made of the host's own calls (`wz-capi-coop`'s `host-sys`
 # over `wz-host-sync`'s pthreads), and what a library without `std` links in its place
 # (`src/os/no_std_host.rs`): the C library's heap as the global allocator, which is the one

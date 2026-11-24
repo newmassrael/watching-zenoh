@@ -10,7 +10,8 @@
 # toolchain's refusal to link a program that allocates anywhere proves, as for the kit's image.
 #
 # Not the host profile of the C ABI (`wz-capi-c`, tokio, threads, a heap): that one is the drop-in
-# for zenoh-c. This one is the same session code the MCU images run, at a Linux socket.
+# for zenoh-c. This one is the same session code the MCU images run, at a POSIX host's socket
+# (Linux, Android, QNX Neutrino, macOS).
 #
 # On Windows the same seams are the system's own calls (`src/windows/`): the clock, entropy, wall
 # clock and Winsock sockets the pico C ABI's cooperative engine is opened over there.
