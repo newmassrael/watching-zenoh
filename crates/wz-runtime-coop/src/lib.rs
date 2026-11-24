@@ -329,6 +329,15 @@ pub mod face_send;
 #[cfg(all(feature = "app-link", feature = "alloc", not(feature = "session-slot")))]
 pub mod app_link;
 
+// Two stacks as one, for a library that opens a session over either of them: the engine over
+// them is one type and is built once. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub mod either_links;
+
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no
 // allocator, so it is not feature-gated: a stack's crate names it to supply a
