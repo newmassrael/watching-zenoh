@@ -2944,7 +2944,10 @@ impl StatedQos {
 }
 
 /// Publish `payload` on a session's key with `opts`: the body `z_put` and `z_delete` share, out
-/// of line so that neither export holds a copy of it. The key is read where it lies and named as
+/// of line so that neither export holds a copy of it. A key not in canon form, which only an
+/// unchecked view can hold, is refused as every door refuses it
+/// ([`canon_key`](crate::keyexpr::canon_key)) and nothing is sent; zenoh-pico sends whatever text
+/// the key holds. The key is read where it lies and named as
 /// its declaration names it on this session ([`wire_key_of`]), which is the reason
 /// `z_declare_keyexpr` exists: pico's `_z_write` reads the same discriminant off its
 /// `_z_declared_keyexpr_t`. Each face resolves the literal from its own outbound mapping table,
@@ -2965,6 +2968,9 @@ unsafe fn session_publish(
     let Some(ke) = keyexpr_str(keyexpr) else {
         return Z_ERR_INVALID;
     };
+    if let Err(code) = crate::keyexpr::canon_key(ke) {
+        return code;
+    }
     let engine = engine_ref(state);
     let wire = wire_key_of(keyexpr, engine);
     publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
@@ -3137,8 +3143,10 @@ pub unsafe extern "C" fn z_declare_publisher(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        let Some(ke) = keyexpr_str(keyexpr) else {
-            return Z_ERR_INVALID;
+        // The gate every declaration takes, before the publisher's place is taken.
+        let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
+            Ok(key) => key,
+            Err(code) => return code,
         };
         let session = PicoSession::of(state);
         // The publisher's place is taken from its session before it is declared, so a session

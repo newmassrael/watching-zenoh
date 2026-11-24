@@ -1909,6 +1909,11 @@ pub unsafe extern "C" fn z_query_reply(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_NULL;
         };
+        // A reply's key not in canon form is refused as every door refuses one, before it is
+        // judged against the query.
+        if let Err(code) = crate::keyexpr::canon_key(ke) {
+            return code;
+        }
         if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
@@ -1981,6 +1986,9 @@ pub unsafe extern "C" fn z_query_reply_del(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_NULL;
         };
+        if let Err(code) = crate::keyexpr::canon_key(ke) {
+            return code;
+        }
         if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
