@@ -248,6 +248,12 @@ pub mod locator_text;
 #[cfg(feature = "serial")]
 pub mod serial_link;
 
+/// The session's link over a pair of named FIFOs on this host: the FIFOs a platform opens
+/// ([`unixpipe_link::FifoOpen`], [`unixpipe_link::Fifo`]) under the stream link's framing, and
+/// the stack that opens it beside another's ([`unixpipe_link::UnixpipeLinks`]).
+#[cfg(all(feature = "unixpipe", not(feature = "session-slot")))]
+pub mod unixpipe_link;
+
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
 /// `input_wait` and `room_wait` methods of the socket traits), and nothing elsewhere.
