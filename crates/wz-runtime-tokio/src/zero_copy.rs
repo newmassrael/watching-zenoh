@@ -377,7 +377,7 @@ impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
 {
     /// The Router's `SLOTS` are held against the pool's slot count. Its `CAP`
     /// is not held against the slot size: a chain longer than a slot moves to
-    /// the heap ([`Stage::Spilled`]), so the slot size is how long a message
+    /// the heap (`Stage::Spilled`), so the slot size is how long a message
     /// may be and still cost no allocation, not how long it may be.
     fn new() -> Self {
         assert!(
