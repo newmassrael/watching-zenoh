@@ -242,10 +242,20 @@ unsafe fn release_place<T>(at: NonNull<Lodging<T>>) {
 #[derive(Clone)]
 pub struct Kept(KeptForm);
 
-#[derive(Clone)]
+/// The count a [`Kept`] holds. Copying one is all it is read for: the copy is one more count of
+/// the same value, and dropping a form lets its count go.
 enum KeptForm {
-    Shared { _held: Arc<dyn Send + Sync> },
+    Shared(Arc<dyn Send + Sync>),
     Lodged(LodgedCount),
+}
+
+impl Clone for KeptForm {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Shared(held) => Self::Shared(Arc::clone(held)),
+            Self::Lodged(count) => Self::Lodged(count.clone()),
+        }
+    }
 }
 
 /// A count of a lodged value whose type is named only by the two functions that take and let go
@@ -264,7 +274,7 @@ unsafe impl Sync for LodgedCount {}
 impl Kept {
     /// One count of `value`, in a box of its own.
     pub fn shared(value: Arc<dyn Send + Sync>) -> Self {
-        Self(KeptForm::Shared { _held: value })
+        Self(KeptForm::Shared(value))
     }
 
     /// The count `count` is, of a value lodged where its maker put it.
@@ -281,7 +291,7 @@ impl Kept {
 impl core::fmt::Debug for Kept {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self.0 {
-            KeptForm::Shared { .. } => "Kept::Shared",
+            KeptForm::Shared(_) => "Kept::Shared",
             KeptForm::Lodged(_) => "Kept::Lodged",
         })
     }
@@ -394,5 +404,27 @@ mod tests {
             1,
             "the last count gave the place back"
         );
+    }
+
+    /// A keep of a value in a box of its own is a count of the box: its copy is one more, and
+    /// the box goes with the last of them.
+    ///
+    /// # Control
+    ///
+    /// A copy that makes a new box, or takes no count, leaves the box's count at two after the
+    /// copy, which reds the first assertion.
+    #[test]
+    fn a_shared_keep_counts_its_copies() {
+        let value: Arc<u32> = Arc::new(7);
+        let kept = Kept::shared(value.clone());
+        let copy = kept.clone();
+        assert_eq!(
+            Arc::strong_count(&value),
+            3,
+            "the keep and its copy are counts"
+        );
+        drop(kept);
+        drop(copy);
+        assert_eq!(Arc::strong_count(&value), 1, "both counts were let go of");
     }
 }
