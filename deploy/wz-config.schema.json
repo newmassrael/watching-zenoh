@@ -454,7 +454,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967291,
-              "default": 97152,
+              "default": 95040,
               "x-wz-kind": "parameter",
               "x-wz-storage": "both",
               "x-wz-scope": "session",

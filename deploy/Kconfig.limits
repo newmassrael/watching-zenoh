@@ -29,8 +29,8 @@ config WZ_LIMIT_MAX_KEYEXPR_BYTES
 config WZ_LIMIT_KEY_ARENA_BYTES
 	int "KEY_ARENA_BYTES"
 	range 1 4294967291
-	default 4096 if WZ_LIMITS_ZENOH_PICO
-	default 97152
+	default 3960 if WZ_LIMITS_ZENOH_PICO
+	default 95040
 	help
 	  How many bytes of key text the rows of a session's tables hold at once, in one
 	  arena each row keeps its key in: the session's own declarations, the
