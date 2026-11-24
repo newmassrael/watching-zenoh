@@ -495,8 +495,6 @@ pub mod revision;
 #[cfg(all(feature = "unstable-api", feature = "query"))]
 pub mod cancellation;
 pub mod codec;
-// Totality debt TD-158 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod config;
 // The policies a config states for its session, from code and from a zenoh document: wz doors
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
