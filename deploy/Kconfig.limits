@@ -221,18 +221,6 @@ config WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS
 	  is full. Apart from the transport events listeners' bound, so a profile
 	  that holds more of one kind spends nothing on the other.
 
-config WZ_LIMIT_MAX_DECL_WATCH_EVENTS
-	int "MAX_DECL_WATCH_EVENTS"
-	default 8 if WZ_LIMITS_ZENOH_PICO
-	default 32
-	help
-	  The events of what the peers declare and retract that a session holds
-	  for its declaration watches until each watch is told, one row for each
-	  event however many watches it reaches. An event that finds every row
-	  taken is not held: each watch it would reach is told how many it lost
-	  before its next event. A watch declared while what the peers hold now
-	  does not fit is refused.
-
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
 	default 306 if WZ_LIMITS_ZENOH_PICO

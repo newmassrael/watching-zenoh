@@ -262,18 +262,6 @@ pub const MAX_LINK_EVENTS_LISTENERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
-/// Where [`super::MAX_DECL_WATCH_EVENTS`] is bound.
-pub const MAX_DECL_WATCH_EVENTS: LimitBinding = LimitBinding {
-    kind: LimitKind::Bound,
-    driven: Some(Driven::Remote),
-    range: None,
-    storage: Storage::Both,
-    scope: &[Scope::Session],
-    binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Open),
-    wire: Wire::None,
-};
-
 /// Where [`super::MAX_DECLARED_KEYEXPRS`] is bound.
 pub const MAX_DECLARED_KEYEXPRS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
