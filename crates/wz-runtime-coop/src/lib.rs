@@ -288,8 +288,6 @@ pub mod link_cells;
 // sockets under a cooperative loop, as the datagram link is: a platform supplies the socket
 // (`stream_link::StreamSocket`), and the batch framing and the driver are here.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-200 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stream_link;
 
 // The two links above as one network stack: a dial names its protocol, and the stack opens that
