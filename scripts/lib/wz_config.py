@@ -3596,10 +3596,21 @@ def emit_rust_policies(decl: dict) -> str:
     else:
         out += ["use crate::policy_document::Profile;", ""]
     if pols:
-        out += ["/// Whether an allowance the build does not state keeps only the build default: what",
-                f"/// `{POLICY_DOMAINS_ENV}` states, else whether the target has no operating system.",
-                f'const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!("{POLICY_DOMAINS_ENV}"));',
+        # A word the build states and a policy does not take is `None`; the constant assertion
+        # refuses the build, and the value it would have had is never read.
+        out += [f"/// What `{POLICY_DOMAINS_ENV}` states: whether an allowance the build does not state keeps",
+                "/// only the build default, else whether the target has no operating system; `None` for a",
+                "/// word that is neither `full` nor `defaults`.",
+                f'const STATED_DOMAINS: Option<bool> = policy_defaults_only(option_env!("{POLICY_DOMAINS_ENV}"));',
+                "",
+                "/// Whether an allowance the build does not state keeps only the build default.",
+                "const DEFAULTS_ONLY: bool = match STATED_DOMAINS {",
+                "    Some(defaults_only) => defaults_only,",
+                "    None => false,",
+                "};",
                 ""]
+        out += rust_refusal("STATED_DOMAINS.is_some()",
+                            f"{POLICY_DOMAINS_ENV} is neither `full` nor `defaults`") + [""]
     for pol in choices:
         name = camel(pol["id"])
         values = pol["choices"]
@@ -3618,12 +3629,14 @@ def emit_rust_policies(decl: dict) -> str:
         out += rust_static_array(f"const ALL: [Self; {len(values)}] =",
                                  [f"Self::{camel(v)}" for v in values], "    ")
         out += ["",
-                "    const fn stated() -> Self {",
-                f'        let stated = option_env!("{pol["kconfig"]}");',
-                f"        let index = policy_choice(stated, &Self::CHOICES, {values.index(pol['default'])});",
-                "        Self::ALL[index]", "    }", "}", "",
+                "    const fn stated() -> Option<Self> {",
+                f'        let stated = option_env!("{pol["kconfig"]}");']
+        out += rust_tail_call("policy_choice",
+                              ["stated", "&Self::CHOICES", "&Self::ALL", f"Self::{camel(pol['default'])}"],
+                              "        ")
+        out += ["    }", "}", "",
                 f"impl Default for {name} {{", BUILD_DEFAULT_DOC, "    fn default() -> Self {",
-                "        Self::stated()", "    }", "}", ""]
+                "        Self::DEFAULT", "    }", "}", ""]
     out += ["/// The value of every policy, as one snapshot: what a creator resolved and handed the machines of"]
     if pols:
         out += ["/// its scope. A machine reads a policy only through the accessor of its field, never from the",
@@ -3813,6 +3826,42 @@ def rust_boundary(text: str) -> list[str]:
     return [head, f"        Some({text});"]
 
 
+def rust_tail_call(name: str, args: list[str], indent: str) -> list[str]:
+    """`<name>(<args>)` as the tail expression of a block at the depth `indent` gives, as rustfmt
+    lays a call out: on one line when its arguments fit the call width and the line fits, else one
+    argument a line."""
+    inner = ", ".join(args)
+    one = f"{indent}{name}({inner})"
+    if len(inner) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return [f"{indent}{name}("] + [f"{indent}    {arg}," for arg in args] + [f"{indent})"]
+
+
+def rust_refusal(check: str, message: str) -> list[str]:
+    """`const _: () = assert!(<check>, "<message>");` at the top level, as rustfmt lays it out: on
+    one line when both fit the call width and the line fits, else one a line. The constant that
+    refuses a build, evaluated whether or not anything reads what it checks."""
+    inner = f'{check}, "{message}"'
+    one = f"const _: () = assert!({inner});"
+    if len(inner) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return ["const _: () = assert!(", f"    {check},", f'    "{message}"', ");"]
+
+
+#: What the build is told when it states a word a policy does not take, by the policy's kind.
+STATED_REFUSALS = {
+    "bool": "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`",
+    "choice": "a WZ_POLICY_* value is not one of its policy's choices",
+}
+
+
+def rust_stated_assert(pol: dict) -> list[str]:
+    """The constant that refuses a build whose `WZ_POLICY_<NAME>` is a word the policy does not
+    take: its `stated()` is then `None`, and `DEFAULT` falls back to upstream's value only so that
+    it is a total expression."""
+    return rust_refusal(f"{camel(pol['id'])}::stated().is_some()", STATED_REFUSALS[pol["kind"]])
+
+
 def rust_default_assert(name: str, pid: str) -> list[str]:
     """The constant that refuses a build whose domain of `pid` leaves out its default, laid out as
     rustfmt lays it out (the message is short enough for any id a line holds)."""
@@ -3841,9 +3890,9 @@ def bool_value_rust(pol: dict) -> list[str]:
             "    pub const fn is_on(self) -> bool {", "        matches!(self, Self::On)", "    }", "",
             "    const fn from_bool(on: bool) -> Self {", "        if on {", "            Self::On",
             "        } else {", "            Self::Off", "        }", "    }", "",
-            "    const fn stated() -> Self {",
+            "    const fn stated() -> Option<bool> {",
             f'        let stated = option_env!("{pol["kconfig"]}");',
-            "        Self::from_bool(policy_bool(stated))", "    }", "}", "",
+            "        policy_bool(stated)", "    }", "}", "",
             f"impl From<bool> for {name} {{", "    fn from(on: bool) -> Self {",
             "        Self::from_bool(on)", "    }", "}", "",
             f"impl From<{name}> for bool {{", f"    fn from(value: {name}) -> Self {{",
@@ -3860,6 +3909,10 @@ def policy_value_rust(pol: dict) -> list[str]:
     default; and its `PolicyField` impl."""
     name = camel(pol["id"])
     values = policy_values(pol)
+    if pol["kind"] == "bool":
+        stated_arm, upstream = "Some(on) => Self::from_bool(on),", "off"
+    else:
+        stated_arm, upstream = "Some(value) => value,", pol["default"]
     out = bool_value_rust(pol) if pol["kind"] == "bool" else []
     out += rust_bound_alias(pol)
     out += [f"impl PolicyValue for {name} {{",
@@ -3873,7 +3926,10 @@ def policy_value_rust(pol: dict) -> list[str]:
             "        Self::DEFAULT as usize,",
             "        DEFAULTS_ONLY,",
             "    );",
-            "    const DEFAULT: Self = Self::stated();",
+            "    const DEFAULT: Self = match Self::stated() {",
+            f"        {stated_arm}",
+            f"        None => Self::{camel(upstream)},",
+            "    };",
             f"    const SCOPE: Scope = Scope::{camel(pol['scope'])};",
             f"    const BINDING: Binding = Binding::{camel(pol['binding'])};",
             f"    const MUTABILITY: Mutability = Mutability::{camel(pol['mutability'])};",
@@ -3883,7 +3939,8 @@ def policy_value_rust(pol: dict) -> list[str]:
     else:
         out.append("    const BOUNDARY: Option<&'static str> = None;")
     out += ["", "    fn index(self) -> usize {", "        self as usize", "    }", "}", ""]
-    return out + rust_default_assert(name, pol["id"]) + policy_field_rust(pol)
+    return (out + rust_stated_assert(pol) + [""] + rust_default_assert(name, pol["id"])
+            + policy_field_rust(pol))
 
 
 def global_axes(decl: dict) -> list[dict]:
@@ -5764,15 +5821,43 @@ def cmd_selftest() -> int:
            "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n" in kpolicies
            and "\t  Upstream: Flushes on the batch boundary.\n" in kpolicies)
     rpolicies = emit_rust_policies(pdecl)
-    expect("a choice policy is an enum whose default index is upstream's",
-           "pub enum WireMode {" in rpolicies and "policy_choice(stated, &Self::CHOICES, 0)" in rpolicies)
+    expect("a choice policy is an enum whose stated word is found, without an index, among its values",
+           "pub enum WireMode {" in rpolicies
+           and "    const fn stated() -> Option<Self> {\n"
+               '        let stated = option_env!("WZ_POLICY_WIRE_MODE");\n'
+               "        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::OsDefault)\n    }\n"
+               in rpolicies
+           and "Self::ALL[" not in rpolicies and "panic!" not in rpolicies)
     expect("a choice enum's Default is the build's value, so a config struct can derive Default",
            "impl Default for WireMode {\n" + BUILD_DEFAULT_DOC + "\n    fn default() -> Self {\n"
-           "        Self::stated()\n" in rpolicies)
+           "        Self::DEFAULT\n" in rpolicies)
     expect("a bool policy reads its environment and nothing else",
+           "    const fn stated() -> Option<bool> {\n"
            '        let stated = option_env!("WZ_POLICY_EAGER_FLUSH");\n'
-           "        Self::from_bool(policy_bool(stated))\n" in rpolicies
+           "        policy_bool(stated)\n    }\n" in rpolicies
            and "use super::{policy_bool, policy_choice, policy_defaults_only};" in rpolicies)
+    expect("the build's value is a total match of what it states, upstream's only past a refusal",
+           "    const DEFAULT: Self = match Self::stated() {\n"
+           "        Some(value) => value,\n        None => Self::OsDefault,\n    };\n" in rpolicies
+           and "    const DEFAULT: Self = match Self::stated() {\n"
+               "        Some(on) => Self::from_bool(on),\n        None => Self::Off,\n    };\n"
+               in rpolicies)
+    expect("a word a policy does not take is refused by a constant of each policy",
+           "const _: () = assert!(\n    WireMode::stated().is_some(),\n"
+           "    \"a WZ_POLICY_* value is not one of its policy's choices\"\n);\n" in rpolicies
+           and "const _: () = assert!(\n    EagerFlush::stated().is_some(),\n"
+               "    \"a WZ_POLICY_* value of a bool policy is neither `on` nor `off`\"\n);\n"
+               in rpolicies)
+    expect("a call that fits stays on its line, and one past the call width goes one argument a line",
+           rust_tail_call("f", ["a", "b"], "        ") == ["        f(a, b)"]
+           and rust_tail_call("policy_choice", ["stated", "&Self::CHOICES", "&Self::ALL",
+                                                "Self::" + "V" * 20], "        ")
+           == ["        policy_choice(", "            stated,", "            &Self::CHOICES,",
+               "            &Self::ALL,", "            Self::" + "V" * 20 + ",", "        )"])
+    expect("a refusal within the call width is one line, and a longer one one argument a line",
+           rust_refusal("A.is_some()", "no") == ['const _: () = assert!(A.is_some(), "no");']
+           and rust_refusal("A.is_some()", "n" * 60)
+           == ["const _: () = assert!(", "    A.is_some(),", '    "' + "n" * 60 + '"', ");"])
     expect("each field of SessionPolicy is private and bound inside the build's domain",
            "    wire_mode: WireModeBound,\n" in rpolicies
            and "    eager_flush: EagerFlushBound,\n" in rpolicies
@@ -5781,8 +5866,13 @@ def cmd_selftest() -> int:
            "type WireModeBound = Bound<WireMode, { WireMode::HELD }>;\n" in rpolicies
            and "type EagerFlushBound = Bound<EagerFlush, { EagerFlush::HELD }>;\n" in rpolicies)
     expect("an unstated allowance takes the rule the build or its target states",
-           "const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!(\"WZ_POLICY_DOMAINS\"));\n"
-           in rpolicies and rpolicies.count("        DEFAULTS_ONLY,\n") == len(pdecl["policies"]))
+           "const STATED_DOMAINS: Option<bool> = "
+           "policy_defaults_only(option_env!(\"WZ_POLICY_DOMAINS\"));\n" in rpolicies
+           and "const DEFAULTS_ONLY: bool = match STATED_DOMAINS {\n"
+               "    Some(defaults_only) => defaults_only,\n    None => false,\n};\n" in rpolicies
+           and "const _: () = assert!(\n    STATED_DOMAINS.is_some(),\n"
+               "    \"WZ_POLICY_DOMAINS is neither `full` nor `defaults`\"\n);\n" in rpolicies
+           and rpolicies.count("        DEFAULTS_ONLY,\n") == len(pdecl["policies"]))
     expect("a bool policy is read as a `bool` beside a value type of its own",
            "    pub const fn eager_flush(&self) -> bool {\n        self.eager_flush.get().is_on()\n"
            in rpolicies
@@ -5813,7 +5903,8 @@ def cmd_selftest() -> int:
            "    default_is_allowed::<EagerFlush>(EagerFlush::DEFAULT as usize),\n"
            '    "the default of eager-flush is outside its WZ_POLICY_*_ALLOWS_*"\n'
            ");\n" in rpolicies
-           and rpolicies.count("const _: () = assert!(") == len(pdecl["policies"]))
+           # Per policy, its stated word and its default; once, the domain rule's word.
+           and rpolicies.count("const _: () = assert!(") == 2 * len(pdecl["policies"]) + 1)
     expect("a literal past rustfmt's width goes one field a line",
            "        Self {\n            wire_mode: Bound::build_default(),\n"
            "            eager_flush: Bound::build_default(),\n        }\n" in rpolicies)

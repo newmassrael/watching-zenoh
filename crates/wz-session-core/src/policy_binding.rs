@@ -300,7 +300,8 @@ impl<T: PolicyValue> Domain<T> {
     /// in the order of [`PolicyValue::ALL`], `on` allowing the value and `off` leaving it out.
     /// A value the build does not state is allowed unless `defaults_only`
     /// ([`crate::policy::policy_defaults_only`]), and then only when it is the build's default,
-    /// at `default_index`.
+    /// at `default_index`. A stated word that is neither `on` nor `off` stops the build that
+    /// evaluates the domain in a constant, as the generated module does for every policy.
     pub const fn from_stated(
         stated: &[Option<&str>],
         default_index: usize,
@@ -320,7 +321,12 @@ impl<T: PolicyValue> Domain<T> {
         let mut rest = stated;
         while let [value, tail @ ..] = rest {
             let unstated = !defaults_only || index == default_index;
-            if crate::policy::policy_allows(*value, unstated) {
+            let allowed = crate::policy::policy_allows(*value, unstated);
+            assert!(
+                allowed.is_some(),
+                "a WZ_POLICY_*_ALLOWS_* value is neither `on` nor `off`"
+            );
+            if matches!(allowed, Some(true)) {
                 bits |= bit;
             }
             bit <<= 1;
@@ -850,6 +856,12 @@ mod tests {
     #[should_panic(expected = "one entry per value of its policy")]
     fn a_stated_domain_that_does_not_state_every_value_is_refused() {
         Domain::<Mode>::from_stated(&[None, None], 0, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "_ALLOWS_* value is neither `on` nor `off`")]
+    fn an_allowance_that_is_neither_on_nor_off_stops_the_build() {
+        Domain::<Mode>::from_stated(&[None, Some("y"), None], 0, false);
     }
 
     #[test]

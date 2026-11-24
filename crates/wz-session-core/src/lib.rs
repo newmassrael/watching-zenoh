@@ -230,8 +230,6 @@ pub mod caps;
 /// The policies of a build: behaviour beyond upstream's, each a typed field of
 /// [`policy::SessionPolicy`] whose default is upstream's behaviour unless the
 /// build states otherwise. Unconditional, no_std and no_alloc, like [`caps`].
-// Totality debt TD-023 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::panic)]
 pub mod policy;
 
 // Where a policy's or a limit's value is decided: the build's domain of each policy, the value
