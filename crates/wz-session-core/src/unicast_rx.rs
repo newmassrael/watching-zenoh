@@ -166,8 +166,8 @@ where
         now_ms: u64,
         on_event: &mut dyn EventSink,
     ) {
-        // The observer type the reassembling dispatch's hand-off reports through too, so the two
-        // reach one instance of the report.
+        // The observer type the reassembling dispatch reports a compressed batch through too, so
+        // the two reach one instance of the report.
         let forward: &mut dyn FnMut(IterationEvent<'_, '_>) =
             &mut |event: IterationEvent<'_, '_>| on_event.event(event);
         crate::drive::report_outcome_in_place(outcome, self, actions, now_ms, forward);
@@ -205,65 +205,31 @@ where
 /// is `false` outside a step and inside another receive's call, so it never takes a unit it
 /// could not stage; a call made anyway does nothing with the Router.
 #[cfg(feature = "alloc")]
-pub struct RouterLend<D>(alloc::rc::Rc<core::cell::Cell<Option<core::ptr::NonNull<D>>>>);
+pub struct RouterLend<D>(crate::step_lend::StepLend<D>);
 
 #[cfg(feature = "alloc")]
 impl<D> RouterLend<D> {
     /// A place nothing is lent in yet.
     pub fn new() -> Self {
-        Self(alloc::rc::Rc::new(core::cell::Cell::new(None)))
+        Self(crate::step_lend::StepLend::new())
     }
 
     /// Lend `router` to every receive that holds this place for the length of `f`, and take it
     /// back when `f` returns or unwinds. The owner holds `router` borrowed for as long, so it
     /// neither reads nor moves it meanwhile.
     pub fn lend_for<T>(&self, router: &mut D, f: impl FnOnce() -> T) -> T {
-        /// Puts back what the place held before, however `f` ends.
-        struct Restore<'a, D> {
-            place: &'a core::cell::Cell<Option<core::ptr::NonNull<D>>>,
-            was: Option<core::ptr::NonNull<D>>,
-        }
-        impl<D> Drop for Restore<'_, D> {
-            fn drop(&mut self) {
-                self.place.set(self.was);
-            }
-        }
-        let _restore = Restore {
-            place: &self.0,
-            was: self.0.replace(Some(core::ptr::NonNull::from(router))),
-        };
-        f()
+        self.0.lend_for(router, f)
     }
 
     /// Whether the Router is lent here now, and not taken out by a call.
     pub fn is_lent(&self) -> bool {
-        self.0.get().is_some()
+        self.0.is_lent()
     }
 
     /// Run `f` on the Router while it is lent here, taking it out for the length of `f`; `None`,
     /// with `f` not run, while it is not.
     pub fn with<T>(&self, f: impl FnOnce(&mut D) -> T) -> Option<T> {
-        let mut taken = self.0.take()?;
-        /// Puts the Router back in its place, however `f` ends.
-        struct PutBack<'a, D> {
-            place: &'a core::cell::Cell<Option<core::ptr::NonNull<D>>>,
-            router: core::ptr::NonNull<D>,
-        }
-        impl<D> Drop for PutBack<'_, D> {
-            fn drop(&mut self) {
-                self.place.set(Some(self.router));
-            }
-        }
-        let _back = PutBack {
-            place: &self.0,
-            router: taken,
-        };
-        // SAFETY: the pointer was set by `lend_for` from a `&mut D` its caller holds borrowed for
-        // the whole of the lend, which has not ended, since `lend_for` takes it back only after
-        // its `f` returns, and this call runs inside it. It was taken out of the place, so no
-        // other call reaches it until `PutBack` returns it: this is the one reference to the
-        // Router while `f` runs.
-        Some(f(unsafe { taken.as_mut() }))
+        self.0.with(f)
     }
 }
 

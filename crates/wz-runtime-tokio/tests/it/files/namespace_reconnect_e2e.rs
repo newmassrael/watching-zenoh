@@ -45,6 +45,7 @@ fn reconnect_replay_re_decorates_the_cached_declare() {
         fixture_params_with_zid(0x01),
         TokioTime::new(),
     );
+    actions.enter_established();
 
     // Install the namespace (survives reconnect — the actions bundle is reused).
     actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));

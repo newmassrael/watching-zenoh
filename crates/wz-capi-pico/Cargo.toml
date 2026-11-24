@@ -244,7 +244,9 @@ os-windows = [
 # runtime has, and the cooperative engine the `tcp/` and `udp/` ones its stack listens on
 # (`wz-capi-coop`'s `listen`, `docs/capi-pico-on-coop-engine.md` step L4). What only the tokio
 # engine has (a group, the secure and the other links, gossip) selects it by its own feature.
-peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]
+# A session that may listen is laid out from its config at the open (`wz-capi-coop`'s
+# `runtime-plan`); a client build's arena is the region the build lays out when it is compiled.
+peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen", "wz-capi-coop?/runtime-plan"]
 # `multicast-transport` (`Z_FEATURE_MULTICAST_TRANSPORT` with `Z_FEATURE_LINK_UDP_MULTICAST`,
 # open-debt item 913): `z_open` with a `listen` endpoint `udp/<group>:<port>#iface=<if>` joins
 # that group as the session's one transport, as pico's listen of a UDP endpoint with an
@@ -653,7 +655,13 @@ unstable-api = ["wz-capi-core?/unstable-api", "wz-session-core/pubsub-source-inf
 # statement. Both engines take the policies the open hands them, so it selects neither. The doors
 # select policies after the build, so their domains keep every value the build does not leave out
 # (`wz-session-core/policy-selection`); without them each such policy is its build default alone.
-config-policy = ["wz-capi-core?/config-policy", "wz-session-core/policy-selection"]
+# A stated limit sizes the session's arena, so the cooperative engine lays it out from the config
+# at the open (`wz-capi-coop`'s `runtime-plan`) and not from the region the build lays out.
+config-policy = [
+    "wz-capi-core?/config-policy",
+    "wz-capi-coop?/runtime-plan",
+    "wz-session-core/policy-selection",
+]
 # `conformance-digest`: `wz_ext_conformance_digest`, the digest of the configuration the library
 # was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
 # package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.

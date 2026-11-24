@@ -358,8 +358,56 @@ pub const HELD_HELLOS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
-/// Where [`super::HELD_PAYLOAD_BYTES`] is bound.
-pub const HELD_PAYLOAD_BYTES: LimitBinding = LimitBinding {
+/// Where [`super::PAYLOAD_SMALL_BLOCK_BYTES`] is bound.
+pub const PAYLOAD_SMALL_BLOCK_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((32, 1073741824)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::PAYLOAD_MEDIUM_BLOCK_BYTES`] is bound.
+pub const PAYLOAD_MEDIUM_BLOCK_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((32, 1073741824)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_SMALL_PAYLOAD_BLOCKS`] is bound.
+pub const HELD_SMALL_PAYLOAD_BLOCKS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_MEDIUM_PAYLOAD_BLOCKS`] is bound.
+pub const HELD_MEDIUM_PAYLOAD_BLOCKS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_LARGE_PAYLOAD_BLOCKS`] is bound.
+pub const HELD_LARGE_PAYLOAD_BLOCKS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Local),
     range: None,

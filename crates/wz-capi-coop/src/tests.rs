@@ -74,7 +74,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         link_rx: LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key").into(),
         region: None,
     }
 }
@@ -172,6 +172,8 @@ enum Command {
 #[derive(Default)]
 struct Seen {
     declares: usize,
+    /// The id of each subscriber the router was declared, in the order the declarations arrived.
+    subscribers: Vec<u64>,
     interests: usize,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -462,7 +464,15 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 for m in messages {
                     match m {
-                        NetworkMessage::Declare(_) => seen.declares += 1,
+                        NetworkMessage::Declare(declare) => {
+                            seen.declares += 1;
+                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                subscriber,
+                            ) = &declare.body
+                            {
+                                seen.subscribers.push(subscriber.id);
+                            }
+                        }
                         NetworkMessage::Interest(_interest) => {
                             seen.interests += 1;
                             #[cfg(all(
@@ -517,8 +527,13 @@ fn run_router(
             // Counted as their owned forms are, and dropped on the same rules.
             if let IterationEvent::InPlace(record) = event {
                 let mut seen = counted.lock().unwrap();
-                if record.declare().is_some() {
+                if let Some(declare) = record.declare() {
                     seen.declares += 1;
+                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
+                        &declare.body
+                    {
+                        seen.subscribers.push(subscriber.id);
+                    }
                 }
                 if let Some(_interest) = record.interest() {
                     seen.interests += 1;
@@ -2321,6 +2336,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::handle(layout),
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2395,6 +2411,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
                 held,
+                plan: crate::arena::PlanFrom::Config,
             },
         )
         .expect("the session opens")
@@ -2481,6 +2498,7 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         OpenStorage {
             memory: &AllocatorMemory,
             held,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2991,7 +3009,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
     );
     let refused = open_with_result(CoopConfig {
         listen: vec![long.clone()],
-        max_faces: 1,
+        max_faces: 0,
         accept_pending: 1,
         ..config(&router)
     });
@@ -3066,6 +3084,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .err();
@@ -3110,6 +3129,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("a listener opens once it is bound");

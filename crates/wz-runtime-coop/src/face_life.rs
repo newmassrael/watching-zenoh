@@ -22,7 +22,9 @@
 //! | `Waiting` past its time, `Held` with `!node_held` | | `Due` | `Dial(0)` |
 //!
 //! A face of the dial role ([`FaceRole::Dial`]) is kept through every loss and dialled again; any
-//! other face goes with its link ([`Next::Remove`]).
+//! other face goes with its link (`Next::Remove`). Only a session that takes faces besides its
+//! dial (`listen`) has such faces, or a dial role that stands by for a node another face holds
+//! (`Held`, `Next::StandBy`): a build without it has neither, nor the decisions about them.
 
 use wz_session_core::session_zid::SessionZid;
 
@@ -36,6 +38,7 @@ pub enum FaceRole {
     /// The dial role's face.
     Dial,
     /// A face taken besides the dial role's.
+    #[cfg(feature = "listen")]
     Taken,
 }
 
@@ -66,6 +69,7 @@ pub enum Phase {
         at_us: u64,
     },
     /// Standing by while another face holds the node `node` its link reached.
+    #[cfg(feature = "listen")]
     Held {
         /// The node the link reached.
         node: SessionZid,
@@ -87,7 +91,9 @@ impl Phase {
                     .min(*deadline_us),
             ),
             Phase::Opening { deadline_us, .. } => Some(*deadline_us),
-            Phase::Up | Phase::Held { .. } => None,
+            Phase::Up => None,
+            #[cfg(feature = "listen")]
+            Phase::Held { .. } => None,
         }
     }
 }
@@ -103,6 +109,7 @@ pub struct Signals {
     /// while it is still being made.
     pub dial: Option<bool>,
     /// Another face holds the node this face stands by for, or brings a link to it up.
+    #[cfg(feature = "listen")]
     pub node_held: bool,
 }
 
@@ -137,6 +144,7 @@ pub enum Turn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     /// The face goes, with its tables.
+    #[cfg(feature = "listen")]
     Remove,
     /// The session ends: the dial role's link is gone and the session dials none again.
     EndSession,
@@ -147,6 +155,7 @@ pub enum Next {
         from: usize,
     },
     /// Stand by while another face holds `node`.
+    #[cfg(feature = "listen")]
     StandBy {
         /// The node another face holds.
         node: SessionZid,
@@ -244,6 +253,7 @@ impl FaceLife {
                 }
             }
             Phase::Waiting { at_us } if now_us >= *at_us => Turn::Due,
+            #[cfg(feature = "listen")]
             Phase::Held { .. } if !signals.node_held => Turn::Due,
             _ => Turn::Stays,
         }
@@ -256,19 +266,11 @@ impl FaceLife {
         match turn {
             Turn::Stays => FaceEffect::Stay,
             Turn::Lost => FaceEffect::Lose {
-                then: match self.role {
-                    FaceRole::Taken => Next::Remove,
-                    FaceRole::Dial if !redials => Next::EndSession,
-                    FaceRole::Dial => Next::DialFrom { from: 0 },
-                },
+                then: self.after_loss(redials),
             },
             Turn::Established => FaceEffect::BringUp,
             Turn::HandshakeOver { next } => FaceEffect::Fail {
-                then: match (self.role, stood_by) {
-                    (FaceRole::Taken, _) => Next::Remove,
-                    (FaceRole::Dial, Some(node)) => Next::StandBy { node },
-                    (FaceRole::Dial, None) => Next::DialFrom { from: next },
-                },
+                then: self.after_handshake(next, stood_by),
             },
             Turn::DialOver {
                 made: Some(true),
@@ -292,10 +294,43 @@ impl FaceLife {
     /// from endpoint `next`: also the executor's answer when the handshake a [`FaceEffect::Handshake`]
     /// asked for could not begin.
     pub fn after_failure(&self, next: usize) -> Next {
-        match self.role {
-            FaceRole::Taken => Next::Remove,
-            FaceRole::Dial => Next::DialFrom { from: next },
+        #[cfg(feature = "listen")]
+        if self.role == FaceRole::Taken {
+            return Next::Remove;
         }
+        Next::DialFrom { from: next }
+    }
+
+    /// What follows a link of this face that was lost: `redials` when the session dials its
+    /// endpoints again.
+    fn after_loss(&self, redials: bool) -> Next {
+        #[cfg(feature = "listen")]
+        if self.role == FaceRole::Taken {
+            return Next::Remove;
+        }
+        if redials {
+            Next::DialFrom { from: 0 }
+        } else {
+            Next::EndSession
+        }
+    }
+
+    /// What follows a handshake of this face that is over before it completed, the dial role
+    /// going on from endpoint `next` unless another face holds the node it reached (`stood_by`),
+    /// which only a session that takes faces besides its dial can say.
+    fn after_handshake(&self, next: usize, stood_by: Option<SessionZid>) -> Next {
+        #[cfg(feature = "listen")]
+        {
+            if self.role == FaceRole::Taken {
+                return Next::Remove;
+            }
+            if let Some(node) = stood_by {
+                return Next::StandBy { node };
+            }
+        }
+        #[cfg(not(feature = "listen"))]
+        let _ = stood_by;
+        Next::DialFrom { from: next }
     }
 }
 
@@ -305,6 +340,7 @@ mod tests {
 
     const NOW: u64 = 1_000;
 
+    #[cfg(feature = "listen")]
     fn node() -> SessionZid {
         SessionZid::new(&[0x51, 0x52]).expect("a zid")
     }
@@ -313,6 +349,7 @@ mod tests {
         FaceLife::new(0, FaceRole::Dial, phase)
     }
 
+    #[cfg(feature = "listen")]
     fn taken(phase: Phase) -> FaceLife {
         FaceLife::new(3, FaceRole::Taken, phase)
     }
@@ -403,19 +440,23 @@ mod tests {
         let waiting = dial(Phase::Waiting { at_us: NOW });
         assert_eq!(waiting.turn(NOW, Signals::default()), Turn::Due);
         assert_eq!(waiting.turn(NOW - 1, Signals::default()), Turn::Stays);
-        let held = dial(Phase::Held { node: node() });
-        let still = Signals {
-            node_held: true,
-            ..Signals::default()
-        };
-        assert_eq!(held.turn(NOW, still), Turn::Stays);
-        assert_eq!(held.turn(NOW, Signals::default()), Turn::Due);
+        #[cfg(feature = "listen")]
+        {
+            let held = dial(Phase::Held { node: node() });
+            let still = Signals {
+                node_held: true,
+                ..Signals::default()
+            };
+            assert_eq!(held.turn(NOW, still), Turn::Stays);
+            assert_eq!(held.turn(NOW, Signals::default()), Turn::Due);
+        }
     }
 
     /// A lost link takes a face taken besides with it; the dial role's face dials again from the
     /// first endpoint, or ends the session when it dials none again.
     #[test]
     fn a_lost_link_removes_a_taken_face_and_redials_or_ends_the_dial_role() {
+        #[cfg(feature = "listen")]
         assert_eq!(
             taken(Phase::Up).effect(Turn::Lost, true, None),
             FaceEffect::Lose { then: Next::Remove }
@@ -440,16 +481,19 @@ mod tests {
     #[test]
     fn a_failed_handshake_removes_stands_by_or_goes_on() {
         let over = Turn::HandshakeOver { next: 2 };
-        assert_eq!(
-            taken(opening()).effect(over.clone(), true, Some(node())),
-            FaceEffect::Fail { then: Next::Remove }
-        );
-        assert_eq!(
-            dial(opening()).effect(over.clone(), true, Some(node())),
-            FaceEffect::Fail {
-                then: Next::StandBy { node: node() }
-            }
-        );
+        #[cfg(feature = "listen")]
+        {
+            assert_eq!(
+                taken(opening()).effect(over.clone(), true, Some(node())),
+                FaceEffect::Fail { then: Next::Remove }
+            );
+            assert_eq!(
+                dial(opening()).effect(over.clone(), true, Some(node())),
+                FaceEffect::Fail {
+                    then: Next::StandBy { node: node() }
+                }
+            );
+        }
         assert_eq!(
             dial(opening()).effect(over, false, None),
             FaceEffect::Fail {
@@ -457,6 +501,22 @@ mod tests {
             },
             "the next endpoint is dialled whether or not the session redials"
         );
+    }
+
+    /// A session that takes no face besides its dial never stands by: no other face can hold the
+    /// node a failed handshake reached, so the dial role goes on to the next endpoint whatever it
+    /// is told of one. Turned red by a build without `listen` that reads the node it is handed.
+    #[cfg(not(feature = "listen"))]
+    #[test]
+    fn a_dial_role_with_no_other_face_goes_on_after_a_failed_handshake() {
+        let node = SessionZid::new(&[0x51, 0x52]).expect("a zid");
+        assert_eq!(
+            dial(opening()).effect(Turn::HandshakeOver { next: 2 }, true, Some(node)),
+            FaceEffect::Fail {
+                then: Next::DialFrom { from: 2 }
+            }
+        );
+        assert_eq!(dial(opening()).after_failure(3), Next::DialFrom { from: 3 });
     }
 
     /// A dial that made a link begins its handshake; one refused or unanswered takes a face
@@ -482,6 +542,7 @@ mod tests {
                     then: Next::DialFrom { from: 2 },
                 }
             );
+            #[cfg(feature = "listen")]
             assert_eq!(
                 taken(dialing()).effect(over(made), true, None),
                 FaceEffect::DialFailed { then: Next::Remove }
@@ -525,6 +586,7 @@ mod tests {
         );
         assert_eq!(dial(opening()).wake_at(0), Some(NOW + 10));
         assert_eq!(dial(Phase::Up).wake_at(0), None);
+        #[cfg(feature = "listen")]
         assert_eq!(dial(Phase::Held { node: node() }).wake_at(0), None);
     }
 
@@ -549,6 +611,7 @@ mod tests {
             now
         };
         assert_eq!(Phase::Up.wake_at(|| read(0)), None);
+        #[cfg(feature = "listen")]
         assert_eq!(Phase::Held { node: node() }.wake_at(|| read(0)), None);
         assert_eq!(Phase::Waiting { at_us: 7 }.wake_at(|| read(0)), Some(7));
         assert_eq!(opening().wake_at(|| read(0)), Some(NOW + 10));

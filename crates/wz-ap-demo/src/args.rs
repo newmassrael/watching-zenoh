@@ -11456,12 +11456,14 @@ pub(crate) fn session_init_params_for(
         // The node's snapshot, which the queue and the width above were made from.
         policy: tuning.policy,
         limits: wz::runtime_tokio::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
-            std::io::Error::other(format!(
-                "no OS entropy for the cookie signing key ({e}); refusing to open a \
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "no OS entropy for the cookie signing key ({e}); refusing to open a \
                  session whose anti-amplification cookie anybody could forge"
-            ))
-        })?,
+                ))
+            })?
+            .into(),
         region: None,
     })
 }

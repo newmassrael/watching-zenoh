@@ -217,12 +217,34 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// ([`Self::task_refusals`]); a sleep past the timers is refused an entry, counted
     /// ([`Self::timer_refusals`]), and ends by polling. No spawn and no sleep allocates. What an
     /// engine that owes no allocation after its open makes at its open.
+    ///
+    /// `rows.timers` of 0 makes no timer table at all (a build in which no task sleeps). Always
+    /// inlined, as are the other reserved makings: a maker that states the count as a constant
+    /// links only the making of that count.
     #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
     pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
         Self::over(
             clock,
             ExecutorState::reserved(rows.tasks, rows.task_bytes),
-            TimerQueue::reserved(rows.timers),
+            TimerQueue::of_rows(rows.timers),
+        )
+    }
+
+    /// [`Self::reserved`] for a runtime that hosts one task at a time: an engine whose session holds
+    /// one link, its dial role's, and runs no task beside that link's. It holds one cell of
+    /// `rows.task_bytes` (none for `rows.tasks` of 0, and one for a count past it), and its
+    /// passes, spawns and sweeps look at that cell alone: a spawn while the cell is taken is
+    /// refused, counted, as one past a reserved table's rows is. As only this names the walks of
+    /// one cell and only the other makings name the walks of many, a build whose runtimes are all
+    /// made here links no walk of many cells.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn reserved_for_one(clock: C, rows: RuntimeRows) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::reserved_one(rows.tasks, rows.task_bytes),
+            TimerQueue::of_rows(rows.timers),
         )
     }
 
@@ -235,11 +257,12 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// table's rows is. Once sealed the runtime is [`Self::reserved`]'s: no spawn and no sleep
     /// allocates.
     #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
     pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
         Self::over(
             clock,
             ExecutorState::opening(rows.tasks, rows.task_bytes, added),
-            TimerQueue::reserved(rows.timers),
+            TimerQueue::of_rows(rows.timers),
         )
     }
 

@@ -45,7 +45,11 @@ P3. **Region memory.** A session is one region sized at build time from the limi
 (`wz_config.py` generates the capacities) and reserved at open; every table is a fixed-capacity
 pool inside it addressed by a generation-checked index (slot map). Exhaustion is an error code at
 the call that asks, never a panic and never a growth. No reference counting inside a session:
-one owner (the session), borrowed by its driver.
+one owner (the session), borrowed by its driver. A value several parts of the session reach (its
+round of deliveries) lies in the region, owned by one `Placed` and reached by `PlacedRef`
+handles that count nothing; whoever takes a handle (`Placed::share`) answers that no copy of it
+is dereferenced after the owner is dropped or beside a `&mut` the owner gave, which the owner's
+place among the session's fields, dropped after every holder of a handle, keeps.
 
 P4. **Zero-copy views.** Received bytes are read where they lie; a decoded message is a view whose
 lifetime is the receive buffer's. Outgoing bytes are encoded into a lent slot. An owned message
@@ -184,7 +188,7 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    | fact (today in `wz-capi-coop`) | owner |
    |---|---|
    | the session lock, the read task (`start_reader`), the wait set (`LinkWaits`, `IdleWait`, the waits of `LinkRooms`, the clock's wake), the task and timer tables, the reservation of the region | L0 |
-   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial_from`, `dial_answered`, `dial_or_wait`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
+   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial`, `redial_later`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
    | the entity tables and their counters, the keys and the shared key ids, the query plane and pending gets, the round of deliveries, the declaration watches, the face reports, what a face that comes up is told again (`replay`), which faces a publish goes to | L3 |
    | the places of the ABI's handle and objects | L4 |
 

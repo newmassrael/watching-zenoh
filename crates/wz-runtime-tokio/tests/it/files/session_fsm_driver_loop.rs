@@ -1252,8 +1252,13 @@ async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch
             _ => None,
         })
         .expect("the acceptor answered with an InitAck carrying a cookie");
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.patch.0,
         Some(1),

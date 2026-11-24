@@ -42,7 +42,6 @@
 use alloc::sync::{Arc, Weak};
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
-use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
@@ -57,6 +56,7 @@ use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use crate::key_arena::{KeyRef, KeySpace};
+use crate::placed::Placed;
 use crate::plane_lock::LockFamily;
 use crate::qos::CongestionControl;
 use crate::query_sink::QueryView;
@@ -940,7 +940,7 @@ impl<C: RoundCalls> Table<C> {
     /// The sample a record of `head` and `rest` holds, read where its parts lie: what each of its
     /// subscribers' callbacks is handed. It answers no hint: nothing is built on the heap for a
     /// record of the round.
-    fn sample(&self, head: &Head, rest: Option<&Rest>) -> SampleRef<'_> {
+    fn sample<'a>(&'a self, head: &Head, rest: Option<&'a Rest>) -> SampleRef<'a> {
         let mut sample = SampleRef::new(
             self.text(head.key),
             self.bytes(head.payload),
@@ -1237,20 +1237,13 @@ unsafe impl<C: RoundCalls> Send for Round<C> {}
 unsafe impl<C: RoundCalls> Sync for Round<C> {}
 
 impl<C: RoundCalls> Round<C> {
-    /// The session's round over `rows`, built where the allocation that shares it keeps it: its
-    /// table's rows are kilobytes, which a value of the whole would lay in the frame of the
-    /// session's open once for each move.
-    #[inline(never)]
-    pub fn shared_over(rows: RoundRows<C>) -> Arc<Self> {
-        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
-        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
-        let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
-        // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
-        // is valid and nothing else reads or writes it while it is written.
-        unsafe { Self::write_in((*raw).as_mut_ptr(), rows) };
-        // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
-        // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
-        unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
+    /// The session's round over `rows`, built where `arena` places it ([`Arena::place_with`]): in
+    /// the session's own memory, owned by one owner and reached by handles that count nothing.
+    /// Refused, taking nothing, past what the arena has left.
+    pub fn placed_over(arena: &mut Arena, rows: RoundRows<C>) -> Result<Placed<Self>, LendRefused> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which
+        // `place_with` gives aligned and valid for writes of one.
+        unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
     }
 
     /// An empty round written where `at` points, field by field.
@@ -2546,10 +2539,10 @@ impl<C: RoundCalls> QueryView for RoundQuery<'_, C> {
 
     fn encoding(&self) -> Option<&EncodingHint> {
         let (packed_id, schema) = self.query.encoding?;
-        Some(self.encoding.get_or_init(|| EncodingHint {
+        crate::once_built::get_or_build(&self.encoding, || EncodingHint {
             packed_id,
             schema: schema.map(|span| self.table.bytes(span).to_vec()),
-        }))
+        })
     }
 
     fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {

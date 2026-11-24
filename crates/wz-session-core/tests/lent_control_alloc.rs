@@ -171,7 +171,7 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
     pair!(
         wrong,
         "declare_kexpr",
-        lent::declare_kexpr(5, key).unwrap(),
+        lent::declare_kexpr(core::num::NonZero::new(5).unwrap(), key).unwrap(),
         owned::build_declare_kexpr(5, key).unwrap()
     );
     pair!(

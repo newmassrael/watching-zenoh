@@ -345,6 +345,14 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
+# The plan of a session's arena laid out at the open from the config it is handed
+# (`arena::PlanFrom::Config`, `CoopEngine::open` and the opens beside it), and kept row by row
+# (`ArenaPlan::rows`). Off, every open is by a region the build laid out when it was compiled
+# (`arena::ArenaRegion`): the image carries neither the walk of the rows nor a table of them, a
+# plan keeping the bytes its rows take and the rows each layer lends from. A C ABI whose config may
+# state a policy, listen or join a group turns it on; the crate's own tests have it whatever this
+# says.
+runtime-plan = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no
@@ -352,6 +360,9 @@ tx-lend-only = ["wz-session-core/tx-lend-only"]
 time-base = []
 
 [dev-dependencies]
+# The stand-in names the subscriber of each declaration it is told, in both forms its session reads
+# one in (owned and where its frame lies), so a test of the replay reads what was told in order.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end
 # certificates, as `wz-tls-mbedtls`'s own tests do, and share that crate's helper for it.
 rcgen = "0.13"
