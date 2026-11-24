@@ -27,6 +27,7 @@
 use alloc::boxed::Box;
 use alloc::rc::{Rc, Weak};
 use core::cell::{Cell, RefCell};
+use core::ffi::c_int;
 
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::link::{
@@ -60,6 +61,11 @@ const DATA_HEADER: u8 = 0;
 
 /// How long a service turn waits for room to write, in microseconds.
 const SERVICE_WAIT_US: u64 = SERVICE_WAIT_MS as u64 * 1_000;
+
+/// The longest a dial that waits for its handshake waits, in microseconds: the connect timeout of
+/// a zenoh-pico session, which a waiting open of a program's transport is held to as well
+/// (`OPEN_WAIT_MS` in `crate::app_link`).
+const OPEN_WAIT_US: u64 = 10_000_000;
 
 /// The largest batch whose frame a buffer of `capacity` bytes holds whole: the frame adds a
 /// header, a length and a CRC (seven bytes), COBS one code byte and one more for every 254 bytes
@@ -619,6 +625,32 @@ where
     }
 }
 
+impl<O: SerialOpen> SerialDial<O>
+where
+    O::Device: 'static,
+{
+    /// The dial, waited out: asked again each time the line has something to read or the
+    /// `INIT` is due again, until the peer answers or [`OPEN_WAIT_US`] has passed on the
+    /// opener's clock, which refuses it as an open worth trying later.
+    fn wait(mut self) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        let deadline = self.opener.now_us().saturating_add(OPEN_WAIT_US);
+        loop {
+            if let Some(made) = self.poll() {
+                return made;
+            }
+            let now = self.opener.now_us();
+            let link = self.link.as_ref().ok_or(LinkOpenError::Refused)?;
+            if now >= deadline {
+                return Err(LinkOpenError::Refused);
+            }
+            let until = link.resend_at_us.get().unwrap_or(deadline).min(deadline);
+            let wait_ms = until.saturating_sub(now).div_ceil(1_000);
+            link.line
+                .wait_readable(c_int::try_from(wait_ms).unwrap_or(c_int::MAX));
+        }
+    }
+}
+
 /// A dial of [`SerialLinks`]: the stack's, or a serial one.
 pub enum SerialLinksDial<D, O: SerialOpen> {
     /// A dial of the stack the serial links stand beside.
@@ -744,6 +776,26 @@ impl<S, O: SerialOpen> SerialLinks<S, O> {
         self
     }
 
+    /// A dial of the line `at` names: the line opened and what it holds thrown away before the
+    /// `INIT`, as upstream clears its port before it connects; the link is made then, so the
+    /// peer's answer is read into its buffer.
+    fn dial_serial(&self, at: SerialLocator) -> Result<SerialDial<O>, LinkOpenError>
+    where
+        O: Clone,
+        O::Device: 'static,
+    {
+        let line = Rc::new(self.opener.open(&at)?);
+        line.discard_queued().map_err(|_| LinkOpenError::Refused)?;
+        let link = self.shape.link(line, at)?;
+        if link.send_frame(SERIAL_FLAG_INIT, &[]) != LinkSendOutcome::Sent {
+            return Err(LinkOpenError::Refused);
+        }
+        Ok(SerialDial {
+            link: Some(link),
+            opener: self.opener.clone(),
+        })
+    }
+
     /// Serial links that lend the session `slots` buffers of `bytes` each to encode its frames
     /// into; by default a slot holds the largest frame's batch.
     #[must_use]
@@ -776,13 +828,14 @@ where
         self.links.open_acceptor(port)
     }
 
-    // A serial link is made by its handshake, which waits for the peer: it is dialled by
-    // `begin_initiator` alone, whose dial is asked between the loop's steps.
+    // A serial link is made by its handshake, which waits for the peer: a caller that opens and
+    // does not ask again (a node's dialer over an endpoint its config names) is held until the
+    // peer answers, as a waiting open is (`SerialDial::wait`).
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
-        if to.as_serial().is_some() {
-            return Err(LinkOpenError::Unsupported);
+        match to.as_serial() {
+            Some(at) => self.dial_serial(at)?.wait(),
+            None => self.links.open_initiator(to),
         }
-        self.links.open_initiator(to)
     }
 
     fn lend_buffers(&mut self, tables: LinkTables) {
@@ -808,22 +861,11 @@ where
         self.links.lend_port_rows(rows);
     }
 
-    // The line is opened and what it holds thrown away before the `INIT`, as upstream clears its
-    // port before it connects; the link is made then, so the peer's answer is read into its buffer.
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
-        let Some(at) = to.as_serial() else {
-            return self.links.begin_initiator(to).map(SerialLinksDial::Links);
-        };
-        let line = Rc::new(self.opener.open(&at)?);
-        line.discard_queued().map_err(|_| LinkOpenError::Refused)?;
-        let link = self.shape.link(line, at)?;
-        if link.send_frame(SERIAL_FLAG_INIT, &[]) != LinkSendOutcome::Sent {
-            return Err(LinkOpenError::Refused);
+        match to.as_serial() {
+            Some(at) => self.dial_serial(at).map(SerialLinksDial::Serial),
+            None => self.links.begin_initiator(to).map(SerialLinksDial::Links),
         }
-        Ok(SerialLinksDial::Serial(SerialDial {
-            link: Some(link),
-            opener: self.opener.clone(),
-        }))
     }
 
     fn open_listener(&self, at: Locator) -> Result<Box<dyn LinkListener<HeapLink>>, LinkOpenError> {
@@ -854,7 +896,6 @@ mod tests {
     use super::*;
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
-    use core::ffi::c_int;
     use core::net::{Ipv4Addr, SocketAddr};
 
     use wz_session_core::locator_grammar::SerialOptions;
@@ -866,12 +907,15 @@ mod tests {
     type Queue = Rc<RefCell<VecDeque<u8>>>;
 
     /// A line of the test: what the link reads (the peer's writes), what it wrote, how many more
-    /// bytes the line takes, and whether it hung up.
+    /// bytes the line takes, and whether it hung up. A wait on it lets the test's clock run for
+    /// the wait, and delivers what the peer writes meanwhile (`later`).
     struct TestLine {
         inbox: Queue,
         outbox: Queue,
+        later: Queue,
         room: Rc<Cell<usize>>,
         hung: Rc<Cell<bool>>,
+        now_us: Rc<Cell<u64>>,
     }
 
     impl SerialDevice for TestLine {
@@ -884,7 +928,12 @@ mod tests {
             Ok(taken)
         }
 
-        fn wait_readable(&self, _timeout_ms: c_int) {}
+        fn wait_readable(&self, timeout_ms: c_int) {
+            let waited_us = u64::try_from(timeout_ms).unwrap_or(0).saturating_mul(1_000);
+            self.now_us.set(self.now_us.get().saturating_add(waited_us));
+            let mut later = self.later.borrow_mut();
+            self.inbox.borrow_mut().extend(later.drain(..));
+        }
 
         fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, ()> {
             if self.hung.get() {
@@ -912,6 +961,7 @@ mod tests {
     struct TestOpen {
         inbox: Queue,
         outbox: Queue,
+        later: Queue,
         room: Rc<Cell<usize>>,
         hung: Rc<Cell<bool>>,
         opens: Rc<Cell<usize>>,
@@ -944,8 +994,10 @@ mod tests {
             Ok(TestLine {
                 inbox: Rc::clone(&self.inbox),
                 outbox: Rc::clone(&self.outbox),
+                later: Rc::clone(&self.later),
                 room: Rc::clone(&self.room),
                 hung: Rc::clone(&self.hung),
+                now_us: Rc::clone(&self.now_us),
             })
         }
 
@@ -1174,19 +1226,38 @@ mod tests {
     fn a_serial_locator_is_dialled_here_and_any_other_by_the_stack() {
         let open = TestOpen::new();
         let links = links(&open);
-        assert!(matches!(
-            links.open_initiator(serial(50_000, true)),
-            Err(LinkOpenError::Unsupported)
-        ));
-        assert_eq!(
-            open.opens.get(),
-            0,
-            "a serial link is made by its handshake alone"
-        );
         let udp = Locator::udp(SocketAddr::from((Ipv4Addr::LOCALHOST, 7447)));
         assert!(links.begin_initiator(udp).is_err());
         assert_eq!(links.links.dials.get(), 1);
         assert!(links.open_listener(udp).is_err());
+    }
+
+    #[test]
+    fn a_dial_that_waits_is_made_once_the_peer_answers_on_the_line() {
+        let open = TestOpen::new();
+        open.later
+            .borrow_mut()
+            .extend(frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]));
+        let link = links(&open)
+            .open_initiator(serial(50_000, true))
+            .expect("the peer's INIT|ACK makes the link");
+        assert_eq!(open.written(), frame(SERIAL_FLAG_INIT, &[]));
+        assert_eq!(
+            link.sink.send_blocking(b"abc", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+    }
+
+    #[test]
+    fn a_dial_that_waits_is_refused_once_the_open_wait_has_passed() {
+        let open = TestOpen::new();
+        open.now_us.set(5);
+        assert!(matches!(
+            links(&open).open_initiator(serial(50_000, true)),
+            Err(LinkOpenError::Refused)
+        ));
+        assert!(open.now_us.get() >= 5 + OPEN_WAIT_US);
+        assert_eq!(open.opens.get(), 1);
     }
 
     #[test]
