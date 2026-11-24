@@ -874,8 +874,10 @@ impl Table {
             for entry in self.entries.iter() {
                 let key = match &entry.what {
                     Held::Sample { head, .. } => head.key,
-                    #[allow(unreachable_patterns)]
-                    _ => continue,
+                    #[cfg(feature = "liveliness")]
+                    Held::Liveliness { key, .. } => *key,
+                    #[cfg(feature = "query")]
+                    Held::Reply(reply) => reply.key,
                 };
                 if key.place == Place::Held {
                     // SAFETY: the record took one count of the block when it was written
@@ -1509,6 +1511,7 @@ impl Round {
         &self,
         call: LivelinessCall,
         sample: &LivelinessSample<'_>,
+        held: Option<&KeyRef>,
     ) {
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
@@ -1558,7 +1561,11 @@ impl Round {
             self.released.end_liveliness(call);
             return;
         }
-        let Some(at) = table.place_key(key, lending) else {
+        let placed = match held.and_then(|held| table.held_key(held)) {
+            Some(at) => Some(at),
+            None => table.place_key(key, lending),
+        };
+        let Some(at) = placed else {
             self.refuse(true);
             self.released.end_liveliness(call);
             return;
@@ -1572,6 +1579,9 @@ impl Round {
             },
             first,
         ));
+        if let (Ok(()), Some(held)) = (&entry, held) {
+            table.hold_key(at, held);
+        }
         let kept = match entry {
             Ok(()) => match table.callbacks.push(Owed::Liveliness(call)) {
                 Ok(()) => true,
@@ -1609,15 +1619,21 @@ impl Round {
             self.refuse(true);
             return;
         }
-        let Some(reply) = Self::place_reply(table, view, lending) else {
+        let held = view.keyexpr_held();
+        let Some(reply) = Self::place_reply(table, view, held, lending) else {
             self.refuse(true);
             return;
         };
+        let key = reply.key;
         let first = table.callbacks.len();
-        let kept = table
+        let entered = table
             .entries
             .push(Entry::owing_one(Held::Reply(reply), first))
-            .is_ok()
+            .is_ok();
+        if let (true, Some(held)) = (entered, held) {
+            table.hold_key(key, held);
+        }
+        let kept = entered
             && table
                 .callbacks
                 .push(Owed::Reply(Arc::clone(callback)))
@@ -1632,9 +1648,13 @@ impl Round {
     fn place_reply(
         table: &mut Table,
         view: &dyn ReplyView,
+        held: Option<&KeyRef>,
         lending: Option<Lending>,
     ) -> Option<HeldReply> {
-        let key = table.place_key(view.keyexpr().as_bytes(), lending)?;
+        let key = match held.and_then(|held| table.held_key(held)) {
+            Some(key) => key,
+            None => table.place_key(view.keyexpr().as_bytes(), lending)?,
+        };
         let payload = table.place(view.payload(), lending)?;
         let attachment = match view.attachment() {
             Some(part) => Some(table.place(part, lending)?),

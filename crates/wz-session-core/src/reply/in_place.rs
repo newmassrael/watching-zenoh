@@ -9,7 +9,7 @@
 //! [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace)
 //! instead of projecting it into a boxed owned message. This module is the
 //! pending-get side of that: the keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_viewed`]), the payload, the encodings and the attachment
+//! ([`resolve_wireexpr_viewed_held`]), the payload, the encodings and the attachment
 //! are read where they lie (the Response is read as its view, a few words and the
 //! bytes its chains occupy, so the walk holds no kilobyte-sized record on the
 //! stack), and every pending get on the reply's rid is handed
@@ -60,7 +60,7 @@ use crate::sample::SourceInfo;
 #[cfg(feature = "alloc")]
 use crate::sample::TimestampHint;
 use crate::wireexpr_resolve::{
-    resolve_wireexpr_viewed, KeyexprBuf, KeyexprPastBound, MappingSpaces,
+    resolve_wireexpr_viewed_held, KeyexprBuf, KeyexprPastBound, MappingSpaces,
 };
 
 /// The reply a Response read in place is delivered as: every field a range of
@@ -71,6 +71,8 @@ use crate::wireexpr_resolve::{
 struct LentReply<'r, 'f> {
     rid: crate::wire_id::RequestId,
     keyexpr: &'r str,
+    /// The key of the session's key arena `keyexpr` is the whole text of, when it is one.
+    held: Option<&'r crate::key_arena::KeyRef>,
     kind: ReplyKind,
     payload: &'r [u8],
     err_encoding: Option<(u32, Option<&'r [u8]>)>,
@@ -94,6 +96,9 @@ impl ReplyView for LentReply<'_, '_> {
     }
     fn keyexpr(&self) -> &str {
         self.keyexpr
+    }
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        self.held
     }
     fn kind(&self) -> ReplyKind {
         self.kind
@@ -381,22 +386,24 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             return Err(Fallback::Instrumented);
         }
         let mut composed = KeyexprBuf::new();
-        let keyexpr = match resolve_wireexpr_viewed(&response.keyexpr.body, spaces, &mut composed) {
-            Ok(Some(keyexpr)) => keyexpr,
-            // An error reply is not about a key: a node that expires a query it forwarded
-            // (upstream's routing does) sends its `Timeout` with no key expression at all, and
-            // the error is what the asker is waiting on. It is delivered with none, as the owned
-            // path delivers it.
-            Ok(None) if body.kind == crate::reply_sink::ReplyKind::Err => "",
-            // An id the space does not hold: dropped, as the owned path drops
-            // it. A sliced Put never reaches here, so there are no shared-memory
-            // slices to settle.
-            Ok(None) => return Ok(()),
-            Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
-        };
+        let (keyexpr, held) =
+            match resolve_wireexpr_viewed_held(&response.keyexpr.body, spaces, &mut composed) {
+                Ok(Some(resolved)) => resolved,
+                // An error reply is not about a key: a node that expires a query it forwarded
+                // (upstream's routing does) sends its `Timeout` with no key expression at all, and
+                // the error is what the asker is waiting on. It is delivered with none, as the owned
+                // path delivers it.
+                Ok(None) if body.kind == crate::reply_sink::ReplyKind::Err => ("", None),
+                // An id the space does not hold: dropped, as the owned path drops
+                // it. A sliced Put never reaches here, so there are no shared-memory
+                // slices to settle.
+                Ok(None) => return Ok(()),
+                Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
+            };
         let reply = LentReply {
             rid: response.request_id,
             keyexpr,
+            held,
             kind: body.kind,
             payload: body.payload,
             err_encoding: body.err_encoding,
@@ -494,7 +501,7 @@ mod tests {
             source_info: view.source_info().cloned(),
             timestamp: view
                 .timestamp_parts()
-                .map(|stamp| TimestampHint::new(stamp.time, &stamp.zid).unwrap()),
+                .map(|stamp| TimestampHint::new(stamp.time, stamp.zid).unwrap()),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
             #[cfg(feature = "pubsub-ts-stack")]

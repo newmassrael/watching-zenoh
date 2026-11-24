@@ -2030,6 +2030,16 @@ impl
         row: RowAccess<'_, LivelinessRow>,
         sample: LivelinessSample<'_>,
     ) {
+        Self::tell_held(cx, id, row, sample, None);
+    }
+
+    fn tell_held(
+        cx: &mut RoundDelivery,
+        id: LivelinessSubscriberHandle,
+        row: RowAccess<'_, LivelinessRow>,
+        sample: LivelinessSample<'_>,
+        held: Option<&KeyRef>,
+    ) {
         // As a subscriber's sample: the row is read where it lies, and one past the most calls
         // its latch counts is handed nothing.
         let Some(call) = RowCallback::begin(row.row()) else {
@@ -2039,7 +2049,7 @@ impl
         // holds, as the round's writer must.
         unsafe {
             cx.round
-                .offer_liveliness(LivelinessCall::new(call, id), &sample)
+                .offer_liveliness(LivelinessCall::new(call, id), &sample, held)
         };
     }
 }
