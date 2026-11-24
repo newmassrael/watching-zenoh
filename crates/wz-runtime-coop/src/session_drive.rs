@@ -32,12 +32,6 @@
 use alloc::boxed::Box;
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
@@ -46,12 +40,6 @@ use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 #[cfg(feature = "session-slot")]
 use core::ops::{Deref, DerefMut};
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "session-slot")]
 use critical_section::Mutex;
@@ -264,50 +252,6 @@ pub trait SessionDatagramLink {
     fn room_wait(&self) -> Option<WaitOn> {
         None
     }
-
-    /// Lend the owner the free part of this link's receive buffer for one read it makes with
-    /// nothing of the session held, waiting in the read itself ([`RxLease`]), where a wait on the
-    /// link's input ([`Self::input_wait`]) is followed by the step's read. `None` for a link
-    /// that gives no such read, holds input already, has a lease out, or has ended; its owner then
-    /// waits on its input. While the lease is out the link's receive reads nothing and leaves
-    /// the buffer alone, and what the read brought is the link's once the lease is landed
-    /// ([`Self::land_rx`]).
-    ///
-    /// Asked only where the link could be asked to receive: what is left of a batch is moved to
-    /// the front of the buffer here, as a receive moves it, so nothing a receive lent may be read
-    /// any more ([`Self::lends_until_next_receive`]). The heap profile's, as [`Self::input_wait`]
-    /// is.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        None
-    }
-
-    /// Take back a lease [`Self::lend_rx`] gave, with what its read brought: the bytes it read
-    /// are the link's from here, and a stream it found ended or failed ends the link, after what
-    /// came before is handed over. A lease another link gave is let go of and changes nothing.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn land_rx(&self, lease: RxLease) {
-        drop(lease);
-    }
-}
-
-/// A wait that a thread which drives no link makes beside the links' (`LinkWaits`): the program's
-/// word that a clock it moves has moved on, which no stack names to its platform. A wait over
-/// links with one of these beside them is a look at the links, and the step that follows reads
-/// every link.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkReadiness: Send + Sync {
-    /// Block until what this waits for has come, or `timeout_ms` has passed; return at once
-    /// when it already has.
-    fn wait_readable(&self, timeout_ms: u32);
 }
 
 /// What a wait on a link names: the link's handle in the stack that made it, a value copied into
@@ -323,6 +267,20 @@ pub enum WaitOn {
     /// A link of the program's transport by its handle (`wz_session_core::app_link_table`'s
     /// `LinkHandle`), which is never reused: a wait on one whose link has gone answers at once.
     AppLink(u64),
+    /// A wake the stack made for a session ([`LinkWaits::wake`]): ready once its waker is woken
+    /// from any thread, and made quiet again by the wait that finds it so.
+    Wake(usize),
+}
+
+/// A wake a stack makes once for a session ([`LinkWaits::wake`]): what a wait names it by, and
+/// the waker that makes it ready from any thread. Whoever holds the waker ends the session's next
+/// wait over its links by waking it, as the program's word that its clock moved on does.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub struct StackWake {
+    /// What a wait names the wake by.
+    pub on: WaitOn,
+    /// What makes the wake ready.
+    pub waker: core::task::Waker,
 }
 
 /// One entry of a wait over several links ([`LinkWaits::wait`]): the link, and whether the wait
@@ -369,6 +327,14 @@ pub trait LinkWaits: Send + Sync {
     /// (or once it has failed or gone, which the send that follows reports), `false` when it
     /// still would not when the time is up.
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool;
+
+    /// A wake of this stack's, made once for a session at its open: a handle a wait over the
+    /// session's links names beside them ([`WaitOn::Wake`]), and the waker any thread makes it
+    /// ready with. `None` for a stack that has none, whose waits a wake beside them bounds at a
+    /// look instead. The provided form has none.
+    fn wake(&self) -> Option<StackWake> {
+        None
+    }
 }
 
 /// The waits of a stack whose links name nothing to wait on: each of them waits in its own loop,
@@ -386,154 +352,6 @@ impl LinkWaits for NoWaits {
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
         let _ = (on, timeout_us);
         true
-    }
-}
-
-/// What a read its owner made of a link's input came to ([`LinkRead::read_waiting`]).
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadWaited {
-    /// This many bytes were taken into the buffer, at least one.
-    Read(usize),
-    /// Nothing came within the wait, or the wait was interrupted: the link is as it was.
-    Quiet,
-    /// The other end closed the stream: nothing more comes.
-    Ended,
-    /// The read failed, with the platform's code for why.
-    Failed(i32),
-}
-
-/// A read of a link's input that its owner makes with nothing of the session held and that waits
-/// in the read itself, as zenoh-pico's read task waits in its socket's `recv`
-/// (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_unicast_client_read`): one call where a
-/// wait for the link to be readable and the read after it are two
-/// ([`SessionDatagramLink::lend_rx`]).
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub trait LinkRead: Send + Sync {
-    /// Wait up to `timeout_ms` milliseconds (at least one) for the link's stack to have bytes,
-    /// and take what it has, at most `buf.len()`, into `buf`; at once when some are queued.
-    fn read_waiting(&self, buf: &mut [u8], timeout_ms: u32) -> ReadWaited;
-}
-
-/// A link's [`LinkRead`], shared between the link and the leases it gives ([`RxLease`]), with
-/// whether a read of a lease is under way: what the link waits out before it lets its buffer go
-/// ([`Self::wait_out`]).
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub struct OwnerRead {
-    read: Box<dyn LinkRead>,
-    reading: AtomicBool,
-}
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl OwnerRead {
-    /// The owner's read `read`, with no lease out.
-    pub fn new(read: Box<dyn LinkRead>) -> Arc<Self> {
-        Arc::new(Self {
-            read,
-            reading: AtomicBool::new(false),
-        })
-    }
-
-    /// Lend the `len` bytes at `at` to one read of the owner's.
-    ///
-    /// # Safety
-    /// The bytes are writable, and nothing reads, writes or frees them until the lease's read has
-    /// ended or the lease is let go of unread, which [`Self::wait_out`] waits for.
-    pub unsafe fn lend(self: &Arc<Self>, at: *mut u8, len: usize) -> RxLease {
-        self.reading.store(true, Ordering::Release);
-        RxLease {
-            owner: Arc::clone(self),
-            at,
-            len,
-            waited: None,
-        }
-    }
-
-    /// Return once no read of a lease of this is under way. A link that lets go of its buffer
-    /// while a lease is out first ends the read (its stream shut, which a read waiting on it
-    /// answers at once) and then waits here, so the buffer is not freed under the read.
-    pub fn wait_out(&self) {
-        while self.reading.load(Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Whether `lease` was lent by this, and not by another link's read.
-    pub fn lent(self: &Arc<Self>, lease: &RxLease) -> bool {
-        Arc::ptr_eq(self, &lease.owner)
-    }
-}
-
-/// The free part of a link's receive buffer, lent to one read its owner makes with nothing of the
-/// session held ([`SessionDatagramLink::lend_rx`]), and what that read brought. Made, read and
-/// landed by the owner's thread; the session takes it back under its lock
-/// ([`SessionDatagramLink::land_rx`]).
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub struct RxLease {
-    owner: Arc<OwnerRead>,
-    at: *mut u8,
-    len: usize,
-    waited: Option<ReadWaited>,
-}
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl RxLease {
-    /// Make the read, waiting up to `timeout_ms` milliseconds in it. A lease is read once; a
-    /// second call reads nothing.
-    pub fn read(&mut self, timeout_ms: u32) {
-        if self.waited.is_some() {
-            return;
-        }
-        // SAFETY: the bytes were lent by `OwnerRead::lend`, whose caller leaves them to this read
-        // alone until it ends, which the store below says.
-        let buf = unsafe { core::slice::from_raw_parts_mut(self.at, self.len) };
-        let waited = self.owner.read.read_waiting(buf, timeout_ms.max(1));
-        self.owner.reading.store(false, Ordering::Release);
-        self.waited = Some(waited);
-    }
-
-    /// What the read brought: [`ReadWaited::Quiet`] for a lease not read.
-    pub fn waited(&self) -> ReadWaited {
-        self.waited.unwrap_or(ReadWaited::Quiet)
-    }
-}
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl Drop for RxLease {
-    fn drop(&mut self) {
-        // A lease let go of unread lets the link have its buffer back; one that was read said so
-        // when its read ended, and a later lease of the same link may be reading now.
-        if self.waited.is_none() {
-            self.owner.reading.store(false, Ordering::Release);
-        }
     }
 }
 
@@ -644,16 +462,6 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     fn room_wait(&self) -> Option<WaitOn> {
         (**self).room_wait()
     }
-
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        (**self).lend_rx()
-    }
-
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn land_rx(&self, lease: RxLease) {
-        (**self).land_rx(lease)
-    }
 }
 
 /// A link in a cell is a link: the handle the drive loop pumps names the same driver the
@@ -726,16 +534,6 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells:
     #[cfg(feature = "alloc")]
     fn room_wait(&self) -> Option<WaitOn> {
         (**self).room_wait()
-    }
-
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        (**self).lend_rx()
-    }
-
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn land_rx(&self, lease: RxLease) {
-        (**self).land_rx(lease)
     }
 }
 
@@ -1007,7 +805,7 @@ pub trait SessionLinks {
     }
 
     /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
-    /// its owner's read of it reach the same link through clones of this. The default puts the
+    /// its loop reach the same link through clones of this. The default puts the
     /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
     /// handle back, so its link is behind one pointer and not two.
     fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {

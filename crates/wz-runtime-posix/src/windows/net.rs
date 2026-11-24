@@ -388,6 +388,52 @@ wz_runtime_coop::with_heap_link_seams! {
     }
 }
 
+wz_runtime_coop::with_heap_link_seams! {
+    /// A wake of [`WindowsWaits`](super::WindowsWaits): a datagram socket on the loopback,
+    /// non-blocking, ready once a waker sends it a byte.
+    #[cfg(feature = "alloc")]
+    struct SocketWake(WindowsUdpSocket);
+
+    #[cfg(feature = "alloc")]
+    impl alloc::task::Wake for SocketWake {
+        fn wake(self: alloc::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+            // A wake that finds the socket's buffer full is ready already.
+            let _ = self.0.send_to(self.0.local, &[1]);
+        }
+    }
+
+    /// The wake of a session over this platform's sockets: `None` when the loopback gives no
+    /// socket.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn self_wake() -> Option<wz_runtime_coop::session_drive::StackWake> {
+        let socket =
+            WindowsUdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).ok()?;
+        super::set_nonblocking(socket.socket, true).ok()?;
+        let on = wz_runtime_coop::session_drive::WaitOn::Wake(socket.socket);
+        Some(wz_runtime_coop::session_drive::StackWake {
+            on,
+            waker: core::task::Waker::from(alloc::sync::Arc::new(SocketWake(socket))),
+        })
+    }
+
+    /// Read what the wake `socket` holds until it holds nothing: the wake is quiet again.
+    pub(crate) fn drain_wake(socket: ws::SOCKET) {
+        let mut buf = [0u8; 64];
+        let room = i32::try_from(buf.len()).unwrap_or(i32::MAX);
+        loop {
+            // SAFETY: a live buffer of the length passed, on a non-blocking socket of the caller's.
+            let read = unsafe { ws::recv(socket, buf.as_mut_ptr(), room, 0) };
+            if read <= 0 {
+                return;
+            }
+        }
+    }
+}
+
 impl Drop for WindowsUdpSocket {
     fn drop(&mut self) {
         close(self.socket);
@@ -703,6 +749,50 @@ mod tests {
                 started.elapsed() < Duration::from_millis(2_500),
                 "the datagram on the set's last socket ended the wait, took {:?}",
                 started.elapsed()
+            );
+        }
+
+        /// A session's wake ends a wait over the sockets beside it once its waker is woken from
+        /// another thread, and the wait that found it reads it quiet: the next wait sleeps its
+        /// time. CONTROL: before the waker is woken the wait sleeps too. Turned red by a wake that
+        /// is never named to `WSAPoll`, or one left ready after the wait that found it.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_sessions_wake_ends_the_wait_beside_it_and_is_quiet_after() {
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits};
+
+            let waits = super::super::WindowsWaits;
+            let (quiet, _sender) = pair();
+            let wake = waits.wake().expect("the loopback makes a wake");
+            let set = [
+                LinkWait::input(quiet.input_wait().expect("a socket names its handle")),
+                LinkWait::input(wake.on),
+            ];
+            let started = Instant::now();
+            waits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "CONTROL: nothing woke it"
+            );
+            let waker = wake.waker.clone();
+            let waking = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                waker.wake();
+            });
+            let started = Instant::now();
+            waits.wait(&set, 10_000);
+            let waited = started.elapsed();
+            waking.join().expect("the waking thread");
+            assert!(
+                waited < Duration::from_secs(5),
+                "the wake ended the wait: {waited:?}"
+            );
+            let started = Instant::now();
+            waits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "the wait that found the wake read it quiet"
             );
         }
     }

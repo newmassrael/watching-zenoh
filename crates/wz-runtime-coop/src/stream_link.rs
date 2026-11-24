@@ -33,12 +33,6 @@ use core::ffi::c_int;
 use core::fmt::Debug;
 use core::net::SocketAddr;
 
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use alloc::sync::Arc;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -60,12 +54,6 @@ use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use crate::session_drive::{LinkRead, OwnerRead, ReadWaited, RxLease};
 use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -179,33 +167,6 @@ pub trait StreamSocket: Sized {
     /// for it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn room_wait(&self) -> Option<WaitOn> {
-        None
-    }
-
-    /// A read of this stream that a thread other than the link's makes, waiting in the read
-    /// itself ([`SessionDatagramLink::lend_rx`]), on a handle of its own that outlives the stream
-    /// safely. `None` when the platform gives none (a stream whose write must not wait keeps a read
-    /// that cannot either), and then the owner waits on the stream's input
-    /// ([`Self::input_wait`]) and the link reads after.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn reader(&self) -> Option<alloc::boxed::Box<dyn LinkRead>> {
-        None
-    }
-
-    /// The failure a read of [`Self::reader`]'s answered with the platform's `code`, as this
-    /// stream reports one; `None` from a stream that names none, and the link then ends with no
-    /// failure kept.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn read_failure(code: i32) -> Option<Self::Error> {
-        let _ = code;
         None
     }
 }
@@ -500,24 +461,6 @@ impl SessionDatagramLink for NoStream {
     fn room_wait(&self) -> Option<WaitOn> {
         match *self {}
     }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        match *self {}
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn land_rx(&self, _lease: RxLease) {
-        match *self {}
-    }
 }
 
 impl StreamDial for NoDial {
@@ -715,22 +658,6 @@ pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
     /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
     /// not.
     owner_waits: bool,
-    /// The read its owner makes into the buffer with nothing of the session held, waiting in the
-    /// read, when the stream gives one ([`SessionDatagramLink::lend_rx`]).
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    owner_read: Option<Arc<OwnerRead>>,
-    /// Whether the free part of the buffer is lent to that read now: the receive then reads
-    /// nothing and leaves the buffer alone until the lease is landed.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    rx_lent: Cell<bool>,
     /// Whether the stream took the last write whole without waiting
     /// ([`StreamSocket::send_parts_now`]): the next frame is then not preceded by a question of
     /// its room, the write itself being the question. `false` before the first write and for a
@@ -776,18 +703,6 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
             lost: Cell::new(None),
             error: Cell::new(None),
             owner_waits: false,
-            #[cfg(all(
-                feature = "alloc",
-                not(feature = "session-slot"),
-                target_has_atomic = "ptr"
-            ))]
-            owner_read: None,
-            #[cfg(all(
-                feature = "alloc",
-                not(feature = "session-slot"),
-                target_has_atomic = "ptr"
-            ))]
-            rx_lent: Cell::new(false),
             room_known: Cell::new(false),
             owed: RefCell::new(OwedQueue::new()),
         }
@@ -796,17 +711,11 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// The same link, waited on by its owner when its stream can be
     /// ([`SessionDatagramLink::input_wait`]): its loop then reads what is queued and does not
     /// wait, and its owner waits on the stream with nothing of the session held. A stream that
-    /// gives no such wait keeps the link waiting in its loop. One that also gives a read made from
-    /// outside ([`StreamSocket::reader`]) lends its owner the buffer to wait in that read
-    /// ([`SessionDatagramLink::lend_rx`]).
+    /// gives no such wait keeps the link waiting in its loop.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
         self.owner_waits = self.socket.input_wait().is_some();
-        #[cfg(target_has_atomic = "ptr")]
-        if self.owner_waits {
-            self.owner_read = self.socket.reader().map(OwnerRead::new);
-        }
         self
     }
 
@@ -836,15 +745,6 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// `_z_zbuf_set_rpos(&ztu->_common._zbuf, _z_zbuf_get_rpos(&ztu->_common._zbuf) - _Z_MSG_LEN_ENC_SIZE);`).
     fn receive(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         if self.lost.get().is_some() {
-            return false;
-        }
-        // The free part of the buffer is the owner's read's until its lease is landed.
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            target_has_atomic = "ptr"
-        ))]
-        if self.rx_lent.get() {
             return false;
         }
         let mut buf = self.rx_buf.borrow_mut();
@@ -1371,80 +1271,6 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         self.socket.room_wait()
     }
 
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        let owner = self.owner_read.as_ref()?;
-        if self.lost.get().is_some() || self.rx_lent.get() || self.batch_held() {
-            return None;
-        }
-        let mut buf = self.rx_buf.try_borrow_mut().ok()?;
-        let bytes = buf.bytes()?;
-        let (start, mut held) = (self.spent.get(), self.held.get());
-        // Nothing before what is left of a batch is lent any more (asked where a receive could
-        // be): it moves to the front, as a receive moves it, and the read lands behind it.
-        if start > 0 {
-            bytes.copy_within(start..held, 0);
-            #[cfg(test)]
-            self.moved.set(self.moved.get() + (held - start));
-            held -= start;
-            self.spent.set(0);
-            self.held.set(held);
-        }
-        let free = bytes.get_mut(held..).filter(|free| !free.is_empty())?;
-        self.rx_lent.set(true);
-        // SAFETY: the free part of the buffer is the lease's read's alone until it is landed: the
-        // receive reads nothing while `rx_lent` is set, nothing else writes the buffer, and the
-        // link does not let the buffer go before the read has ended (`Drop`).
-        Some(unsafe { owner.lend(free.as_mut_ptr(), free.len()) })
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn land_rx(&self, lease: RxLease) {
-        let Some(owner) = self.owner_read.as_ref() else {
-            return;
-        };
-        if !self.rx_lent.get() || !owner.lent(&lease) {
-            return;
-        }
-        self.rx_lent.set(false);
-        match lease.waited() {
-            ReadWaited::Read(n) => {
-                let held = (self.held.get() + n).min(self.rx_len);
-                self.held.set(held);
-                let mut buf = self.rx_buf.borrow_mut();
-                // The lease was lent from the buffer the link holds, which it holds still.
-                if let Some(bytes) = buf.bytes() {
-                    self.ready.set(matches!(
-                        front(&bytes[self.spent.get()..held], self.rx_len),
-                        Front::Batch(_)
-                    ));
-                }
-            }
-            ReadWaited::Quiet => {
-                // A read that brought nothing leaves a buffer that holds nothing of the link's
-                // own to its pool.
-                if B::POOLED && self.held.get() == self.spent.get() {
-                    self.rx_buf.borrow_mut().idle();
-                }
-            }
-            ReadWaited::Ended => self.end(LostCause::PeerClosed),
-            ReadWaited::Failed(code) => {
-                if let Some(error) = S::read_failure(code) {
-                    self.error.set(Some(error));
-                }
-                self.end(LostCause::OsError);
-            }
-        }
-    }
-
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         let mut frame = None;
@@ -1461,8 +1287,6 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
     }
 }
 
-/// A buffer lent to the owner's read is not let go of under it: the stream is shut, which ends a
-/// read waiting on it at once, and the read is waited out before the buffer goes.
 impl<S, B, X> StreamLink<S, B, X> for StreamDriver<S, B, X>
 where
     S: StreamSocket + 'static,
@@ -1476,20 +1300,6 @@ where
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn waited_by_owner(self) -> Self {
         StreamDriver::waited_by_owner(self)
-    }
-}
-
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-impl<S: StreamSocket, B: RxStore, T: TxStore> Drop for StreamDriver<S, B, T> {
-    fn drop(&mut self) {
-        if let (Some(owner), true) = (&self.owner_read, self.rx_lent.get()) {
-            self.socket.shutdown();
-            owner.wait_out();
-        }
     }
 }
 
@@ -1627,15 +1437,6 @@ mod tests {
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         fn room_wait(&self) -> Option<WaitOn> {
             Some(WaitOn::Socket(PIPE_HANDLE))
-        }
-
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            target_has_atomic = "ptr"
-        ))]
-        fn read_failure(_code: i32) -> Option<Broken> {
-            Some(Broken)
         }
     }
 
@@ -2743,250 +2544,5 @@ mod tests {
                 "the session's close is staged for its loop"
             );
         }
-    }
-
-    /// One answer of the owner's read of a test link a read: bytes, the end of the stream, a
-    /// failure. A read that finds none is quiet.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    enum Answer {
-        Bytes(Vec<u8>),
-        Ended,
-        Failed(i32),
-    }
-
-    /// The answers the owner's read of a test link gives, in order, and how many reads were made.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[derive(Default)]
-    struct Feed {
-        answers: std::sync::Mutex<VecDeque<Answer>>,
-        reads: core::sync::atomic::AtomicUsize,
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    impl Feed {
-        fn answer(&self, answer: Answer) {
-            self.answers.lock().unwrap().push_back(answer);
-        }
-
-        fn reads(&self) -> usize {
-            self.reads.load(core::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    /// The owner's read of a test link, over the feed the test holds.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    struct Fed(Arc<Feed>);
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    impl LinkRead for Fed {
-        fn read_waiting(&self, buf: &mut [u8], _timeout_ms: u32) -> ReadWaited {
-            self.0
-                .reads
-                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-            match self.0.answers.lock().unwrap().pop_front() {
-                None => ReadWaited::Quiet,
-                Some(Answer::Ended) => ReadWaited::Ended,
-                Some(Answer::Failed(code)) => ReadWaited::Failed(code),
-                Some(Answer::Bytes(bytes)) => {
-                    buf[..bytes.len()].copy_from_slice(&bytes);
-                    ReadWaited::Read(bytes.len())
-                }
-            }
-        }
-    }
-
-    /// A test link whose owner reads it, and the feed of that read.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn owned_link() -> (Link, Arc<Feed>) {
-        let feed = Arc::new(Feed::default());
-        let mut link = link();
-        link.owner_read = Some(OwnerRead::new(alloc::boxed::Box::new(Fed(feed.clone()))));
-        (link, feed)
-    }
-
-    /// Lend `link`'s buffer to its owner, make the read and land what it brought.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn owner_reads(link: &Link) {
-        let mut lease = link.lend_rx().expect("the buffer is lent");
-        lease.read(100);
-        link.land_rx(lease);
-    }
-
-    /// The owner's read takes a batch into the link's buffer, and the receive after it hands the
-    /// batch over from there with no read of the stream of its own: one read a batch, where a wait
-    /// for the stream to be readable and the receive's read were two. The CONTROL is the link's
-    /// own read of the stream, which the same batch costs a link its owner does not read for.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn a_batch_the_owner_read_is_handed_over_with_no_read_of_the_links_own() {
-        let (link, feed) = owned_link();
-        feed.answer(Answer::Bytes(batch(b"ping")));
-        owner_reads(&link);
-        assert_eq!(feed.reads(), 1, "one read, the owner's");
-        assert!(link.holds_input(), "the batch lies whole in the buffer");
-        assert_eq!(received(&link).as_deref(), Some(&b"ping"[..]));
-        assert_eq!(link.socket.reads.get(), 0, "the stream was not read again");
-
-        let control = self::link();
-        queue(&control, &batch(b"ping"));
-        assert_eq!(received(&control).as_deref(), Some(&b"ping"[..]));
-        assert_eq!(
-            control.socket.reads.get(),
-            1,
-            "CONTROL: the link reads it itself"
-        );
-    }
-
-    /// A link with no read of its owner's lends nothing; one lends its buffer once, not again
-    /// while the lease is out, and receives nothing meanwhile, leaving what its stream holds
-    /// there; a link that holds a whole batch, or has ended, lends nothing.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn a_link_lends_its_buffer_once_and_not_while_it_holds_input_or_has_ended() {
-        assert!(link().lend_rx().is_none(), "no read of the owner's");
-
-        let (link, feed) = owned_link();
-        let lease = link.lend_rx().expect("the buffer is lent");
-        assert!(link.lend_rx().is_none(), "not twice");
-        queue(&link, &batch(b"late"));
-        assert_eq!(
-            received(&link),
-            None,
-            "nothing is received while it is lent"
-        );
-        assert_eq!(link.socket.reads.get(), 0, "and the stream is not read");
-        link.land_rx(lease);
-        assert_eq!(
-            received(&link).as_deref(),
-            Some(&b"late"[..]),
-            "landed, the link reads its stream again"
-        );
-
-        let mut two = batch(b"one");
-        two.extend(batch(b"two"));
-        feed.answer(Answer::Bytes(two));
-        owner_reads(&link);
-        assert_eq!(received(&link).as_deref(), Some(&b"one"[..]));
-        assert!(link.holds_input());
-        assert!(link.lend_rx().is_none(), "a whole batch is held");
-        assert_eq!(received(&link).as_deref(), Some(&b"two"[..]));
-
-        feed.answer(Answer::Ended);
-        owner_reads(&link);
-        assert_eq!(link.lost(), Some(LostCause::PeerClosed));
-        assert!(link.lend_rx().is_none(), "a link that ended");
-    }
-
-    /// A lease is taken back by the link that gave it alone: landed on another link it changes
-    /// nothing there and is not back where it was lent, while that link's own lease is taken back
-    /// and it lends again.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn a_lease_is_landed_by_the_link_that_gave_it_alone() {
-        let (giver, feed) = owned_link();
-        let (other, _) = owned_link();
-        feed.answer(Answer::Bytes(batch(b"mine")));
-        let mut lease = giver.lend_rx().expect("lent");
-        lease.read(100);
-        let others = other.lend_rx().expect("the other lends its own");
-        other.land_rx(lease);
-        assert!(!other.holds_input(), "the other's buffer took nothing");
-        assert!(giver.lend_rx().is_none(), "the giver's lease is not back");
-        other.land_rx(others);
-        assert!(other.lend_rx().is_some(), "the other's own lease is back");
-    }
-
-    /// A failure the owner's read met ends the link, with the stream's failure kept.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn a_failed_read_of_the_owners_ends_the_link_and_keeps_why() {
-        let (link, feed) = owned_link();
-        feed.answer(Answer::Failed(104));
-        owner_reads(&link);
-        assert_eq!(link.lost(), Some(LostCause::OsError));
-        assert_eq!(link.error(), Some(Broken));
-    }
-
-    /// What is left of a batch moves to the front of the buffer when the buffer is lent, as a
-    /// receive moves it, and the owner's read lands the rest behind it: 3 bytes moved here.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn what_is_left_of_a_batch_moves_to_the_front_before_the_buffer_is_lent() {
-        let (link, feed) = owned_link();
-        let mut wire = batch(b"one");
-        wire.extend(&batch(b"three")[..3]);
-        queue(&link, &wire);
-        assert_eq!(received(&link).as_deref(), Some(&b"one"[..]));
-        assert_eq!(link.moved.get(), 0);
-        feed.answer(Answer::Bytes(batch(b"three")[3..].to_vec()));
-        owner_reads(&link);
-        assert_eq!(link.moved.get(), 3, "the part of the batch, moved once");
-        assert_eq!(received(&link).as_deref(), Some(&b"three"[..]));
-    }
-
-    /// A link let go of while its lease was read and not yet landed lets its buffer go at once:
-    /// the read has ended, and the lease landed after finds nothing of it.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    #[test]
-    fn a_link_let_go_after_its_lease_was_read_does_not_wait() {
-        let (link, feed) = owned_link();
-        feed.answer(Answer::Bytes(batch(b"gone")));
-        let mut lease = link.lend_rx().expect("lent");
-        lease.read(100);
-        drop(link);
-        assert_eq!(lease.waited(), ReadWaited::Read(6));
-        drop(lease);
     }
 }

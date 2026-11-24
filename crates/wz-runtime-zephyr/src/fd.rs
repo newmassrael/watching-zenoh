@@ -69,7 +69,8 @@ impl wz_runtime_coop::session_drive::LinkWaits for ZephyrWaits {
         for wait in on {
             let fd = match wait.on {
                 WaitOn::Socket(handle) => c_int::try_from(handle).ok(),
-                WaitOn::AppLink(_) => None,
+                // Zephyr's sockets make no wake, and a link of the program's is not one of its.
+                WaitOn::AppLink(_) | WaitOn::Wake(_) => None,
             };
             match (fd, fds.get_mut(count)) {
                 (Some(fd), Some(entry)) => {

@@ -23,7 +23,8 @@
 //! when its time has moved on ([`TimeBaseHold::advanced`]): each wait whose time has come is woken
 //! then. A program that moves its time and says nothing wakes none. An engine that the program
 //! steps reads the time at each step and needs no telling; one that waits on threads of its own
-//! waits until it is told.
+//! waits until it is told, on a waker it watches the time base with ([`TimeBaseHold::watch`]),
+//! which each word wakes, so the engine's one wait (over its links) is ended by the word too.
 //!
 //! ## Holding
 //!
@@ -40,7 +41,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 /// What the program's time is read through.
 pub trait ProgramTime: Send + Sync {
@@ -68,9 +69,8 @@ struct Sleeper {
 struct Sleepers {
     next_id: u64,
     waiting: Vec<Sleeper>,
-    /// How often the program has said its time moved on (and the base been retired), which a
-    /// thread that waits for the next word compares against.
-    moves: u64,
+    /// The wakers each word wakes, by the id their watch removes them by ([`MoveWatch`]).
+    watching: Vec<(u64, Waker)>,
 }
 
 /// One time base, never freed (see "Holding").
@@ -80,8 +80,6 @@ struct TimeBase {
     last_ns: AtomicU64,
     holders: AtomicUsize,
     sleepers: Mutex<Sleepers>,
-    /// Told each time `Sleepers::moves` grows, for the threads that wait on it.
-    moved: Condvar,
 }
 
 /// The time bases no hold has, which the next one made is taken from.
@@ -103,9 +101,8 @@ impl TimeBase {
             sleepers: Mutex::new(Sleepers {
                 next_id: 0,
                 waiting: Vec::new(),
-                moves: 0,
+                watching: Vec::new(),
             }),
-            moved: Condvar::new(),
         }
     }
 
@@ -143,15 +140,18 @@ impl TimeBase {
         last.max(now)
     }
 
-    /// Wake every wait whose time has come by the reading under `lease`. The wakers run with no
-    /// lock of the time base held: a woken task may poll at once on another thread.
+    /// Wake every watch, and every wait whose time has come by the reading under `lease`. The
+    /// wakers run with no lock of the time base held: a woken task may poll at once on another
+    /// thread.
     fn wake_due(&self, lease: u64) {
         let now = self.now_ns(lease);
         let due = {
             let mut sleepers = locked(&self.sleepers);
-            sleepers.moves = sleepers.moves.wrapping_add(1);
-            self.moved.notify_all();
-            let mut due = Vec::new();
+            let mut due: Vec<Waker> = sleepers
+                .watching
+                .iter()
+                .map(|(_, waker)| waker.clone())
+                .collect();
             let mut at = 0;
             while at < sleepers.waiting.len() {
                 if sleepers.waiting[at].deadline_ns <= now {
@@ -195,6 +195,22 @@ impl TimeBase {
         sleepers.waiting.retain(|entry| entry.id != id);
     }
 
+    /// Keep `waker` for every word from now on; the id its watch removes it by. Ids are never
+    /// reused, across leases too, so a watch of an earlier lease removes nothing of a later one.
+    fn watch(&self, waker: Waker) -> u64 {
+        let mut sleepers = locked(&self.sleepers);
+        let id = sleepers.next_id;
+        sleepers.next_id = sleepers.next_id.wrapping_add(1);
+        sleepers.watching.push((id, waker));
+        id
+    }
+
+    /// Remove the watch `id` names, if the time base still holds it.
+    fn unwatch(&self, id: u64) {
+        let mut sleepers = locked(&self.sleepers);
+        sleepers.watching.retain(|(at, _)| *at != id);
+    }
+
     /// End the lease: the program's read goes, with no lock of the time base held while its own
     /// drop runs, and every wait still registered is woken to read the time base as past its
     /// deadline.
@@ -209,32 +225,21 @@ impl TimeBase {
             installed.program.take()
         };
         drop(program);
-        let waiting = {
+        let (waiting, watching) = {
             let mut sleepers = locked(&self.sleepers);
-            // A thread that waits for the next word is let go too: the base it waits on is gone.
-            sleepers.moves = sleepers.moves.wrapping_add(1);
-            self.moved.notify_all();
-            core::mem::take(&mut sleepers.waiting)
+            (
+                core::mem::take(&mut sleepers.waiting),
+                // A watch is woken once more and let go: the base it watched is gone, and the next
+                // program's words are not its.
+                core::mem::take(&mut sleepers.watching),
+            )
         };
         for sleeper in waiting {
             sleeper.waker.wake();
         }
-    }
-
-    /// How often the program has said its time moved on.
-    fn moves(&self) -> u64 {
-        locked(&self.sleepers).moves
-    }
-
-    /// Block until the count of moves differs from `seen`, or `timeout` of the wall clock passes;
-    /// whether it moved.
-    fn wait_moved(&self, seen: u64, timeout: core::time::Duration) -> bool {
-        let sleepers = locked(&self.sleepers);
-        let (sleepers, _) = self
-            .moved
-            .wait_timeout_while(sleepers, timeout, |sleepers| sleepers.moves == seen)
-            .unwrap_or_else(PoisonError::into_inner);
-        sleepers.moves != seen
+        for (_, waker) in watching {
+            waker.wake();
+        }
     }
 }
 
@@ -270,23 +275,40 @@ impl TimeBaseHold {
     }
 
     /// The program's time has moved on: every wait whose time has come by its reading now is
-    /// woken, and every thread waiting for the word ([`Self::wait_moved`]) is let go.
+    /// woken, and every watch ([`Self::watch`]).
     pub fn advanced(&self) {
         self.base.wake_due(self.lease);
     }
 
-    /// How often the program has said its time moved on: the mark a thread that is to wait for
-    /// the next word takes before it decides to wait ([`Self::wait_moved`]).
-    pub fn moves(&self) -> u64 {
-        self.base.moves()
+    /// Wake `waker` at each word that the program's time moved on ([`Self::advanced`]), and once
+    /// more when the last hold goes, until the watch returned is dropped: a thread that waits for
+    /// input and for the time together (an engine's read) waits on what the waker makes ready.
+    pub fn watch(&self, waker: Waker) -> MoveWatch {
+        MoveWatch {
+            base: self.base,
+            id: self.base.watch(waker),
+        }
     }
+}
 
-    /// Block the calling thread until the program says its time moved on after the mark `seen`
-    /// ([`Self::moves`]), or until `timeout` of the wall clock passes: a thread that waits for
-    /// input and for the time together (an engine's read) is ended by whichever comes first.
-    /// Whether the word came. A word that came between the mark and the call ends it at once.
-    pub fn wait_moved(&self, seen: u64, timeout: core::time::Duration) -> bool {
-        self.base.wait_moved(seen, timeout)
+/// A waker the time base wakes at each word of the program's ([`TimeBaseHold::watch`]), kept
+/// until this is dropped.
+pub struct MoveWatch {
+    base: &'static TimeBase,
+    id: u64,
+}
+
+impl Drop for MoveWatch {
+    fn drop(&mut self) {
+        self.base.unwatch(self.id);
+    }
+}
+
+impl fmt::Debug for MoveWatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoveWatch")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -566,31 +588,37 @@ mod tests {
         assert!(poll(&mut sleep, &waker).is_ready());
     }
 
+    /// A watch is woken at each word whatever the time, until it is dropped, and once more when
+    /// the last hold goes. CONTROL: before any word it is not woken. Turned red by a word that
+    /// wakes no watch, a watch woken after it was dropped, or one the end of the base forgets.
     #[test]
-    fn a_thread_waiting_for_the_word_is_let_go_by_it_and_not_by_the_wall_clock_alone() {
+    fn a_watch_is_woken_at_each_word_until_it_is_dropped() {
         let (_now, hold) = time_at(0);
-        let seen = hold.moves();
-        assert!(
-            !hold.wait_moved(seen, std::time::Duration::from_millis(20)),
-            "no word came, so the wait ran out"
-        );
-        let waiter = hold.clone();
-        let waiting = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let moved = waiter.wait_moved(seen, std::time::Duration::from_secs(30));
-            (moved, started.elapsed())
-        });
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (wakes, waker) = wakes();
+        let watch = hold.watch(waker);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "CONTROL: no word yet");
         hold.advanced();
-        let (moved, took) = waiting.join().expect("the waiting thread");
-        assert!(moved, "the word let the thread go");
-        assert!(
-            took < std::time::Duration::from_secs(10),
-            "the thread waited for its own bound instead of the word ({took:?})"
+        hold.advanced();
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            2,
+            "each word woke the watch, with no wait due"
         );
-        assert!(
-            hold.wait_moved(seen, std::time::Duration::ZERO),
-            "a word that came after the mark ends a later wait at once"
+        drop(watch);
+        hold.advanced();
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            2,
+            "a dropped watch is woken no more"
+        );
+
+        let (kept_wakes, kept) = wakes();
+        let _kept = hold.watch(kept);
+        drop(hold);
+        assert_eq!(
+            kept_wakes.0.load(Ordering::SeqCst),
+            1,
+            "the last hold's going woke the watch"
         );
     }
 

@@ -41,6 +41,8 @@ const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 // own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
 wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
+    #[cfg(feature = "alloc")]
+    use wz_runtime_coop::session_drive::StackWake;
 }
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
@@ -124,9 +126,14 @@ impl LinkWaits for PosixWaits {
         }; crate::WAIT_SET_SOCKETS];
         let mut count = 0;
         let mut look = false;
+        let mut wakes = false;
         for wait in on {
             let fd = match wait.on {
                 WaitOn::Socket(handle) => c_int::try_from(handle).ok(),
+                WaitOn::Wake(handle) => {
+                    wakes = true;
+                    c_int::try_from(handle).ok()
+                }
                 WaitOn::AppLink(_) => None,
             };
             match (fd, fds.get_mut(count)) {
@@ -149,6 +156,16 @@ impl LinkWaits for PosixWaits {
         // timeout bounds the wait. A failed or interrupted wait is a quiet link: the step that
         // follows reads and reports the error.
         unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) };
+        // A wake found ready is made quiet, so the next wait waits for the next word.
+        if wakes {
+            for wait in on {
+                if let WaitOn::Wake(handle) = wait.on {
+                    if let Ok(fd) = c_int::try_from(handle) {
+                        drain(fd);
+                    }
+                }
+            }
+        }
     }
 
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
@@ -156,8 +173,94 @@ impl LinkWaits for PosixWaits {
             WaitOn::Socket(handle) => {
                 c_int::try_from(handle).map_or(true, |fd| poll_writable(fd, timeout_us))
             }
-            // Not a socket of this platform's: the send that follows answers.
-            WaitOn::AppLink(_) => true,
+            // Not a socket that takes bytes: the send that follows answers.
+            WaitOn::AppLink(_) | WaitOn::Wake(_) => true,
+        }
+    }
+
+    // An eventfd where the host has one, else a pipe: made once for a session, and closed when
+    // the last waker of it goes.
+    #[cfg(feature = "alloc")]
+    fn wake(&self) -> Option<StackWake> {
+        let wake = FdWake::open()?;
+        let on = WaitOn::Wake(usize::try_from(wake.read).ok()?);
+        Some(StackWake {
+            on,
+            waker: core::task::Waker::from(alloc::sync::Arc::new(wake)),
+        })
+    }
+}
+
+/// Read what `fd`, a wake's read end, holds until it holds nothing: the wake is quiet again.
+fn drain(fd: c_int) {
+    let mut buf = [0u8; 64];
+    loop {
+        // SAFETY: a live buffer of its length, on the caller's non-blocking descriptor.
+        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if read <= 0 {
+            return;
+        }
+    }
+}
+
+/// A wake of [`PosixWaits`]: a descriptor a wait polls, ready once a waker writes to it.
+#[cfg(feature = "alloc")]
+struct FdWake {
+    read: c_int,
+    write: c_int,
+}
+
+#[cfg(feature = "alloc")]
+impl FdWake {
+    /// An eventfd (Linux, Android): one descriptor both read and written, which never blocks.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn open() -> Option<Self> {
+        // SAFETY: value arguments; the call makes a descriptor or fails.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        (fd >= 0).then_some(Self { read: fd, write: fd })
+    }
+
+    /// A pipe, both ends non-blocking and closed on exec, where the host has no eventfd.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn open() -> Option<Self> {
+        let mut ends = [0 as c_int; 2];
+        // SAFETY: a live array of two descriptors, which the call writes.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let [read, write] = ends;
+        let wake = Self { read, write };
+        for fd in ends {
+            if set_nonblocking(fd, true).is_err() || set_close_on_exec(fd).is_err() {
+                return None;
+            }
+        }
+        Some(wake)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl alloc::task::Wake for FdWake {
+    fn wake(self: alloc::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+        let one = 1u64.to_ne_bytes();
+        // SAFETY: a live buffer of its length, on this wake's non-blocking descriptor. A wake
+        // that finds the descriptor full is ready already, which is all a waker is for.
+        unsafe { libc::write(self.write, one.as_ptr().cast(), one.len()) };
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for FdWake {
+    fn drop(&mut self) {
+        // SAFETY: this wake's own descriptors, each closed exactly once.
+        unsafe { libc::close(self.read) };
+        if self.write != self.read {
+            // SAFETY: as above, the write end of a pipe.
+            unsafe { libc::close(self.write) };
         }
     }
 }
@@ -1202,6 +1305,48 @@ mod tests {
             assert!(
                 PosixWaits.wait_room(on(&quiet).on, 1_000),
                 "an idle datagram socket has room"
+            );
+        }
+
+        /// A stack's wake ends a wait over the links beside it once its waker is woken from
+        /// another thread, and the wait that found it leaves it quiet: the next wait sleeps its
+        /// time. CONTROL: before the waker is woken the wait sleeps too. Turned red by a wake
+        /// that is never named to the kernel, or one left ready after the wait that found it.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_stacks_wake_ends_the_wait_beside_it_and_is_quiet_after() {
+            use std::time::{Duration, Instant};
+
+            let (quiet, _sender) = pair();
+            let wake = PosixWaits.wake().expect("the host makes a wake");
+            let set = [
+                LinkWait::input(quiet.input_wait().expect("a descriptor")),
+                LinkWait::input(wake.on),
+            ];
+            let started = Instant::now();
+            PosixWaits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "CONTROL: nothing woke it"
+            );
+            let waker = wake.waker.clone();
+            let waking = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                waker.wake();
+            });
+            let started = Instant::now();
+            PosixWaits.wait(&set, 10_000);
+            let waited = started.elapsed();
+            waking.join().expect("the waking thread");
+            assert!(
+                waited < Duration::from_secs(5),
+                "the wake ended the wait: {waited:?}"
+            );
+            let started = Instant::now();
+            PosixWaits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "the wait that found the wake left it quiet"
             );
         }
     }

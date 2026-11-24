@@ -23,10 +23,6 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 // implementation of them below is.
 wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::WaitOn;
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    use wz_runtime_coop::session_drive::{LinkRead, ReadWaited};
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    use core::sync::atomic::{AtomicU32, Ordering};
 }
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
@@ -453,17 +449,6 @@ impl StreamSocket for PosixTcpSocket {
         fn room_wait(&self) -> Option<WaitOn> {
             crate::net::wait_on(self.fd)
         }
-
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        fn reader(&self) -> Option<alloc::boxed::Box<dyn LinkRead>> {
-            StreamReader::of(self.fd)
-                .map(|reader| alloc::boxed::Box::new(reader) as alloc::boxed::Box<dyn LinkRead>)
-        }
-
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        fn read_failure(code: i32) -> Option<PosixNetError> {
-            Some(PosixNetError::Recv(code))
-        }
     }
 }
 
@@ -472,128 +457,6 @@ impl Drop for PosixTcpSocket {
         // SAFETY: `fd` is this socket's own descriptor, closed exactly once.
         unsafe { libc::close(self.fd) };
     }
-}
-
-wz_runtime_coop::with_heap_link_seams! {
-/// The read a stream's owner makes from a thread of its own, waiting in the read itself
-/// ([`LinkRead`]): one blocking `recv` on a duplicate of the socket's descriptor, which this owns
-/// and closes, bounded by the socket's receive timeout (`SO_RCVTIMEO`), as zenoh-pico bounds the
-/// `recv` of its read task
-/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `SOL_SOCKET, SO_RCVTIMEO`).
-/// The timeout is set only when a read asks for another than the one set last, so a read with
-/// nothing due before the session's idle wait is the `recv` alone. The timeout is the socket's,
-/// shared by its duplicate, and changes nothing else: the link's own reads do not wait
-/// (`MSG_DONTWAIT`), and its writes are bounded, if at all, by the send timeout.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-pub(crate) struct StreamReader {
-    fd: c_int,
-    /// The receive timeout set on the socket, in milliseconds; 0 before the first is set.
-    armed_ms: AtomicU32,
-    /// How often the timeout was set, which the tests count.
-    #[cfg(test)]
-    arms: core::sync::atomic::AtomicUsize,
-}
-
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-impl StreamReader {
-    /// The owner's read of the stream socket `fd`: `None` when the descriptor cannot be
-    /// duplicated, or when the socket does not block, whose `recv` would not wait and whose
-    /// owner then waits on its readiness instead.
-    pub(crate) fn of(fd: c_int) -> Option<Self> {
-        // SAFETY: plain system call with value arguments on the caller's live descriptor.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0 || flags & libc::O_NONBLOCK != 0 {
-            return None;
-        }
-        // SAFETY: `fd` is the caller's live descriptor; `fcntl` duplicates it or fails.
-        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-        if dup < 0 {
-            return None;
-        }
-        Some(Self {
-            fd: dup,
-            armed_ms: AtomicU32::new(0),
-            #[cfg(test)]
-            arms: core::sync::atomic::AtomicUsize::new(0),
-        })
-    }
-
-    /// Bound the reads from here on by `ms` milliseconds, at least one (a timeout of zero is
-    /// none at all): `false` when the socket refused it.
-    fn arm(&self, ms: u32) -> bool {
-        let ms = ms.max(1);
-        if self.armed_ms.load(Ordering::Relaxed) == ms {
-            return true;
-        }
-        let timeout = libc::timeval {
-            tv_sec: (ms / 1000) as _,
-            tv_usec: ((ms % 1000) * 1000) as _,
-        };
-        // SAFETY: `timeout` is a live `timeval` of the length passed, on this read's own
-        // descriptor.
-        let rc = unsafe {
-            libc::setsockopt(
-                self.fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVTIMEO,
-                (&timeout as *const libc::timeval).cast(),
-                core::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return false;
-        }
-        #[cfg(test)]
-        self.arms.fetch_add(1, Ordering::Relaxed);
-        self.armed_ms.store(ms, Ordering::Relaxed);
-        true
-    }
-}
-
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-impl LinkRead for StreamReader {
-    fn read_waiting(&self, buf: &mut [u8], timeout_ms: u32) -> ReadWaited {
-        if buf.is_empty() {
-            return ReadWaited::Quiet;
-        }
-        // A socket that took no timeout would hold the read past every deadline: it is waited on
-        // for the time asked and read without waiting, as the step reads it.
-        let flags = if self.arm(timeout_ms) {
-            0
-        } else {
-            let mut pfd = libc::pollfd {
-                fd: self.fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
-            // SAFETY: one live `pollfd` over this read's own descriptor; the timeout bounds the
-            // wait. A failed wait is a quiet socket: the read below reports the error.
-            unsafe { libc::poll(&mut pfd, 1, timeout) };
-            libc::MSG_DONTWAIT
-        };
-        // SAFETY: `buf` is live and writable for its length, and the descriptor is this read's
-        // own.
-        let got = unsafe { libc::recv(self.fd, buf.as_mut_ptr().cast(), buf.len(), flags) };
-        match got {
-            0 => ReadWaited::Ended,
-            n if n > 0 => ReadWaited::Read(n as usize),
-            _ => match errno() {
-                // The timeout ran out, or a signal came first: nothing was read.
-                libc::EAGAIN | libc::EINTR => ReadWaited::Quiet,
-                failed => ReadWaited::Failed(failed),
-            },
-        }
-    }
-}
-
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-impl Drop for StreamReader {
-    fn drop(&mut self) {
-        // SAFETY: the duplicate is this value's own descriptor, closed exactly once.
-        unsafe { libc::close(self.fd) };
-    }
-}
 }
 
 #[cfg(test)]
@@ -909,108 +772,6 @@ mod tests {
                 !waits.wait_room(on, 1_000),
                 "a wait on the handle sees the stream full as the socket does"
             );
-        }
-
-        /// The owner's read of a stream waits in the read itself: what is queued is taken by one
-        /// `recv`, the receive timeout set once for every read that asks for the same wait; a read
-        /// with nothing queued waits about its timeout and finds nothing, and one that asks for
-        /// another wait sets the timeout again; the end of the stream is the end. CONTROL: the
-        /// second read asks for the first's wait and sets nothing.
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        #[test]
-        fn the_owners_read_waits_in_the_recv_and_sets_its_timeout_once() {
-            use core::sync::atomic::Ordering::SeqCst;
-            use std::time::{Duration, Instant};
-
-            let (near, mut far) = pair();
-            let reader = StreamReader::of(near.fd).expect("a read of a blocking stream");
-            let mut buf = [0u8; 64];
-            far.write_all(b"\x03\x00abc").expect("the far end writes");
-            assert_eq!(reader.read_waiting(&mut buf, 1_000), ReadWaited::Read(5));
-            assert_eq!(&buf[..5], b"\x03\x00abc");
-            far.write_all(b"de").expect("the far end writes");
-            assert_eq!(reader.read_waiting(&mut buf, 1_000), ReadWaited::Read(2));
-            assert_eq!(
-                reader.arms.load(SeqCst),
-                1,
-                "CONTROL: one timeout set for both reads"
-            );
-            let started = Instant::now();
-            assert_eq!(reader.read_waiting(&mut buf, 50), ReadWaited::Quiet);
-            let took = started.elapsed();
-            assert!(
-                took >= Duration::from_millis(40),
-                "the read waited in the recv, {took:?}"
-            );
-            assert_eq!(reader.arms.load(SeqCst), 2, "another wait is set again");
-            drop(far);
-            assert_eq!(reader.read_waiting(&mut buf, 1_000), ReadWaited::Ended);
-        }
-
-        /// A read waiting in a stream's `recv` is ended at once when the stream is shut: what a
-        /// link let go of with its buffer lent does before it waits the read out.
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        #[test]
-        fn shutting_the_stream_ends_a_read_waiting_in_it() {
-            use std::time::{Duration, Instant};
-
-            let (near, _far) = pair();
-            let reader = StreamReader::of(near.fd).expect("a read of a blocking stream");
-            let waiting = std::thread::spawn(move || {
-                let mut buf = [0u8; 8];
-                let started = Instant::now();
-                (reader.read_waiting(&mut buf, 10_000), started.elapsed())
-            });
-            std::thread::sleep(Duration::from_millis(100));
-            near.shutdown();
-            let (got, took) = waiting.join().expect("the reading thread");
-            assert_eq!(got, ReadWaited::Ended);
-            assert!(
-                took < Duration::from_secs(5),
-                "the shut ended the read, after {took:?}"
-            );
-        }
-
-        /// A stream that does not block gives no read that waits in itself, whose `recv` would
-        /// answer at once: its owner waits on its readiness. CONTROL: the same stream, blocking,
-        /// gives one.
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        #[test]
-        fn a_stream_that_does_not_block_gives_no_read_that_waits() {
-            let (near, _far) = pair();
-            set_nonblocking(near.fd, true).expect("the stream stops blocking");
-            assert!(near.reader().is_none());
-            set_nonblocking(near.fd, false).expect("the stream blocks again");
-            assert!(near.reader().is_some(), "CONTROL: a blocking stream gives one");
-        }
-
-        /// A link over a host stream that its owner waits on lends its buffer to the owner's read,
-        /// which takes the batch the far end wrote, and the link hands the batch over from there.
-        /// CONTROL: the link its loop waits on lends nothing.
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        #[test]
-        fn a_host_stream_link_lends_its_buffer_to_its_owners_read() {
-            use wz_runtime_coop::link_storage::HeapTx;
-            use wz_runtime_coop::session_drive::SessionDatagramLink;
-            use wz_runtime_coop::stream_link::StreamDriver;
-
-            let (near, _) = pair();
-            let looped = StreamDriver::with_buffers(near, 4096, HeapTx::new(2, 2048));
-            assert!(
-                looped.lend_rx().is_none(),
-                "CONTROL: a link its loop waits on"
-            );
-
-            let (near, mut far) = pair();
-            let link =
-                StreamDriver::with_buffers(near, 4096, HeapTx::new(2, 2048)).waited_by_owner();
-            far.write_all(b"\x03\x00abc").expect("the far end writes");
-            let mut lease = link.lend_rx().expect("the owner's read is lent the buffer");
-            lease.read(1_000);
-            link.land_rx(lease);
-            let mut got = None;
-            assert!(link.recv_with(&mut |batch| got = Some(batch.to_vec())));
-            assert_eq!(got.as_deref(), Some(&b"abc"[..]));
         }
     }
 
