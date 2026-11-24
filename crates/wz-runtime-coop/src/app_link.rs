@@ -612,7 +612,7 @@ impl AppWaits {
         }
     }
 
-    /// Whether `wait` has what it waits for now, keeping `waker` for each side it asks when it
+    /// Whether `wait` already has what it waits for, keeping `waker` for each side it asks when it
     /// has not: input, room when it asks for it, a link whose handle names none any more, or bytes
     /// the link holds for a program that takes bytes now (it took part of a write), which a step
     /// offers again and no call of the program's announces. A handle of another stack's is never

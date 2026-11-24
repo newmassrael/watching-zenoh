@@ -1452,8 +1452,8 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
 }
 
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
-/// matching listener and a write filter on that plane are refused (a listener as not built, a filter
-/// as none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
+/// matching listener and a write filter on that plane are refused (a listener with
+/// `Refusal::NotBuilt`, a filter with none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
 /// subscribers' plane, which every build holds.
 #[cfg(not(any(feature = "query", feature = "queryable")))]
 #[test]

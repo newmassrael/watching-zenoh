@@ -301,7 +301,8 @@ UPSTREAM_UNCARRIED = frozenset(
         # `scripts/lib/upstream_switch_map.py` now carries every pico switch as a judged
         # row, so the tree names each one in code; what wz does with it is that row's
         # class (maps, always, never, n/a), which is the record this set used to stand in for.
-        "Z_FRAG_MAX_SIZE",
+        # pico's bound on a defragmented message left this set: the tree carries the name
+        # now. Described, not spelled, for the reason below.
         "Z_JOIN_INTERVAL",
         "Z_KEYEXPR_CANON_CONTAINS_SHARP_OR_QMARK",
         "Z_KEYEXPR_CANON_CONTAINS_UNBOUND_DOLLAR",

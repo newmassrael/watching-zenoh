@@ -1198,7 +1198,7 @@ impl<
     ///
     /// `make_router` writes the Router in the place it is handed and lends it back, which safe
     /// code does only by writing it there ([`MaybeUninit::write`]); one that lends back anything
-    /// else has written no Router, and the pump is not built: `None`, with what it was to be made
+    /// else has written no Router, and no pump is made: `None`, with what it was to be made
     /// of dropped. `place` is overwritten without dropping what it held.
     #[cfg(feature = "reassembly")]
     pub fn with_router_in(

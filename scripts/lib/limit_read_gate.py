@@ -122,6 +122,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-admin/src/admin_connect.rs", "push_entry", "the admin write fills a heapless list of the build's endpoint rows on every backing, and refuses the entry that list has no row for"),
     ("crates/wz-capi-coop/src/lane.rs", "LANE_SLOTS", "a constant that sizes the delivery lane's records and published list, a slot index and the ring's wrap, from the build's event slots; a session's limits hold the lane to fewer through DeliveryLane::with_limits"),
     ("crates/wz-capi-coop/src/lane.rs", "_", "build-time assertions on the storage the constants size: the lane queue's handles name every event slot and every offset of the area"),
+    ("crates/wz-capi-coop/src/arena.rs", "of", "the session arena's plan sizes the arena from the session's limits and holds each under the build's value, the memory the build fixes for an image, which a stage after the build only lowers; a value over it is refused under its own name before anything is lent"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it
