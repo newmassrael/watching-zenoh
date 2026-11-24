@@ -2830,3 +2830,21 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
     );
     assert!(!probe.reached(), "a refused open dials nothing");
 }
+
+/// A group whose members' keyexprs are each their own counts every member's aliases at its face's
+/// place in the session's pool, and each other face one peer's.
+#[cfg(feature = "multicast-declarations")]
+#[test]
+fn a_groups_face_counts_every_members_aliases_in_the_pool() {
+    use crate::arena::{faces_aliases, GROUP_FACE_ALIASES};
+    assert_eq!(faces_aliases(3, 0, 16), 48, "CONTROL: no group's face");
+    assert_eq!(
+        faces_aliases(3, 1, 16),
+        2 * 16 + GROUP_FACE_ALIASES,
+        "two faces of one peer and one group's"
+    );
+    assert_eq!(
+        GROUP_FACE_ALIASES,
+        caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
+    );
+}

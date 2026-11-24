@@ -3415,6 +3415,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.session
                 .registry
                 .set_unanswerable_final(id, self.policy.query_unanswerable_final());
+            // Each member's keyexprs are its own, and the face holds them all.
+            #[cfg(feature = "multicast-declarations")]
+            self.session.registry.hold_member_aliases(held);
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
             if let Some(ids) = &self.session.key_ids {
