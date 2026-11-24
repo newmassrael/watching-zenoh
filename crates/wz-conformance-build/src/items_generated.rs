@@ -136,6 +136,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         4,
     ),
     (
+        "MAX_DECL_WATCH_EVENTS",
+        "WZ_LIMIT_MAX_DECL_WATCH_EVENTS",
+        32,
+    ),
+    (
         "MAX_DECLARED_KEYEXPRS",
         "WZ_LIMIT_MAX_DECLARED_KEYEXPRS",
         332,

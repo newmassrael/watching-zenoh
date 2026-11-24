@@ -14,7 +14,9 @@
 //! A watch of subscribers or queryables is told first what each peer holds when the watch is
 //! declared, as [`DeclWatchEvent::Declared`] events ahead of every live event of that link, then
 //! what the peers declare from then on, on every link the session holds and every link that comes
-//! up later; each declaration is told once. A watch of tokens hears only what comes after it: the
+//! up later. Each declaration is told once, or, when the engine had no room to hold the events a
+//! watch is owed, the watch is told how many it lost ([`DeclWatchEvent::Lost`]) ahead of its next
+//! event. A watch of tokens hears only what comes after it: the
 //! tokio engine keeps no table of the tokens a peer holds. A watch declared after a peer finished
 //! its initial declarations is not told [`DeclWatchEvent::Synced`] for that link. A link that is
 //! lost tells no undeclaration for what its peer
@@ -70,6 +72,13 @@ pub enum DeclWatchEvent<'a> {
         /// As [`DeclWatchEvent::Declared`]'s.
         peer: Option<&'a [u8]>,
     },
+    /// The engine had no room to hold events the watch was owed, and dropped them: told ahead of
+    /// the watch's next event, so a program that keeps a picture of what the peers hold knows it
+    /// is no longer whole. Names no peer, as the events lost may be of more than one.
+    Lost {
+        /// How many events the watch lost since it was last told.
+        count: u64,
+    },
 }
 
 impl<'a> DeclWatchEvent<'a> {
@@ -79,6 +88,7 @@ impl<'a> DeclWatchEvent<'a> {
             Self::Declared { peer, .. } | Self::Undeclared { peer, .. } | Self::Synced { peer } => {
                 peer
             }
+            Self::Lost { .. } => None,
         }
     }
 
@@ -89,20 +99,28 @@ impl<'a> DeclWatchEvent<'a> {
         self.peer().and_then(|bytes| SessionZid::new(bytes).ok())
     }
 
-    /// The id of the declaration the event is about; `None` for [`DeclWatchEvent::Synced`],
-    /// which is about none.
+    /// The id of the declaration the event is about; `None` for [`DeclWatchEvent::Synced`] and
+    /// [`DeclWatchEvent::Lost`], which are about none.
     pub fn declaration_id(&self) -> Option<u64> {
         match *self {
             Self::Declared { id, .. } | Self::Undeclared { id, .. } => Some(id),
-            Self::Synced { .. } => None,
+            Self::Synced { .. } | Self::Lost { .. } => None,
         }
     }
 
-    /// The key expression of a [`DeclWatchEvent::Declared`]; `None` for the other two.
+    /// How many events a [`DeclWatchEvent::Lost`] counts; `None` for the others.
+    pub fn lost(&self) -> Option<u64> {
+        match *self {
+            Self::Lost { count } => Some(count),
+            Self::Declared { .. } | Self::Undeclared { .. } | Self::Synced { .. } => None,
+        }
+    }
+
+    /// The key expression of a [`DeclWatchEvent::Declared`]; `None` for the others.
     pub fn keyexpr(&self) -> Option<&'a str> {
         match *self {
             Self::Declared { keyexpr, .. } => Some(keyexpr),
-            Self::Undeclared { .. } | Self::Synced { .. } => None,
+            Self::Undeclared { .. } | Self::Synced { .. } | Self::Lost { .. } => None,
         }
     }
 }
@@ -266,6 +284,18 @@ mod tests {
         );
         assert_eq!(synced.keyexpr(), None);
         assert_eq!(synced.peer(), Some(&PEER[..]));
+        assert_eq!(synced.lost(), None);
+
+        let lost = DeclWatchEvent::Lost { count: 3 };
+        assert_eq!(lost.lost(), Some(3));
+        assert_eq!(
+            lost.declaration_id(),
+            None,
+            "a loss is about no one declaration"
+        );
+        assert_eq!(lost.keyexpr(), None);
+        assert_eq!(lost.peer(), None, "a loss names no peer");
+        assert_eq!(declared.lost(), None);
     }
 
     #[test]

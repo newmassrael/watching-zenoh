@@ -28,11 +28,13 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
+#[cfg(any(feature = "query", feature = "liveliness", feature = "liveliness-get"))]
 use alloc::borrow::Cow;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::cell::{Cell, RefCell};
+use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -53,15 +55,17 @@ use crate::arena::{
     PlaceTables, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
+use wz_session_core::bounded::{KeyBacking, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
-    KeyexprHandle, RowCallbacks, SessionTables, SubscriberHandle,
+    InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, Plane, RowCallbacks,
+    SessionTables, SubscriberHandle,
 };
+use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -108,9 +112,6 @@ use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
-#[cfg(any(feature = "query", feature = "queryable"))]
-use wz_session_core::declare::queryable::QuerierCriterion;
-use wz_session_core::declare::subscriber::PublisherCriterion;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
 use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
@@ -686,9 +687,6 @@ struct SessionLent {
     samples: Arc<Round>,
     router: SessionReassembly,
     endpoints: EndpointTexts,
-    filters: FilterRows,
-    interests: InterestRows,
-    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
     keys: KeySpace,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -715,12 +713,9 @@ struct SessionLent {
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the engine's record of the session's own declarations, the key
-/// arena, and the ends of its legs, their callbacks and the session's note of each leg pending.
+/// (`SessionRows::lent_from`): the key arena, and the ends of its legs, their callbacks and the
+/// session's note of each leg pending.
 struct StateTables {
-    filters: FilterRows,
-    interests: InterestRows,
-    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
     keys: LentKeys,
     #[cfg(feature = "query")]
     legs: Rows<Ended, { usize::MAX }>,
@@ -736,13 +731,9 @@ impl SessionRows {
     /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
     fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
-        let entities = self.entities();
         #[cfg(feature = "query")]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            filters: lend.table(entities.filters().unwrap_or(usize::MAX)),
-            interests: lend.table(entities.interests().unwrap_or(usize::MAX)),
-            matches: lend.table(entities.matching_listeners),
             keys: lend.keys(self.key_bytes(), longest),
             #[cfg(feature = "query")]
             legs: lend.table(legs),
@@ -786,9 +777,6 @@ fn lend_session(
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
     let StateTables {
-        filters,
-        interests,
-        matches,
         keys,
         #[cfg(feature = "query")]
         legs,
@@ -868,9 +856,6 @@ fn lend_session(
         samples,
         router,
         endpoints,
-        filters,
-        interests,
-        matches,
         keys,
         #[cfg(feature = "queryable")]
         plane,
@@ -1036,7 +1021,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    decl_watches: Arc<DeclWatches>,
+    decl_watches: DeclWatches,
     zid: SessionZid,
     closed: AtomicBool,
     /// The ids of what the session holds for the program and never names to a peer: the legs
@@ -1480,7 +1465,7 @@ impl RowCallbacks for CoopRows {
     type LivelinessSubscriber = LivelinessRow;
     #[cfg(not(feature = "liveliness"))]
     type LivelinessSubscriber = ();
-    type Matching = ();
+    type Matching = MatchingCall;
     type Reply = ();
     // A session that answers no query keeps no table of queryables.
     #[cfg(feature = "queryable")]
@@ -1492,10 +1477,56 @@ impl RowCallbacks for CoopRows {
     type LivelinessPresence = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "liveliness"))]
     type LivelinessPresence = wz_session_core::session_tables::Absent;
-    // The engine keeps its write filters, their Interests and listeners, and its pending gets in
-    // its own core, so the tables keep none of them.
-    type FilterPresence = wz_session_core::session_tables::Absent;
+    // The write filters, the matching listeners and the Interests they hold are rows of the
+    // tables; the pending gets are kept in the engine's own core, so the tables keep none.
+    type FilterPresence = wz_session_core::session_tables::Present;
     type GetPresence = wz_session_core::session_tables::Absent;
+}
+
+/// A matching listener's callback as its row holds it. A change of the listener's status is found
+/// under the session's lock and queued by the listener's id (`MatchFlips`); the delivery after the
+/// lock takes the callback out of the row, calls it and puts it back, so no call reads the row and
+/// the row is let go of as soon as it is undeclared, its callback by the thread that called it when
+/// it was out. `None` while it is out for a call.
+pub(crate) struct MatchingCall {
+    sink: Option<MatchingSink>,
+}
+
+impl RowCallback for MatchingCall {
+    type Call = core::convert::Infallible;
+
+    const READS_ROW_IN_PLACE: bool = false;
+
+    fn begin(&self) -> Option<core::convert::Infallible> {
+        None
+    }
+
+    unsafe fn end(call: core::convert::Infallible) -> bool {
+        match call {}
+    }
+
+    fn retire(&self) -> bool {
+        true
+    }
+}
+
+/// The id the port names a write filter or a matching listener by: the bits of its row's handle,
+/// whose generation tells the id of an undeclared row from the row that took its slot since.
+fn row_id<K>(handle: Handle<K>) -> u64 {
+    u64::from(handle.to_bits().get())
+}
+
+/// The row `id` names, as [`row_id`] made it; `None` for an id no handle is made of.
+fn row_of<K>(id: u64) -> Option<Handle<K>> {
+    Handle::from_bits(NonZeroU32::new(u32::try_from(id).ok()?)?)
+}
+
+/// What a write filter or a matching listener on `plane` counts, as the session's tables name it.
+fn plane_of(plane: FilterPlane) -> Plane {
+    match plane {
+        FilterPlane::Subscribers => Plane::Subscribers,
+        FilterPlane::Queryables { complete_required } => Plane::Queryables { complete_required },
+    }
 }
 
 /// The session's one table set, its rows lent from the session's arena: the application's tables
@@ -1558,44 +1589,13 @@ pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
 /// A table of the session's own declarations: rows lent from the session's arena at its open, as
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
 /// is refused before anything is taken, registered or sent.
-type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
-
-/// The bytes of one row of each table the engine keeps of the session's own declarations, as the
-/// session's arena lays them out (`crate::arena::ArenaPlan`).
-pub(crate) struct EntryBytes;
-
-impl EntryBytes {
-    /// A write filter's row.
-    pub(crate) const FILTER: usize = core::mem::size_of::<FilterEntry>();
-    /// A matching listener's row.
-    pub(crate) const MATCH: usize = core::mem::size_of::<MatchEntry>();
-    /// An Interest's row.
-    pub(crate) const INTEREST: usize = core::mem::size_of::<InterestHold>();
-}
-
-/// Keep `row` in `table`, whose room its declaration found free under the lock it still holds,
-/// before it took an id or sent anything.
-// Out of line: the write filters and the matching listeners each keep a row through it.
-#[inline(never)]
-fn keep<T, const N: usize>(table: &mut Rows<T, N>, row: T) {
-    let kept = table.push(row).is_ok();
-    debug_assert!(kept, "the table had the row its declaration found free");
-}
+#[cfg(feature = "query")]
+type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, Lent>;
 
 /// A key as a row of the session's own declarations keeps it: a block of the session's key arena
 /// (`KEY_ARENA_BYTES`) as long as the key, which the row holds by its place, and which is given
 /// back when the row goes.
 pub(super) type RowKey = KeyRef;
-
-/// The write filters' table, sized by the build: a publisher's and a querier's each.
-type FilterRows = Rows<FilterEntry, { caps::MAX_PUBLISHERS + caps::MAX_QUERIERS }>;
-
-/// The Interests' table, sized by the build: one for each write filter and matching listener at
-/// most.
-type InterestRows = Rows<
-    InterestHold,
-    { caps::MAX_PUBLISHERS + caps::MAX_QUERIERS + caps::MAX_MATCHING_LISTENERS },
->;
 
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's tasks, and the runtime their cells and timers lie in, which the set holds.
@@ -1674,15 +1674,13 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the ids the links hand out (`local-queryable`).
     #[cfg(feature = "local-queryable")]
     next_local_request: wz_session_core::wire_id::RequestId,
-    filters: FilterRows,
-    next_filter: FilterId,
-    interests: InterestRows,
     /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
     /// tests count.
     #[cfg(test)]
     clock_reads: core::cell::Cell<usize>,
-    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
-    next_match: MatchId,
+    /// The count of the faces' writes (`Registry::faces_written`) the matching listeners were last
+    /// read at: a step that finds it moved reads them again ([`CoopEngine::read_matching`]).
+    matching_read: Cell<u64>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
     /// The legs of the session's gets still pending on its link, in rows the session's arena lent.
@@ -2117,132 +2115,80 @@ fn on_link<'w, C: ClockSource + 'static>(
     Cow::Borrowed(wire)
 }
 
-/// `form`, an Interest about the key `keyexpr`, as the link of `actions` names that key: by the
-/// link's key-wire form, as `on_link` names the key of a put or a declaration, the declared
-/// form keeping `form` as the ABI made it (`shared-key-ids`).
+/// How the link of `actions` names the key `keyexpr` of an Interest that asks aggregated as
+/// `aggregate` says: by the link's key-wire form, as `on_link` names the key of a put or a
+/// declaration; `None` for a link of the declared form, which names it as the Interest's row does
+/// (`shared-key-ids`).
 #[cfg(feature = "shared-key-ids")]
-fn interest_on_link<'f, C: ClockSource + 'static>(
+fn interest_on_link<C: ClockSource + 'static>(
     actions: &McuActions<C>,
     keyexpr: &str,
-    form: &'f InterestForm,
-) -> Cow<'f, InterestForm> {
-    match wz_capi_port::interest_on_link(actions.key_wire_on_link(keyexpr), keyexpr, form) {
-        Some(linked) => Cow::Owned(linked),
-        None => Cow::Borrowed(form),
-    }
+    aggregate: bool,
+) -> Option<InterestForm> {
+    // The link's form reads only whether the Interest aggregates; the rest is the link's own.
+    let asked = InterestForm {
+        mapping_id: 0,
+        suffix: None,
+        aggregate,
+    };
+    wz_capi_port::interest_on_link(actions.key_wire_on_link(keyexpr), keyexpr, &asked)
 }
 
-/// A build without the shared key ids names the key of every Interest as the ABI made it.
+/// A build without the shared key ids names the key of every Interest as its row does.
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
-fn interest_on_link<'f, C: ClockSource + 'static>(
+fn interest_on_link<C: ClockSource + 'static>(
     _actions: &McuActions<C>,
     _keyexpr: &str,
-    form: &'f InterestForm,
-) -> Cow<'f, InterestForm> {
-    Cow::Borrowed(form)
+    _aggregate: bool,
+) -> Option<InterestForm> {
+    None
 }
 
-struct FilterEntry {
-    id: FilterId,
-    plane: FilterPlane,
-    keyexpr: RowKey,
-    asked: bool,
-    /// Whether the session's own entities count toward the filter (`local-subscriber`).
-    count_local: bool,
-    /// What the peers' declarations answered for the filter, with the registry's count of writes
-    /// it was read at (`Registry::faces_written`): kept for the puts after it until a face's
-    /// tables are written, as zenoh-pico's filter keeps its state between the declarations that
-    /// move it (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h` @
-    /// `return ctx->state == WRITE_FILTER_ACTIVE;`).
-    peers: Cell<Option<(u64, bool)>>,
-    /// How a write of the filter's entity that brings nothing of its own goes the plain way: the
-    /// facts it is sent from and the declaration that names its key, stated once by the entity
-    /// that declared the filter (`keep_write_filter_plain`). `None` sends it the general way.
-    plain: Cell<Option<(PlainPutParams, ExprId)>>,
+/// Send the Interest `row` holds open over `actions`, for what is declared now and what is
+/// declared later, naming its key as the link's key-wire form says: whether the link took it.
+fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
+    row: &InterestRow<K>,
+    actions: &McuActions<C>,
+) -> bool {
+    let linked = interest_on_link(actions, row.key(), row.aggregate());
+    let (mapping_id, suffix) = match &linked {
+        Some(form) => (form.mapping_id, form.suffix.as_deref()),
+        None => (row.mapping_id(), row.suffix()),
+    };
+    actions
+        .send_interest_kinds(
+            u64::from(row.id()),
+            wz_session_core::session_actions::InterestAsk {
+                kinds: kinds(row.kind()),
+                current: true,
+                future: true,
+                aggregate: row.aggregate(),
+            },
+            mapping_id,
+            suffix,
+        )
+        .is_ok()
 }
 
-/// One Interest the session holds open, and how many hold it.
-struct InterestHold {
-    plane: FilterPlane,
-    keyexpr: RowKey,
-    interest_id: u64,
-    /// How the Interest names its key. The rest of the key it names is no copy of its own when it
-    /// is a tail of `keyexpr` (`suffix_at`), which it is for every form the ABI asks with.
-    form: InterestForm,
-    /// Where in `keyexpr` the rest of the key the form names begins: the whole key for a form that
-    /// names no declaration, what follows the declared prefix for one that does. `None` when the
-    /// form keeps a rest of its own, or names none.
-    suffix_at: Option<usize>,
-    holds: usize,
+/// Where the Interest `handle` names lies among the Interests the replay tells, in the table's slot
+/// order: read while it stands, for its Final's place once it is let go of.
+fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<usize> {
+    let handle = handle?;
+    tables
+        .interests()
+        .iter()
+        .position(|(held, _)| held == handle)
 }
 
-impl InterestHold {
-    /// The rest of the key the form names.
-    fn suffix(&self) -> Option<&str> {
-        match self.suffix_at {
-            Some(at) => self.keyexpr.get(at..),
-            None => self.form.suffix.as_deref(),
-        }
-    }
-
-    /// Send this Interest over `actions`, for what is declared now and what is declared later,
-    /// naming its key as the link's key-wire form says: whether the link took it.
-    fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let linked = interest_on_link(actions, &self.keyexpr, &self.form);
-        let (aggregate, mapping_id, suffix) = match &linked {
-            Cow::Borrowed(form) => (form.aggregate, form.mapping_id, self.suffix()),
-            Cow::Owned(form) => (form.aggregate, form.mapping_id, form.suffix.as_deref()),
-        };
-        actions
-            .send_interest_kinds(
-                self.interest_id,
-                wz_session_core::session_actions::InterestAsk {
-                    kinds: kinds(self.plane),
-                    current: true,
-                    future: true,
-                    aggregate,
-                },
-                mapping_id,
-                suffix,
-            )
-            .is_ok()
-    }
-}
-
-/// Where in `keyexpr` a form's rest of the key, `suffix`, begins, when it is a tail of it.
-fn suffix_place(keyexpr: &str, suffix: Option<&str>) -> Option<usize> {
-    let suffix = suffix?;
-    let at = keyexpr.len().checked_sub(suffix.len())?;
-    keyexpr.ends_with(suffix).then_some(at)
-}
-
-struct MatchEntry {
-    id: MatchId,
-    /// What the listener counts, as a write filter names it: which registry `watch` is in.
-    plane: FilterPlane,
-    watch: u64,
-    keyexpr: RowKey,
-    /// The listener's callback: taken out of the row under the session's lock for each change of
-    /// its status, called after it and put back, or let go of by the thread that called it when
-    /// the row went meanwhile; let go of with the row otherwise, with no lock held. `None` while
-    /// it is out for a call.
-    sink: Option<MatchingSink>,
-}
-
-/// The locality a matching criterion carries: what the entity counts. The session's own
-/// entities of `plane`'s kind count (`Any`) only for one that asked them to and in a build that
-/// delivers to them locally.
-fn counted(plane: FilterPlane, count_local: bool) -> Locality {
+/// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
+/// listener: only for one that asked them to, and in a build that delivers to them locally.
+fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
     let delivers_locally = match plane {
         FilterPlane::Subscribers => cfg!(feature = "local-subscriber"),
         FilterPlane::Queryables { .. } => cfg!(feature = "local-queryable"),
     };
-    if delivers_locally && count_local {
-        Locality::Any
-    } else {
-        Locality::Remote
-    }
+    delivers_locally && count_local
 }
 
 /// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
@@ -2285,45 +2231,11 @@ const fn counts(plane: FilterPlane) -> bool {
     }
 }
 
-/// What a matching listener watches: the criterion of the plane it counts, made only for a plane
-/// the build holds ([`counts`]). A listener on any other plane is refused where this is made,
-/// before anything is taken, so the registry is never handed a plane it has no table for.
-enum Watched {
-    Publishers(PublisherCriterion),
-    #[cfg(any(feature = "query", feature = "queryable"))]
-    Queriers(QuerierCriterion),
-}
-
-impl Watched {
-    /// The criterion a listener on `plane` over `keyexpr` counts with, the session's own
-    /// entities among it with `count_local` as its write filter's are (`counted`);
-    /// [`Declined::NotBuilt`] for a plane this build does not hold, and
-    /// [`Declined::KeyTooLong`] for a key longer than the criterion holds in place.
-    // Out of line, with the other parts the key and Interest holding share: measured smaller apart.
-    #[inline(never)]
-    fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Result<Self, Declined> {
-        let locality = counted(plane, count_local);
-        match plane {
-            FilterPlane::Subscribers => PublisherCriterion::new(keyexpr, locality)
-                .map(Self::Publishers)
-                .map_err(Declined::from),
-            #[cfg(any(feature = "query", feature = "queryable"))]
-            FilterPlane::Queryables { complete_required } => {
-                QuerierCriterion::new(keyexpr, locality, complete_required)
-                    .map(Self::Queriers)
-                    .map_err(Declined::from)
-            }
-            #[cfg(not(any(feature = "query", feature = "queryable")))]
-            FilterPlane::Queryables { .. } => Err(Declined::NotBuilt),
-        }
-    }
-}
-
-/// The two planes' Interest kinds, an Interest held per plane and key.
-fn kinds(plane: FilterPlane) -> InterestKinds {
-    match plane {
-        FilterPlane::Subscribers => InterestKinds::SUBSCRIBERS,
-        FilterPlane::Queryables { .. } => InterestKinds::QUERYABLES,
+/// What an Interest of `kind` asks the peer about, an Interest held per kind and key.
+fn kinds(kind: InterestKind) -> InterestKinds {
+    match kind {
+        InterestKind::Subscribers => InterestKinds::SUBSCRIBERS,
+        InterestKind::Queryables => InterestKinds::QUERYABLES,
     }
 }
 
@@ -2421,7 +2333,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            registry.settle_decl_events(|| actions.peer_zid());
+            registry.settle_decl_events(|| actions.peer_session_zid());
             registry.flush_pending_replies(face, actions);
             registry.take_pending_final_rids(face)
         };
@@ -2449,7 +2361,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        registry.settle_decl_events(|| actions.peer_zid());
+        registry.settle_decl_events(|| actions.peer_session_zid());
     }
 
     /// A rejoined message's records are read where its chain's buffer lies, which the round keeps
@@ -2586,9 +2498,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// (a row of the session's record, a table of the registry, an object of the program), is that
     /// block shared ([`KeySpace::kept`]), so a key the session's declarations and the program's
     /// objects name alike takes one block, whichever of them came first.
-    // Out of line: the write filters, the matching listeners and the Interests take their row key
-    // through it, each a copy inlined.
-    #[inline(never)]
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
         if !self.keys.holds_key(keyexpr.len()) {
             return None;
@@ -2614,18 +2523,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             tables(&self.registry).keyexpr_by_id(wire.mapping_id)
         };
         wz_session_core::session_tables::KeyForm { prefix, names_key }
-    }
-
-    /// Why [`Self::row_key`] refused `keyexpr`: longer than a row holds, or no room for it left in
-    /// the key arena.
-    // Out of line: the refusals of every declaration that keeps a row key read it.
-    #[inline(never)]
-    fn key_refusal(&self, keyexpr: &str) -> Declined {
-        if self.keys.holds_key(keyexpr.len()) {
-            Declined::TableFull
-        } else {
-            Declined::KeyTooLong
-        }
     }
 
     /// The dial role's face, which the session holds for its whole life.
@@ -4328,13 +4225,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             key_forms,
             #[cfg(feature = "local-queryable")]
             next_local_request: 0,
-            filters: lent.filters,
-            next_filter: 1,
-            interests: lent.interests,
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
-            matches: lent.matches,
-            next_match: 1,
+            matching_read: Cell::new(0),
             #[cfg(feature = "queryable")]
             plane: lent.plane,
             #[cfg(feature = "query")]
@@ -5011,24 +4904,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // The callback is taken out of the listener's row under the session's lock and
                 // called after it; a listener undeclared since the change was found is handed
                 // nothing.
-                let sink = self.live().and_then(|mut core| {
-                    core.0
-                        .matches
-                        .iter_mut()
-                        .find(|entry| entry.id == id)
-                        .and_then(|entry| entry.sink.take())
+                let sink = self.live().and_then(|core| {
+                    let mut tables = tables_mut(&core.0.registry);
+                    tables
+                        .matching_listener_callback_mut(row_of(id)?)?
+                        .sink
+                        .take()
                 });
                 let Some(sink) = sink else {
                     continue;
                 };
                 sink.call(matching);
                 // Put back in its row, or let go of here, with no lock held, when the row went
-                // during the call (an undeclare from inside it, or the session's close).
+                // during the call (an undeclare from inside it, or the session's close): the
+                // handle's generation tells a row that took the slot since from the listener's.
                 let gone = match self.live() {
-                    Some(mut core) => {
-                        match core.0.matches.iter_mut().find(|entry| entry.id == id) {
-                            Some(entry) => {
-                                entry.sink = Some(sink);
+                    Some(core) => {
+                        let mut tables = tables_mut(&core.0.registry);
+                        match row_of(id).and_then(|row| tables.matching_listener_callback_mut(row))
+                        {
+                            Some(call) => {
+                                call.sink = Some(sink);
                                 None
                             }
                             None => Some(sink),
@@ -5730,14 +5626,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         loop {
-            let sink = {
-                let mut guard = self.core.lock();
-                let Some(entry) = guard.0.matches.pop() else {
+            let row = {
+                let guard = self.core.lock();
+                let mut tables = tables_mut(&guard.0.registry);
+                let Some((handle, _)) = tables.matching_listeners().iter().next() else {
                     break;
                 };
-                entry.sink
+                tables
+                    .undeclare_matching_listener(handle)
+                    .and_then(|unwatched| unwatched.row)
             };
-            drop(sink);
+            drop(row);
         }
         #[cfg(feature = "queryable")]
         loop {
@@ -5985,67 +5884,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
+        // What the peers declared moved only where a face's tables were written since the
+        // listeners were last read.
+        if core.registry.borrow().faces_written() != core.matching_read.get() {
+            self.read_matching(core);
+        }
         Some(now_us)
-    }
-
-    /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder.
-    /// Refused, with nothing held or sent, when a first holder finds no row of the Interests'
-    /// table free or the session with no entity id left for it.
-    fn acquire_interest(
-        &self,
-        core: &mut Core<L, C>,
-        plane: FilterPlane,
-        keyexpr: &str,
-        form: InterestAsk<'_>,
-    ) -> Result<(), Declined> {
-        if let Some(hold) = core
-            .interests
-            .iter_mut()
-            .find(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
-        {
-            hold.holds += 1;
-            return Ok(());
-        }
-        // A first holder takes a row of the Interests' table, which is lent one for each write
-        // filter and matching listener: each of them takes a row of its own table first.
-        if core.interests.free_slots() == 0 {
-            return Err(Declined::TableFull);
-        }
-        // zenoh-pico's Interest takes the session's next entity id
-        // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
-        };
-        let Some(interest_id) = core.take_entity_id() else {
-            return Err(Declined::NoEntityId);
-        };
-        // The rest of the key the form names is read from the row's own key, not copied.
-        let suffix_at = suffix_place(keyexpr, form.suffix);
-        let hold = InterestHold {
-            plane,
-            keyexpr: key,
-            interest_id: u64::from(interest_id),
-            form: InterestForm {
-                mapping_id: form.mapping_id,
-                suffix: if suffix_at.is_some() {
-                    None
-                } else {
-                    form.suffix.map(String::from)
-                },
-                aggregate: form.aggregate,
-            },
-            suffix_at,
-            holds: 1,
-        };
-        core.announce(Kind::Interest, &|actions| hold.send(actions));
-        // The row was found free above, under the lock still held.
-        let held = core.interests.push(hold).is_ok();
-        debug_assert!(held, "the Interests' table had the row the check found");
-        if held {
-            Ok(())
-        } else {
-            Err(Declined::TableFull)
-        }
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -6073,45 +5917,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Let go of one hold on the Interest for `keyexpr` on `plane`; the last one ends it.
-    fn release_interest(core: &mut Core<L, C>, plane: FilterPlane, keyexpr: &str) {
-        let Some(at) = core
-            .interests
-            .iter()
-            .position(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
-        else {
-            return;
-        };
-        core.interests[at].holds -= 1;
-        if core.interests[at].holds == 0 {
-            let hold = core.interests.remove(at);
-            core.retract(Kind::Interest, at, &interest_final::<C>(hold.interest_id));
+    /// Read the verdict of every matching listener off what the peers and the session itself
+    /// declare now, and queue each one that changed for its callback, which the delivery after the
+    /// lock hands it: after a step that wrote the faces' tables, and after each declaration of the
+    /// session's own that may move a verdict.
+    fn read_matching(&self, core: &Core<L, C>) {
+        let mut registry = core.registry.borrow_mut();
+        core.matching_read.set(registry.faces_written());
+        let (tables, peers) = registry.tables_and_peers();
+        let mut cursor = 0;
+        while let Some((handle, matching)) = tables.next_matching_change(&mut cursor, &peers) {
+            self.matching.lock().flip(row_id(handle), matching);
         }
-    }
-
-    /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
-    /// own that a local put reaches (`local-subscriber`). The session answers nothing else
-    /// locally, as zenoh-pico's default build does not.
-    // Out of line, with the other parts the key and Interest holding share: measured smaller apart.
-    #[inline(never)]
-    fn local_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
-        #[cfg(feature = "local-subscriber")]
-        if matches!(plane, FilterPlane::Subscribers) {
-            return wz_session_core::pubsub::LocalSubscribers::has_local_matching(
-                &*tables(&core.registry),
-                keyexpr,
-            );
-        }
-        #[cfg(feature = "local-queryable")]
-        if let FilterPlane::Queryables { complete_required } = plane {
-            return wz_session_core::query::LocalQueryables::has_local_queryable(
-                tables(&core.registry).queryables(),
-                keyexpr,
-                complete_required,
-            );
-        }
-        let _ = (core, plane, keyexpr);
-        false
     }
 
     /// Ask the session's own queryables a get of this session, as zenoh-pico's
@@ -6171,21 +5988,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.deliver();
     }
 
-    /// The queryables' plane's counterpart of [`Self::reevaluate_subscriber_matching`].
-    #[cfg(feature = "local-queryable")]
-    fn reevaluate_queryable_matching(core: &Core<L, C>) {
-        core.registry.borrow_mut().reevaluate_querier_watches();
-    }
-
     /// Whether write filter `id` holds what it filters back: a filter is created suppressing,
     /// until a peer declares what it counts, or the session itself does when it counts its own
     /// (`vendor/zenoh-pico/src/net/filtering.c` @ `ctx->state = WRITE_FILTER_ACTIVE`). A filter
     /// the session does not hold holds nothing back.
     fn filter_active_in(core: &Core<L, C>, id: FilterId) -> bool {
-        core.filters
-            .iter()
-            .find(|f| f.id == id)
-            .is_some_and(|f| !Self::filter_matches(core, f))
+        let Some(handle) = row_of(id) else {
+            return false;
+        };
+        let registry = core.registry.borrow();
+        // What the peers answered is kept by the filter's row until a face's tables are written.
+        let open = registry.app.tables.write_filter_open(handle, &*registry);
+        open.is_some_and(|open| !open)
     }
 
     /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
@@ -6265,42 +6079,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Self::filter_active_in(core, id)
     }
 
-    /// What write filter `entry` reads: a peer's declaration, or with `count_local` one of the
-    /// session's own. The peers' half is the one kept ([`Self::peers_match_kept`]); the session's
-    /// own subscribers change by no face and are asked each time.
-    fn filter_matches(core: &Core<L, C>, entry: &FilterEntry) -> bool {
-        Self::peers_match_kept(core, entry)
-            || (entry.count_local && Self::local_matches(core, entry.plane, &entry.keyexpr))
-    }
-
-    /// Whether a peer declared what filter `entry` counts: the answer it keeps while no face's
-    /// tables were written since it was read, else read again and kept.
-    fn peers_match_kept(core: &Core<L, C>, entry: &FilterEntry) -> bool {
-        let registry = core.registry.borrow();
-        let written = registry.faces_written();
-        if let Some((read_at, matched)) = entry.peers.get() {
-            if read_at == written {
-                return matched;
-            }
-        }
-        let matched = registry.peers_declare(entry.plane, &entry.keyexpr);
-        entry.peers.set(Some((written, matched)));
-        matched
-    }
-
     /// How often what the peers declared was searched since the open: what a test of the cost of
     /// a filtered put counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
         self.core.lock().0.registry.borrow().peer_looks()
-    }
-
-    /// Tell every matching listener on the subscribers' plane that counts the session's own
-    /// subscribers whether it now matches, after one was declared or retracted here: the
-    /// registry reads the remote half off its own membership and asks this for the local half.
-    #[cfg(feature = "local-subscriber")]
-    fn reevaluate_subscriber_matching(core: &Core<L, C>) {
-        core.registry.borrow_mut().reevaluate_publisher_watches();
     }
 
     /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread
@@ -6531,15 +6314,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::Closed);
         };
         let core = &guard.0;
-        let observed = self
-            .decl_watches
-            .observe(&mut core.registry.borrow_mut().app, plane);
-        if let Err(refused) = observed {
-            drop(guard);
-            drop(sink);
-            return Err(refused);
+        // What the peers hold now is told first, so the ring must have the rows for it before
+        // the watch is declared.
+        let mut held = 0;
+        {
+            let registry = core.registry.borrow();
+            for face in core.links.faces() {
+                if !matches!(&face.link, Link::Up(_) | Link::Opening { .. }) {
+                    continue;
+                }
+                if let Some(tables) = registry.tables_of(face.id) {
+                    held += decl_watch::held(plane, tables);
+                }
+            }
         }
-        let id = self.decl_watches.add(plane, sink);
+        let added = self
+            .decl_watches
+            .add(&mut core.registry.borrow_mut().app, plane, sink, held);
+        let id = match added {
+            Ok(id) => id,
+            Err((refused, sink)) => {
+                drop(guard);
+                drop(sink);
+                return Err(refused);
+            }
+        };
         let registry = core.registry.borrow();
         for face in core.links.faces() {
             let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
@@ -6547,7 +6346,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             if let Some(tables) = registry.tables_of(face.id) {
                 self.decl_watches
-                    .tell_held(id, plane, tables, || wire.actions.peer_zid());
+                    .tell_held(id, plane, tables, || wire.actions.peer_session_zid());
             }
         }
         Ok(id)
@@ -6674,7 +6473,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
         {
-            Self::reevaluate_subscriber_matching(core);
+            self.read_matching(core);
             drop(guard);
             self.deliver();
         }
@@ -6748,7 +6547,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
-            Self::reevaluate_subscriber_matching(core);
+            self.read_matching(core);
             Some((handle, row))
         });
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
@@ -6837,95 +6636,66 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<MatchId, Declined> {
         // A plane the build does not hold is refused first, with nothing taken. Every refusal
         // lets `sink` go as it returns, before the caller hears of it.
-        let watched = Watched::of(plane, keyexpr, count_local)?;
+        if !counts(plane) {
+            return Err(Declined::NotBuilt);
+        }
         let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
-        // A full table refuses the listener before its Interest is asked.
-        if core.matches.free_slots() == 0 {
-            return Err(Declined::TableFull);
-        }
-        // So does a key the session cannot hold.
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
-        };
-        // A listener whose Interest the session cannot hold is not declared, as a closed session
-        // declares none: it would never hear a peer.
-        self.acquire_interest(
-            core,
-            plane,
+        // The listener is a row of the session's tables holding an Interest of its own: a full
+        // table, a key the session cannot hold or an Interest it cannot hold or number refuses it
+        // before anything is asked, as a listener that could ask no peer would never hear one.
+        let declared = tables_mut(&core.registry).declare_matching_listener_on(
+            plane_of(plane),
             keyexpr,
-            InterestAsk {
-                mapping_id: 0,
-                suffix: Some(keyexpr),
-                aggregate: false,
-            },
-        )?;
-        let id = core.next_match;
-        core.next_match += 1;
-        let local = count_local && Self::local_matches(core, plane, keyexpr);
-        // A change is queued by the listener's id; the delivery takes the callback from the
-        // listener's row, so the row is the callback's one holder and its end is the callback's.
-        let report = registry::FlipReport {
-            queue: self.matching.clone(),
-            id,
-        };
-        // The watch is in the registry of what `plane` counts, with the criterion its write
-        // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
-        // An already-matching registration is told so by the registry as it registers, as
-        // zenoh-pico tells it (`vendor/zenoh-pico/src/net/filtering.c` @
-        // `_z_write_filter_ctx_add_callback`): that is the one report of it, and a second would
-        // take the first back (`MatchFlips::flip`).
-        let watch = {
-            let mut registry = core.registry.borrow_mut();
-            match watched {
-                Watched::Publishers(criterion) => {
-                    registry.watch_publishers(criterion, local, report)
-                }
-                #[cfg(any(feature = "query", feature = "queryable"))]
-                Watched::Queriers(criterion) => registry.watch_queriers(criterion, local, report),
+            counts_own(plane, count_local),
+            MatchingCall { sink: Some(sink) },
+        );
+        let watching = match declared {
+            Ok(watching) => watching,
+            Err(refused) => {
+                drop(guard);
+                let why = Declined::from(refused.why);
+                drop(refused.callback);
+                return Err(why);
             }
         };
-        keep(
-            &mut core.matches,
-            MatchEntry {
-                id,
-                plane,
-                watch,
-                keyexpr: key,
-                sink: Some(sink),
-            },
-        );
+        // A new Interest is asked of each link from its row; one held already was asked.
+        if watching.interest.is_some() {
+            let interest = tables(&core.registry)
+                .matching_listeners()
+                .get(watching.handle)
+                .and_then(|row| row.interest());
+            if let Some(interest) = interest {
+                core.announce_interest(interest);
+            }
+        }
+        // A listener that matches already is told so as it is declared, as zenoh-pico tells it
+        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
+        self.read_matching(core);
         drop(guard);
         self.deliver();
-        Ok(id)
+        Ok(row_id(watching.handle))
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
         let gone = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let at = core.matches.iter().position(|m| m.id == id)?;
-            {
-                let entry = core.matches.remove(at);
-                {
-                    let mut registry = core.registry.borrow_mut();
-                    match entry.plane {
-                        FilterPlane::Subscribers => registry
-                            .app
-                            .remote_subscribers
-                            .undeclare_matching_listener(entry.watch),
-                        #[cfg(any(feature = "query", feature = "queryable"))]
-                        FilterPlane::Queryables { .. } => registry
-                            .app
-                            .remote_queryables
-                            .undeclare_matching_listener(entry.watch),
-                        // A build that leaves the plane out holds no listener of it (`counts`).
-                        #[cfg(not(any(feature = "query", feature = "queryable")))]
-                        FilterPlane::Queryables { .. } => false,
-                    };
-                }
-                Self::release_interest(core, entry.plane, &entry.keyexpr);
-                Some(entry.sink)
+            let handle = row_of(id)?;
+            let place = {
+                let tables = tables(&core.registry);
+                let interest = tables.matching_listeners().get(handle)?.interest();
+                interest_rank(&tables, interest)
+            };
+            let unwatched = tables_mut(&core.registry).undeclare_matching_listener(handle)?;
+            // The row went before the links are told: a send never finds the tables borrowed.
+            if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
+                core.retract(
+                    Kind::Interest,
+                    at,
+                    &interest_final::<C>(u64::from(interest)),
+                );
             }
+            unwatched.row
         });
         // Nothing it was owed is handed; its row's callback is let go of here, with no lock held.
         self.matching.lock().forget(id);
@@ -6955,40 +6725,55 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             FilterPlane::Subscribers => core.entities.publishers,
             FilterPlane::Queryables { .. } => core.entities.queriers,
         };
-        let held_of_plane = core
-            .filters
+        let kind = plane_of(plane).interest_kind();
+        let held_of_plane = tables(&core.registry)
+            .write_filters()
             .iter()
-            .filter(|f| f.plane.same_kind(plane))
+            .filter(|(_, row)| row.plane().interest_kind() == kind)
             .count();
-        if held_of_plane >= most || core.filters.free_slots() == 0 {
+        if held_of_plane >= most {
             return Err(Declined::TableFull);
         }
-        // So is a key the session cannot hold.
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
-        };
+        // A full table, a key the session cannot hold, or an Interest it cannot hold or number
+        // refuses the filter, with nothing held, asked or numbered.
+        let name = ask.map(|form| InterestName {
+            mapping_id: form.mapping_id,
+            suffix: form.suffix,
+            aggregate: form.aggregate,
+        });
+        let watching = tables_mut(&core.registry)
+            .declare_write_filter_as(
+                plane_of(plane),
+                keyexpr,
+                counts_own(plane, count_local),
+                name,
+            )
+            .map_err(Declined::from)?;
+        let id = row_id(watching.handle);
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
-        let mut spent = None;
-        // A filter whose Interest the session cannot hold, or that finds no id left, is refused
-        // and spends no filter id.
-        match ask {
-            Some(form) => {
-                let before = core.interests.len();
-                self.acquire_interest(core, plane, keyexpr, form)?;
-                if core.interests.len() > before {
-                    spent = core.interests.last().map(|hold| hold.interest_id);
-                }
+        let spent = if ask.is_some() {
+            let interest = watching.interest.and_then(|_| {
+                tables(&core.registry)
+                    .write_filters()
+                    .get(watching.handle)
+                    .and_then(|row| row.interest())
+            });
+            if let Some(interest) = interest {
+                core.announce_interest(interest);
             }
+            watching.interest.map(u64::from)
+        } else {
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
-            // `_z_add_interest` takes it before it decides.
-            None => {
-                let taken = core.take_entity_id().ok_or(Declined::NoEntityId)?;
-                spent = Some(u64::from(taken));
-            }
-        }
-        let id = core.next_filter;
-        core.next_filter += 1;
+            // `_z_add_interest` takes it before it decides: a filter that finds none left is
+            // refused, its row given back.
+            let Some(taken) = core.take_entity_id() else {
+                let _ =
+                    tables_mut(&core.registry).undeclare_write_filter(watching.handle, |_, _| {});
+                return Err(Declined::NoEntityId);
+            };
+            Some(u64::from(taken))
+        };
         // Each group a write filter asks (`asks_for_filters`) is asked for its members'
         // declarations by an id of the filter's own, as the tokio engine's group is: the one the
         // filter spent, or a fresh one when its Interest was held already.
@@ -7006,18 +6791,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(not(feature = "group"))]
         let _ = (spent, wire);
-        keep(
-            &mut core.filters,
-            FilterEntry {
-                id,
-                plane,
-                keyexpr: key,
-                asked: ask.is_some(),
-                count_local,
-                peers: Cell::new(None),
-                plain: Cell::new(None),
-            },
-        );
         Ok(id)
     }
 
@@ -7037,16 +6810,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     #[inline(never)]
     fn undeclare_write_filter(&self, id: FilterId) {
+        let Some(handle) = row_of(id) else {
+            return;
+        };
         let Some(mut core) = self.live() else {
             return;
         };
         let core = &mut core.0;
-        let Some(at) = core.filters.iter().position(|f| f.id == id) else {
+        let place = {
+            let tables = tables(&core.registry);
+            let Some(row) = tables.write_filters().get(handle) else {
+                return;
+            };
+            interest_rank(&tables, row.interest())
+        };
+        let Some(unwatched) = tables_mut(&core.registry).undeclare_write_filter(handle, |_, _| {})
+        else {
             return;
         };
-        let entry = core.filters.remove(at);
-        if entry.asked {
-            Self::release_interest(core, entry.plane, &entry.keyexpr);
+        // The row went before the links are told: a send never finds the tables borrowed.
+        if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
+            core.retract(
+                Kind::Interest,
+                at,
+                &interest_final::<C>(u64::from(interest)),
+            );
         }
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
@@ -7070,8 +6858,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return;
         };
-        if let Some(entry) = core.0.filters.iter().find(|entry| entry.id == filter) {
-            entry.plain.set(plain);
+        let tables = tables(&core.0.registry);
+        if let Some(row) = row_of(filter).and_then(|handle| tables.write_filters().get(handle)) {
+            row.keep_plain(plain);
         }
     }
 
@@ -7193,7 +6982,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // outside the lock.
         #[cfg(feature = "local-queryable")]
         {
-            Self::reevaluate_queryable_matching(core);
+            self.read_matching(core);
             drop(guard);
             self.deliver();
         }
@@ -7657,7 +7446,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
-            Self::reevaluate_queryable_matching(core);
+            self.read_matching(core);
             Some((handle, row))
         });
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
@@ -8108,12 +7897,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let (mapping_id, params) = match given {
             Some(given) => given,
             None => {
-                let Some((params, mapping_id)) = core
-                    .filters
-                    .iter()
-                    .find(|entry| entry.id == filter)
-                    .and_then(|entry| entry.plain.get())
-                else {
+                let plain = row_of(filter).and_then(|handle| {
+                    tables(&core.registry)
+                        .write_filters()
+                        .get(handle)
+                        .and_then(|row| row.plain())
+                });
+                let Some((params, mapping_id)) = plain else {
                     return FilteredPut::NotPlain;
                 };
                 // A link that names keys its own way is sent the general way, which names the key
@@ -8353,26 +8143,54 @@ mod clock_moves_tests {
 }
 
 #[cfg(test)]
-mod interest_form_tests {
-    //! Where an Interest's rest of the key lies in the key its row keeps.
-    use super::suffix_place;
+mod row_id_tests {
+    //! How the port's ids of write filters and matching listeners name their rows.
+    use super::{counts_own, plane_of, row_id, row_of};
+    use core::num::NonZeroU32;
+    use wz_capi_port::FilterPlane;
+    use wz_session_core::session_tables::{kind, Plane, WriteFilterHandle};
 
-    /// A form that names no declaration names the whole key, one that names a declared prefix the
-    /// rest after it: each a tail of the row's key, found where it begins. A rest that is not a tail,
-    /// or none, has no place, and the form keeps its own.
+    /// A row's id is its handle's bits and names that handle back; an id no handle is made of
+    /// names none: zero, and one past a handle's width, whose low bits alone would name a row.
     #[test]
-    fn a_forms_rest_of_the_key_is_found_in_the_rows_key() {
-        assert_eq!(suffix_place("demo/if/key", Some("demo/if/key")), Some(0));
+    fn a_rows_id_names_its_handle_and_no_other() {
+        let bits = NonZeroU32::new(0x0003_0005).expect("not zero");
+        let handle = WriteFilterHandle::from_bits(bits).expect("an index");
+        let id = row_id(handle);
+        assert_eq!(id, 0x0003_0005);
+        assert_eq!(row_of::<kind::WriteFilter>(id), Some(handle));
+        assert_eq!(row_of::<kind::WriteFilter>(0), None);
+        assert_eq!(row_of::<kind::WriteFilter>(id + (1 << 32)), None);
+        // The same slot at another generation is another row.
+        assert_ne!(row_of::<kind::WriteFilter>(0x0004_0005), Some(handle));
+    }
+
+    /// A plane of the port is the tables' plane of the same kind, a querier's need of complete
+    /// queryables kept.
+    #[test]
+    fn a_ports_plane_is_the_tables_plane_of_its_kind() {
+        assert_eq!(plane_of(FilterPlane::Subscribers), Plane::Subscribers);
+        for complete_required in [false, true] {
+            assert_eq!(
+                plane_of(FilterPlane::Queryables { complete_required }),
+                Plane::Queryables { complete_required }
+            );
+        }
+    }
+
+    /// The session's own entities count only for a filter or a listener that asked them to, and
+    /// only in a build that delivers to them locally; never for one that did not ask.
+    #[test]
+    fn the_sessions_own_entities_count_only_where_asked_and_built() {
+        let querier = FilterPlane::Queryables {
+            complete_required: false,
+        };
+        assert!(!counts_own(FilterPlane::Subscribers, false));
+        assert!(!counts_own(querier, false));
         assert_eq!(
-            suffix_place("demo/if/key", Some("/key")),
-            Some("demo/if".len())
+            counts_own(FilterPlane::Subscribers, true),
+            cfg!(feature = "local-subscriber")
         );
-        assert_eq!(
-            suffix_place("demo/if/key", Some("")),
-            Some("demo/if/key".len())
-        );
-        assert_eq!(suffix_place("demo/if/key", Some("/other")), None);
-        assert_eq!(suffix_place("demo", Some("demo/longer")), None);
-        assert_eq!(suffix_place("demo/if/key", None), None);
+        assert_eq!(counts_own(querier, true), cfg!(feature = "local-queryable"));
     }
 }
