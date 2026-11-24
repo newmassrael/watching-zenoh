@@ -1888,8 +1888,6 @@ pub mod request_routing_context;
 // `alloc` accumulator), with `QueryReply::into_response` /
 // `response_final_for` further behind `codec-response` /
 // `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
-// Totality debt TD-085 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod query;
 
 /// Fixed-memory step S9a — what a peer's queries make the session OWE it: the
