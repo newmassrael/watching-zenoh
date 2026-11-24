@@ -1371,12 +1371,19 @@ impl Engine {
                     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
                     promotion,
                 );
-                let handler = sink(router.node.query_holder());
+                // The node's queries are held through the node itself, which the one sink is
+                // called with.
+                let holder = router.node.node_query_holder();
                 let id = router.node.forwarder().host_queryable_from(
                     key,
                     complete,
                     tokio_engine::engine_locality(origin),
-                    handler,
+                    Box::new(
+                        move |query: &dyn wz_session_core::query_sink::QueryView,
+                              out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                            sink.call(query, out, &holder);
+                        },
+                    ),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a queryable {id}, which is more than an id holds")
