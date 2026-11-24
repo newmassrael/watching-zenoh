@@ -67,6 +67,7 @@ mod watched {
         Declared(u64, String),
         Undeclared(u64),
         Synced,
+        Lost(u64),
     }
 
     /// Each event a watch was told, with the peer it named.
@@ -89,6 +90,7 @@ mod watched {
                     }
                     DeclWatchEvent::Undeclared { id, .. } => Seen::Undeclared(id),
                     DeclWatchEvent::Synced { .. } => Seen::Synced,
+                    DeclWatchEvent::Lost { count } => Seen::Lost(count),
                 };
                 into.lock()
                     .unwrap()
