@@ -119,7 +119,9 @@ use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
-use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
+use wz_session_core::bounded::{
+    Arena, BoundedVec, LendRefused, Lent, Static, TableLender, ARENA_ALIGN,
+};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
@@ -885,13 +887,10 @@ impl PlaceRows {
 /// What a session's arena holds, row by row, and the rows each layer lends its tables from
 /// ([`Self::transport`], [`Self::session`], [`Self::places`]). The arena is the sum of the rows'
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
-    /// The rows laid out, in order: those below `len`. A row not laid out is `None`, a null name
-    /// by the niche of its `&str`, so a plan's table of rows starts as a fill of zeros and not as
-    /// a write of each row.
-    rows: [Option<ArenaRow>; ARENA_ROWS],
-    len: usize,
+    /// The rows laid out, in order, and only those: a row is written when it is laid out, so a
+    /// vacant plan writes its length and no row.
+    rows: BoundedVec<ArenaRow, ARENA_ROWS, Static>,
     /// The first refusal met while the plan was laid out, kept as it came (the limit it names, or
     /// the address space), and the one its maker is told once the plan is settled
     /// ([`Self::settled`]): every row and every limit is put and read in one pass with no exit of
@@ -905,14 +904,38 @@ pub struct ArenaPlan {
     places: PlaceRows,
 }
 
+/// Two plans are the same when they laid out the same rows and kept the same counts and refusal.
+impl PartialEq for ArenaPlan {
+    fn eq(&self, other: &Self) -> bool {
+        *self.rows == *other.rows
+            && self.refused == other.refused
+            && self.transport == other.transport
+            && self.session == other.session
+            && self.places == other.places
+    }
+}
+
+impl Eq for ArenaPlan {}
+
+impl core::fmt::Debug for ArenaPlan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ArenaPlan")
+            .field("rows", &&*self.rows)
+            .field("refused", &self.refused)
+            .field("transport", &self.transport)
+            .field("session", &self.session)
+            .field("places", &self.places)
+            .finish()
+    }
+}
+
 impl ArenaPlan {
     /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]): out of line,
-    /// so the plan is made where its caller keeps it and the rows' empty fill is one body.
+    /// so the plan is made where its caller keeps it.
     #[inline(never)]
     pub fn vacant() -> Self {
         Self {
-            rows: [None; ARENA_ROWS],
-            len: 0,
+            rows: BoundedVec::new_static(),
             refused: None,
             transport: TransportRows::default(),
             session: SessionRows::default(),
@@ -1521,17 +1544,14 @@ impl ArenaPlan {
     /// as its refusal unless it holds an earlier one ([`Self::settled`]).
     #[inline(never)]
     fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
-        match self.rows.get_mut(self.len) {
-            Some(row) => {
-                *row = Some(ArenaRow {
-                    part,
-                    basis,
-                    count,
-                    entry_bytes,
-                });
-                self.len = self.len.saturating_add(1);
-            }
-            None => self.refuse(ArenaRefused::TooLarge),
+        let row = ArenaRow {
+            part,
+            basis,
+            count,
+            entry_bytes,
+        };
+        if self.rows.push(row).is_err() {
+            self.refuse(ArenaRefused::TooLarge);
         }
     }
 
@@ -1687,7 +1707,7 @@ impl ArenaPlan {
 
     /// The rows, in the order the plan laid them out.
     pub fn rows(&self) -> impl Iterator<Item = &ArenaRow> + '_ {
-        self.rows.get(..self.len).unwrap_or(&[]).iter().flatten()
+        self.rows.iter()
     }
 
     /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
@@ -2480,5 +2500,19 @@ mod tests {
         assert_eq!(plan, same);
         same.put("third", "BASIS", 1, 8);
         assert_ne!(plan, same);
+    }
+
+    /// Two plans of the same rows differ when one kept a refusal the other did not: a plan's
+    /// equality reads every part of it, not its rows alone. Turned red by an equality of the rows
+    /// alone.
+    #[test]
+    fn plans_of_the_same_rows_differ_by_their_refusal() {
+        let mut plan = empty_plan();
+        plan.put("first", "BASIS", 1, 8);
+        let mut refused = empty_plan();
+        refused.put("first", "BASIS", 1, 8);
+        assert_eq!(plan, refused);
+        refused.refuse(ArenaRefused::TooLarge);
+        assert_ne!(plan, refused);
     }
 }
