@@ -718,6 +718,9 @@ pub(crate) struct PicoSessionHandle {
     /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
     /// undeclare waits on its own.
     background: crate::ffi::LatchList,
+    /// The closures of the gets the session issued, counted while they are held: a close waits
+    /// for none to be open, with no latch kept for each (`crate::ffi::OpenClosures`).
+    pub(crate) open: alloc::sync::Arc<crate::ffi::OpenClosures>,
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
@@ -729,6 +732,7 @@ impl PicoSessionHandle {
             drive,
             ext,
             background: crate::ffi::LatchList::default(),
+            open: alloc::sync::Arc::default(),
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -752,9 +756,11 @@ impl PicoSessionHandle {
         self.background.keep(latch);
     }
 
-    /// Block until every such closure has run its `drop(context)`.
+    /// Block until every such closure, and every closure counted in [`Self::open`], has run its
+    /// `drop(context)`.
     fn wait_background(&self) {
         self.background.wait_all();
+        self.open.wait_none();
     }
 }
 
