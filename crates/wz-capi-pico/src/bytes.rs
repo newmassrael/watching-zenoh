@@ -21,6 +21,7 @@
 //! `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the area has no block for it; in one without, the heap's.
 
 use core::ffi::{c_char, c_void, CStr};
+use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
@@ -296,29 +297,12 @@ impl Drop for Block {
     }
 }
 
-/// Where a payload's bytes are held.
-enum Store {
-    /// Nowhere: an empty payload holds no block.
-    Empty,
-    /// A block its holders share.
-    Shared(Block),
-    /// The start of bytes the payload only reads, for as long as their owner keeps them: a
-    /// sample's, reply's or query's payload handed to a callback ([`ByteBuf::lent`]). Never shared,
-    /// so a holder that may outlive them is given a copy.
-    Lent(*const u8),
-}
-
-// SAFETY: a lent payload's bytes are its lender's, valid and unchanged for as long as the payload
-// lives (`ByteBuf::lent`); nothing writes through the pointer, so it is shared between threads
-// exactly as the lender's own reference would be. A block is `Send` and `Sync` on its own.
-unsafe impl Send for Store {}
-unsafe impl Sync for Store {}
-
 /// The `len` bytes at `start`, none when `len` is zero.
 ///
 /// # Safety
 /// `start` is null only with `len` zero, and the `len` bytes there are written and live while
 /// they are read.
+#[cfg(test)]
 unsafe fn lent_bytes<'a>(start: *const u8, len: usize) -> &'a [u8] {
     if len == 0 {
         &[]
@@ -352,20 +336,45 @@ unsafe fn lent_bytes<'a>(start: *const u8, len: usize) -> &'a [u8] {
 /// ([`ByteBuf::lent`]) has no block to share, so its clone is a copy. Every
 /// one that takes a block can be refused one ([`NoRoom`]).
 pub(crate) struct ByteBuf {
-    backing: Store,
+    /// Where the payload's bytes start: in the block it holds a share of, in its lender's bytes
+    /// ([`ByteBuf::lent`]), or dangling for none. Read with `len` and nothing else, so reading a
+    /// payload has no branch on where it is held.
+    start: NonNull<u8>,
     /// How much of the block this payload is: shorter than the block's room for a payload made
     /// over a string, whose terminator it does not carry, and for a writer's, which grows into it.
     len: usize,
+    /// The block the payload holds a share of, which its drop lets go; none for an empty payload
+    /// and for a lent one, whose bytes are its lender's. Let go only by the drop, out of line.
+    block: ManuallyDrop<Option<Block>>,
     /// END offset of each segment. Either empty (the implicit single segment)
-    /// or ending at `len`.
-    bounds: Vec<usize>,
+    /// or ending at `len`. Let go only by the drop, as `block` is.
+    bounds: ManuallyDrop<Vec<usize>>,
+}
+
+// SAFETY: a lent payload's bytes are its lender's, valid and unchanged for as long as the payload
+// lives (`ByteBuf::lent`); nothing writes through `start` but the one holder of an own block
+// ([`Block::write`]), so the pointer is shared between threads exactly as the lender's reference
+// or the block would be. A block is `Send` and `Sync` on its own.
+unsafe impl Send for ByteBuf {}
+unsafe impl Sync for ByteBuf {}
+
+impl Drop for ByteBuf {
+    /// The payload's share of its block and its segment ends let go. One body out of line: every
+    /// door that lets a payload go drops one, and the drop inlined at each held its own copy of
+    /// giving the block and the ends back.
+    #[inline(never)]
+    fn drop(&mut self) {
+        drop((*self.block).take());
+        // SAFETY: the ends are let go once, here, and nothing reads them after.
+        unsafe { ManuallyDrop::drop(&mut self.bounds) };
+    }
 }
 
 impl core::fmt::Debug for ByteBuf {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ByteBuf")
             .field("len", &self.len)
-            .field("bounds", &self.bounds)
+            .field("bounds", &*self.bounds)
             .finish()
     }
 }
@@ -376,13 +385,29 @@ impl Default for ByteBuf {
     }
 }
 
+/// Where the bytes of `block` start, dangling for an alias of none.
+fn block_start(block: &Block) -> NonNull<u8> {
+    NonNull::new(block.span().0.cast_mut()).unwrap_or(NonNull::dangling())
+}
+
 impl ByteBuf {
     /// An empty payload with no segments, which holds no block.
     pub(crate) fn new() -> Self {
         Self {
-            backing: Store::Empty,
+            start: NonNull::dangling(),
             len: 0,
-            bounds: Vec::new(),
+            block: ManuallyDrop::new(None),
+            bounds: ManuallyDrop::new(Vec::new()),
+        }
+    }
+
+    /// The first `len` bytes of `block`, which this payload holds a share of.
+    fn over(block: Block, len: usize) -> Self {
+        Self {
+            start: block_start(&block),
+            len,
+            block: ManuallyDrop::new(Some(block)),
+            bounds: ManuallyDrop::new(Vec::new()),
         }
     }
 
@@ -394,11 +419,7 @@ impl ByteBuf {
             return Ok(Self::new());
         }
         let block = Block::copy_of(bytes).ok_or(NoRoom)?;
-        Ok(Self {
-            backing: Store::Shared(block),
-            len: bytes.len(),
-            bounds: Vec::new(),
-        })
+        Ok(Self::over(block, bytes.len()))
     }
 
     /// A payload that DESCRIBES the caller's `len` bytes at `start` and lets
@@ -421,11 +442,7 @@ impl ByteBuf {
             drop(release);
             NoRoom
         })?;
-        Ok(Self {
-            backing: Store::Shared(block),
-            len,
-            bounds: Vec::new(),
-        })
+        Ok(Self::over(block, len))
     }
 
     /// A payload that READS `bytes` where they lie and allocates nothing: a sample's payload
@@ -436,51 +453,47 @@ impl ByteBuf {
     /// `bytes` stay valid and unchanged until this payload is dropped.
     pub(crate) unsafe fn lent(bytes: &[u8]) -> Self {
         Self {
-            backing: Store::Lent(bytes.as_ptr()),
+            start: NonNull::from(bytes).cast::<u8>(),
             len: bytes.len(),
-            bounds: Vec::new(),
+            block: ManuallyDrop::new(None),
+            bounds: ManuallyDrop::new(Vec::new()),
         }
     }
 
     /// The payload's bytes.
     pub(crate) fn as_slice(&self) -> &[u8] {
-        match &self.backing {
-            Store::Empty => &[],
-            // SAFETY: the first `len` bytes of the block's span are this payload's, written when
-            // it was made, and the block lives as long as this holder.
-            Store::Shared(block) => unsafe { lent_bytes(block.span().0, self.len) },
-            // SAFETY: a lent payload's bytes outlive it (`Self::lent`).
-            Store::Lent(start) => unsafe { lent_bytes(*start, self.len) },
-        }
+        // SAFETY: `start` is never null, and the `len` bytes there are the payload's, written
+        // when it was made: in its block, which lives as long as this holder, or in its lender's
+        // bytes, which outlive it (`Self::lent`). For none it is dangling and `len` is zero.
+        unsafe { core::slice::from_raw_parts(self.start.as_ptr(), self.len) }
     }
 
     /// Another holder of the payload: one that SHARES its block, as pico's `z_bytes_clone` shares
     /// the storage, or for a lent payload, whose lender's bytes a clone may outlive, a copy.
     pub(crate) fn try_clone(&self) -> Result<Self, NoRoom> {
-        let backing = match &self.backing {
-            Store::Empty => Store::Empty,
-            Store::Shared(block) => Store::Shared(block.share().ok_or(NoRoom)?),
-            Store::Lent(_) => Self::copy_of(self.as_slice())?.backing,
+        let mut clone = match &*self.block {
+            Some(block) => Self {
+                start: self.start,
+                len: self.len,
+                block: ManuallyDrop::new(Some(block.share().ok_or(NoRoom)?)),
+                bounds: ManuallyDrop::new(Vec::new()),
+            },
+            None => Self::copy_of(self.as_slice())?,
         };
-        Ok(Self {
-            backing,
-            len: self.len,
-            bounds: self.bounds.clone(),
-        })
+        *clone.bounds = (*self.bounds).clone();
+        Ok(clone)
     }
 
     /// The block, for a holder that keeps it: a lent payload's bytes are copied into one of their
     /// own first; an empty payload has none.
-    fn into_block(self) -> Result<Option<Block>, NoRoom> {
-        match self.backing {
-            Store::Empty => Ok(None),
-            Store::Shared(block) => Ok(Some(block)),
-            Store::Lent(_) if self.len == 0 => Ok(None),
-            // SAFETY: a lent payload's bytes outlive it (`Self::lent`), and it lives here.
-            Store::Lent(start) => Block::copy_of(unsafe { lent_bytes(start, self.len) })
-                .map(Some)
-                .ok_or(NoRoom),
+    fn into_block(mut self) -> Result<Option<Block>, NoRoom> {
+        if let Some(block) = (*self.block).take() {
+            return Ok(Some(block));
         }
+        if self.len == 0 {
+            return Ok(None);
+        }
+        Block::copy_of(self.as_slice()).map(Some).ok_or(NoRoom)
     }
 
     /// A payload with the same bytes in a block of its own: the copy an
@@ -495,7 +508,7 @@ impl ByteBuf {
     /// the bytes a bounded number of times.
     fn reserve(&mut self, extra: usize) -> Result<(), NoRoom> {
         let need = self.len.checked_add(extra).ok_or(NoRoom)?;
-        if let Store::Shared(block) = &self.backing {
+        if let Some(block) = &*self.block {
             if block.is_unique() && !block.is_alias() && block.room() >= need {
                 return Ok(());
             }
@@ -506,13 +519,14 @@ impl ByteBuf {
             .ok_or(NoRoom)?;
         // SAFETY: a new block, of one holder, with room for the payload's bytes.
         unsafe { block.write(0, self.as_slice()) };
-        self.backing = Store::Shared(block);
+        self.start = block_start(&block);
+        *self.block = Some(block);
         Ok(())
     }
 
     /// Write `bytes` after the payload's bytes, into the room [`Self::reserve`] made for them.
     fn put_after(&mut self, bytes: &[u8]) {
-        if let Store::Shared(block) = &mut self.backing {
+        if let Some(block) = &mut *self.block {
             // SAFETY: `reserve` left a block of the payload's own, of one holder, with room for
             // these bytes after its own.
             unsafe { block.write(self.len, bytes) };
@@ -616,11 +630,7 @@ unsafe fn payload_over(
 ) -> Result<ByteBuf, NoRoom> {
     if let Some(block) = block {
         if start == block.span().0 && len <= filled {
-            return Ok(ByteBuf {
-                backing: Store::Shared(block.share().ok_or(NoRoom)?),
-                len,
-                bounds: Vec::new(),
-            });
+            return Ok(ByteBuf::over(block.share().ok_or(NoRoom)?, len));
         }
     }
     ByteBuf::copy_of(crate::abi::view_bytes(start, len).unwrap_or(&[]))
@@ -2200,9 +2210,9 @@ mod block_tests {
     #[test]
     fn an_empty_payload_holds_no_block() {
         let empty = ByteBuf::copy_of(&[]).expect("no room is asked for");
-        assert!(matches!(empty.backing, Store::Empty));
+        assert!(empty.block.is_none());
         let clone = empty.try_clone().expect("no room is asked for");
-        assert!(matches!(clone.backing, Store::Empty));
+        assert!(clone.block.is_none());
         assert!(clone.as_slice().is_empty());
     }
 
@@ -2401,7 +2411,7 @@ mod block_tests {
     #[test]
     fn a_payloads_bytes_lie_in_the_process_pools() {
         let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the area");
-        let Store::Shared(block) = &payload.backing else {
+        let Some(block) = &*payload.block else {
             panic!("a payload of bytes holds a block");
         };
         assert!(crate::process_pool::lies_in_area(block.head.cast::<u8>()));
