@@ -795,8 +795,10 @@ impl Registry {
     /// side beside the table staged both as it was told; the table that serves one peer or many
     /// leaves each peer to read the table's epoch, and nothing else reads it.
     fn reconcile_subscribers(&mut self, id: FaceId) {
-        if let Some(Split { app, face, .. }) = self.split(id) {
-            face.peer.subscribers.reconcile(&app.tables);
+        // Handed out to be written, as `Self::split` hands a face's tables out.
+        self.writing();
+        if let Some(at) = self.held_at(id) {
+            reconcile_face(&self.app, &mut self.sets[at]);
         }
     }
 
@@ -854,7 +856,7 @@ impl Registry {
                 face.peer
                     .subscribers
                     .dispatch_iteration_event(&mut app.tables, delivery, event);
-                face.peer.subscribers.reconcile(&app.tables);
+                reconcile_face(app, face);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
             }
@@ -903,7 +905,7 @@ impl Registry {
             face.peer
                 .subscribers
                 .dispatch_iteration_event(&mut app.tables, delivery, event);
-            face.peer.subscribers.reconcile(&app.tables);
+            reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
         #[cfg(all(test, feature = "std"))]
@@ -1123,6 +1125,14 @@ impl Registry {
             after = None;
         }
     }
+}
+
+/// Stage for `face`'s peer what the application did to its subscriptions since the peer last looked
+/// ([`Registry::reconcile_subscribers`]): one body for every caller, not one for each that inlines
+/// it.
+#[inline(never)]
+fn reconcile_face(app: &App, face: &mut FaceTables) {
+    face.peer.subscribers.reconcile(&app.tables);
 }
 
 /// Write a set of no rows in the next row of `sets`, held to `limits`, its peer's keys kept in
