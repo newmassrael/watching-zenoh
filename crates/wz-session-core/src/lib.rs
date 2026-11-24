@@ -670,6 +670,12 @@ pub mod serial_link;
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
 
+// The RFC 6455 pieces of a WebSocket link with no heap and no I/O: the opening handshake, its
+// accept value, the frame header, the mask and the mask keys. The engine with no heap reads and
+// writes its `ws/` links with these. Gated on `transport-link-ws`.
+#[cfg(feature = "transport-link-ws")]
+pub mod ws_link;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +
 /// no_alloc; unconditional AND feature-independent (R311kl removed the

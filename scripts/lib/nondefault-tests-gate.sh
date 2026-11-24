@@ -1014,6 +1014,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         transport-link-raweth,\
         transport-link-serial,\
+        transport-link-ws,\
         transport-lowlatency,\
         transport-multilink,\
         transport-qos,\
