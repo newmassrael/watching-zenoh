@@ -2910,6 +2910,7 @@ impl SharedSession {
             links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::with_order(
                 &zid_bytes,
                 session_policy.link_tie_order(),
+                wz_session_core::link_admission::admitted_links(&session_limits),
             )),
             inner: StdMutex::new(inner),
             clock,

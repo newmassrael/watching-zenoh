@@ -33,8 +33,14 @@ use alloc::vec::Vec;
 use wz_runtime_core::Runtime;
 
 #[cfg(feature = "alloc")]
-use crate::credential_identity::canonical_zid;
+use crate::caps;
 use crate::credential_identity::zid_from_wire;
+#[cfg(feature = "alloc")]
+use crate::credential_identity::{canonical_zid, CREDENTIAL_ZID_BYTES};
+#[cfg(feature = "alloc")]
+use crate::limit_binding::Quota;
+#[cfg(feature = "alloc")]
+use crate::limits::SessionLimits;
 use crate::policy::LinkTieOrder;
 
 /// What a session does with a link to a node it already holds a link to.
@@ -143,8 +149,9 @@ pub struct LinkLease {
     authority: alloc::sync::Arc<dyn LinkAdmission>,
     token: u64,
     /// The node the authority was last asked about, whatever it answered: what a link that was
-    /// refused can still say of the node it was refused for.
-    node: Option<Vec<u8>>,
+    /// refused can still say of the node it was refused for. Held in place, so that asking takes
+    /// no memory after the session opened; bytes that spell no zid name no node.
+    node: Option<crate::session_zid::SessionZid>,
 }
 
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -161,13 +168,14 @@ impl LinkLease {
 
     /// See [`LinkAdmission::reserve`]. The node is kept, admitted or not.
     pub fn reserve(&mut self, remote_zid: &[u8]) -> bool {
-        self.node = Some(remote_zid.to_vec());
+        self.node = crate::session_zid::SessionZid::new(remote_zid).ok();
         self.authority.reserve(self.token, remote_zid)
     }
 
-    /// The node the authority was last asked about ([`Self::reserve`]), or `None` before it was.
-    pub fn node(&self) -> Option<&[u8]> {
-        self.node.as_deref()
+    /// The node the authority was last asked about ([`Self::reserve`]), or `None` before it was
+    /// and for bytes that spell no zid.
+    pub fn node(&self) -> Option<crate::session_zid::SessionZid> {
+        self.node
     }
 
     /// See [`LinkAdmission::confirm`].
@@ -206,11 +214,79 @@ enum LinkState {
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 struct LinkRow {
+    /// The token [`LinkBook::open`] gave the link.
+    token: u64,
     /// Whether this node dialled the link.
     dialled: bool,
-    /// The remote's zid, once the handshake has named it and the link was admitted.
-    zid: Option<Vec<u8>>,
+    /// The remote's zid as [`row_key`] keys it, once the handshake has named it and the link was
+    /// admitted.
+    zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
     state: LinkState,
+}
+
+/// The key every spelling of one zid shares in a [`LinkBook`]: its bytes up to the last that is
+/// not zero ([`canonical_zid`]), padded with zeros to sixteen, so that a row holds it in place and
+/// two keys are equal exactly when the zids are. `None` for bytes still longer than sixteen once
+/// trimmed, which no handshake carries: its zid field is one to sixteen bytes.
+#[cfg(feature = "alloc")]
+fn row_key(zid: &[u8]) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+    let canonical = canonical_zid(zid);
+    if canonical.len() > CREDENTIAL_ZID_BYTES {
+        return None;
+    }
+    let mut key = [0u8; CREDENTIAL_ZID_BYTES];
+    for (into, byte) in key.iter_mut().zip(canonical) {
+        *into = *byte;
+    }
+    Some(key)
+}
+
+/// The token [`LinkBook::open`] gives a link it has no row for: the table is full. Never the
+/// token of a row, as the tokens of rows start at 1 and skip it when they wrap.
+#[cfg(feature = "alloc")]
+const NO_ROW: u64 = 0;
+
+/// The links a node whose sessions hold `limits` keeps in its [`LinkBook`] at once, the rows
+/// the table reserves when it is made: the link it dials, each face `MAX_FACES` admits besides,
+/// and each link `MAX_ACCEPT_PENDING` admits in its handshake (zenoh's
+/// `transport/unicast/max_sessions` and `accept_pending`). A bound the snapshot leaves open,
+/// which a heap build's defaults do, counts as the build's value of it ([`caps`]).
+#[cfg(feature = "alloc")]
+pub fn admitted_links(limits: &SessionLimits) -> usize {
+    let held = |quota: Quota, build: usize| quota.most().unwrap_or(build);
+    held(limits.max_faces(), caps::MAX_FACES)
+        .saturating_add(held(limits.max_accept_pending(), caps::MAX_ACCEPT_PENDING))
+        .saturating_add(1)
+}
+
+/// What `rival` says of the link `token`, `dialled` or not, being admitted to the node keyed
+/// `key` (spelled `remote_zid`) by the node `local_zid` that orders zids by `order`: `None`
+/// when it is no rival of the link (the link itself, one superseded, or one to another node).
+#[cfg(feature = "alloc")]
+fn rival_says(
+    order: LinkTieOrder,
+    local_zid: &[u8],
+    rival: &LinkRow,
+    token: u64,
+    dialled: bool,
+    key: &[u8; CREDENTIAL_ZID_BYTES],
+    remote_zid: &[u8],
+) -> Option<SecondLink> {
+    if rival.token == token || rival.zid.as_ref() != Some(key) {
+        return None;
+    }
+    match rival.state {
+        LinkState::Superseded => None,
+        LinkState::Established => Some(SecondLink::Refuse),
+        LinkState::Handshaking if rival.dialled == dialled => Some(SecondLink::Refuse),
+        LinkState::Handshaking => Some(judge_second_link_by(
+            order,
+            rival.dialled,
+            dialled,
+            local_zid,
+            remote_zid,
+        )),
+    }
 }
 
 /// A node's links to each remote node, from the moment the handshake names the remote until the
@@ -247,91 +323,105 @@ struct LinkRow {
 /// The acceptor's reservation is its admission: it sends the OpenAck next, and its link is
 /// established from then on. The initiator's reservation (at the InitAck) is a claim that the
 /// rival acceptor of the same node respects, and it is established at [`LinkBook::confirm`].
+///
+/// # Its rows
+///
+/// The table reserves its rows when it is made, as many as the node may hold links at once
+/// ([`admitted_links`], or the engine's own count of its links), and takes no memory after:
+/// a link is admitted, superseded and let go in rows that never move. A link opened while every
+/// row is held has none, and is refused when it asks, as a link past the node's faces is.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct LinkBook {
-    local_zid: Vec<u8>,
+    /// The node's own zid in its sixteen-byte form, zeros for bytes that spell none: either
+    /// orders as the bytes it was made of do (`zid_order_key`).
+    local_zid: [u8; CREDENTIAL_ZID_BYTES],
     /// How two zids are ordered when two links in their handshakes cross: the node's
     /// `link-tie-order`, fixed when the table is made.
     order: LinkTieOrder,
     next_token: u64,
-    links: alloc::collections::BTreeMap<u64, LinkRow>,
+    /// The rows the table was made with: `links` never holds more, so it never grows.
+    rows: usize,
+    links: Vec<LinkRow>,
 }
 
 #[cfg(feature = "alloc")]
 impl LinkBook {
     /// The table of the node `local_zid`, whose two crossing links are judged by `order`, the
-    /// `link-tie-order` of the node's snapshot.
-    pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
+    /// `link-tie-order` of the node's snapshot, with a row reserved for each of the `rows` links
+    /// the node may hold at once.
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
         Self {
-            local_zid: local_zid.to_vec(),
+            local_zid: zid_from_wire(local_zid).unwrap_or([0; CREDENTIAL_ZID_BYTES]),
             order,
             next_token: 1,
-            links: alloc::collections::BTreeMap::new(),
+            rows,
+            links: Vec::with_capacity(rows),
         }
     }
 
-    /// See [`LinkAdmission::open`].
+    /// See [`LinkAdmission::open`]. A link opened while every row is held is given a token of no
+    /// row, which [`Self::reserve`] and [`Self::confirm`] refuse.
     pub fn open(&mut self, dialled: bool) -> u64 {
+        if self.links.len() >= self.rows {
+            return NO_ROW;
+        }
         let token = self.next_token;
-        self.next_token = self.next_token.wrapping_add(1);
-        self.links.insert(
+        self.next_token = self.next_token.wrapping_add(1).max(1);
+        self.links.push(LinkRow {
             token,
-            LinkRow {
-                dialled,
-                zid: None,
-                state: LinkState::Handshaking,
-            },
-        );
+            dialled,
+            zid: None,
+            state: LinkState::Handshaking,
+        });
         token
+    }
+
+    /// The row of the link `token`.
+    fn row_mut(&mut self, token: u64) -> Option<&mut LinkRow> {
+        self.links.iter_mut().find(|link| link.token == token)
     }
 
     /// See [`LinkAdmission::reserve`].
     pub fn reserve(&mut self, token: u64, remote_zid: &[u8]) -> bool {
+        // A link with no row has no place to hold a node in.
+        if token == NO_ROW {
+            return false;
+        }
         // A link that names no node cannot collide with another.
         if remote_zid.is_empty() {
             return true;
         }
-        let Some(dialled) = self.links.get(&token).map(|link| link.dialled) else {
+        let Some(dialled) = self
+            .links
+            .iter()
+            .find(|link| link.token == token)
+            .map(|link| link.dialled)
+        else {
             return true;
         };
+        let Some(key) = row_key(remote_zid) else {
+            return true;
+        };
+        let (order, local_zid) = (self.order, self.local_zid);
+        let says = |rival: &LinkRow| {
+            rival_says(order, &local_zid, rival, token, dialled, &key, remote_zid)
+        };
         // Every rival is read before any is superseded: a link that is refused changes nothing.
-        let mut superseded = Vec::new();
-        for (rival_token, rival) in self.links.iter() {
-            if *rival_token == token || rival.state == LinkState::Superseded {
-                continue;
-            }
-            let Some(rival_zid) = rival.zid.as_deref() else {
-                continue;
-            };
-            if canonical_zid(rival_zid) != canonical_zid(remote_zid) {
-                continue;
-            }
-            match rival.state {
-                LinkState::Established => return false,
-                LinkState::Handshaking if rival.dialled == dialled => return false,
-                LinkState::Handshaking => {
-                    match judge_second_link_by(
-                        self.order,
-                        rival.dialled,
-                        dialled,
-                        &self.local_zid,
-                        remote_zid,
-                    ) {
-                        SecondLink::Refuse => return false,
-                        SecondLink::Replace => superseded.push(*rival_token),
-                    }
-                }
-                LinkState::Superseded => {}
-            }
+        if self
+            .links
+            .iter()
+            .any(|rival| says(rival) == Some(SecondLink::Refuse))
+        {
+            return false;
         }
-        for rival_token in superseded {
-            if let Some(rival) = self.links.get_mut(&rival_token) {
+        for rival in self.links.iter_mut() {
+            if says(rival) == Some(SecondLink::Replace) {
                 rival.state = LinkState::Superseded;
             }
         }
-        if let Some(link) = self.links.get_mut(&token) {
-            link.zid = Some(remote_zid.to_vec());
+        if let Some(link) = self.row_mut(token) {
+            link.zid = Some(key);
             // An acceptor sends its OpenAck next: from here the link is established at its end.
             link.state = if dialled {
                 LinkState::Handshaking
@@ -344,7 +434,10 @@ impl LinkBook {
 
     /// See [`LinkAdmission::confirm`].
     pub fn confirm(&mut self, token: u64) -> bool {
-        match self.links.get_mut(&token) {
+        if token == NO_ROW {
+            return false;
+        }
+        match self.row_mut(token) {
             None => true,
             // A link that was never reserved names no node: nothing to confirm against.
             Some(link) if link.zid.is_none() => true,
@@ -358,7 +451,9 @@ impl LinkBook {
 
     /// See [`LinkAdmission::release`].
     pub fn release(&mut self, token: u64) {
-        self.links.remove(&token);
+        if let Some(at) = self.links.iter().position(|link| link.token == token) {
+            self.links.swap_remove(at);
+        }
     }
 
     /// How many links the table holds, in every state.
@@ -369,6 +464,11 @@ impl LinkBook {
     /// Whether the table holds no link.
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
+    }
+
+    /// How many links the table holds at most: the rows it was made with.
+    pub fn rows(&self) -> usize {
+        self.rows
     }
 }
 
@@ -386,10 +486,11 @@ pub struct LinkRegistry<R: Runtime> {
 #[cfg(feature = "alloc")]
 impl<R: Runtime> LinkRegistry<R> {
     /// The admission of the node `local_zid`, judging crossing links by `order`, the
-    /// `link-tie-order` of the node's snapshot.
-    pub fn with_order(local_zid: &[u8], order: LinkTieOrder) -> Self {
+    /// `link-tie-order` of the node's snapshot, with a row reserved for each of the `rows` links
+    /// the node may hold at once ([`LinkBook::with_order`]).
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
         Self {
-            book: R::new_mutex(LinkBook::with_order(local_zid, order)),
+            book: R::new_mutex(LinkBook::with_order(local_zid, order, rows)),
         }
     }
 
@@ -580,10 +681,13 @@ mod book_tests {
     const LOW: [u8; 2] = [0x01, 0x00];
     const HIGH: [u8; 2] = [0x02, 0x00];
 
+    /// The rows a test's table reserves: more than any test below holds at once.
+    const ROWS: usize = 8;
+
     /// The table of the node `local_zid` under the order of the build defaults, which is what a
     /// node that selected none holds.
     fn book(local_zid: &[u8]) -> LinkBook {
-        LinkBook::with_order(local_zid, SessionPolicy::defaults().link_tie_order())
+        LinkBook::with_order(local_zid, SessionPolicy::defaults().link_tie_order(), ROWS)
     }
 
     #[test]
@@ -641,7 +745,7 @@ mod book_tests {
         const LOCAL: &[u8] = &[0x01, 0x02];
         const REMOTE: &[u8] = &[0x02];
         let crossing = |order: LinkTieOrder| {
-            let mut node = LinkBook::with_order(LOCAL, order);
+            let mut node = LinkBook::with_order(LOCAL, order, ROWS);
             let own_dial = node.open(true);
             assert!(node.reserve(own_dial, REMOTE));
             let inbound = node.open(false);
@@ -715,6 +819,137 @@ mod book_tests {
         assert!(node.reserve(held, &[0x02]));
         let new = node.open(false);
         assert!(!node.reserve(new, &[0x02, 0x00, 0x00]));
+    }
+
+    /// A row keys a zid by its bytes once trimmed, so a spelling padded past sixteen bytes is the
+    /// node it spells. Turned red by a key that refuses the length before it trims.
+    #[test]
+    fn a_zid_padded_past_sixteen_bytes_is_still_the_node_it_spells() {
+        let mut node = book(&LOW);
+        let held = node.open(false);
+        assert!(node.reserve(held, &[0x02]));
+        let mut padded = [0u8; 20];
+        padded[0] = 0x02;
+        let new = node.open(false);
+        assert!(
+            !node.reserve(new, &padded),
+            "the padded spelling names the node the held link reaches"
+        );
+    }
+
+    /// A link opened while every row is held is refused when it asks, at its reservation and its
+    /// confirmation, and holds no row; a row let go is taken by the next link. Turned red by an
+    /// `open` that gives a link past the rows a row of its own.
+    #[test]
+    fn a_link_past_the_rows_is_refused_and_a_row_let_go_is_taken_again() {
+        let mut node = LinkBook::with_order(&LOW, SessionPolicy::defaults().link_tie_order(), 2);
+        assert_eq!(node.rows(), 2);
+        let first = node.open(false);
+        let second = node.open(true);
+        let past = node.open(false);
+        assert!(
+            !node.reserve(past, &[0x03]),
+            "a link with no row is refused, to a node no other link reaches"
+        );
+        assert!(!node.confirm(past), "and is refused its confirmation");
+        assert_eq!(node.len(), 2, "the refused link holds no row");
+        node.release(past);
+        assert_eq!(node.len(), 2, "letting go of it lets go of no row");
+        assert!(
+            node.reserve(first, &HIGH),
+            "the links with rows are judged as before"
+        );
+        node.release(second);
+        let again = node.open(false);
+        assert!(
+            node.reserve(again, &[0x03]),
+            "the row the second link let go is the next link's"
+        );
+    }
+
+    /// The table reserves its rows when it is made and never grows past them, however often its
+    /// links come and go and however many more are opened. Turned red by a table that takes a row
+    /// past the ones it was made with, which grows its storage.
+    #[test]
+    fn the_rows_are_reserved_when_the_table_is_made_and_never_grow() {
+        let mut node = book(&LOW);
+        let reserved = node.links.capacity();
+        assert!(reserved >= ROWS, "the rows are reserved up front");
+        for _ in 0..3 {
+            let tokens: Vec<u64> = (0..ROWS + 2).map(|at| node.open(at % 2 == 0)).collect();
+            for (at, token) in tokens.iter().enumerate() {
+                let zid = [u8::try_from(at + 1).expect("a few links"), 0x10];
+                node.reserve(*token, &zid);
+            }
+            assert_eq!(node.len(), ROWS, "the links past the rows hold none");
+            assert_eq!(node.links.capacity(), reserved, "the storage never grew");
+            for token in tokens {
+                node.release(token);
+            }
+            assert!(node.is_empty());
+        }
+    }
+
+    /// A node reserves a row for the link it dials, each face its sessions' `MAX_FACES` admits
+    /// and each handshake their `MAX_ACCEPT_PENDING` admits; a bound left open counts as the
+    /// build's value. Turned red by a count that leaves out any of the three.
+    #[test]
+    fn a_node_reserves_its_dial_its_faces_and_its_handshakes() {
+        use crate::limits::SessionLimits;
+
+        let mut limits = SessionLimits::defaults();
+        if limits.select_max_faces(Quota::at_most(3)).is_ok()
+            && limits.select_max_accept_pending(Quota::at_most(2)).is_ok()
+        {
+            assert_eq!(admitted_links(&limits), 1 + 3 + 2);
+        }
+        let mut open = SessionLimits::defaults();
+        if open.select_max_faces(Quota::UNBOUNDED).is_ok()
+            && open.select_max_accept_pending(Quota::at_most(2)).is_ok()
+        {
+            assert_eq!(admitted_links(&open), 1 + caps::MAX_FACES + 2);
+        }
+        assert!(
+            admitted_links(&SessionLimits::BUILD) >= 1,
+            "the dial has its row whatever the faces"
+        );
+    }
+
+    /// An admission that refuses every link it is asked about.
+    #[cfg(target_has_atomic = "ptr")]
+    struct RefusesEverything;
+
+    #[cfg(target_has_atomic = "ptr")]
+    impl LinkAdmission for RefusesEverything {
+        fn open(&self, _dialled: bool) -> u64 {
+            1
+        }
+
+        fn reserve(&self, _token: u64, _remote_zid: &[u8]) -> bool {
+            false
+        }
+
+        fn confirm(&self, _token: u64) -> bool {
+            false
+        }
+
+        fn release(&self, _token: u64) {}
+    }
+
+    /// A lease names the node it was last asked about, refused or not, as the zid it spells, and
+    /// no node for bytes that spell none. Turned red by a lease that forgets a refused node, or
+    /// names one for bytes of zeros.
+    #[cfg(target_has_atomic = "ptr")]
+    #[test]
+    fn a_lease_names_the_node_it_was_refused_for_and_none_for_bytes_that_spell_none() {
+        use crate::session_zid::SessionZid;
+
+        let mut lease = LinkLease::new(alloc::sync::Arc::new(RefusesEverything), true);
+        assert_eq!(lease.node(), None, "no node before the question");
+        assert!(!lease.reserve(&HIGH));
+        assert_eq!(lease.node(), SessionZid::new(&HIGH).ok());
+        assert!(!lease.reserve(&[0x00, 0x00]));
+        assert_eq!(lease.node(), None, "bytes of zeros name no node");
     }
 
     /// A step of the two links' handshakes: link 0 is dialled by A and accepted by B, link 1 is

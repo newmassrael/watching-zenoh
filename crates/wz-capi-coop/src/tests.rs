@@ -2825,6 +2825,8 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
         .expect("the failed open let go of its port");
 }
 
+#[cfg(feature = "listen")]
+mod admission_heap;
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
 #[cfg(all(feature = "app-transport", feature = "listen"))]

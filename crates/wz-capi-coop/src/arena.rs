@@ -1427,6 +1427,13 @@ impl ArenaPlan {
         self.session.round
     }
 
+    /// The links the session may hold at once ([`links_of`]), whose buffers the plan holds: the
+    /// rows of the session's link admission too.
+    #[cfg(feature = "listen")]
+    pub fn links(&self) -> usize {
+        self.transport.links
+    }
+
     /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
     /// that a link may find every slot held.
     #[cfg(feature = "listen")]

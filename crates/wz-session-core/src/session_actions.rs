@@ -11156,8 +11156,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn link_admission_node(&self) -> Option<SessionZid> {
         R::with_mutex_mut(&self.link.link_lease, |slot| {
             slot.as_ref()
-                .and_then(|lease| lease.node())
-                .and_then(|node| SessionZid::new(node).ok())
+                .and_then(crate::link_admission::LinkLease::node)
         })
     }
 
