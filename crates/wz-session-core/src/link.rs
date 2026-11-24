@@ -1313,12 +1313,17 @@ pub trait BoxedLinkDriver {
     /// a link whose slots are all in flight, so the pool running dry is a
     /// fallback to the heap and never an error.
     ///
-    /// `want` is a HINT, not a requirement: the capacity the heap path would
-    /// reserve, which is the codec's worst case for the message and so far past
-    /// any ordinary frame. A link need not be able to hold it. A frame that
-    /// turns out not to fit the slot is encoded again on the heap and the slot
-    /// is given back, so a link with one slot size lends it whatever `want`
-    /// says, and a link with several size classes may pick by it.
+    /// `want` is the most the message can need, not its length: the codec's worst
+    /// case for it, the capacity the heap path would reserve (for a handshake
+    /// message sent lend-only, `handshake_encode::HANDSHAKE_LEND_WANT`),
+    /// and so far past any ordinary frame. A link lends a slot of UP TO `want`
+    /// bytes and need not be able to hold it: the session writes the message
+    /// into the slot once and hands [`Self::tx_slot_send`] the length it wrote. A
+    /// frame that turns out not to fit the slot is given back and encoded again on
+    /// the heap, or, on the lend-only profile, refused. So a link with one slot
+    /// size lends it whatever `want` says, and a link with several size classes
+    /// may pick by it; one a lend-only session writes to answers `None` only when
+    /// it has no slot free, since there that answer refuses the message.
     ///
     /// A granted slot is the session's alone until it is passed to exactly one
     /// of [`Self::tx_slot_send`] or [`Self::tx_slot_abort`]. A driver that
@@ -1345,7 +1350,8 @@ pub trait BoxedLinkDriver {
     }
 
     /// Send `len` bytes of a granted slot, starting `start` bytes in (the
-    /// headroom the grant named, where the frame begins), and take the slot: it
+    /// headroom the grant named, where the frame begins): the bytes the session
+    /// wrote, however far short of the `want` the slot was asked for. Take the slot: it
     /// is the link's from this call on, and returns to the pool once the bytes
     /// are written. The outcome is [`Self::send_prioritized`]'s.
     ///

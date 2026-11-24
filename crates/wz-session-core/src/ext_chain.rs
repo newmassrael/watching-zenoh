@@ -1004,26 +1004,6 @@ pub(crate) fn encode_ext_chain_into(
     write_ext_chain(&mut crate::tx_buf::TxSink::new(buf), entries)
 }
 
-/// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
-/// counts it. The continuation bit that encode sets or clears on each header
-/// changes no length.
-// Its reader is the lend-only Open's sizer, the Init being counted whole by its
-// document, so the gate is that send's in `session_actions`.
-#[cfg(all(
-    feature = "tx-lend-only",
-    feature = "session-unicast",
-    feature = "codec-open-body",
-    any(feature = "session-unicast-open", feature = "session-unicast-accept")
-))]
-pub(crate) fn ext_chain_len(entries: ChainRef<'_>) -> usize {
-    // Counted by the writer itself, so the count and the write are one compiled encoder.
-    let mut count = crate::tx_buf::CountTxBuf::new();
-    match crate::handshake_encode::encode_held_chain_into(&mut count, entries) {
-        Ok(()) => crate::tx_buf::TxBuf::len(&count),
-        Err(_) => 0,
-    }
-}
-
 /// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror, to
 /// the entry whose `Z` flag is clear. Each entry consumes at least its header
 /// byte, so a chain that never terminates ends at the cursor's end as a
