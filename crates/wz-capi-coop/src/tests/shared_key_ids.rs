@@ -607,11 +607,12 @@ fn a_reply_under_the_declared_form_names_its_key_whole() {
 fn the_session_declares_no_key_expression_under_an_id_of_the_dictionary() {
     let held = Arc::new(KeyIds::new([(1, "lab/one"), (2, "lab/two")]).expect("valid"));
     let (with, _) = listener(Some(held), KeyWireForm::Shared);
-    assert_eq!(with.acquire_keyexpr("lab/x"), Ok(3));
-    assert_eq!(with.acquire_keyexpr("lab/y"), Ok(4));
+    let id = |hold: wz_capi_port::KeyHold| hold.mapping_id();
+    assert_eq!(with.acquire_keyexpr("lab/x").map(id), Ok(3));
+    assert_eq!(with.acquire_keyexpr("lab/y").map(id), Ok(4));
     let (without, _) = listener(None, KeyWireForm::Declared);
     assert_eq!(
-        without.acquire_keyexpr("lab/x"),
+        without.acquire_keyexpr("lab/x").map(id),
         Ok(1),
         "CONTROL: without a dictionary the first id is 1"
     );
@@ -684,7 +685,8 @@ fn interest_keys_under(
         open_keyed(super::config(&router), ids, policy_of(form)).expect("the session opens");
     let declared = engine
         .acquire_keyexpr(ASKED)
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .mapping_id();
     ask(&engine, declared);
     super::until(&engine, "the peer to see the Interest", || {
         router.seen(|seen| seen.interest_keys.len()) == 1

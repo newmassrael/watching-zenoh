@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    HeldKey, KeyAsk, KeyHold, KeyHolds, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys,
-    SubscriberSink, WireKey,
+    HeldKey, KeyAsk, KeyHold, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys, SubscriberSink,
+    WireKey,
 };
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::key_arena::block_bytes;
@@ -102,7 +102,7 @@ fn a_key_the_record_keeps_is_held_in_the_same_block() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let before = engine.key_counts().used;
-    let id = engine
+    let declaration = engine
         .acquire_keyexpr("demo/held/shared")
         .expect("a declaration");
     let declared = engine.key_counts().used;
@@ -116,7 +116,7 @@ fn a_key_the_record_keeps_is_held_in_the_same_block() {
         declared,
         "the record's block is shared"
     );
-    engine.release_keyexpr(id);
+    declaration.release(&*engine);
     assert_eq!(
         held.as_str(),
         "demo/held/shared",
@@ -238,7 +238,7 @@ fn holds_of_one_text_share_its_block_whoever_holds_it() {
         before + block,
         "one block for both holds"
     );
-    let id = engine
+    let declaration = engine
         .acquire_keyexpr("demo/held/twice")
         .expect("a declaration");
     assert_eq!(
@@ -253,7 +253,7 @@ fn holds_of_one_text_share_its_block_whoever_holds_it() {
         "CONTROL: another text takes a block of its own"
     );
     release(&engine, first);
-    engine.release_keyexpr(id);
+    declaration.release(&*engine);
     assert_eq!(second.as_str(), "demo/held/twice");
     release(&engine, second);
     release(&engine, other);
@@ -279,10 +279,10 @@ fn live_holds(engine: &Engine) -> isize {
 fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let id = engine
+    let program = engine
         .acquire_keyexpr("demo/holds")
         .expect("room for a declaration");
-    let program = KeyHold::taken(id);
+    let id = program.mapping_id();
     let dropped = Arc::new(AtomicUsize::new(0));
     let named_by_key = engine
         .declare_subscriber_on_wire(
@@ -336,10 +336,10 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
         "and lets it go with the last row"
     );
 
-    let again = engine
+    let program = engine
         .acquire_keyexpr("demo/holds")
         .expect("room for a declaration");
-    let program = KeyHold::taken(again);
+    let again = program.mapping_id();
     engine
         .declare_subscriber_on_wire(
             "demo/holds/c",
@@ -368,10 +368,10 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
 fn a_subscribers_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let id = engine
+    let program = engine
         .acquire_keyexpr("demo/named")
         .expect("room for a declaration");
-    let program = KeyHold::taken(id);
+    let id = program.mapping_id();
     let dropped = Arc::new(AtomicUsize::new(0));
     let subscriber = engine
         .declare_subscriber_on_wire(
@@ -417,10 +417,10 @@ fn a_liveliness_subscribers_row_holds_the_declaration_its_interest_names() {
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let id = engine
+    let program = engine
         .acquire_keyexpr("demo/alive")
         .expect("room for a declaration");
-    let program = KeyHold::taken(id);
+    let id = program.mapping_id();
     let subscriber = engine
         .declare_liveliness_subscriber_on_wire(
             "demo/alive/**",
@@ -462,10 +462,10 @@ fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let id = engine
+    let program = engine
         .acquire_keyexpr("demo/named")
         .expect("room for a declaration");
-    let program = KeyHold::taken(id);
+    let id = program.mapping_id();
     let dropped = Arc::new(AtomicUsize::new(0));
     let sink = || -> QueryableSink {
         let guard = Dropped(dropped.clone());
@@ -514,4 +514,49 @@ fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
         2,
         "the refused callback at once, the other with its row"
     );
+}
+
+/// A hold gives itself back by the row it was taken in, not by its id: once its declaration went,
+/// and a later declaration took the same id after the ids wrapped, giving it back lets go of
+/// nothing. The hold that outlives its declaration is a second hold of a count of one, as a holder
+/// is whose declaration another holder's going retracted. Turned red by a hold given back by its
+/// id (`KeyHold::release` or `KeyHolds::release_keyexpr` looking the id up), which retracts the
+/// new declaration.
+#[test]
+fn a_hold_whose_declaration_went_spares_the_one_that_took_its_id_again() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let program = engine
+        .acquire_keyexpr("demo/held/old")
+        .expect("room for a declaration");
+    let old = program.mapping_id();
+    let outlived = KeyHold::taken(old, program.row().expect("a hold the session took"));
+    program.release(&*engine);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "CONTROL: the count of one went with the program's hold"
+    );
+    // The ids are minted onward and wrap: declarations made and let go of come to the id again.
+    // The session is stepped with each, so what it sends the router is read as it goes.
+    let again = (0..=u32::from(u16::MAX))
+        .find_map(|_| {
+            let hold = engine
+                .acquire_keyexpr("demo/held/new")
+                .expect("an id is free");
+            let _ = SessionDrive::read(&*engine, false);
+            if hold.mapping_id() == old {
+                return Some(hold);
+            }
+            hold.release(&*engine);
+            None
+        })
+        .expect("the id is minted again");
+    outlived.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(old, "demo/held/new".to_owned())],
+        "the new declaration stands after the outlived hold went"
+    );
+    again.release(&*engine);
+    assert!(engine.keyexpr_declarations().is_empty());
 }

@@ -895,7 +895,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -942,7 +942,8 @@ mod mapped {
         until_members_know_each_other(&first, &second);
         let id = first
             .acquire_keyexpr("demo/mapped/q")
-            .expect("a session with ids left declares a keyexpr");
+            .expect("a session with ids left declares a keyexpr")
+            .mapping_id();
         eventually("the declaration to leave", || {
             carried(&network, 1, b"mapped/q")
         });
@@ -1016,9 +1017,10 @@ mod mapped {
         let network = Arc::new(Network::default());
         let first = open_mapped(&network, 1).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
-        let id = first
+        let held = first
             .acquire_keyexpr("demo/mapped/b")
             .expect("a session with ids left declares a keyexpr");
+        let id = held.mapping_id();
         let second = open_mapped(&network, 2).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
         until_members_know_each_other(&first, &second);
@@ -1049,7 +1051,7 @@ mod mapped {
                 .iter()
                 .any(|payload| payload == b"by-its-literal")
         });
-        first.release_keyexpr(id);
+        held.release(&*first);
         SessionDrive::close(&*second);
         SessionDrive::close(&*first);
     }

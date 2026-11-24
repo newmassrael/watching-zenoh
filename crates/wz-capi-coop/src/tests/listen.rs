@@ -724,8 +724,12 @@ fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
     let long = "a".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES - 1);
     let fits = peer
         .acquire_keyexpr("demo/c")
-        .expect("room for a declaration");
-    let past = peer.acquire_keyexpr(&long).expect("room for a declaration");
+        .expect("room for a declaration")
+        .mapping_id();
+    let past = peer
+        .acquire_keyexpr(&long)
+        .expect("room for a declaration")
+        .mapping_id();
     let remote = PublishOptions::put().with_locality(Locality::Remote);
     let long_key = format!("{long}/x");
     for (id, key) in [(fits, "demo/c/x"), (past, long_key.as_str())] {

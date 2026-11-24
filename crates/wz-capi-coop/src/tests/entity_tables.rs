@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, KeyHolds, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -302,10 +302,13 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let before = router.seen(|s| s.declares);
-    let id = engine.acquire_keyexpr("demo/k/a").expect("a row is free");
+    let first = engine.acquire_keyexpr("demo/k/a").expect("a row is free");
+    let again = engine
+        .acquire_keyexpr("demo/k/a")
+        .expect("a held key is held again");
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/a"),
-        Ok(id),
+        (again.mapping_id(), again.row()),
+        (first.mapping_id(), first.row()),
         "a held key is held again, in its row"
     );
     until(&engine, "the router to see the key", || {
@@ -318,13 +321,13 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
     assert_eq!(engine.keyexpr_declarations().len(), 1);
 
-    engine.release_keyexpr(id);
+    first.release(&*engine);
     assert_eq!(
         engine.acquire_keyexpr("demo/k/b"),
         Err(Refusal::TableFull),
         "one hold is left on the first key"
     );
-    engine.release_keyexpr(id);
+    again.release(&*engine);
     assert!(
         engine.acquire_keyexpr("demo/k/b").is_ok(),
         "the last hold gone, its row takes the next key"
@@ -339,7 +342,10 @@ fn a_key_handed_as_a_borrow_is_kept_in_the_sessions_own_row() {
     let engine = open_under(&router, SessionLimits::defaults());
     let mut buffer = *b"demo/k/borrowed";
     let key = core::str::from_utf8(&buffer).expect("the key is text");
-    let id = engine.acquire_keyexpr(key).expect("a row is free");
+    let id = engine
+        .acquire_keyexpr(key)
+        .expect("a row is free")
+        .mapping_id();
     buffer.copy_from_slice(b"xxxx/x/xxxxxxxx");
     assert_eq!(
         engine.keyexpr_declarations(),
@@ -347,7 +353,9 @@ fn a_key_handed_as_a_borrow_is_kept_in_the_sessions_own_row() {
         "the row holds its own copy of the key"
     );
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/borrowed"),
+        engine
+            .acquire_keyexpr("demo/k/borrowed")
+            .map(|hold| hold.mapping_id()),
         Ok(id),
         "the held key is held again by its text"
     );
@@ -805,7 +813,7 @@ fn a_key_expression_the_link_refuses_is_not_declared() {
     );
     settle(&engine);
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
-    engine
+    let _held = engine
         .acquire_keyexpr("demo/kx/ok")
         .expect("CONTROL: a key the link takes");
     until(&engine, "the router to see the declaration", || {

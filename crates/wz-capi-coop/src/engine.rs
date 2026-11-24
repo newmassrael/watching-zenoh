@@ -79,7 +79,7 @@ use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    KeyAnchor, KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
+    KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
     ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
     StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
@@ -6134,34 +6134,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
     for CoopEngine<L, C>
 {
     #[inline(never)]
-    fn release_keyexpr(&self, mapping_id: ExprId) {
+    fn release_keyexpr(&self, row: KeyexprHandle) {
         #[cfg(test)]
         self.takes.holds.fetch_sub(1, Ordering::Relaxed);
         let Some(mut core) = self.live() else {
             return;
         };
         let core = &mut core.0;
-        let Some(handle) = tables(&core.session.registry).keyexpr_by_id(mapping_id) else {
-            return;
-        };
-        let place = core.prefix_retraction(Some(handle));
-        let retracted = tables_mut(&core.session.registry).undeclare_keyexpr(handle);
+        // A row that went names nothing, whichever declaration took its slot or its id since.
+        let place = core.prefix_retraction(Some(row));
+        let retracted = tables_mut(&core.session.registry).undeclare_keyexpr(row);
         // The row went before the links are told: a send never finds the table borrowed.
         core.retract_keyexpr(place, retracted);
     }
 
     #[inline(never)]
-    fn retain_keyexpr(&self, mapping_id: ExprId) {
-        #[cfg(test)]
-        self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        let Some(core) = self.live() else {
-            return;
-        };
+    fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
         // One more hold of the row in the session's one table set; nothing goes on the wire.
-        let mut tables = tables_mut(&core.0.session.registry);
-        if let Some(handle) = tables.keyexpr_by_id(mapping_id) {
-            tables.retain_keyexpr(handle);
+        let taken = match self.live() {
+            Some(core) => {
+                let mut tables = tables_mut(&core.0.session.registry);
+                tables.retain_keyexpr(row)
+            }
+            None => false,
+        };
+        #[cfg(test)]
+        if taken {
+            self.takes.holds.fetch_add(1, Ordering::Relaxed);
         }
+        taken
     }
 }
 
@@ -6634,7 +6635,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[inline(never)]
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Declined> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<KeyHold, Declined> {
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
         // A key the session declared already is held once more; any other takes a row and an id.
@@ -6662,7 +6663,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !declared.new {
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(id);
+            return Ok(KeyHold::taken(id, declared.handle));
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
@@ -6684,7 +6685,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(id)
+        Ok(KeyHold::taken(id, declared.handle))
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {

@@ -163,12 +163,12 @@ impl SessionState {
 }
 
 impl wz_capi_port::KeyHolds for SharedSession {
-    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::release_keyexpr(self, mapping_id)
+    fn release_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) {
+        SharedSession::release_keyexpr(self, row)
     }
 
-    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::retain_keyexpr(self, mapping_id)
+    fn retain_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) -> bool {
+        SharedSession::retain_keyexpr(self, row)
     }
 }
 
@@ -364,7 +364,7 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_subscriber(self, id)
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
 

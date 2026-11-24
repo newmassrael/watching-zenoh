@@ -766,21 +766,33 @@ impl core::fmt::Debug for WireKey {
 /// One hold on a keyexpr declaration of a session, counted by the engine's own count of the
 /// declaration's holders ([`KeyHolds::retain_keyexpr`], [`KeyHolds::release_keyexpr`]).
 ///
-/// It is the declaration's id and nothing else: it names no session and lets nothing go when it is
-/// dropped, so the object of the ABI's that keeps it names its session beside it and gives it back
-/// to that session ([`Self::release`]); it is neither copied nor cloned, so each hold is given back
-/// once, and one dropped unused is warned of where it is made. What a session records holds its
-/// declarations in the same count itself, and takes no `KeyHold` ([`WireKey`]).
+/// It is the declaration's id, and the row of the session's tables the hold was taken in, by
+/// which it is given back: a declaration retracted whatever held it leaves its id to a later one
+/// once the ids wrap, and the row, whose generation moved on, names no declaration but its own.
+/// It names no session and lets nothing go when it is dropped, so the object of the ABI's that
+/// keeps it names its session beside it and gives it back to that session ([`Self::release`]); it
+/// is neither copied nor cloned, so each hold is given back once, and one dropped unused is warned
+/// of where it is made. What a session records holds its declarations in the same count itself,
+/// and takes no `KeyHold` ([`WireKey`]).
 #[must_use = "a hold is given back to its session (`KeyHold::release`), or its declaration stays"]
+#[derive(Debug, PartialEq, Eq)]
 pub struct KeyHold {
     mapping_id: wz_session_core::wire_id::ExprId,
+    /// The row the hold was taken in; `None` for a copy its session took no hold for.
+    row: Option<wz_session_core::session_tables::KeyexprHandle>,
 }
 
 impl KeyHold {
-    /// The hold on `mapping_id` that the caller took of its session
+    /// The hold on `mapping_id` an engine took in `row` of its tables
     /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
-    pub fn taken(mapping_id: wz_session_core::wire_id::ExprId) -> Self {
-        Self { mapping_id }
+    pub fn taken(
+        mapping_id: wz_session_core::wire_id::ExprId,
+        row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Self {
+        Self {
+            mapping_id,
+            row: Some(row),
+        }
     }
 
     /// The declaration held.
@@ -788,24 +800,44 @@ impl KeyHold {
         self.mapping_id
     }
 
-    /// One more hold on the same declaration, taken of `session`, the session this one is on.
+    /// The row the hold was taken in, `None` when it holds nothing.
+    pub fn row(&self) -> Option<wz_session_core::session_tables::KeyexprHandle> {
+        self.row
+    }
+
+    /// One more hold on the same declaration, taken of `session`, the session this one is on: one
+    /// that holds nothing when the session took none ([`KeyHolds::retain_keyexpr`]), so that
+    /// giving it back lets go of no hold another holder took.
     pub fn share<H: KeyHolds + ?Sized>(&self, session: &H) -> Self {
-        session.retain_keyexpr(self.mapping_id);
         Self {
             mapping_id: self.mapping_id,
+            row: self.row.filter(|&row| session.retain_keyexpr(row)),
+        }
+    }
+
+    /// A copy of a hold whose session is gone, which holds nothing.
+    pub fn unheld(&self) -> Self {
+        Self {
+            mapping_id: self.mapping_id,
+            row: None,
         }
     }
 
     /// Give the hold back to `session`, the session it was taken of; the last one retracts the
     /// declaration.
     pub fn release<H: KeyHolds + ?Sized>(self, session: &H) {
-        session.release_keyexpr(self.mapping_id);
+        if let Some(row) = self.row {
+            session.release_keyexpr(row);
+        }
     }
 
     /// Let go of a hold whose session is gone: the count it was one of went with the session, so
     /// there is nothing to give it back to.
     pub fn outlived_its_session(self) {
-        let Self { mapping_id: _ } = self;
+        let Self {
+            mapping_id: _,
+            row: _,
+        } = self;
     }
 }
 
@@ -1269,59 +1301,100 @@ mod tests {
     }
 
     /// A session's count of a declaration's holders as a test keeps it: each hold taken and each
-    /// given back, by id, in order, up to four of each.
+    /// given back, by the bits of its row, in order, up to four of each; it refuses every hold
+    /// asked once `full` is set.
     #[derive(Default)]
     struct CountedHolds {
-        retained: Ids,
-        released: Ids,
+        retained: Rows,
+        released: Rows,
+        full: core::sync::atomic::AtomicBool,
     }
 
-    /// Up to four ids, in the order they were written.
+    /// Up to four rows, as the bits of their handles, in the order they were written.
     #[derive(Default)]
-    struct Ids {
-        ids: [core::sync::atomic::AtomicU16; 4],
+    struct Rows {
+        rows: [core::sync::atomic::AtomicU32; 4],
         len: core::sync::atomic::AtomicUsize,
     }
 
-    impl Ids {
-        fn push(&self, id: wz_session_core::wire_id::ExprId) {
+    impl Rows {
+        fn push(&self, row: wz_session_core::session_tables::KeyexprHandle) {
             let at = self.len.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-            self.ids[at].store(id, core::sync::atomic::Ordering::SeqCst);
+            self.rows[at].store(row.to_bits().get(), core::sync::atomic::Ordering::SeqCst);
         }
 
-        fn read(&self) -> alloc::vec::Vec<wz_session_core::wire_id::ExprId> {
+        fn read(&self) -> alloc::vec::Vec<u32> {
             let len = self.len.load(core::sync::atomic::Ordering::SeqCst);
-            self.ids[..len]
+            self.rows[..len]
                 .iter()
-                .map(|id| id.load(core::sync::atomic::Ordering::SeqCst))
+                .map(|row| row.load(core::sync::atomic::Ordering::SeqCst))
                 .collect()
         }
     }
 
     impl KeyHolds for CountedHolds {
-        fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-            self.released.push(mapping_id);
+        fn release_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) {
+            self.released.push(row);
         }
 
-        fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-            self.retained.push(mapping_id);
+        fn retain_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) -> bool {
+            if self.full.load(core::sync::atomic::Ordering::SeqCst) {
+                return false;
+            }
+            self.retained.push(row);
+            true
         }
     }
 
+    /// The row of slot 4 at generation 1, as the bits of its handle.
+    const ROW_BITS: u32 = 0x0001_0004;
+
+    /// The row of slot 4 at generation 1.
+    fn row() -> wz_session_core::session_tables::KeyexprHandle {
+        core::num::NonZeroU32::new(ROW_BITS)
+            .and_then(wz_session_core::session_tables::KeyexprHandle::from_bits)
+            .expect("an index half that is not zero")
+    }
+
     /// A hold shared is one more hold of the session's count, and each hold is given back once,
-    /// to the session it is handed. Turned red by `KeyHold::share` taking no hold of the session
-    /// (`retained` empty), or by `KeyHold::release` giving none back.
+    /// by its row, to the session it is handed. Turned red by `KeyHold::share` taking no hold of
+    /// the session (`retained` empty), or by `KeyHold::release` giving none back.
     #[test]
     fn a_hold_is_shared_and_given_back_once_to_its_session() {
         let session = CountedHolds::default();
-        let named = KeyHold::taken(4);
+        let named = KeyHold::taken(4, row());
         let shared = named.share(&session);
-        assert_eq!(session.retained.read(), [4]);
+        assert_eq!(session.retained.read(), [ROW_BITS]);
         assert_eq!(shared.mapping_id(), 4);
+        assert_eq!(shared.row(), Some(row()));
         shared.release(&session);
-        assert_eq!(session.released.read(), [4]);
+        assert_eq!(session.released.read(), [ROW_BITS]);
         named.release(&session);
-        assert_eq!(session.released.read(), [4, 4]);
+        assert_eq!(session.released.read(), [ROW_BITS, ROW_BITS]);
+    }
+
+    /// A copy the session took no hold for, and the copy of a hold whose session is gone, hold
+    /// nothing and give nothing back: a hold given back by such a copy would let go of one another
+    /// holder took. Turned red by a `KeyHold::share` that keeps the row its session refused, or an
+    /// `unheld` copy that keeps the row (`released` not empty).
+    #[test]
+    fn a_copy_the_session_took_no_hold_for_gives_nothing_back() {
+        let session = CountedHolds::default();
+        let named = KeyHold::taken(4, row());
+        session
+            .full
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let refused = named.share(&session);
+        assert_eq!(refused.mapping_id(), 4, "the copy names the declaration");
+        assert_eq!(refused.row(), None);
+        let gone = named.unheld();
+        assert_eq!(gone.row(), None);
+        refused.release(&session);
+        gone.release(&session);
+        assert!(session.retained.read().is_empty());
+        assert!(session.released.read().is_empty());
+        named.release(&session);
+        assert_eq!(session.released.read(), [ROW_BITS], "CONTROL: the held one");
     }
 
     /// An engine's periodic jobs as a test counts them: the ids it gave and the jobs it stopped.

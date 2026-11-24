@@ -2444,7 +2444,8 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
 
     let id = engine
         .acquire_keyexpr("demo/named")
-        .expect("a key expression the link takes");
+        .expect("a key expression the link takes")
+        .mapping_id();
     let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let record = seen.clone();
     let declares_before = router.seen(|s| s.declares);

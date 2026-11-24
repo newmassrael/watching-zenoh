@@ -174,16 +174,11 @@ pub(crate) struct WireDeclaration {
 }
 
 impl WireDeclaration {
-    /// The hold on `mapping_id` the caller took of `shared`, covering `prefix_len` bytes of the
-    /// key.
-    fn taken(
-        shared: &Arc<Engine>,
-        mapping_id: wz_session_core::wire_id::ExprId,
-        prefix_len: usize,
-    ) -> Self {
+    /// The hold the caller took of `shared`, covering `prefix_len` bytes of the key.
+    fn taken(shared: &Arc<Engine>, hold: KeyHold, prefix_len: usize) -> Self {
         Self {
             session: ManuallyDrop::new(Arc::downgrade(shared)),
-            hold: ManuallyDrop::new(KeyHold::taken(mapping_id)),
+            hold: ManuallyDrop::new(hold),
             prefix_len,
         }
     }
@@ -206,7 +201,7 @@ impl Clone for WireDeclaration {
         let hold = match self.session.upgrade() {
             Some(engine) => self.hold.share(Arc::as_ref(&engine)),
             // A session that is gone counts nothing: the copy gives nothing back either.
-            None => KeyHold::taken(self.mapping_id()),
+            None => self.hold.unheld(),
         };
         Self {
             session: self.session.clone(),
@@ -597,12 +592,12 @@ impl DeclaredKeyexpr {
         }
         // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
         // back with `text`.
-        let id = shared.acquire_keyexpr(prefix).map_err(|refused| {
+        let hold = shared.acquire_keyexpr(prefix).map_err(|refused| {
             crate::refusal::refusal_code(refused, crate::refusal::Door::Keyexpr)
         })?;
         Ok(Self {
             literal: text,
-            declaration: Some(WireDeclaration::taken(shared, id, prefix_len)),
+            declaration: Some(WireDeclaration::taken(shared, hold, prefix_len)),
         })
     }
 }
@@ -1962,6 +1957,51 @@ mod tests {
             "the entity still holds the declaration"
         );
         drop(entity);
+        assert!(shared.keyexpr_declarations().is_empty());
+    }
+
+    /// A key the program holds gives its declaration back by the row its hold was taken in, not
+    /// by its id: a declaration retracted whatever held it, whose id a later declaration takes
+    /// again once the ids wrap, is not the one the program's `z_keyexpr_drop` lets go of. Turned
+    /// red by a hold given back by its id (`KeyHold::release` or the engine's `release_keyexpr`
+    /// looking the id up), which retracts the new declaration.
+    #[test]
+    fn dropping_a_key_spares_a_declaration_that_took_its_retracted_id_again() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let declared = DeclaredKeyexpr::declare(&engine, "demo/kd/old", None).expect("declared");
+        let old = shared.keyexpr_declarations()[0].0;
+        let mut key = z_owned_keyexpr_t::null_value();
+        // SAFETY: `key` is a live owned key the store writes over.
+        unsafe { store_owned_keyexpr(&mut key, declared) };
+        // Retracted whatever holds it, as the other ABI's undeclaration of its key does.
+        shared.undeclare_keyexpr(old);
+        assert!(
+            shared.keyexpr_declarations().is_empty(),
+            "CONTROL: retracted"
+        );
+        // The ids are minted onward and wrap: declarations made and let go of come to the
+        // retracted id again.
+        let again = (0..=u32::from(u16::MAX))
+            .find_map(|_| {
+                let hold = shared
+                    .acquire_keyexpr("demo/kd/new".to_owned())
+                    .expect("an id is free");
+                if hold.mapping_id() == old {
+                    return Some(hold);
+                }
+                hold.release(&*shared);
+                None
+            })
+            .expect("the retracted id is minted again");
+        // SAFETY: `key` holds the owned key stored above, moved out once here.
+        unsafe { z_keyexpr_drop(z_keyexpr_move(&mut key)) };
+        assert_eq!(
+            shared.keyexpr_declarations(),
+            vec![(old, "demo/kd/new".to_owned())],
+            "the new declaration stands after the program's key went"
+        );
+        again.release(&*shared);
         assert!(shared.keyexpr_declarations().is_empty());
     }
 

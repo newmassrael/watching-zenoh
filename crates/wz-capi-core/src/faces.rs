@@ -161,7 +161,7 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId,
+    FanoutError, FilterId, FilterPlane, FilteredPut, KeyHold, MatchId, MatchingSink, QblId,
     StatementNotHonoured, SubId, TokenId, WireKey,
 };
 
@@ -3303,10 +3303,7 @@ impl SharedSession {
     /// held on the way in, since the last hold of a declaration retracts it, which takes the lock.
     fn release_named(&self, held: [Option<KeyexprHandle>; 2]) {
         for handle in held.into_iter().flatten() {
-            let mut guard = self.lock();
-            if let Some(mapping_id) = guard.tables.undeclare_keyexpr(handle) {
-                self.retract_keyexpr_locked(&mut guard, mapping_id);
-            }
+            self.release_keyexpr(handle);
         }
     }
 
@@ -5116,45 +5113,42 @@ impl SharedSession {
     /// [`Self::declare_keyexpr`] is what the other ABI uses: each call there is
     /// its own declaration with its own id.
     ///
-    /// `None` when the id space is exhausted, as for [`Self::declare_keyexpr`].
-    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
+    /// The hold, which names the declaration's id and the row it was taken in; `None` when the id
+    /// space is exhausted, as for [`Self::declare_keyexpr`].
+    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<KeyHold> {
         let mut guard = self.lock();
         let declared = guard
             .tables
             .declare_keyexpr_where(&keyexpr, false, |id| self.mapping_id_free(id))
             .ok()?;
         self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
-        Some(declared.id)
+        Some(KeyHold::taken(declared.id, declared.handle))
     }
 
-    /// Let go of one holder of a keyexpr [`Self::acquire_keyexpr`] (or
-    /// [`Self::declare_keyexpr`]) returned, retracting the key when it was the
-    /// last. Nothing goes on the wire while another holder remains: pico sends
-    /// its undeclaration only when the count reaches zero
+    /// Let go of one holder of the declaration in row `row` ([`Self::acquire_keyexpr`]),
+    /// retracting the key when it was the last. Nothing goes on the wire while another holder
+    /// remains: pico sends its undeclaration only when the count reaches zero
     /// (`vendor/zenoh-pico/src/session/resource.c` @
-    /// `_z_resource_slist_value(res_ptr)->_refcount--;`).
+    /// `_z_resource_slist_value(res_ptr)->_refcount--;`). By the row and not the id: a declaration
+    /// retracted whatever held it ([`Self::undeclare_keyexpr`]) leaves its id to a later one once
+    /// the ids wrap, and its row, whose generation moved on, names nothing.
     ///
     /// The count and the retraction are one step under one lock: releasing the
     /// lock between them would let an [`Self::acquire_keyexpr`] find the entry at
     /// zero, take a holder, and then have its key retracted from under it.
-    pub fn release_keyexpr(&self, mapping_id: ExprId) {
+    pub fn release_keyexpr(&self, row: KeyexprHandle) {
         let mut guard = self.lock();
-        let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) else {
-            return;
-        };
-        if guard.tables.undeclare_keyexpr(handle).is_some() {
+        if let Some(mapping_id) = guard.tables.undeclare_keyexpr(row) {
             self.retract_keyexpr_locked(&mut guard, mapping_id);
         }
     }
 
-    /// One more holder of declaration `mapping_id`, which a holder already holds: it stays
+    /// One more holder of the declaration in row `row`, which a holder already holds: it stays
     /// declared until this holder lets go too ([`Self::release_keyexpr`]), and nothing goes on
-    /// the wire. A declaration no longer held takes none.
-    pub fn retain_keyexpr(&self, mapping_id: ExprId) {
-        let mut guard = self.lock();
-        if let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) {
-            guard.tables.retain_keyexpr(handle);
-        }
+    /// the wire. `false`, taking none, for a row that went or a count that holds as many as it
+    /// can.
+    pub fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
+        self.lock().tables.retain_keyexpr(row)
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
@@ -8427,17 +8421,21 @@ mod matching_aggregate_tests {
         let second = shared
             .acquire_keyexpr("wz/res/shared".to_owned())
             .expect("a held key answers with its id");
-        assert_eq!(first, second, "the same key is the same id");
+        assert_eq!(
+            first, second,
+            "the same key is the same id, in the same row"
+        );
         assert_eq!(
             shared.keyexpr_declarations().len(),
             1,
             "and one declaration, not two"
         );
 
+        let id = first.mapping_id();
         let put = |shared: &SharedSession| {
             let delivered = shared
                 .publish_aliased_all(
-                    first,
+                    id,
                     None,
                     b"x",
                     &PublishOptions::put().with_locality(Locality::Any),
@@ -8446,7 +8444,7 @@ mod matching_aggregate_tests {
             (delivered, shared.drain_local_plane())
         };
 
-        shared.release_keyexpr(first);
+        first.release(&shared);
         assert_eq!(
             put(&shared),
             (1, 1),
@@ -8454,7 +8452,7 @@ mod matching_aggregate_tests {
         );
         assert_eq!(shared.keyexpr_declarations().len(), 1);
 
-        shared.release_keyexpr(second);
+        second.release(&shared);
         assert_eq!(
             put(&shared),
             (0, 0),
@@ -8475,7 +8473,8 @@ mod matching_aggregate_tests {
         let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
         let old = shared
             .acquire_keyexpr("wz/held/old".to_owned())
-            .expect("the first id is not exhausted");
+            .expect("the first id is not exhausted")
+            .mapping_id();
         let sub = shared
             .declare_subscriber_on_wire(
                 "wz/held/old/x".to_owned(),
@@ -8491,23 +8490,23 @@ mod matching_aggregate_tests {
         // retracted id again.
         let again = (0..=u32::from(u16::MAX))
             .find_map(|_| {
-                let id = shared
+                let hold = shared
                     .acquire_keyexpr("wz/held/new".to_owned())
                     .expect("an id is free");
-                if id == old {
-                    return Some(id);
+                if hold.mapping_id() == old {
+                    return Some(hold);
                 }
-                shared.release_keyexpr(id);
+                hold.release(&shared);
                 None
             })
             .expect("the retracted id is minted again");
         shared.undeclare_subscriber(sub);
         assert_eq!(
             shared.keyexpr_declarations(),
-            vec![(again, "wz/held/new".to_owned())],
+            vec![(old, "wz/held/new".to_owned())],
             "the new declaration stands after the old holder went"
         );
-        shared.release_keyexpr(again);
+        again.release(&shared);
         assert!(shared.keyexpr_declarations().is_empty());
     }
 
