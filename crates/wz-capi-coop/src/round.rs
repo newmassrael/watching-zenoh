@@ -2104,6 +2104,20 @@ impl Round {
     }
 }
 
+/// The round as the session's state asks it (`SessionState::retract_owed`). Named by its path
+/// alone: in scope, its methods would be found first on an `Arc<Round>`, before the round's own.
+#[cfg(feature = "liveliness")]
+impl wz_session_core::session_state::DeliveryRound for Round {
+    unsafe fn has_room(&self, callbacks: usize) -> bool {
+        // SAFETY: the caller's contract, which is the round's own.
+        unsafe { Round::has_room(self, ReadRoom { callbacks }) }
+    }
+
+    fn owe(&self, owed: bool) {
+        Round::owe(self, owed);
+    }
+}
+
 #[cfg(test)]
 impl Round {
     /// The tables of a round holding `events` records at once, lent from an arena the test leaks,

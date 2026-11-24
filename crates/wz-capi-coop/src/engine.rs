@@ -3293,23 +3293,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
-    /// takes now, and tell the round whether any is still owed: while one is, no link is read, so a
-    /// token's `Delete` comes before anything a link brings after its loss, and none is dropped.
-    /// Each `Delete` is a record of a token for every liveliness subscriber.
+    /// takes now (`SessionState::retract_owed`). Each `Delete` is a record of a token for every
+    /// liveliness subscriber the session's limits admit.
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self) {
-        let round = Arc::clone(&self.session.lane);
-        let record_room = crate::round::ReadRoom {
-            // A token's record owes a callback to each liveliness subscriber the session admits.
-            callbacks: crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
-                &resolve_limits(&self.config),
-            )
-            .max(1),
-        };
-        // SAFETY: `Core` is reached under the session's lock alone.
-        let mut fits = || unsafe { round.has_room(record_room) };
-        let done = self.session.registry.borrow_mut().retract_owed(&mut fits);
-        round.owe(!done);
+        // A token's record owes a callback to each liveliness subscriber the session admits.
+        let callbacks = crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
+            &resolve_limits(&self.config),
+        )
+        .max(1);
+        // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
+        unsafe { self.session.retract_owed(callbacks) };
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
