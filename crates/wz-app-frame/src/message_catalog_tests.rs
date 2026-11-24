@@ -23,6 +23,7 @@ use crate::message_catalog_table::{
     KeyFieldRow, KeyValue as KeyValueRow, Limits, MessageRow, NodeRow, ProtectionRow,
     SupervisionRow, Table,
 };
+use crate::segment_profile::SegmentProfile;
 
 const SYNTHETIC: &str = include_str!("../catalog/synthetic.json5");
 const CORPUS: &str = include_str!("../catalog/refusals.json5");
@@ -56,6 +57,36 @@ fn hand_values(address: u64) -> Values {
 
 fn hand_profile(catalog: &Catalog) -> Profile {
     Profile::parse(&catalog.e2e_profiles()[0].text()).expect("valid profile")
+}
+
+/// The catalog reads its profiles from the trees it holds: each gives the profile, or the
+/// refusal, its text gives the reader of text.
+#[test]
+fn a_profile_is_read_from_its_tree_as_from_its_text() {
+    let catalog = synthetic();
+    assert!(!catalog.e2e_profiles().is_empty());
+    assert!(!catalog.segment_profiles().is_empty());
+    for document in catalog.e2e_profiles() {
+        let from_tree = Profile::from_tree(&document.tree).map(|p| format!("{p:?}"));
+        let from_text = Profile::parse(&document.text()).map(|p| format!("{p:?}"));
+        assert!(from_tree.is_ok(), "{}: {from_tree:?}", document.name);
+        assert_eq!(from_tree, from_text, "{}", document.name);
+    }
+    for document in catalog.segment_profiles() {
+        let from_tree = SegmentProfile::from_tree(&document.tree).map(|p| format!("{p:?}"));
+        let from_text = SegmentProfile::parse(&document.text()).map(|p| format!("{p:?}"));
+        assert!(from_tree.is_ok(), "{}: {from_tree:?}", document.name);
+        assert_eq!(from_tree, from_text, "{}", document.name);
+    }
+    let refused = json5::parse(r#"{"name": "p", "fields": [], "crc": 1}"#).expect("JSON5");
+    let from_tree = Profile::from_tree(&refused).map(|p| format!("{p:?}"));
+    let from_text = Profile::parse(&refused.to_json5_text()).map(|p| format!("{p:?}"));
+    assert!(from_tree.is_err(), "{from_tree:?}");
+    assert_eq!(from_tree, from_text);
+    let from_tree = SegmentProfile::from_tree(&refused).map(|p| format!("{p:?}"));
+    let from_text = SegmentProfile::parse(&refused.to_json5_text()).map(|p| format!("{p:?}"));
+    assert!(from_tree.is_err(), "{from_tree:?}");
+    assert_eq!(from_tree, from_text);
 }
 
 #[test]
