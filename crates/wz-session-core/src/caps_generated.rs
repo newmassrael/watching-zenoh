@@ -77,8 +77,6 @@ pub(super) const MAX_SHARED_KEY_IDS: usize = limit(option_env!("WZ_LIMIT_MAX_SHA
 pub(super) const MAX_REMOTE_DECLS: usize = limit(option_env!("WZ_LIMIT_MAX_REMOTE_DECLS"), 16);
 pub(super) const MAX_PENDING_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_REPLIES"), 8);
 pub(super) const MAX_PENDING_FINALS: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_FINALS"), 8);
-pub(super) const HELD_QUERY_PARAMS_BYTES: usize =
-    limit(option_env!("WZ_LIMIT_HELD_QUERY_PARAMS_BYTES"), 256);
 pub(super) const MAX_REPLY_PAYLOAD_BYTES: usize =
     limit(option_env!("WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"), 1024);
 pub(super) const MAX_ADMIN_REPLY_BYTES: usize =

@@ -318,7 +318,8 @@ config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	default 131072
 	help
 	  The bytes the owned payloads, strings and slices a program of the pico C ABI
-	  holds carry at once: the payloads' area the library reserves at its first
+	  holds carry at once, and the keys and parameters of the queries it keeps
+	  past their callbacks: the payloads' area the library reserves at its first
 	  object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
 	  smallest that holds its bytes and a 16-byte head. A payload no free block
 	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
@@ -475,16 +476,6 @@ config WZ_LIMIT_MAX_PENDING_FINALS
 	  query that would need one more is refused, and counted, before its
 	  queryables run: an answer that could not be ended would leave the asker
 	  waiting until its own timeout.
-
-config WZ_LIMIT_HELD_QUERY_PARAMS_BYTES
-	int "HELD_QUERY_PARAMS_BYTES"
-	default 256
-	help
-	  The bytes of the parameters of one query a program keeps past its
-	  queryable's callback, held beside the query's Final until the program lets
-	  the query go: a cell of this many bytes for each query the session holds
-	  at once (MAX_PENDING_FINALS). Keeping a query whose parameters are longer
-	  is refused; a query without parameters takes no cell.
 
 config WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES
 	int "MAX_REPLY_PAYLOAD_BYTES"
