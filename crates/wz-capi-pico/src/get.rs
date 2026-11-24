@@ -1530,7 +1530,7 @@ pub(crate) fn issue_get(
         Err(code) => return code,
     };
 
-    let opts = get_options(ask, anyke);
+    let mut opts = get_options(ask, anyke);
 
     // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
@@ -1543,10 +1543,10 @@ pub(crate) fn issue_get(
     // A get the engine refuses issues no leg and sends nothing; the fan completes it with no
     // reply, and the caller is told the code pico's get answers for the cause: a session with no
     // room to hold it pending, a closed one, or an engine that cannot address it to one node.
-    let opts = match target_peer {
-        Some(target_peer) => opts.with_target_peer(target_peer),
-        None => opts,
-    };
+    if let Some(target_peer) = target_peer {
+        // Set where the options lie, so the whole options value is not moved through a builder.
+        opts.target_peer = Some(target_peer);
+    }
     fan_get(
         engine,
         crate::object_slot::Kind::Get,
