@@ -2149,12 +2149,12 @@ fn dispatch_copied_of<R: SessionRuntime, T: TimeSource>(
 /// the error and drop it, as upstream drops a reassembled message it cannot
 /// read.
 #[cfg(feature = "reassembly")]
-pub fn dispatch_datagram_reassembling<R, T, const SLOTS: usize, const CAP: usize, S>(
+pub fn dispatch_datagram_reassembling<R, T, const SLOTS: usize, const CAP: usize, S, P>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     now_ms: u64,
     on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath
@@ -2162,6 +2162,7 @@ where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     // A link that keeps its datagram, as [`dispatch_datagram`] reads it.
     #[cfg(feature = "alloc")]
@@ -2198,18 +2199,19 @@ where
 /// number of bytes of `unit` it was and whether it stopped part-way, as
 /// [`dispatch_datagram_unit`] answers them.
 #[cfg(feature = "reassembly")]
-fn dispatch_datagram_reassembling_unit<R, T, const SLOTS: usize, const CAP: usize, S>(
+fn dispatch_datagram_reassembling_unit<R, T, const SLOTS: usize, const CAP: usize, S, P>(
     unit: &[u8],
     resume: Option<usize>,
     kept: bool,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    hand: &mut HandOff<'_, R, T, SLOTS, CAP, S>,
+    hand: &mut HandOff<'_, R, T, SLOTS, CAP, S, P>,
 ) -> (DatagramPath, usize, bool)
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     let actions = hand.actions;
     match in_place_unit(unit, actions, true) {
@@ -2241,25 +2243,27 @@ where
 /// on its way, as the copying loop reports its outcomes. A lent record is not an outcome
 /// and goes to `on_event`'s `record` as it is.
 #[cfg(feature = "reassembly")]
-struct HandOff<'a, R, T, const SLOTS: usize, const CAP: usize, S>
+struct HandOff<'a, R, T, const SLOTS: usize, const CAP: usize, S, P>
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
-    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &'a SessionLinkActions<R, T>,
     now_ms: u64,
     on_event: &'a mut dyn crate::driver_loop::EventSink,
 }
 
 #[cfg(feature = "reassembly")]
-impl<R, T, const SLOTS: usize, const CAP: usize, S> crate::driver_loop::EventSink
-    for HandOff<'_, R, T, SLOTS, CAP, S>
+impl<R, T, const SLOTS: usize, const CAP: usize, S, P> crate::driver_loop::EventSink
+    for HandOff<'_, R, T, SLOTS, CAP, S, P>
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     // Out of line: the receive paths that take the hand-off as a known type inlined it into each,
     // beside the copy its trait object calls.
@@ -2292,16 +2296,17 @@ where
 }
 
 #[cfg(feature = "reassembly")]
-fn through_hand_off<'a, R, T, const SLOTS: usize, const CAP: usize, S>(
-    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
+fn through_hand_off<'a, R, T, const SLOTS: usize, const CAP: usize, S, P>(
+    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &'a SessionLinkActions<R, T>,
     now_ms: u64,
     on_event: &'a mut dyn crate::driver_loop::EventSink,
-) -> HandOff<'a, R, T, SLOTS, CAP, S>
+) -> HandOff<'a, R, T, SLOTS, CAP, S, P>
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     HandOff {
         reasm,
@@ -3036,18 +3041,19 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
 /// The admissible `Fragment` at the front of a unit, staged into its chain's
 /// slot from where it lies ([`dispatch_datagram_reassembling`]).
 #[cfg(feature = "reassembly")]
-fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S>(
+fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S, P>(
     unit: &[u8],
     head: crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
     payload_at: usize,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    hand: &mut HandOff<'_, R, T, SLOTS, CAP, S>,
+    hand: &mut HandOff<'_, R, T, SLOTS, CAP, S, P>,
 ) -> DatagramPath
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     let actions = hand.actions;
     let now_ms = hand.now_ms;
@@ -3080,9 +3086,14 @@ where
     // completed chain from inside the ingest, and what the delivery dispatches
     // must not run under the facts' lock. The Router keys a chain on at most
     // this many bytes of the zid.
+    // A Router whose key keeps no peer reads none.
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
     let (caps, peer_len) = actions.with_facts(|facts| {
-        let zid: &[u8] = facts.handshake.inbound_peer_zid.as_deref().unwrap_or(&[]);
+        let zid: &[u8] = if P::KEYED {
+            facts.handshake.inbound_peer_zid.as_deref().unwrap_or(&[])
+        } else {
+            &[]
+        };
         for (to, from) in peer.iter_mut().zip(zid) {
             *to = *from;
         }
@@ -4140,9 +4151,9 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 /// fragment is staged where its datagram lies, `fragment_in_place`), so there the
 /// outcome is reported and a channel-gate rejection clears its chain, and that is all.
 #[cfg(feature = "reassembly")]
-pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S, F>(
+pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S, P, F>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
     on_event: &mut F,
@@ -4150,6 +4161,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
     F: FnMut(IterationEvent<'_, '_>) + ?Sized,
 {
     report_outcome_reassembling_with(outcome, reasm, actions, now_ms, &mut |_| {}, on_event);
@@ -4167,9 +4179,9 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
 /// payload is the one that is fragmented. The namespace strip right above it in the body is the
 /// same shape of obligation, and has been paid here since it was written.
 #[cfg(feature = "reassembly")]
-pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
+pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usize, S, P, F, H>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
     ingress: &mut H,
@@ -4178,6 +4190,7 @@ pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usi
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
     F: FnMut(IterationEvent<'_, '_>) + ?Sized,
     H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
@@ -4197,15 +4210,16 @@ pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usi
 /// by the rejection must never complete a chain from mixed generations.
 /// Whether `outcome` was such a rejection.
 #[cfg(feature = "reassembly")]
-fn clear_rejected_chain<R, T, const SLOTS: usize, const CAP: usize, S>(
+fn clear_rejected_chain<R, T, const SLOTS: usize, const CAP: usize, S, P>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
 ) -> bool
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     let DriverLoopOutcome::RxSnRejected {
         priority, reliable, ..
@@ -4214,8 +4228,12 @@ where
         return false;
     };
     // The zid is copied out: the abort drives the slot's machine, which does not run under the
-    // facts' lock.
-    let peer = actions.fact_inbound_peer_zid(|zid_slot| *zid_slot);
+    // facts' lock. A Router whose key keeps no peer takes no hold of the facts for it.
+    let peer = if P::KEYED {
+        actions.fact_inbound_peer_zid(|zid_slot| *zid_slot)
+    } else {
+        None
+    };
     // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
     // chain the rejected frame's conduit owns, not a sibling priority's.
     reasm.abort_channel(peer.as_deref().unwrap_or(&[]), *priority, *reliable);
@@ -4229,9 +4247,9 @@ where
 /// the copying path inflated: only a build that compresses drives the pool from an outcome here,
 /// and one that does not links no decode of a reassembled chain into owned messages through it.
 #[cfg(feature = "reassembly")]
-pub fn report_outcome_in_place<R, T, const SLOTS: usize, const CAP: usize, S, F>(
+pub fn report_outcome_in_place<R, T, const SLOTS: usize, const CAP: usize, S, P, F>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
     on_event: &mut F,
@@ -4239,6 +4257,7 @@ pub fn report_outcome_in_place<R, T, const SLOTS: usize, const CAP: usize, S, F>
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
     F: FnMut(IterationEvent<'_, '_>) + ?Sized,
 {
     #[cfg(all(feature = "alloc", feature = "transport-compression"))]
@@ -4254,9 +4273,9 @@ pub fn report_outcome_in_place<R, T, const SLOTS: usize, const CAP: usize, S, F>
 /// The `Fragment` half of [`report_outcome_reassembling`]: drive the pool with the
 /// fragment an owned outcome carries, and report what completed or was dropped.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
+fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, P, F, H>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
     ingress: &mut H,
@@ -4265,6 +4284,7 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
     F: FnMut(IterationEvent<'_, '_>) + ?Sized,
     H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
@@ -4294,10 +4314,15 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     // read in one hold of the facts and copied out: the ingest drives the slot's
     // machine and decodes a completed chain, neither of which runs under the
     // facts' lock.
+    // A Router whose key keeps no peer reads none.
     let (caps, peer) = actions.with_facts(|facts| {
         (
             facts.handshake.inbound_peer_init_caps,
-            facts.handshake.inbound_peer_zid,
+            if P::KEYED {
+                facts.handshake.inbound_peer_zid
+            } else {
+                None
+            },
         )
     });
     let sn_mask = actions.sn_mask_for(caps);
