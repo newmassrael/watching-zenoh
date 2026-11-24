@@ -1311,22 +1311,23 @@ impl Advanced {
         );
     }
 
-    /// Declare an advanced subscriber whose history asks the publisher's cache, wait for it to
-    /// hear what the cache answers, and undeclare it.
-    unsafe fn history(&self, pair: &Pair) {
+    /// Undeclare the advanced subscriber and declare its successor, whose history asks the
+    /// publisher's cache, and wait for it to hear what the cache answers. One advanced subscriber
+    /// stands on the session at a time, as many as the pico preset's sessions hold.
+    unsafe fn history(&mut self, pair: &Pair) {
         use wz_capi_pico::advanced::{
             ze_advanced_subscriber_move, ze_undeclare_advanced_subscriber,
         };
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut self.subscriber)),
+            Z_OK
+        );
         let heard = pair.counts.heard.load(Ordering::SeqCst);
-        let mut subscriber = Self::subscriber(pair);
+        self.subscriber = Self::subscriber(pair);
         assert!(
             wait_for(WAIT_BOUND, || pair.counts.heard.load(Ordering::SeqCst)
                 > heard),
             "a history did not cross within {WAIT_BOUND:?}"
-        );
-        assert_eq!(
-            ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut subscriber)),
-            Z_OK
         );
     }
 

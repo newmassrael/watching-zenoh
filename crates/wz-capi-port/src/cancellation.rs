@@ -214,8 +214,8 @@ impl TokenRef {
     }
 }
 
-/// Which fan a pending leg belongs to: the fan's address, which does not change while the fan
-/// stands, and the serial it was named under. A fan's place is given back with its get's last
+/// Which fan a pending leg belongs to: the fan's address where it was first named, and the serial
+/// it was named under. A fan's place is given back with its get's last
 /// leg and may hold the next get's fan, so a cancel still running for the first must not name the
 /// second: the serial tells them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -265,20 +265,21 @@ struct FanState {
     canceller: Option<Weak<dyn FanCanceller>>,
     /// The legs an engine that keeps no key on them recorded one undo for.
     undo: Vec<OnCancel>,
-    /// The serial of the fan's key; `0` until the key is first asked.
-    serial: u64,
+    /// The fan's key, named where the fan lies the first time it is asked, so a fan moved after
+    /// it was named is still told apart by the key its engine tagged its legs with.
+    key: Option<FanKey>,
 }
 
 impl FanState {
     /// The key of the fan at `at`, named now if it was not yet.
     fn key_at(&mut self, at: usize) -> FanKey {
-        if self.serial == 0 {
-            self.serial = SERIALS.with(|next| {
+        *self.key.get_or_insert_with(|| {
+            let serial = SERIALS.with(|next| {
                 *next = next.wrapping_add(1).max(1);
                 *next
             });
-        }
-        FanKey(at, self.serial)
+            FanKey(at, serial)
+        })
     }
 }
 
@@ -324,7 +325,7 @@ impl CancellableFan {
                 cancelled: false,
                 canceller: None,
                 undo: Vec::new(),
-                serial: 0,
+                key: None,
             }),
             token: UnsafeCell::new(None),
             link: UnsafeCell::new(Link {
