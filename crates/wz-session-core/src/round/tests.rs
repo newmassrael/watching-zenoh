@@ -148,9 +148,15 @@ struct Block([u8; ARENA_ALIGN]);
 /// A round of a few records, its tables lent from an arena over memory the test process leaks,
 /// so it outlives the round.
 pub(crate) fn round<C: RoundCalls>() -> Arc<Round<C>> {
+    round_of(4, 4)
+}
+
+/// A round of `records` records owing `callbacks` callbacks at most, each no more than the build's
+/// bound, as [`round`] makes one.
+fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
     let counts = RoundRowCounts {
-        records: caps::DELIVERY_LANE_EVENTS.min(4),
-        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
+        records: caps::DELIVERY_LANE_EVENTS.min(records),
+        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(callbacks),
         longest_key: caps::MAX_KEYEXPR_BYTES,
     };
     let bytes: usize = [
@@ -187,6 +193,53 @@ impl SampleView for Sample {
 
     fn reliability(&self) -> Reliability {
         Reliability::BestEffort
+    }
+}
+
+/// A sample on `key` with no payload that holds its sender: sent reliably, with `block`.
+struct Blocking(&'static str);
+
+impl SampleView for Blocking {
+    fn keyexpr(&self) -> &str {
+        self.0
+    }
+
+    fn payload(&self) -> &[u8] {
+        &[]
+    }
+
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+
+    fn reliability(&self) -> Reliability {
+        Reliability::Reliable
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        // The data priority, with the `nodrop` bit: congestion control `block`.
+        Some(QosLevel::from_raw(0x05 | 0x08))
+    }
+}
+
+/// Offer `sample` to the rows `rows` as one fan-out of the session's dispatch hands it to them,
+/// in that order: each a call of its row that notes in `log`.
+///
+/// # Safety
+/// The caller is the round's one writer, as a holder of the session's lock is.
+unsafe fn fan_out<C: RoundCalls<Subscriber = Call>>(
+    round: &Round<C>,
+    rows: &[u32],
+    sample: &dyn SampleView,
+    log: &Arc<Log>,
+) {
+    for (at, row) in rows.iter().enumerate() {
+        let call = Call {
+            row: *row,
+            log: log.clone(),
+        };
+        // SAFETY: the caller's contract.
+        unsafe { round.offer_sample(call, sample, at == 0) };
     }
 }
 
@@ -717,4 +770,182 @@ fn a_round_of_tokens_and_watches_asks_for_two_records_a_message() {
         kept.seal();
     }
     assert!(kept.deliver());
+}
+
+/// A fan-out that reaches more rows than the round has callbacks left is held once, for the rows
+/// that found room, handed to them in the order the fan-out reached them; each row past the room is
+/// refused on its own, counted with the drops and its call ended at once. Turned red by a refusal
+/// counted once for the fan-out rather than once for each call, a call past the room left running
+/// until the delivery, or a second record written for the sample.
+#[test]
+fn a_fan_out_past_the_callbacks_left_counts_and_ends_each_call_past_them() {
+    let log = Arc::new(Log::default());
+    let room = caps::DELIVERY_LANE_CALLBACKS.min(4);
+    let round = round_of::<Kept>(4, room);
+    let rows: Vec<u32> = (1..=room as u32 + 2).collect();
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        fan_out(&round, &rows, &Sample("k/a"), &log);
+        round.seal();
+    }
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 2,
+            held_over: 0,
+            unplaced: 0
+        }
+    );
+    assert_eq!(log.ended(), 2, "the calls past the room are ended at once");
+    assert!(round.deliver());
+    let handed: Vec<String> = (1..=room).map(|row| format!("{row} sample k/a")).collect();
+    assert_eq!(log.handed(), handed);
+    assert_eq!(log.ended(), room + 2, "every call is ended");
+    assert_eq!(
+        round.tally().samples.load(Ordering::SeqCst),
+        1,
+        "one record for the sample"
+    );
+}
+
+/// A fan-out that finds no record left is refused for every row it reaches, each call counted and
+/// ended at once: with the drops for a sample that may be dropped, held over for one that holds its
+/// sender. The record the round held is handed out untouched. Turned red by a fan-out counted once,
+/// counted by another sample's congestion control, or a refused call left running.
+#[test]
+fn a_fan_out_with_no_record_left_counts_every_call() {
+    let log = Arc::new(Log::default());
+    let round = round_of::<Kept>(1, 4);
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        fan_out(&round, &[1], &Sample("k/a"), &log);
+        fan_out(&round, &[2, 3, 4], &Sample("k/b"), &log);
+        fan_out(&round, &[5, 6], &Blocking("k/c"), &log);
+        round.seal();
+    }
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 3,
+            held_over: 2,
+            unplaced: 0
+        }
+    );
+    assert_eq!(log.ended(), 5, "each refused call is ended at once");
+    assert!(round.deliver());
+    assert_eq!(log.handed(), ["1 sample k/a"]);
+    assert_eq!(log.ended(), 6);
+}
+
+/// A fan-out offered to a sealed round is refused for every row, each call counted by the
+/// sample's congestion control and ended at once; what came before the seal is handed out alone.
+/// Turned red by a sealed round that takes a later row of a fan-out, or counts a fan-out once.
+#[test]
+fn a_fan_out_offered_to_a_sealed_round_counts_every_call() {
+    let log = Arc::new(Log::default());
+    let round = round_of::<Lean>(4, 4);
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        fan_out(&round, &[1], &Sample("k/a"), &log);
+        round.seal();
+        fan_out(&round, &[2, 3], &Sample("k/b"), &log);
+        fan_out(&round, &[4, 5, 6], &Blocking("k/c"), &log);
+    }
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 2,
+            held_over: 3,
+            unplaced: 0
+        }
+    );
+    assert_eq!(log.ended(), 5);
+    assert!(round.deliver());
+    assert_eq!(log.handed(), ["1 sample k/a"]);
+}
+
+/// A fan-out of a sample with a part that lies nowhere the round reads it is refused for every
+/// row, each call counted unplaced and with the drops, and ended at once; nothing is held. Turned
+/// red by a later row of the fan-out that is counted otherwise than the first.
+#[test]
+fn a_fan_out_of_a_sample_with_no_place_counts_every_call_unplaced() {
+    let log = Arc::new(Log::default());
+    let round = round_of::<Lean>(4, 4);
+    let long: &'static str = "k".repeat(2 * caps::MAX_KEYEXPR_BYTES + 1).leak();
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        fan_out(&round, &[1, 2, 3], &Sample(long), &log);
+        round.seal();
+    }
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 3,
+            held_over: 0,
+            unplaced: 3
+        }
+    );
+    assert_eq!(log.ended(), 3);
+    assert!(!round.deliver(), "nothing was held");
+    assert!(log.handed().is_empty());
+}
+
+/// Each fan-out is one record, handed to its rows in the order the fan-out reached them, and each
+/// record after the one before it; a fan-out of the same bytes as an earlier one is a record of
+/// its own. Turned red by rows handed out of their fan-out's order, a record handed before the one
+/// written before it, or two fan-outs joined into one record.
+#[test]
+fn each_fan_out_is_one_record_handed_in_the_order_its_rows_came() {
+    let log = Arc::new(Log::default());
+    let round = round_of::<Kept>(4, 8);
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        fan_out(&round, &[1, 2], &Sample("k/a"), &log);
+        fan_out(&round, &[2, 1], &Sample("k/b"), &log);
+        fan_out(&round, &[3], &Sample("k/a"), &log);
+        round.seal();
+    }
+    assert!(round.deliver());
+    assert_eq!(
+        log.handed(),
+        [
+            "1 sample k/a",
+            "2 sample k/a",
+            "2 sample k/b",
+            "1 sample k/b",
+            "3 sample k/a"
+        ]
+    );
+    assert_eq!(log.ended(), 5);
+    assert_eq!(round.counts(), RoundCounts::default(), "nothing refused");
+    assert_eq!(
+        round.tally().samples.load(Ordering::SeqCst),
+        3,
+        "three records"
+    );
+}
+
+/// While the round captures, every row of a fan-out hands its call to the session's own put, in
+/// the order the fan-out reached them, and the round holds nothing. Turned red by a later row of a
+/// fan-out held in the round, or calls handed out of order.
+#[test]
+fn a_captured_fan_out_hands_every_call_in_order() {
+    let log = Arc::new(Log::default());
+    let round = round_of::<Kept>(4, 4);
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    let mut captured = unsafe {
+        round.capture();
+        fan_out(&round, &[3, 1, 2], &Sample("k/a"), &log);
+        round.captured()
+    };
+    let rows: Vec<u32> = captured.iter().map(|call| call.row).collect();
+    assert_eq!(rows, [3, 1, 2]);
+    // SAFETY: as above.
+    unsafe { round.seal() };
+    assert!(!round.deliver(), "nothing was held");
+    while let Some(call) = captured.pop() {
+        round.end_call(call);
+    }
+    assert_eq!(log.ended(), 3);
+    assert!(log.handed().is_empty(), "the put hands the sample itself");
 }
