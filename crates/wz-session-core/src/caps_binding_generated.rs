@@ -1078,6 +1078,18 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HANDED_LEG_BYTES`] is bound.
+pub const HANDED_LEG_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::PICO_UNICAST_BATCH_BYTES`] is bound.
 pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
