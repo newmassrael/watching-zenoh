@@ -511,6 +511,85 @@ enum Lend<E> {
     Refused(E),
 }
 
+/// The write a lend asks of its path (`SessionLinkActions::send_lent`), as a trait object so
+/// that one body of the lend serves every path. A trait of its own and not `dyn FnMut`: that
+/// table also holds the closure's `FnOnce` shim, a second copy of the write.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+trait FillLent<D: BoxedLinkDriver + ?Sized> {
+    /// Write the frame into `slot`, and whether it is to be sent; a write that refuses the slot
+    /// keeps its reason for its path to read.
+    fn fill(&mut self, slot: &mut crate::tx_lease::TxLease<'_, D>) -> bool;
+}
+
+/// A path's write, called once, and the reason it refused the slot it was lent, if it did.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+struct FillOnce<F, E> {
+    fill: Option<F>,
+    refused: Option<E>,
+}
+
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+impl<D, F, E> FillLent<D> for FillOnce<F, E>
+where
+    D: BoxedLinkDriver + ?Sized,
+    F: FnOnce(&mut crate::tx_lease::TxLease<'_, D>) -> Result<(), E>,
+{
+    fn fill(&mut self, slot: &mut crate::tx_lease::TxLease<'_, D>) -> bool {
+        let Some(fill) = self.fill.take() else {
+            return false;
+        };
+        match fill(slot) {
+            Ok(()) => true,
+            Err(why) => {
+                self.refused = Some(why);
+                false
+            }
+        }
+    }
+}
+
 /// What putting one whole frame into a slot its link lends came to
 /// (`SessionLinkActions::send_frame_lent`).
 #[cfg(all(
@@ -5386,17 +5465,56 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         F: FnOnce(&mut crate::tx_lease::TxLease<'_, R::Driver>) -> Result<(), E>,
     {
+        let mut once = FillOnce {
+            fill: Some(fill),
+            refused: None,
+        };
+        match (
+            self.send_lent_through(reliability, priority, want, &mut once),
+            once.refused,
+        ) {
+            (None, _) => Lend::NoSlot,
+            (Some(true), _) => Lend::Sent,
+            (Some(false), Some(why)) => Lend::Refused(why),
+            // The write is called once, so a slot it gave back carries its reason; one given
+            // back without a write sent nothing and refused nothing.
+            (Some(false), None) => Lend::NoSlot,
+        }
+    }
+
+    /// [`Self::send_lent`]'s body, one for every path: the slot asked of the conduit's link,
+    /// `fill` written into it and the slot sent when `fill` says so. `None` when the link
+    /// lent no slot, otherwise whether it was sent.
+    #[cfg(all(
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline(never)]
+    fn send_lent_through(
+        &self,
+        reliability: Reliability,
+        priority: Priority,
+        want: usize,
+        fill: &mut dyn FillLent<R::Driver>,
+    ) -> Option<bool> {
         self.with_conduit_link(reliability, priority, |link| {
-            let Some(mut slot) =
-                crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
-            else {
-                return Lend::NoSlot;
-            };
-            if let Err(why) = fill(&mut slot) {
-                return Lend::Refused(why);
+            let mut slot = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)?;
+            let send = fill.fill(&mut slot);
+            if send {
+                self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
             }
-            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
-            Lend::Sent
+            Some(send)
         })
     }
 
