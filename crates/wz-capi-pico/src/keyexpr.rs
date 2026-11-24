@@ -494,7 +494,9 @@ impl DeclaredKeyexpr {
             .map(|(d, rest)| (d.mapping_id(), rest))
     }
 
-    /// The declaration that is `shared`'s and the remainder of the key past it.
+    /// The declaration that is `shared`'s and the remainder of the key past it. One body out of
+    /// line: every way a key is named on the wire, for a put, an entity or a record, reads it.
+    #[inline(never)]
     fn declared_rest(&self, shared: &Engine) -> Option<(&WireDeclaration, &str)> {
         // Every constructor keeps the declared prefix at the front of the
         // literal (see `extended`), so the remainder always exists; the `get`
