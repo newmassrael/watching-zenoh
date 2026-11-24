@@ -13,10 +13,10 @@
 //! (a host's links outside a session's arena) holds the same handle over a cell of its own on the
 //! heap, so a link is one type whichever memory it lives in.
 //!
-//! Making a cell and giving it back are one body each, generic over nothing: what is left for each
-//! kind of value is writing it into its cell, and the last handle drops it through the view of it
-//! that handle is (the value's own type or a trait object of it), so a kind of link adds no body of
-//! its own here.
+//! Making a cell, letting go of a handle and giving the cell back are one body each, generic over
+//! nothing: what is left for each kind of value is writing it into its cell with what drops it,
+//! and the last handle drops it through that, whatever view of it the handle is (the value's own
+//! type, a trait object of it or a part of it), so a kind of link adds no body of its own here.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::alloc::Layout;
@@ -33,16 +33,15 @@ use wz_session_core::link::BoxedLinkDriver;
 use crate::session_drive::SessionDatagramLink;
 
 /// What a cell keeps before its value: how many handles name it, where its memory came from,
-/// which is where it goes back once none does, and, for a cell whose handles name parts of its
-/// value ([`CellRc::halves`]), what drops the whole value. A cell whose handles each name the
-/// whole value has none: its last handle drops the value through the view of it that handle is.
+/// which is where it goes back once none does, and what drops the whole value placed in it, which
+/// its last handle calls whatever view of the value it is ([`CellRc::unsize`], [`CellRc::halves`]).
 struct CellHead {
     handles: Cell<usize>,
     owner: Owner,
-    whole: Cell<Option<DropWhole>>,
+    whole: DropWhole,
 }
 
-/// What drops the whole value of a cell whose handles name parts of it, given the cell's head.
+/// What drops the whole value of a cell, given the cell's head: [`drop_whole`] of the type placed.
 type DropWhole = unsafe fn(NonNull<CellHead>);
 
 /// Where a cell's memory came from, which is where it goes back.
@@ -69,21 +68,30 @@ pub struct CellRc<T: ?Sized> {
     _owns: PhantomData<T>,
 }
 
-/// A cell for a slot of `layout`, its head written with one handle and its value not yet: a
-/// claimed cell of `cells` when a table is lent, `None` when every cell is taken or a cell is too
-/// small or not aligned for the slot; a block of the heap when no table is. Out of line: the one
-/// body of every kind of value a cell holds, which tells them apart by the slot's layout alone.
+/// A cell for a slot of `layout`, its head written with one handle and `whole`, its value not
+/// yet: a claimed cell of `cells` when a table is lent, `None` when every cell is taken or a cell
+/// is too small or not aligned for the slot; a block of the heap when no table is. Out of line: the
+/// one body of every kind of value a cell holds, which tells them apart by the slot's layout and
+/// the drop of its value alone.
 #[inline(never)]
-fn head_in(cells: Option<&LentByteCells>, layout: Layout) -> Option<NonNull<CellHead>> {
+fn head_in(
+    cells: Option<&LentByteCells>,
+    layout: Layout,
+    whole: DropWhole,
+) -> Option<NonNull<CellHead>> {
     match cells {
-        Some(cells) => table_head(cells, layout),
-        None => Some(heap_head(layout)),
+        Some(cells) => table_head(cells, layout, whole),
+        None => Some(heap_head(layout, whole)),
     }
 }
 
-/// A claimed cell of `cells` for a slot of `layout`, its head written; `None` when every cell is
-/// taken, a cell is too small for the slot, or the cell is not aligned for it.
-fn table_head(cells: &LentByteCells, layout: Layout) -> Option<NonNull<CellHead>> {
+/// A claimed cell of `cells` for a slot of `layout`, its head written with `whole`; `None` when
+/// every cell is taken, a cell is too small for the slot, or the cell is not aligned for it.
+fn table_head(
+    cells: &LentByteCells,
+    layout: Layout,
+    whole: DropWhole,
+) -> Option<NonNull<CellHead>> {
     if !fits_layout(cells.size(), layout) {
         return None;
     }
@@ -98,28 +106,28 @@ fn table_head(cells: &LentByteCells, layout: Layout) -> Option<NonNull<CellHead>
     let base = NonNull::new(base)?;
     // SAFETY: the claim lends this cell to this call alone, of the slot's layout and aligned for
     // it, and moves into the head, which keeps the cell until the last handle gives it back.
-    Some(unsafe { write_head(base, Owner::Table(claim)) })
+    Some(unsafe { write_head(base, Owner::Table(claim), whole) })
 }
 
-/// A block of the heap for a slot of `layout`, its head written: the cell of a value no table is
-/// lent for, given back to the heap with the same layout.
+/// A block of the heap for a slot of `layout`, its head written with `whole`: the cell of a value
+/// no table is lent for, given back to the heap with the same layout.
 #[inline(never)]
-fn heap_head(layout: Layout) -> NonNull<CellHead> {
+fn heap_head(layout: Layout, whole: DropWhole) -> NonNull<CellHead> {
     // SAFETY: a slot's layout is never of no bytes: it holds a head.
     let base = unsafe { alloc(layout) };
     let Some(base) = NonNull::new(base) else {
         handle_alloc_error(layout)
     };
     // SAFETY: the block is the heap's, of the slot's layout, and this call's alone.
-    unsafe { write_head(base, Owner::Heap(layout)) }
+    unsafe { write_head(base, Owner::Heap(layout), whole) }
 }
 
-/// The head of a cell at `base`, written with one handle and `owner`.
+/// The head of a cell at `base`, written with one handle, `owner` and `whole`.
 ///
 /// # Safety
 /// `base` is memory of a slot's layout that nothing else reaches, and `owner` is where it came
 /// from.
-unsafe fn write_head(base: NonNull<u8>, owner: Owner) -> NonNull<CellHead> {
+unsafe fn write_head(base: NonNull<u8>, owner: Owner, whole: DropWhole) -> NonNull<CellHead> {
     let head = base.cast::<CellHead>();
     // SAFETY: the caller's contract: the memory is the slot's alone, and a slot starts with its
     // head, aligned for it.
@@ -127,7 +135,7 @@ unsafe fn write_head(base: NonNull<u8>, owner: Owner) -> NonNull<CellHead> {
         head.as_ptr().write(CellHead {
             handles: Cell::new(1),
             owner,
-            whole: Cell::new(None),
+            whole,
         });
     }
     head
@@ -147,6 +155,31 @@ unsafe fn give_back(head: NonNull<CellHead>) {
         // SAFETY: the block is the heap's, taken with this layout by `heap_head`, and nothing
         // reaches it after this call.
         Owner::Heap(layout) => unsafe { dealloc(head.as_ptr().cast::<u8>(), layout) },
+    }
+}
+
+/// Let go of one handle on the cell `head` heads: the last drops the value placed through the
+/// cell's `whole` and gives the cell back. Out of line: the one body of every handle's drop,
+/// which each kind of handle only calls.
+///
+/// # Safety
+/// `head` heads a cell whose value was placed and not dropped, named by a handle that is let go
+/// of here and not used after.
+#[inline(never)]
+unsafe fn let_go(head: NonNull<CellHead>) {
+    // SAFETY: the caller's contract: a handle names the cell, so its head is live.
+    let cell = unsafe { head.as_ref() };
+    let left = cell.handles.get().saturating_sub(1);
+    cell.handles.set(left);
+    if left == 0 {
+        let whole = cell.whole;
+        // SAFETY: this was the last handle, so nothing names the value or the cell after this,
+        // and the value was placed and not dropped: `whole` drops it as the type it was placed
+        // as, whatever view of it the handle was, before the cell goes back.
+        unsafe {
+            whole(head);
+            give_back(head);
+        }
     }
 }
 
@@ -172,7 +205,7 @@ impl<K> CellRc<K> {
     /// lends. The cell is made by `head_in`, out of line; what is left here, for each kind of
     /// value, is moving the value into it.
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
-        match head_in(cells, Layout::new::<Slot<K>>()) {
+        match head_in(cells, Layout::new::<Slot<K>>(), drop_whole::<K>) {
             // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle, whose
             // value this writes.
             Some(head) => Ok(unsafe { Self::fill(head, value) }),
@@ -192,7 +225,7 @@ impl<K> CellRc<K> {
         cells: Option<&LentByteCells>,
         make: impl FnOnce(&mut MaybeUninit<K>) -> &mut K,
     ) -> Option<Self> {
-        let head = head_in(cells, Layout::new::<Slot<K>>())?;
+        let head = head_in(cells, Layout::new::<Slot<K>>(), drop_whole::<K>)?;
         let slot = head.cast::<Slot<K>>().as_ptr();
         // SAFETY: the head heads a cell of `Slot<K>`'s layout that only this call reaches.
         let at = unsafe { core::ptr::addr_of_mut!((*slot).value) };
@@ -215,7 +248,7 @@ impl<K> CellRc<K> {
 
     /// `value` in a cell of its own on the heap: the handle of a link lent no table.
     pub fn boxed(value: K) -> Self {
-        let head = heap_head(Layout::new::<Slot<K>>());
+        let head = heap_head(Layout::new::<Slot<K>>(), drop_whole::<K>);
         // SAFETY: as in `Self::in_cells`.
         unsafe { Self::fill(head, value) }
     }
@@ -257,8 +290,8 @@ impl<K> CellRc<K> {
     }
 }
 
-/// Drop the value of the cell `head` heads, which holds a `K`: the whole of a value whose handles
-/// name its parts.
+/// Drop the value of the cell `head` heads, which holds a `K`: the whole value placed, whatever
+/// view of it or of a part of it the last handle was.
 ///
 /// # Safety
 /// `head` heads a `Slot<K>` whose value was written and not dropped, which no handle names any
@@ -295,7 +328,7 @@ impl<A, B> CellRc<(A, B)> {
         cells: Option<&LentByteCells>,
         write: impl FnOnce(*mut A, *mut B),
     ) -> Option<(CellRc<A>, CellRc<B>)> {
-        let head = head_in(cells, Layout::new::<Slot<(A, B)>>())?;
+        let head = head_in(cells, Layout::new::<Slot<(A, B)>>(), drop_whole::<(A, B)>)?;
         let slot = head.cast::<Slot<(A, B)>>().as_ptr();
         // SAFETY: the head heads a cell of `Slot<(A, B)>`'s layout, written with one handle and
         // named by none, whose value is not written: its two fields are places of `A` and `B`,
@@ -319,8 +352,6 @@ impl<A, B> CellRc<(A, B)> {
     /// This handle on a pair as one handle on each of its halves, the cell given back with the
     /// last of them, which drops the pair whole.
     fn into_halves(self) -> (CellRc<A>, CellRc<B>) {
-        // The last handle names one half, so it drops the pair through this, not through its view.
-        self.head().whole.set(Some(drop_whole::<(A, B)>));
         let other = self.clone();
         // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
         // lives as long as the cell does; the cell's `whole` drops the pair it was placed as.
@@ -341,8 +372,8 @@ impl<T: ?Sized> CellRc<T> {
     /// This handle as one on a part of its value, `as_part` answering where the part lies.
     ///
     /// # Safety
-    /// `as_part` answers a pointer to a value that lives as long as the value it is handed, and
-    /// the cell's `whole` is set: its last handle drops the whole value placed, never the part.
+    /// `as_part` answers a pointer to a value that lives as long as the value it is handed: the
+    /// last handle drops the whole value placed, through the cell's `whole`, never the part.
     unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U> {
         let this = core::mem::ManuallyDrop::new(self);
         CellRc {
@@ -355,8 +386,9 @@ impl<T: ?Sized> CellRc<T> {
     /// This handle as one on `U`, the value seen through `as_u`: a trait object of it.
     ///
     /// # Safety
-    /// `as_u` answers a pointer to the same value it is handed (an unsizing coercion), so the last
-    /// handle, which drops the value through the view it is, drops the value that was placed.
+    /// `as_u` answers a pointer to the same value it is handed (an unsizing coercion), so the
+    /// handle reads the value that was placed, which the last handle drops through the cell's
+    /// `whole`.
     pub unsafe fn unsize<U: ?Sized>(
         self,
         as_u: impl FnOnce(NonNull<T>) -> NonNull<U>,
@@ -433,24 +465,9 @@ impl<T: ?Sized> Clone for CellRc<T> {
 
 impl<T: ?Sized> Drop for CellRc<T> {
     fn drop(&mut self) {
-        let head = self.head();
-        let left = head.handles.get().saturating_sub(1);
-        head.handles.set(left);
-        if left == 0 {
-            let whole = head.whole.get();
-            // SAFETY: this was the last handle, so nothing names the value or the cell after this,
-            // and the value was placed and not dropped. A cell whose handles name parts drops the
-            // whole value through `whole` (`Self::part`); any other handle names the value as what
-            // it was placed as or as a trait object of it (`Self::unsize`), so this drops the
-            // value placed.
-            unsafe {
-                match whole {
-                    Some(drop_whole) => drop_whole(self.head),
-                    None => self.value.as_ptr().drop_in_place(),
-                }
-                give_back(self.head);
-            }
-        }
+        // SAFETY: the handle names its cell, whose value was placed and not dropped, and is let
+        // go of here once.
+        unsafe { let_go(self.head) }
     }
 }
 
