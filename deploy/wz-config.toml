@@ -2343,7 +2343,7 @@ reason = "No key of upstream's configuration states it: the delivery lane of an 
 
 [limit.pico_preset]
 value = 4768
-reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 100 subscribers, 4768 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run."
+reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 100 subscribers, 4768 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run. A cooperative engine built to read every record where it lies (rx-lent-only) reserves no lane and reads none of this limit (crates/wz-capi-coop/src/arena.rs, LANE_ROWS)."
 
 [[limit]]
 id = "DELIVERY_LANE_CALLBACKS"
