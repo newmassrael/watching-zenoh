@@ -265,6 +265,21 @@ impl<'a> SerialEnvelopeSource for SerialEnvelopeParts<'a> {
     }
 }
 
+#[allow(dead_code)]
+impl<'a> SerialEnvelopeParts<'a> {
+    /// The parts of what `src` says, each accessor of [`SerialEnvelopeSource`] read
+    /// once: the one form a codec that holds this one writes it from,
+    /// whatever form the value it is handed is in (docs/adr/0058).
+    #[doc(hidden)]
+    pub fn of<S: SerialEnvelopeSource + ?Sized>(src: &'a S) -> Self {
+        Self {
+            header: src.header(),
+            payload: src.payload(),
+            crc32: src.crc32(),
+        }
+    }
+}
+
 impl<S: SerialEnvelopeStorage> SerialEnvelopeSource for SerialEnvelopeOwned<S> {
     fn header(&self) -> u8 {
         self.header
@@ -352,6 +367,21 @@ impl SerialEnvelopeWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `SerialEnvelope` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct SerialEnvelopeWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for SerialEnvelopeWalk {
+    type Entry<'b> = SerialEnvelopeView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        SerialEnvelopeView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `SerialEnvelope` holds no bounded list, embedded body or variant, so a
 // view of it would hold what it holds. Its view is the codec itself under the
 // name every codec's view has, which lets a codec that embeds, lists or

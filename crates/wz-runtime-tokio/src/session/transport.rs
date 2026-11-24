@@ -324,7 +324,7 @@ impl RemoteReplyRoute
     >
 {
     fn send_reply(&self, reply: wz_session_core::query::QueryReply) {
-        use wz_session_core::response_sink::ResponseSink as _;
+        use wz_session_core::response_sink::OwnedResponseSink as _;
         if let Ok(response) = reply.into_response() {
             self.send_response(response);
         }

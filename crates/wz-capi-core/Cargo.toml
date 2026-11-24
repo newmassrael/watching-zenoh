@@ -271,6 +271,10 @@ message-catalog = []
 # (`wz-capi-pico/message-payload`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 message-payload = []
+# The doors that read a schema from `.proto` text. The model has nothing behind it: the doors are
+# the pico ABI's own (`wz-capi-pico/proto-text`) over the text reader of `wz-app-frame`, so this
+# feature only carries the capability's name, as `e2e-sender`'s does.
+proto-text = []
 # The object pools. The model has nothing behind them: the pools are the pico ABI's own
 # (`wz-capi-pico/object-pool`, `wz-capi-pico/object-pool-region`), so these features only carry
 # the capabilities' names, as `e2e-sender`'s does.

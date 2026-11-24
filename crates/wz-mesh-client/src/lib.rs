@@ -334,6 +334,7 @@ fn session_params(policy: &SessionPolicy) -> Result<SessionInitParams, ClientErr
                 "no operating system entropy for a signing key: {e}"
             ))
         })?,
+        region: None,
     })
 }
 

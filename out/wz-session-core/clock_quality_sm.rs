@@ -96,6 +96,18 @@ pub enum ClockQualityState {
     #[cfg(feature = "clock-source")] FreeRunning = 3,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ClockQualityState {
+    pub const ID_Unsynchronized: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Unsynchronized as u16);
+    pub const ID_Synchronized: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Synchronized as u16);
+    #[cfg(feature = "clock-source")] pub const ID_Holdover: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Holdover as u16);
+    #[cfg(feature = "clock-source")] pub const ID_FreeRunning: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::FreeRunning as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -115,6 +127,19 @@ pub enum ClockQualityEvent {
     #[cfg(feature = "clock-source")] SyncLost = 2,
     #[cfg(feature = "clock-source")] /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 3,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ClockQualityEvent {
+    #[cfg(feature = "clock-source")] pub const ID_HoldoverExpired: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HoldoverExpired as u16);
+    pub const ID_SyncAcquired: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SyncAcquired as u16);
+    pub const ID_SyncLost: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SyncLost as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -557,9 +582,9 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: clock_quality.scxml:51 :: _machine"]
 // SCE-MAP: clock_quality.scxml:51 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
-            #[cfg(feature = "clock-source")] ClockQualityState::FreeRunning => {
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
                 // SCE-MAP: clock_quality.scxml:86 :: FreeRunning :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -569,7 +594,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
             self.actions.quality_changed();
                 }
             },
-            #[cfg(feature = "clock-source")] ClockQualityState::Holdover => {
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_Holdover => {
                 // SCE-MAP: clock_quality.scxml:78 :: Holdover :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -579,7 +604,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
             self.actions.quality_changed();
                 }
             },
-            ClockQualityState::Synchronized => {
+            ClockQualityState::ID_Synchronized => {
                 // SCE-MAP: clock_quality.scxml:69 :: Synchronized :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -589,7 +614,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
             self.actions.quality_changed();
                 }
             },
-            ClockQualityState::Unsynchronized => {
+            ClockQualityState::ID_Unsynchronized => {
                 // SCE-MAP: clock_quality.scxml:62 :: Unsynchronized :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -614,7 +639,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
 // SCE-MAP: clock_quality.scxml:51 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -632,18 +657,20 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: clock_quality.scxml:51 :: _machine"]
 // SCE-MAP: clock_quality.scxml:51 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            #[cfg(feature = "clock-source")] ClockQualityState::FreeRunning => {
-                if event == ClockQualityEvent::SyncAcquired {
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
+                if event == ClockQualityEvent::ID_SyncAcquired {
                     {
                         // FreeRunning, transition 0
                         return Some(::sce_rust_runtime::TransitionId(5));
@@ -651,14 +678,14 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
                 }
                 None
             },
-            #[cfg(feature = "clock-source")] ClockQualityState::Holdover => {
-                if event == ClockQualityEvent::SyncAcquired {
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_Holdover => {
+                if event == ClockQualityEvent::ID_SyncAcquired {
                     {
                         // Holdover, transition 0
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
-                if event == ClockQualityEvent::HoldoverExpired {
+                if event == ClockQualityEvent::ID_HoldoverExpired {
                     {
                         // Holdover, transition 1
                         return Some(::sce_rust_runtime::TransitionId(4));
@@ -666,14 +693,14 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
                 }
                 None
             },
-            ClockQualityState::Synchronized => {
-                if event == ClockQualityEvent::SyncLost {
+            ClockQualityState::ID_Synchronized => {
+                if event == ClockQualityEvent::ID_SyncLost {
                     {
                         // Synchronized, transition 0
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
-                #[cfg(feature = "clock-source")] if event == ClockQualityEvent::SyncLost {
+                #[cfg(feature = "clock-source")] if event == ClockQualityEvent::ID_SyncLost {
                     {
                         // Synchronized, transition 1
                         return Some(::sce_rust_runtime::TransitionId(2));
@@ -681,8 +708,8 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
                 }
                 None
             },
-            ClockQualityState::Unsynchronized => {
-                if event == ClockQualityEvent::SyncAcquired {
+            ClockQualityState::ID_Unsynchronized => {
+                if event == ClockQualityEvent::ID_SyncAcquired {
                     {
                         // Unsynchronized, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));

@@ -1466,6 +1466,7 @@ pub(crate) fn init_params(
         policy: link_conf.policy,
         limits: link_conf.limits,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
+        region: None,
     })
 }
 
