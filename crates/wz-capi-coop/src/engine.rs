@@ -712,7 +712,7 @@ impl SessionRows {
     }
 }
 
-/// Lay out the plan of the session opened with `config` under `policy` (`session_plan`, each
+/// Lay out the plan of the session opened with `config` under `policy` (`lay_out_open`, each
 /// link's cells `cell_bytes` large and the ABI's places `held`), reserve its arena in `memory`
 /// and lend from it every table of the session. One lender lends each layer its plain tables
 /// from the rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
@@ -730,7 +730,8 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
-    let plan = session_plan(config, cell_bytes, held)?;
+    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
+    lay_out_open(&mut plan, cell_bytes, held)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     let TransportTables {
@@ -2498,18 +2499,17 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
     }
 }
 
-/// The arena an open of `config` reserves: the rows its limits size, the cells `cells` sizes for
-/// each link and the ABI's places `held` names, after every other row. The one plan an open
-/// reserves by, laid out by `lend_session` in its own frame, where the plan stays while it is read.
-pub(crate) fn session_plan<E: EndpointList>(
-    config: &CoopConfig<E>,
+/// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::of`]), the cells `cells` sizes
+/// for each link and then the ABI's places `held` names, after every other row: the one plan an
+/// open reserves by. Laid out where the plan lies, which `lend_session` reads in its own frame: a
+/// plan handed back by value would be moved again, twice, by the open that reads it.
+pub(crate) fn lay_out_open(
+    plan: &mut ArenaPlan,
     cells: LinkCells<usize>,
     held: &HeldPlaces,
-) -> Result<ArenaPlan, ArenaRefused> {
-    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
+) -> Result<(), ArenaRefused> {
     plan.holding_cells(cells)?;
-    plan.holding(held)?;
-    Ok(plan)
+    plan.holding(held)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
