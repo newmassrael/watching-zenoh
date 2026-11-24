@@ -128,6 +128,7 @@ impl<'a> PicoEndpoint<'a> {
     }
 
     /// The bytes of the text pico keeps of the endpoint ([`Self::write_text`]).
+    #[cfg(any(test, feature = "connectivity"))]
     pub(crate) fn text_len(&self, separator: &str) -> usize {
         let mut len = 0usize;
         self.write_text(separator, |piece| len = len.saturating_add(piece.len()));
@@ -150,20 +151,15 @@ impl<'a> PicoEndpoint<'a> {
 /// every locator text of a session is held to, with pico's `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its
 /// reading of a config answers when it has no memory to hold a value in
 /// (`vendor/zenoh-pico/src/protocol/config.c` @ `ret = _Z_ERR_SYSTEM_OUT_OF_MEMORY;`). Judged
-/// over the text where it lies, before anything is opened; nothing is written.
+/// before anything is opened, by the reading the engine's text is made by ([`kept_text`]), into a
+/// locator text of the stack that is let go of here.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZResult> {
-    let Some(keys) = config_keys(scheme_of(endpoint)) else {
-        return Ok(());
-    };
-    let read = PicoEndpoint::read(endpoint, keys);
-    if read.is_malformed() {
-        return Err(crate::result::Z_ERR_CONFIG_INVALID_VALUE);
-    }
-    if read.text_len("#") > wz_session_core::caps::MAX_LOCATOR_LEN {
-        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
-    }
-    Ok(())
+    kept_text(
+        endpoint,
+        &mut wz_session_core::locator_directory::LocatorText::new(),
+    )
+    .map(|_| ())
 }
 
 /// `use_text` handed a unicast endpoint the program wrote as pico reads it, for a session of the
@@ -179,28 +175,33 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
     let mut kept = wz_session_core::locator_directory::LocatorText::new();
-    use_text(engine_text(endpoint, &mut kept))
+    use_text(kept_text(endpoint, &mut kept).unwrap_or(endpoint))
 }
 
-/// The text [`with_engine_text`] hands its user: `endpoint` itself, or what pico's link reads of
-/// it, made in `kept`. Out of line and generic over nothing: one body for every user of the text,
-/// where each would otherwise read the endpoint in a copy of its own.
+/// What pico's link for the scheme of `endpoint` keeps of it, made in `kept`, or `endpoint`
+/// itself for a scheme whose config this ABI does not read; refused as [`checked_endpoint`] says,
+/// a kept text past `kept`'s room being one past `MAX_LOCATOR_LEN`. The one reading of an
+/// endpoint the check before the open and the text the engine is handed both make: out of line and
+/// generic over nothing, so they cannot read an endpoint differently and the code is one copy.
 #[cfg(not(feature = "engine-tokio"))]
 #[inline(never)]
-fn engine_text<'a>(
+fn kept_text<'a>(
     endpoint: &'a str,
     kept: &'a mut wz_session_core::locator_directory::LocatorText,
-) -> &'a str {
+) -> Result<&'a str, crate::result::ZResult> {
     let Some(keys) = config_keys(scheme_of(endpoint)) else {
-        return endpoint;
+        return Ok(endpoint);
     };
     let read = PicoEndpoint::read(endpoint, keys);
-    let mut fits = !read.is_malformed();
+    if read.is_malformed() {
+        return Err(crate::result::Z_ERR_CONFIG_INVALID_VALUE);
+    }
+    let mut fits = true;
     read.write_text("#", |piece| fits = fits && kept.push_str(piece).is_ok());
     if fits {
-        kept.as_str()
+        Ok(kept.as_str())
     } else {
-        endpoint
+        Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
     }
 }
 
@@ -308,6 +309,33 @@ mod tests {
         assert_eq!(
             dialled("tcp/127.0.0.1:9000#tout=5=6").as_deref(),
             Ok("tcp/127.0.0.1:9000#tout=5=6")
+        );
+    }
+
+    /// An endpoint the check refuses is handed to the engine as written, for the engine to refuse
+    /// by name, and one it takes is handed as the check read it: the two are one reading. Turned
+    /// red by a text handed over in place of a refused endpoint, or by a check that reads the
+    /// endpoint apart from the text.
+    #[test]
+    fn a_refused_endpoint_is_handed_over_as_written() {
+        let host = "h".repeat(MAX_LOCATOR_LEN);
+        let long = format!("tcp/{host}:9000#iface=lo");
+        assert_eq!(checked_endpoint(&long), Err(Z_ERR_SYSTEM_OUT_OF_MEMORY));
+        assert_eq!(
+            with_engine_text(&long, |text: &str| String::from(text)),
+            long
+        );
+        let malformed = "udp/127.0.0.1:9000#iface";
+        assert_eq!(checked_endpoint(malformed), Err(Z_ERR_CONFIG_INVALID_VALUE));
+        assert_eq!(
+            with_engine_text(malformed, |text: &str| String::from(text)),
+            malformed
+        );
+        let unread = "tls/127.0.0.1:9000#root_ca_certificate=x";
+        assert_eq!(checked_endpoint(unread), Ok(()));
+        assert_eq!(
+            with_engine_text(unread, |text: &str| String::from(text)),
+            unread
         );
     }
 
