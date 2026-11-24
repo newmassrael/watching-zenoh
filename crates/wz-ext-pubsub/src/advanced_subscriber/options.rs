@@ -679,11 +679,12 @@ pub struct HistoryConfig {
     /// source (the `_max=N` selector); `None` recovers the publishers' whole
     /// caches (zenoh `HistoryConfig::max_samples`).
     pub sample_depth: Option<usize>,
-    /// `Some(secs)` bounds the startup history GET to samples no older than
-    /// `secs` seconds (the `_time=[now(-secs)..]` selector); `None` applies no
-    /// age bound (zenoh `HistoryConfig::max_age`). Composes with `sample_depth`
-    /// — both selectors ride the one GET.
-    pub max_age: Option<f64>,
+    /// `Some(age)` bounds the startup history GET to samples no older than
+    /// `age` (the `_time=[now(-secs)..]` selector); `None` applies no age
+    /// bound (zenoh `HistoryConfig::max_age`). Composes with `sample_depth`
+    /// — both selectors ride the one GET. Held as a `Duration` so the selector
+    /// is written from integers.
+    pub max_age: Option<Duration>,
     /// `true` declares a liveliness subscriber on `<ke>/@adv/pub/**` so a
     /// publisher appearing AFTER this subscriber joined (its `@adv` liveliness
     /// token Put) triggers a per-publisher history GET — recovering its cache
@@ -712,12 +713,18 @@ impl HistoryConfig {
     /// `seconds` must be non-negative — a negative age has no meaning for a
     /// "no older than" window and would render the malformed `now(--Ns)` form
     /// (the lower-bound emit negates it). Asserted in debug builds.
+    ///
+    /// An age past what a `Duration` holds (an infinite one included) is the
+    /// longest `Duration`, which bounds nothing a clock can date; a positive
+    /// age under a nanosecond is one nanosecond, so it stays a bound and is not
+    /// refused as a zero one. A negative age or a NaN, which the assertion
+    /// refuses, is a zero age and is refused where the subscriber is declared.
     pub fn max_age(mut self, seconds: f64) -> Self {
         debug_assert!(
             seconds >= 0.0,
             "HistoryConfig::max_age must be non-negative, got {seconds}"
         );
-        self.max_age = Some(seconds);
+        self.max_age = Some(age_of_seconds(seconds));
         self
     }
 
@@ -727,5 +734,43 @@ impl HistoryConfig {
     pub fn detect_late_publishers(mut self) -> Self {
         self.detect_late_publishers = true;
         self
+    }
+}
+
+/// The age `HistoryConfig::max_age` holds for `seconds`, as that method states it.
+#[cfg(feature = "advanced-history")]
+fn age_of_seconds(seconds: f64) -> Duration {
+    if seconds.is_nan() || seconds <= 0.0 {
+        return Duration::ZERO;
+    }
+    match Duration::try_from_secs_f64(seconds) {
+        Ok(age) if age.is_zero() => Duration::from_nanos(1),
+        Ok(age) => age,
+        Err(_) => Duration::MAX,
+    }
+}
+
+#[cfg(all(test, feature = "advanced-history"))]
+mod tests {
+    use super::*;
+
+    /// An age in seconds is held to the nanosecond; past a `Duration` it is the longest one, under
+    /// a nanosecond one nanosecond, and a negative or NaN age a zero one. Turned red by a
+    /// conversion that panics, truncates a positive age to zero, or wraps a large one.
+    #[test]
+    fn an_age_in_seconds_is_held_as_the_duration_it_names() {
+        assert_eq!(
+            HistoryConfig::new().max_age(1.5).max_age,
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(age_of_seconds(30.0), Duration::from_secs(30));
+        assert_eq!(age_of_seconds(0.001), Duration::from_millis(1));
+        assert_eq!(age_of_seconds(1e-12), Duration::from_nanos(1));
+        assert_eq!(age_of_seconds(f64::INFINITY), Duration::MAX);
+        assert_eq!(age_of_seconds(1e30), Duration::MAX);
+        assert_eq!(age_of_seconds(0.0), Duration::ZERO);
+        assert_eq!(age_of_seconds(-0.0), Duration::ZERO);
+        assert_eq!(age_of_seconds(-1.0), Duration::ZERO);
+        assert_eq!(age_of_seconds(f64::NAN), Duration::ZERO);
     }
 }

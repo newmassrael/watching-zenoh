@@ -154,7 +154,7 @@ struct Shared<E: SessionEngine + ?Sized> {
     /// The timeout of every get, in milliseconds.
     timeout_ms: u32,
     /// The bounds of a detected late publisher's history get: its depth and its age.
-    late: (Option<usize>, Option<f64>),
+    late: (Option<usize>, Option<core::time::Duration>),
 }
 
 impl<E: SessionEngine + ?Sized> Shared<E> {
@@ -967,7 +967,7 @@ fn admitted<E: SessionEngine + ?Sized>(
                 knob: "max_samples",
             });
         }
-        if history.max_age == Some(0.0) {
+        if history.max_age == Some(core::time::Duration::ZERO) {
             return Err(HostError::HistoryBoundZero { knob: "max_age" });
         }
     }
@@ -1236,7 +1236,7 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
 fn issue_history_query<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let key = history_key(shared.base());
     let parameters = GetParameters::history(depth, age);
@@ -1254,7 +1254,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
     zid: Vec<u8>,
     eid: u32,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let key = recovery_key(shared.base(), &zid, eid);
     let parameters = GetParameters::history(depth, age);
@@ -1269,7 +1269,7 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
     token_keyexpr: &str,
     zid: Vec<u8>,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
@@ -1282,7 +1282,7 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
@@ -1296,7 +1296,7 @@ fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
     kind: LivelinessSampleKind,
     token_keyexpr: &str,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     if kind != LivelinessSampleKind::Put {
         // A departed publisher has nothing to recover, but its retention flag is how the sweep
