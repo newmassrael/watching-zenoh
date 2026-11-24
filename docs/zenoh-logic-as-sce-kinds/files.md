@@ -384,9 +384,11 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-ext-pubsub/src/advanced_subscriber/plans.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/advanced_subscriber/plans/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-ext-pubsub/src/advanced_subscriber/state.rs` | S6 | |
+| `crates/wz-ext-pubsub/src/advanced_subscriber/state/sources.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/advanced_subscriber/state/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-ext-pubsub/src/lib.rs` | S6, S10 | |
 | `crates/wz-ext-pubsub/src/sync.rs` | S6 | |
+| `crates/wz-ext-pubsub/src/test_alloc.rs` | excluded: test | Allocation counter of the lib test binary, reached only by `#[cfg(all(test, feature = "advanced-recovery"))] mod test_alloc` (`lib.rs:65`). |
 | `crates/wz-ext-pubsub/src/time_range.rs` | S6, S10 | |
 | `crates/wz-host-net/src/lib.rs` | S9 | |
 | `crates/wz-host-net/src/link_interfaces.rs` | S9 | |
