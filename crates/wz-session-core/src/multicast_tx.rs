@@ -1046,7 +1046,11 @@ pub fn multicast_tx_group_announcement<R>(
                 .map_err(SendWireError::Codec)?;
             multicast_tx_declaration(&declaration, f).ok_or(refused)
         }
-        #[allow(unreachable_patterns)]
+        #[cfg(not(all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
         _ => {
             let _ = (id, mapping_id, suffix, f, refused);
             Err(SendWireError::FeatureDisabled)
@@ -1094,7 +1098,11 @@ pub fn multicast_tx_group_retraction<R>(
             f,
         )
         .ok_or(refused),
-        #[allow(unreachable_patterns)]
+        #[cfg(not(all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
         _ => {
             let _ = (id, named, f);
             Err(SendWireError::FeatureDisabled)
