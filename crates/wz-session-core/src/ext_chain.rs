@@ -812,12 +812,98 @@ fn check_walk<'a>(
     walked: &mut dyn crate::ext_view::EntryWalk<'a>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     while let Some(entry) = walked.next_entry() {
-        let mut lent = wz_codecs::lent::ExtEntry::default();
-        entry
-            .into_builder(&mut lent)
-            .map_err(crate::parse_error::InboundParseError::Codec)?;
+        lend_entry(&entry)?;
     }
     Ok(())
+}
+
+/// The step of keeping a received entry that can refuse it, lending it where it lies, with nothing
+/// kept ([`check_ext_chain`]).
+#[cfg(feature = "alloc")]
+fn lend_entry(
+    entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let mut lent = wz_codecs::lent::ExtEntry::default();
+    entry
+        .into_builder(&mut lent)
+        .map_err(crate::parse_error::InboundParseError::Codec)
+}
+
+/// The one walk of the chain of a handshake message read where it lies (`inbound::read_control`),
+/// which answers everything the session asks of that chain: the refusals the decoder answers for
+/// it (as [`collect_handshake_ext_chain`], with nothing kept where keeping copies), the admission
+/// rule's verdict on its headers ([`crate::ext_admit::judge_ext_chain`]), and what the readers of
+/// an Init's and an Open's chain take of it (`inbound::ChainAnswers`).
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+pub(crate) fn read_handshake_chain<'a>(
+    mid: u8,
+    mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<
+    (
+        crate::ext_admit::ExtAdmission,
+        crate::inbound::ChainAnswers<'a>,
+    ),
+    crate::parse_error::InboundParseError,
+> {
+    read_walk(mid, &mut walked)
+}
+
+/// [`read_handshake_chain`] over the walk as a trait object, compiled once for the four handshake
+/// documents' walks.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+#[inline(never)]
+fn read_walk<'a>(
+    mid: u8,
+    walked: &mut dyn crate::ext_view::EntryWalk<'a>,
+) -> Result<
+    (
+        crate::ext_admit::ExtAdmission,
+        crate::inbound::ChainAnswers<'a>,
+    ),
+    crate::parse_error::InboundParseError,
+> {
+    use crate::ext_admit::{judge_ext_chain, ExtCarrier};
+    let carrier = ExtCarrier::Transport(mid);
+    // The rule answers with the first header it refuses, and otherwise as it answers a chain of no
+    // entry, so it is asked of each header until one is refused.
+    let mut admission = judge_ext_chain(carrier, None::<u8>);
+    let mut answers = crate::inbound::ChainAnswers::NONE;
+    #[cfg(feature = "session-slot")]
+    let mut kept = ExtChainOwned::new();
+    while let Some(entry) = walked.next_entry() {
+        #[cfg(feature = "session-slot")]
+        keep_handshake_entry(mid, &entry, reads_received_ext(entry.ext_id()), &mut kept)?;
+        #[cfg(not(feature = "session-slot"))]
+        lend_entry(&entry)?;
+        if !admission.is_refusal() {
+            let judged = judge_ext_chain(carrier, Some(entry.header));
+            if judged.is_refusal() {
+                admission = judged;
+            }
+        }
+        answers.note(&entry);
+    }
+    Ok((admission, answers))
 }
 
 /// One entry of a received transport chain, from the view the document read it as to the

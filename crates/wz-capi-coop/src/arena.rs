@@ -1725,7 +1725,8 @@ impl ArenaPlan {
             queryables: self.session.entities.queryables,
             tokens: self.session.entities.tokens,
             liveliness_subscribers: self.session.entities.liveliness_subscribers,
-            write_filters: self.session.entities.filters().unwrap_or(usize::MAX),
+            publishers: self.session.entities.publishers,
+            queriers: self.session.entities.queriers,
             matching_listeners: self.session.entities.matching_listeners,
             ..TableRows::default()
         }

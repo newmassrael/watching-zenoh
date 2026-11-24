@@ -161,8 +161,8 @@ unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
 }
 
 /// One holder's share of a block: a payload's storage, or a string's or a slice's that payloads
-/// made over it share. The last share let go runs the caller's release, for the record of an
-/// alias, and gives the block back.
+/// made over it share, or an encoding's kept schema. The last share let go runs the caller's
+/// release, for the record of an alias, and gives the block back.
 pub(crate) struct Block {
     head: NonNull<BlockHead>,
 }
@@ -196,6 +196,15 @@ impl Block {
         // SAFETY: a new block, of one holder, with room for the bytes.
         unsafe { block.write(0, bytes) };
         Some(block)
+    }
+
+    /// A block holding a copy of `bytes` and where the copy starts in it, for a holder that only
+    /// reads them by start and length and needs none of a payload's segment ends: an encoding's
+    /// kept schema. `None` when there is no room for one.
+    pub(crate) fn kept_copy(bytes: &[u8]) -> Option<(Self, NonNull<u8>)> {
+        let block = Self::copy_of(bytes)?;
+        let start = block_start(&block);
+        Some((block, start))
     }
 
     /// A block holding the record of the caller's `len` bytes at `start`, which `release` lets

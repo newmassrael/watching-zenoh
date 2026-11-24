@@ -49,8 +49,8 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, OpenStorage,
-    PlaceTables, SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
+    SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
@@ -65,8 +65,8 @@ use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    kind, InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle,
-    MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, SessionTables,
+    kind, DeclaredRow, DeclaredTable, InterestHandle, InterestKind, InterestName, InterestRow,
+    KeyexprHandle, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, SessionTables,
     SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
@@ -191,7 +191,7 @@ use deliveries::Deliveries;
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
-use registry::{FaceId, Registry, DIAL_FACE};
+use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
@@ -646,9 +646,6 @@ struct SessionLent {
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
-    /// How many rows each table of the engine's record of the declarations is lent, as the plan
-    /// laid them out.
-    entities: EntityRows,
     /// The links the plan holds buffers for: the rows of the session's link admission.
     #[cfg(feature = "listen")]
     links: usize,
@@ -831,7 +828,6 @@ fn lend_session(
         pending_gets,
         handle_place,
         places,
-        entities: plan.entities(),
         #[cfg(feature = "listen")]
         links: plan.links(),
         #[cfg(feature = "listen")]
@@ -1662,8 +1658,8 @@ impl SessionParts for CoopSession {
     type Watchers = Arc<FacePlane>;
     #[cfg(not(feature = "connectivity"))]
     type Watchers = ();
-    /// What a write filter of each plane is held to, the filters sharing one table.
-    type Entities = EntityRows;
+    /// The tables hold each plane's write filters to its own bound: nothing is kept apart.
+    type Entities = ();
     #[cfg(feature = "queryable")]
     type Queryables = Arc<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
@@ -2360,7 +2356,8 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
 /// out at once. Without it everything the dispatch staged goes out at once.
 pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: Rc<RefCell<Registry>>,
-    face: FaceId,
+    /// The face the link serves, its set found by its place for every frame and not looked for.
+    face: HeldFace,
     actions: SessionHandle<C>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -2670,7 +2667,8 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         let generation = self.session.plane.next_generation();
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
-            face,
+            // The registry holds the face before its link is made (`Registry::add_face`).
+            face: self.session.registry.borrow().held(face),
             actions: actions.clone(),
             #[cfg(feature = "queryable")]
             plane: self.session.plane.clone(),
@@ -3120,6 +3118,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
+        // What the lost link's peer was told went with it: the next link's peer holds nothing.
+        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+            face.replay.discard();
+        }
         self.rooms.forget(id);
         self.lose_link(id);
     }
@@ -3330,7 +3332,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .get(prefix)
                 .is_some_and(|row| row.holds() <= 1)
         })?;
-        Some(self.keyexpr_place(prefix))
+        Some(self.place_of(DeclaredRow::of(prefix)))
     }
 
     /// Tell the links whose peers were told of it, and each group the session joined, that the
@@ -3448,21 +3450,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// What a lost link of face `id` takes with it: what its peer was told, and what the session
-    /// holds of it (`SessionState::lose_face`).
+    /// What a lost link of face `id` takes with it: what the session holds of it
+    /// (`SessionState::lose_face`). What the peer was told is the caller's, which holds the face's
+    /// place: a group keeps no replay.
     /// Out of line: a lost face and a group that ended each take what the peer declared.
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
-        // What the lost link's peer was told went with it: the next link's peer holds nothing.
-        if let Some(face) = self
-            .transport
-            .links
-            .faces_mut()
-            .iter_mut()
-            .find(|face| face.id == id)
-        {
-            face.replay.discard();
-        }
         self.session.lose_face(id);
         #[cfg(feature = "liveliness")]
         self.retract_owed();
@@ -3901,7 +3894,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 watchers: Arc::new(FacePlane::with_room(face_rows)),
                 #[cfg(not(feature = "connectivity"))]
                 watchers: (),
-                entities: lent.entities,
+                entities: (),
                 keys: lent.keys,
                 #[cfg(feature = "shared-key-ids")]
                 key_ids: key_ids.at_open.ids,
@@ -5721,7 +5714,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // A new Interest is asked of each link from its row; one held already was asked.
         if let Some(opened) = watching.interest {
-            core.announce_interest(opened.handle);
+            core.announce(DeclaredRow::of(opened.handle));
         }
         // A listener that matches already is told so as it is declared, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
@@ -6349,7 +6342,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             "the tables number a row as they said they would"
         );
         // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce_subscriber(declared.handle);
+        core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
         #[cfg(feature = "group")]
         {
@@ -6396,7 +6389,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's
             // its key is named by.
-            let place = core.place(replay::Kind::LiveSub, rank);
+            let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
@@ -6451,7 +6444,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's,
             // which comes before every subscriber.
-            let place = core.place(replay::Kind::Subscriber, rank);
+            let place = core.place(DeclaredTable::Subscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
@@ -6513,7 +6506,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
         // refuses one it cannot carry.
-        let place = core.keyexpr_place(declared.handle);
+        let place = core.place_of(DeclaredRow::of(declared.handle));
         let taken = core.announce_or_undo_at(
             place,
             &|actions: &McuActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
@@ -6626,24 +6619,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
-        // A publisher's filter is held to MAX_PUBLISHERS and a querier's to MAX_QUERIERS, in the
-        // one table lent for both: one past its plane's count is refused before its Interest is
-        // asked or an id taken.
-        let most = match plane {
-            FilterPlane::Subscribers => core.session.entities.publishers,
-            FilterPlane::Queryables { .. } => core.session.entities.queriers,
-        };
-        let kind = plane_of(plane).interest_kind();
-        let held_of_plane = tables(&core.session.registry)
-            .write_filters()
-            .iter()
-            .filter(|(_, row)| row.plane().interest_kind() == kind)
-            .count();
-        if held_of_plane >= most {
-            return Err(Declined::TableFull);
-        }
-        // A full table, a key the session cannot hold, or an Interest it cannot hold or number
-        // refuses the filter, with nothing held, asked or numbered.
+        // A full table, a plane at its own bound (a publisher's MAX_PUBLISHERS, a querier's
+        // MAX_QUERIERS, in the one table lent for both), a key the session cannot hold, or an
+        // Interest it cannot hold or number refuses the filter, with nothing held, asked or
+        // numbered.
         let name = ask.map(|form| InterestName {
             mapping_id: form.mapping_id,
             suffix: form.suffix,
@@ -6662,7 +6641,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // first to hold it, or the one taken for a filter that sends none.
         let spent = if ask.is_some() {
             if let Some(opened) = watching.interest {
-                core.announce_interest(opened.handle);
+                core.announce(DeclaredRow::of(opened.handle));
             }
             watching.interest.map(|opened| u64::from(opened.id))
         } else {
@@ -6880,7 +6859,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             "the tables number a row as they said they would"
         );
         // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce_queryable(declared.handle);
+        core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
         #[cfg(feature = "group")]
         {
@@ -7434,7 +7413,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the queryable's, ranked by the walk that found it, then the declaration's,
             // which comes before every queryable.
-            let place = core.place(replay::Kind::Queryable, rank);
+            let place = core.place(DeclaredTable::Queryables, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
@@ -7485,7 +7464,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let form = core.session.key_form(wire.mapping_id, named);
             let declared = tables_mut(&core.session.registry).declare_token(keyexpr, form)?;
-            core.announce_token(declared.handle);
+            core.announce(DeclaredRow::of(declared.handle));
             // A token takes no traffic of its own, so every group that is told tokens is told it.
             // It is held before it is announced (its row, which a peer's and a group member's
             // Interest are answered from), so a member that asks right after it hears the
@@ -7525,7 +7504,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         // The links are asked while the rows stand, which are their places in the replay's order:
         // the token's, then the declaration's, which comes before every token.
-        let token_place = core.token_place(handle);
+        let token_place = core.place_of(DeclaredRow::of(handle));
         let keyexpr_place = core.prefix_retraction(prefix);
         let Some(undeclared) = tables_mut(&core.session.registry).undeclare_token(handle) else {
             return;
@@ -7620,7 +7599,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .is_some();
         if stands {
             // Each link is asked from the row, as it stands now.
-            core.announce_liveliness(declared.handle);
+            core.announce(DeclaredRow::of(declared.handle));
             // And each group the session joined is asked, as its declarations say.
             #[cfg(feature = "group")]
             {
