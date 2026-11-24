@@ -868,6 +868,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/query_mode.rs` | S2 | |
 | `crates/wz-session-core/src/query_options.rs` | S2 | |
 | `crates/wz-session-core/src/query_parts.rs` | S2 | |
+| `crates/wz-session-core/src/query_plane.rs` | S2 | |
+| `crates/wz-session-core/src/query_plane/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/query_sink.rs` | S2 | |
 | `crates/wz-session-core/src/query_value_ext.rs` | S2 | |
 | `crates/wz-session-core/src/queryable_info.rs` | S2 | |

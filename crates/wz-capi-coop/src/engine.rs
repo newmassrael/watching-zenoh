@@ -2036,7 +2036,12 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // The callback is the program's and never runs under the session's lock: the query is
         // held for it with a call begun on its row, read where it lies, and the replies it makes
         // go out through a responder of the plane's own.
-        cx.plane.arrive(&cx.round, row.row(), query);
+        // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
+        // holds, as the plane's arrival asks.
+        unsafe {
+            cx.plane
+                .arrive(&cx.round, || QueryableCall::begin(row.row()), query)
+        };
     }
 }
 
@@ -2209,19 +2214,6 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
     now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
 }
 
-/// The generation the next link, or the next join of a group, answers its queries under: the
-/// counter's next value. The counter wraps as `fetch_add` does, and a value equal to
-/// `query::LOCAL_QUERY`, which names the session's own queries and no link's, is stepped over.
-#[cfg(feature = "queryable")]
-fn next_generation(counter: &AtomicU64) -> u64 {
-    loop {
-        let generation = counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        if generation != query::LOCAL_QUERY {
-            return generation;
-        }
-    }
-}
-
 /// A group member's key (`SessionEngine::next_group_member`): its group's place in the session's
 /// groups in the high half, its place in the group's member table in the low one, so the keys
 /// order by group first. Each half is a `u32`, so the two never overlap.
@@ -2368,9 +2360,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         } else {
             // The queries this frame carries arrive on this face's link, whichever was dialled
             // last.
-            self.plane
-                .arriving
-                .store(self.generation, Ordering::Release);
+            self.plane.set_arriving(self.generation);
             // A query by an id of the shared dictionary is kept, so its replies mirror its key
             // form.
             #[cfg(feature = "shared-key-ids")]
@@ -2385,7 +2375,10 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             registry.take_pending_final_rids(face)
         };
         for (rid, qos) in owed {
-            if lock(&self.plane.holds).owe(self.generation, rid, qos) {
+            if self
+                .plane
+                .with_holds(|holds| holds.owe(self.generation, rid, qos))
+            {
                 actions.send_response_final(rid, qos);
             }
         }
@@ -2652,7 +2645,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
         let link = self.transport.place_gate(gate, endpoint)?;
         #[cfg(feature = "queryable")]
-        let generation = next_generation(&self.session.plane.generation);
+        let generation = self.session.plane.next_generation();
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
             face,
@@ -3165,7 +3158,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A member's query is held, and answered, under the group's own generation, as a link's
         // is under its; each join of the group is a generation of its own.
         #[cfg(feature = "queryable")]
-        let generation = next_generation(&self.session.plane.generation);
+        let generation = self.session.plane.next_generation();
         #[cfg(feature = "queryable")]
         let dispatch = group::dispatch(
             self.session.registry.clone(),
@@ -5370,8 +5363,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return;
         };
         let due = match release {
-            query::Release::Hold => lock(&self.plane.holds).release(generation, rid),
-            query::Release::Kept => lock(&self.plane.holds).release_kept(generation, rid),
+            query::Release::Hold => self
+                .plane
+                .with_holds(|holds| holds.release(generation, rid)),
+            query::Release::Kept => self
+                .plane
+                .with_holds(|holds| holds.release_kept(generation, rid)),
         };
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
@@ -5594,7 +5591,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             });
         }
         let gets = &mut registry.local;
-        lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
+        self.plane
+            .with_holds(|holds| holds.owe(query::LOCAL_QUERY, rid, qos));
         if own.release().is_some() {
             gets.replies.deliver_local_final(rid);
         }
@@ -6674,7 +6672,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(wire.mapping_id, retraction.is_some());
-        let row = QueryableRow::new(id, retraction, wire, sink);
+        // The tables' row holds the declaration the key is named by, so the key's own hold of it
+        // is given back once the row stands, and the entity holds it once; the row keeps what
+        // else the key held.
+        let mut holds = wire.into_holds();
+        let named = holds.take_named();
+        let row = QueryableRow::new(id, retraction, holds, sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -6689,6 +6692,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // held goes back.
                 drop(guard);
                 let why = Declined::from(refused.why);
+                if let Some(named) = named {
+                    named.release(self);
+                }
                 self.give_back(refused.callback.into_holds());
                 return Err(why);
             }
@@ -6699,17 +6705,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         );
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce_queryable(declared.handle);
+        // So is each group.
         #[cfg(feature = "group")]
         {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.queryables().get(declared.handle) {
+                let wire = group::wire_key_of(tables.wire_of(row.key()));
                 core.transport.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Queryable {
                         complete: row.complete(),
                     },
                     entity: id,
                     keyexpr: row.key().as_str(),
-                    wire: row.callback().wire(),
+                    wire: &wire,
                     retraction: row.callback().retraction(),
                     allowed_origin,
                 });
@@ -6718,11 +6726,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A matching listener that counts the session's own queryables may now match: it is told,
         // outside the lock.
         #[cfg(feature = "local-queryable")]
-        {
-            self.read_matching(core);
-            drop(guard);
-            self.deliver();
+        self.read_matching(core);
+        drop(guard);
+        if let Some(named) = named {
+            named.release(self);
         }
+        #[cfg(feature = "local-queryable")]
+        self.deliver();
         Ok(id)
     }
 
@@ -6762,7 +6772,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // generation (`query::LOCAL_QUERY`), so no table a link's ids reach holds it, and
             // the two counters never meet.
             let rid = guard.0.session.local_requests.take();
-            Some(query::OwnFinalHold::take(&self.plane.holds, rid).ok_or(Declined::TableFull)?)
+            Some(query::OwnFinalHold::take(&self.plane, rid).ok_or(Declined::TableFull)?)
         } else {
             None
         };
@@ -8079,35 +8089,6 @@ mod leg_deadline_tests {
             leg_deadline_ms(u64::MAX, u32::MAX),
             18_446_744_073_709_552 + 4_294_967_295
         );
-    }
-}
-
-#[cfg(all(test, feature = "queryable"))]
-mod generation_tests {
-    //! The generations a session's links and groups answer their queries under.
-    use super::{next_generation, query};
-    use core::sync::atomic::Ordering;
-    use portable_atomic::AtomicU64;
-
-    /// A link's generation is the counter's next value, and where the counter wraps the
-    /// session's own queries' generation is stepped over.
-    ///
-    /// # Control
-    ///
-    /// Returning the wrapped value without the step over `query::LOCAL_QUERY` reds the second
-    /// assertion.
-    #[test]
-    fn a_links_generation_is_never_the_sessions_own() {
-        let counter = AtomicU64::new(0);
-        assert_eq!(next_generation(&counter), 1);
-        let counter = AtomicU64::new(query::LOCAL_QUERY.wrapping_sub(1));
-        let after = query::LOCAL_QUERY.wrapping_add(1);
-        assert_eq!(
-            next_generation(&counter),
-            after,
-            "LOCAL_QUERY is stepped over"
-        );
-        assert_eq!(counter.load(Ordering::Relaxed), after);
     }
 }
 

@@ -1366,7 +1366,7 @@ mod tests {
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
             round,
-            alloc::sync::Arc::new(super::super::query::QueryPlane::leaked(1)),
+            alloc::sync::Arc::new(super::super::query::leaked_plane(1)),
         );
         let registry = Registry::new(
             &SessionLimits::defaults(),

@@ -1550,15 +1550,14 @@ pub(super) fn dispatch(
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
-    use core::sync::atomic::Ordering;
     use wz_session_core::response_sink::ResponseSink;
     move |event, replies| {
         let mut registry = registry.borrow_mut();
-        plane.arriving.store(generation, Ordering::Release);
+        plane.set_arriving(generation);
         registry.dispatch_event(face, event);
         registry.flush_pending_replies(face, replies);
         for (rid, qos) in registry.take_pending_final_rids(face) {
-            if super::lock(&plane.holds).owe(generation, rid, qos) {
+            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
                 replies.send_response_final(rid, qos);
             }
         }

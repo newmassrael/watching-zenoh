@@ -441,3 +441,72 @@ fn a_liveliness_subscribers_row_holds_the_declaration_its_interest_names() {
     );
     assert_eq!(live_holds(&engine), 0, "no hold is live");
 }
+
+/// A queryable's row holds the declaration its key is named by for as long as it stands, and is
+/// the one holder the queryable has of it: the key's own hold comes back as the queryable is
+/// declared, and the declaration outlives the program's hold while the queryable stands. A
+/// queryable the tables refuse gives back its key's hold of the declaration with the rest. Turned
+/// red by a queryable that keeps the key's hold besides the row's (two live after the
+/// declaration), and by a refusal that keeps the named hold (two live after it).
+#[cfg(feature = "queryable")]
+#[test]
+fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
+    use wz_capi_port::{QueryHolder, QueryableSink};
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let id = engine
+        .acquire_keyexpr("demo/named")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let sink = || -> QueryableSink {
+        let guard = Dropped(dropped.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                let _held = &guard;
+            },
+        )
+    };
+    let declare = |rest: &str| {
+        engine.declare_queryable_on_wire(
+            &format!("demo/named{rest}"),
+            WireKey::aliased_tail(id, rest.len()).holding(program.share(&*engine)),
+            false,
+            Locality::Any,
+            None,
+            sink(),
+        )
+    };
+    let queryable = declare("/x").expect("declared");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the program's hold alone: the key's came back, the row holds the declaration"
+    );
+    assert!(declare("/y").is_err(), "CONTROL: the one row is taken");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the refused queryable's key gave its hold back"
+    );
+    program.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/named".to_owned())],
+        "the queryable's row holds it past the program's release"
+    );
+    engine.undeclare_queryable(queryable);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "and lets it go with the queryable"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        2,
+        "the refused callback at once, the other with its row"
+    );
+}

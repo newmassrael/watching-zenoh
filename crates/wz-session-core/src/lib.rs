@@ -791,6 +791,12 @@ pub mod round;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub mod get_plane;
 
+/// The answering end of the session's queries: the Finals its queryables still owe, held by link
+/// generation and request id, the generation each query belongs to, and the calls a get of the
+/// session's own hands its queryables. Gated as [`round`] is, which holds the queries.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod query_plane;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
