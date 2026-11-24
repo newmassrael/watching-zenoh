@@ -31,7 +31,6 @@
 //! ([`TurnEnd::EndsLink`]).
 
 use wz_runtime_coop::session_drive::SessionLinks;
-use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
@@ -538,27 +537,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
     }
 
-    /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
-    /// over ([`Self::retract_at`]). Call it once, before the removal.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<SessionHandle<C>> {
+    /// The declaration at `index` of `kind`'s list was removed: retract it with `send`
+    /// ([`Self::retract_at`]). `index` is where it lay, and the kinds before it in the replay's
+    /// order are as they were.
+    pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn Fn(&McuActions<C>)) {
         let place = self.start_of(kind) + index;
-        self.retract_at(place)
+        self.retract_at(place, send);
     }
 
-    /// The declaration at `place` in the replay's order is about to be removed: the links to
-    /// retract it over, which are those of the faces that are up and whose peers were told of it.
-    /// Call it once, before the removal.
-    pub(super) fn retract_at(&mut self, place: usize) -> Vec<SessionHandle<C>> {
-        let mut links = Vec::new();
+    /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
+    /// each face that is up and whose peer was told of it, and move every face's replay past it.
+    /// Call it once, after the row went, with the place read while it stood: a send then finds
+    /// none of the session's tables borrowed, and nothing is kept to send later.
+    #[inline(never)]
+    pub(super) fn retract_at(&mut self, place: usize, send: &dyn Fn(&McuActions<C>)) {
         for face in self.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
             if matches!(face.replay.cursor.removed(place), Removal::Retract) {
-                links.push(wire.actions.clone());
+                send(&wire.actions);
             }
         }
-        links
     }
 }
 
