@@ -69,8 +69,13 @@ impl<'a> PicoEndpoint<'a> {
     pub(crate) fn read(endpoint: &'a str, keys: &'static [&'static str]) -> Self {
         let (locator, config) = cut(endpoint, b'#').unwrap_or((endpoint, ""));
         let locator = cut(locator, b'?').map_or(locator, |(bare, _)| bare);
-        let mut values = [None; MAX_KEYS];
-        let mut malformed = false;
+        // Read into the value handed back, so the values are not built apart and then moved in.
+        let mut read = Self {
+            locator,
+            keys,
+            values: [None; MAX_KEYS],
+            malformed: false,
+        };
         // The pairs between the `;`, an empty one skipped.
         let mut rest = Some(config);
         while let Some(text) = rest {
@@ -88,25 +93,20 @@ impl<'a> PicoEndpoint<'a> {
                 continue;
             }
             let Some((key, value)) = cut(pair, b'=') else {
-                malformed = true;
+                read.malformed = true;
                 break;
             };
             // A key past the room the values have is read as one the link does not know.
             let Some(slot) = keys
                 .iter()
                 .position(|known| *known == key)
-                .and_then(|slot| values.get_mut(slot))
+                .and_then(|slot| read.values.get_mut(slot))
             else {
                 break;
             };
             *slot = Some(value);
         }
-        Self {
-            locator,
-            keys,
-            values,
-            malformed,
-        }
+        read
     }
 
     /// Whether pico refuses the endpoint for a malformed config.
