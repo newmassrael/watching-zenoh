@@ -480,12 +480,16 @@ impl SegmentLedger {
             stream: profile.stream().iter().map(|&i| piece.values[i]).collect(),
         };
 
-        match self.streams.get(&stream) {
+        // The stream's transfer, found or made here: the key is moved into the
+        // map when the transfer is new, and the one the map holds is reached
+        // without a second search.
+        let transfer = match self.streams.get_mut(&stream) {
             Some(current) if current.number == number => {
                 if current.total != total {
                     verdict.unjoined = Some(Unjoined::TotalDisagrees);
                     return verdict;
                 }
+                current
             }
             _ => {
                 // A new transfer: the stream's previous one ends here.
@@ -500,26 +504,18 @@ impl SegmentLedger {
                 let need = total as usize;
                 self.make_room(need, &mut verdict.ended);
                 self.held += need;
-                self.streams.insert(
-                    stream.clone(),
-                    Transfer {
-                        number,
-                        total,
-                        buffer: vec![0u8; need],
-                        have: Vec::new(),
-                        high: 0,
-                        completed: false,
-                        touched: self.clock,
-                    },
-                );
+                self.streams.entry(stream).or_insert(Transfer {
+                    number,
+                    total,
+                    buffer: vec![0u8; need],
+                    have: Vec::new(),
+                    high: 0,
+                    completed: false,
+                    touched: self.clock,
+                })
             }
-        }
-        let clock = self.clock;
-        let Some(transfer) = self.streams.get_mut(&stream) else {
-            // Found or made just above; a ledger that lost it joins nothing.
-            return verdict;
         };
-        transfer.touched = clock;
+        transfer.touched = self.clock;
         if transfer.completed {
             verdict.place = Some(Place::AfterClosing);
             verdict.overlap = true;
