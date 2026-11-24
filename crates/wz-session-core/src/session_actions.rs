@@ -6440,28 +6440,76 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-close",
         )
     ))]
-    // The writer is handed over as a trait object, so the lease, the refusals and the send are
-    // compiled once for every message this sends, and not once for each writer.
-    #[inline(never)]
+    // The writer is written where it is called; the lease and the send around it are the two
+    // functions below, compiled once for every message this sends.
+    #[inline(always)]
     fn send_control_lent(
         &self,
         reliability: Reliability,
         priority: Priority,
         want: usize,
-        fill: &mut dyn FnMut(
+        fill: impl FnOnce(
             &mut crate::tx_buf::EncodeBuf<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     ) -> Result<(), crate::link::LinkDropCause> {
-        let link = &self.link;
-        let Some(mut slot) = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
-        else {
-            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
-        };
-        if fill(&mut slot).is_err() {
-            // Dropping the lease gives the slot back unsent.
+        let mut slot = self.lend_control_slot(priority, want)?;
+        let written = fill(&mut slot).is_ok();
+        self.send_control_slot(slot, written, reliability, priority)
+    }
+
+    /// The slot [`Self::send_control_lent`] writes its message into, from this binding's own link,
+    /// or the refusal, counted, of a link that lent none.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ))]
+    #[inline(never)]
+    fn lend_control_slot(
+        &self,
+        priority: Priority,
+        want: usize,
+    ) -> Result<crate::tx_lease::TxLease<'_, R::Driver>, crate::link::LinkDropCause> {
+        crate::tx_lease::TxLease::acquire(self.link.link_driver(), want, priority)
+            .ok_or_else(|| self.refuse_tx(crate::link::LinkDropCause::NoTxSlot))
+    }
+
+    /// Send `slot` once its message is `written` into it; a message that did not fit is refused
+    /// and counted, and dropping the lease gives the slot back unsent.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ))]
+    #[inline(never)]
+    fn send_control_slot(
+        &self,
+        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
+        written: bool,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> Result<(), crate::link::LinkDropCause> {
+        if !written {
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         }
-        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+        self.emit_on_link(
+            &self.link,
+            &[],
+            Some(&mut slot),
+            reliability,
+            priority,
+            false,
+        );
         Ok(())
     }
 
@@ -6553,7 +6601,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 cookie_override,
             )
         });
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, &mut |buf| {
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             let start = buf.len();
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 crate::handshake_encode::encode_init_into(
@@ -6614,7 +6662,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             open_head_len(&self.params, initial_sn, is_ack, None)
         };
         let want = head_len.saturating_add(chain_len);
-        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, &mut |buf| {
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             let start = buf.len();
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
@@ -6648,18 +6696,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
     fn send_close_lent(&self, reason: u8) -> Result<(), crate::link::LinkDropCause> {
         const WANT: usize = 1 + wz_codecs::close::Close::MAX_ENCODED_BYTES;
-        self.send_control_lent(
-            Reliability::Reliable,
-            Priority::Background,
-            WANT,
-            &mut |buf| {
-                crate::handshake_encode::encode_close_into(
-                    buf,
-                    reason,
-                    self.close_scope_is_session(),
-                )
-            },
-        )
+        self.send_control_lent(Reliability::Reliable, Priority::Background, WANT, |buf| {
+            crate::handshake_encode::encode_close_into(buf, reason, self.close_scope_is_session())
+        })
     }
 
     /// The one write of a Close of `reason` on this link, counted as the close it is: the
@@ -10186,7 +10225,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if len == 0 {
                 return false;
             }
-            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, &mut |buf| {
+            self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
                 R::with_mutex_mut(slot, |held| {
                     if held.is_empty() {
                         return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
