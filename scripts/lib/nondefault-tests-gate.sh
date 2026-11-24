@@ -743,6 +743,9 @@ transport-link-unixpipe,transport-link-ws|"
     # bound and pinned as its keys say, the group transport's room and input over loopback, and a
     # scouting window's sockets asking, reading and waiting.
     "wz-runtime-posix|hook|host-multicast|"
+    # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
+    # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
+    "wz-runtime-posix|hook|serial|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
