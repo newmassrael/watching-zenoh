@@ -1321,12 +1321,14 @@ where
         hand: Hand,
         deliver: F,
     ) -> Judged {
+        let mut active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
         if self.config.fragmentation_markers {
-            if let Some(judged) = self.apply_chain_boundary_markers(&frag) {
-                return judged;
-            }
+            active = match self.apply_chain_boundary_markers(&frag, active) {
+                Ok(active) => active,
+                Err(judged) => return judged,
+            };
         }
-        let admitted = match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
+        let admitted = match active {
             Some(idx) => self.admit_continuation(idx, &frag, ring, now_ms),
             None => self
                 .admit_chain_start(&frag, now_ms)
@@ -1416,10 +1418,11 @@ where
     /// ahead of the SN machinery on a session whose negotiated patch level
     /// carries them ([`ReassemblyConfig::fragmentation_markers`]).
     ///
-    /// `Some(judged)` means the fragment is CONSUMED here and must not
-    /// reach the staging path; `None` means carry on to the normal
-    /// start / continuation split, whose own `find_active` re-resolves the
-    /// slot this may have just released.
+    /// `Err(judged)` means the fragment is CONSUMED here and must not
+    /// reach the staging path; `Ok(active)` means carry on to the normal
+    /// start / continuation split with the slot of the fragment's key that is
+    /// still open: `active` as it came, or none once this has evicted it, since
+    /// a key has at most one open chain.
     ///
     /// The order is zenoh's, and the order is load-bearing
     /// (`io/zenoh-transport/src/unicast/universal/rx.rs:155-170`):
@@ -1434,8 +1437,11 @@ where
     /// missing-start-marker rule rather than reported as an abort — there
     /// is nothing to abort, and the sender is announcing the end of a
     /// chain this receiver never saw the start of.
-    fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<Judged> {
-        let active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
+    fn apply_chain_boundary_markers(
+        &mut self,
+        frag: &Fragment<'_>,
+        active: Option<usize>,
+    ) -> Result<Option<usize>, Judged> {
         if frag.markers.first {
             // A restart supersedes whatever is staged on this key: the open
             // chain is evicted before the marked fragment is admitted.
@@ -1443,19 +1449,19 @@ where
                 self.evict_duplicate_first(idx);
             }
             // Fall through: the marked fragment itself now starts a chain.
-            return None;
+            return Ok(None);
         }
         let Some(idx) = active else {
             // No marker and no chain in progress: this is not a chain
             // start, whatever its SN says.
-            return Some(Judged::Outcome(IngestOutcome::Refused(
+            return Err(Judged::Outcome(IngestOutcome::Refused(
                 RefuseReason::MissingStartMarker,
             )));
         };
         if frag.markers.dropped {
-            return Some(Self::abort_peer_drop(idx));
+            return Err(Self::abort_peer_drop(idx));
         }
-        None
+        Ok(active)
     }
 
     /// R311y578 — the SINGLE producer of the slot FSM's `fragment.drop`
