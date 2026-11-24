@@ -2431,8 +2431,10 @@ fn a_record_of_a_kept_kind_holds_its_value_and_one_not_kept_is_refused() {
     assert_eq!(*<Present as Presence>::read(&kept), 7);
     assert_eq!(<Present as Presence>::take(kept), 7);
     assert!(<Absent as Presence>::record(7_u64).is_none());
-    assert!(<Present as Presence>::KEPT && !<Absent as Presence>::KEPT);
 }
+
+// Whether a kind is kept is known to the build, of each presence.
+const _: () = assert!(<Present as Presence>::KEPT && !<Absent as Presence>::KEPT);
 
 /// A variant that holds a record of a kind not kept takes no room: the enum is as small as its
 /// other variant alone, which a kept kind's record outgrows.
