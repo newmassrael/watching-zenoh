@@ -11,7 +11,6 @@
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use core::cell::Cell;
-use core::num::NonZeroU32;
 use std::sync::Mutex;
 
 use wz_capi_port::{SubscriberSink, WireKey};
@@ -22,7 +21,6 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::row_callback::RowCallback;
 use wz_session_core::sample::{QosLevel, Sample, SampleKind, SourceInfo};
-use wz_session_core::session_tables::SubscriberHandle;
 use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use crate::engine::{SubscriberCall, SubscriberRow};
@@ -41,17 +39,14 @@ fn round(events: usize) -> Arc<Round> {
     Round::leaked(events)
 }
 
-/// A subscriber row a test hands samples to, boxed so it lies where it is while a call of it runs,
-/// and the handle its table would name it by.
+/// A subscriber row a test hands samples to, boxed so it lies where it is while a call of it runs.
 struct Row {
     row: Box<SubscriberRow>,
-    handle: SubscriberHandle,
 }
 
 impl Row {
     /// Row `tag`, handing what it hears to `sink`, the timestamp shown.
     fn new(tag: u8, sink: SubscriberSink) -> Self {
-        let bits = NonZeroU32::new(u32::from(tag) + 1).expect("not zero");
         Self {
             row: Box::new(SubscriberRow::new(
                 u32::from(tag),
@@ -60,16 +55,12 @@ impl Row {
                 sink,
                 true,
             )),
-            handle: SubscriberHandle::from_bits(bits).expect("an index"),
         }
     }
 
     /// A call of its callback, begun as the session's dispatch begins one.
     fn call(&self) -> SubscriberCall {
-        SubscriberCall::new(
-            self.row.begin().expect("a live row begins a call"),
-            self.handle,
-        )
+        SubscriberCall::new(self.row.begin().expect("a live row begins a call"))
     }
 
     /// Undeclare it: whether no call of it runs.
@@ -1013,22 +1004,17 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
 #[cfg(feature = "liveliness")]
 type Heard = Arc<Mutex<Vec<(u8, String, u64)>>>;
 
-/// A liveliness subscriber's row, boxed so it lies where it is while a call of it runs, and the
-/// handle its table would name it by.
+/// A liveliness subscriber's row, boxed so it lies where it is while a call of it runs.
 #[cfg(feature = "liveliness")]
 struct Hearing {
     row: Box<crate::engine::LivelinessRow>,
-    handle: wz_session_core::session_tables::LivelinessSubscriberHandle,
 }
 
 #[cfg(feature = "liveliness")]
 impl Hearing {
     /// A call of its callback, begun as the session's dispatch begins one.
     fn call(&self) -> crate::engine::LivelinessCall {
-        crate::engine::LivelinessCall::new(
-            self.row.begin().expect("a live row begins a call"),
-            self.handle,
-        )
+        crate::engine::LivelinessCall::new(self.row.begin().expect("a live row begins a call"))
     }
 }
 
@@ -1037,7 +1023,6 @@ impl Hearing {
 fn hearing(tag: u8, heard: &Heard) -> Hearing {
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
     let heard = heard.clone();
-    let bits = NonZeroU32::new(u32::from(tag) + 1).expect("not zero");
     Hearing {
         row: Box::new(crate::engine::LivelinessRow::new(
             WireKey::literal(),
@@ -1048,8 +1033,6 @@ fn hearing(tag: u8, heard: &Heard) -> Hearing {
                     .push((tag, sample.keyexpr.to_owned(), sample.token_id));
             }),
         )),
-        handle: wz_session_core::session_tables::LivelinessSubscriberHandle::from_bits(bits)
-            .expect("an index"),
     }
 }
 

@@ -798,9 +798,9 @@ impl Table {
 ///
 /// A fixed array the put takes out of the round whole and holds in its own frame while it hands
 /// the calls out with no lock held, so it takes no heap after the open; its cost is stack. One is
-/// `MAX_SUBSCRIPTIONS` calls of at most 16 bytes (a row's address and a 4-byte handle: 16 on a
-/// 64-bit target, 8 on a 32-bit one) and a length: at the build's default of 100 subscribers,
-/// 1,608 bytes on a 64-bit target and 804 on a 32-bit one. A subscriber's callback that puts on
+/// `MAX_SUBSCRIPTIONS` calls of a row's address each (8 bytes on a 64-bit target, 4 on a 32-bit
+/// one) and a length: at the build's default of 100 subscribers, 808 bytes on a 64-bit target and
+/// 404 on a 32-bit one. A subscriber's callback that puts on
 /// its own session from inside the call holds a second one in a frame above the first, and so
 /// on, as zenoh-pico's put re-enters its subscribers at any depth: the session bounds no such
 /// nesting, so its depth, and the stack it takes, are the program's, each level these bytes
@@ -810,10 +810,9 @@ impl Table {
 #[cfg(feature = "local-subscriber")]
 pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
 
-// A call is a row's address and a handle; the stack cost stated on `Captured` holds while it
-// stays so small.
+// A call is a row's address alone; the stack cost stated on `Captured` holds while it stays so.
 #[cfg(feature = "local-subscriber")]
-const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= 16);
+const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= core::mem::size_of::<usize>());
 
 /// What answers a query the round hands a queryable: the engine, which builds the responder the
 /// query's replies go out through on the link it came in on, and lets go of its Final's hold once
@@ -875,7 +874,7 @@ impl Released {
 
     /// End `call`, marked for the session to let its row go when it was the row's last call.
     fn end(&self, call: SubscriberCall) {
-        if call.end().is_some() {
+        if call.end() {
             self.mark();
         }
     }
@@ -883,7 +882,7 @@ impl Released {
     /// [`Self::end`] for a call of a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
     fn end_liveliness(&self, call: LivelinessCall) {
-        if call.end().is_some() {
+        if call.end() {
             self.mark();
         }
     }

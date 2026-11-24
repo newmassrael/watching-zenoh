@@ -1969,19 +1969,18 @@ impl RowCallback for SubscriberRow {
 }
 
 /// A call of a subscriber's callback the session began under its lock and a delivery makes after
-/// it: the call, and the handle its row is let go of by when it ends the last call of an
-/// undeclared subscriber. Neither copied nor dropped unended: each is ended once ([`Self::end`]),
-/// or its row would keep its slot for good.
+/// it: where its row lies, and nothing else, since the row whose last call it ends is found by its
+/// latch and not by a handle. Neither copied nor dropped unended: each is ended once
+/// ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct SubscriberCall {
     call: RowCall,
-    handle: SubscriberHandle,
 }
 
 impl SubscriberCall {
-    /// `call`, begun on the row `handle` names.
-    pub(crate) fn new(call: RowCall, handle: SubscriberHandle) -> Self {
-        Self { call, handle }
+    /// `call`, begun on a subscriber's row.
+    pub(crate) fn new(call: RowCall) -> Self {
+        Self { call }
     }
 
     /// Whether `other` is a call of the same row.
@@ -1996,15 +1995,13 @@ impl SubscriberCall {
         unsafe { self.call.0.as_ref() }.hand(sample);
     }
 
-    /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
-    /// which the session's walk of its tables then lets go of
-    /// (`SessionTables::release_drained_subscriber`).
-    pub(crate) fn end(self) -> Option<SubscriberHandle> {
+    /// End the call: `true` when it was the last call of an undeclared subscriber, whose row the
+    /// session's walk of its tables then lets go of (`SessionTables::release_drained_subscriber`).
+    pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row, asserted above)
         // and keeps its slot until its last call ended, which this one is not yet; a call ends with
         // no lock held (asserted above).
-        let last = unsafe { <SubscriberRow as RowCallback>::end(self.call) };
-        last.then_some(self.handle)
+        unsafe { <SubscriberRow as RowCallback>::end(self.call) }
     }
 }
 
@@ -2036,7 +2033,7 @@ impl RoundDelivery {
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     fn deliver(
         &mut self,
-        id: SubscriberHandle,
+        _id: SubscriberHandle,
         row: RowAccess<'_, SubscriberRow>,
         sample: &dyn SampleView,
         turn: FanOut,
@@ -2051,7 +2048,7 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         // holds, as the round's writer must.
         unsafe {
             self.round
-                .offer_sample(SubscriberCall::new(call, id), sample, turn.is_first())
+                .offer_sample(SubscriberCall::new(call), sample, turn.is_first())
         };
     }
 }
@@ -2076,7 +2073,7 @@ impl
 
     fn tell_held(
         cx: &mut RoundDelivery,
-        id: LivelinessSubscriberHandle,
+        _id: LivelinessSubscriberHandle,
         row: RowAccess<'_, LivelinessRow>,
         sample: LivelinessSample<'_>,
         held: Option<&KeyRef>,
@@ -2090,7 +2087,7 @@ impl
         // holds, as the round's writer must.
         unsafe {
             cx.round
-                .offer_liveliness(LivelinessCall::new(call, id), &sample, held)
+                .offer_liveliness(LivelinessCall::new(call), &sample, held)
         };
     }
 }
@@ -5942,7 +5939,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let tables = tables(&core.0.session.registry);
             let id = tables.liveliness_subscribers().get(handle)?.id();
             let call = tables.begin_liveliness_subscriber(handle)?;
-            Some((id, LivelinessCall::new(call, handle)))
+            Some((id, LivelinessCall::new(call)))
         });
         let Some((id, call)) = begun else {
             return;
