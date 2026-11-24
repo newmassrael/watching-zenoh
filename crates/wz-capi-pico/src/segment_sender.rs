@@ -145,7 +145,7 @@ impl wz_ext_owned_segment_sender_t {
 
     fn adopt(sender: SegmentSender) -> Self {
         Self {
-            handle: Box::into_raw(Box::new(Mutex::new(sender))).cast::<c_void>(),
+            handle: Box::into_raw(crate::object_slot::boxed(Mutex::new(sender))).cast::<c_void>(),
         }
     }
 }

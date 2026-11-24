@@ -67,7 +67,7 @@ impl StringArrayEntry {
             _start: bytes.as_ptr(),
             _len: bytes.len(),
         };
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             _bytes: bytes,
             view,
         })
@@ -104,7 +104,7 @@ enum Items {
 
 impl StringArrayState {
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             items: Items::Owned(
                 items
                     .into_iter()
@@ -133,7 +133,7 @@ impl StringArrayState {
             let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
             entries.push(StringArrayEntry::new(Box::from(bytes.unwrap_or(&[]))));
         }
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             items: Items::Owned(entries),
         })
     }
