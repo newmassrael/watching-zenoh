@@ -38,7 +38,11 @@ pub(super) struct FacePlane {
 impl FacePlane {
     /// Tell `sink` of each face event from now on, under the id that stops it.
     pub(super) fn watch(&self, sink: FaceEventSink) -> u64 {
-        let id = self.next_watcher.fetch_add(1, Ordering::AcqRel) + 1;
+        // The counter wraps as `fetch_add` does; a session does not declare 2^64 watchers.
+        let id = self
+            .next_watcher
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         lock(&self.watchers).push((id, sink));
         id
     }
