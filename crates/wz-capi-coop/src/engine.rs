@@ -1341,6 +1341,18 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 }
 
+/// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
+/// still being made.
+type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
+
+/// What the session read of a face at a step (`Core::read_face`): where its link stands, what it
+/// did since, and the answer of its dial, kept for the link it made.
+struct FaceRead<P> {
+    phase: Phase,
+    signals: Signals,
+    answer: DialAnswer<P>,
+}
+
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
 struct Publication<'a> {
     keyexpr: &'a str,
@@ -3017,7 +3029,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         } else {
             FaceRole::Taken
         };
-        let (phase, signals, answer) = self.read_face(at, id);
+        let FaceRead {
+            phase,
+            signals,
+            answer,
+        } = self.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         // A dial that is over is let go of now, with what it held for its link (a socket, the
@@ -3033,15 +3049,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
     /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
     /// made.
-    fn read_face(
-        &mut self,
-        at: usize,
-        id: FaceId,
-    ) -> (
-        Phase,
-        Signals,
-        Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
-    ) {
+    fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
         let phase = self
             .links
             .faces()
@@ -3069,7 +3077,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Phase::Held { node } = &phase {
             signals.node_held = self.links.node_is_held(node.as_slice(), id);
         }
-        (phase, signals, answer)
+        FaceRead {
+            phase,
+            signals,
+            answer,
+        }
     }
 
     /// The node a handshake that is over reached, when another face holds it or brings a link to
@@ -3101,7 +3113,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         life: &FaceLife,
         effect: FaceEffect,
-        answer: Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
+        answer: DialAnswer<L::Pump>,
         redial_ms: Option<u64>,
         now_us: u64,
     ) -> Result<(), OpenError> {
