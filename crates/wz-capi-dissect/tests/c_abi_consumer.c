@@ -1907,8 +1907,8 @@ static int check_follow_door(void) {
         rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
         CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
@@ -1937,8 +1937,8 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && doc != NULL,
               "field_values_since_window rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
                   0,
               "the windowed door writes the same document: %s", doc);
         wz_dissect_string_free(doc);
@@ -4137,11 +4137,11 @@ int main(void) {
      * nothing on this branch either; nor is revision 10, the four e2e fields
      * joining, nor revision 11, `row` joining, nor revision 12, the dates,
      * clock times and units of `time` and the intervals, and `zids` and
-     * `session`, joining.
+     * `session`, joining, nor revision 13, a zone rule after a time.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -4492,8 +4492,11 @@ int main(void) {
      * declared after; the exchange plane gains `maybe_other_link`; a reply
      * pairs with its request across a named session's links.
      * 28: `dropped_by_limits.caps` gains `chain_bytes`, the bytes one fragment
-     * chain may join. A key arrives; nothing retires. */
-    revisioned[0].revision = 28;
+     * chain may join. A key arrives; nothing retires.
+     * 29: a `row` term is read against the places the documents give the
+     * rows, so the narrowed planes count such a record matched or rejected
+     * where they counted it undecided. Values move under stationary keys. */
+    revisioned[0].revision = 29;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -5042,9 +5045,10 @@ int main(void) {
     CHECK(rc == WZ_DISSECT_OK, "proto_message document rc=%d", rc);
     /* (ABI 35) -- the binder's verdict, at 1. A selector with no node term and
      * no table is the cheapest input it answers; the same envelope opens a
-     * refusal. */
+     * refusal.
+     * 2: the rule binder's three refusals join; no key moves. */
     revisioned[16].name = "selector_bind";
-    revisioned[16].revision = 1;
+    revisioned[16].revision = 2;
     revisioned[16].doc = NULL;
     rc = wz_dissect_selector_bind("kind == put", NULL, &revisioned[16].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_bind document rc=%d", rc);
@@ -5056,8 +5060,8 @@ int main(void) {
         rc = wz_dissect_selector_bind_in_zone("time > 12:04", NULL, 540, &zoned);
         CHECK(rc == WZ_DISSECT_OK && zoned != NULL, "selector_bind_in_zone rc=%d", rc);
         if (zoned != NULL) {
-            CHECK(strncmp(zoned, "{\"document\":{\"name\":\"selector_bind\",\"revision\":1},",
-                          strlen("{\"document\":{\"name\":\"selector_bind\",\"revision\":1},")) ==
+            CHECK(strncmp(zoned, "{\"document\":{\"name\":\"selector_bind\",\"revision\":2},",
+                          strlen("{\"document\":{\"name\":\"selector_bind\",\"revision\":2},")) ==
                       0,
                   "the zone binder writes the binder's document: %s", zoned);
             CHECK(strstr(zoned, "\"selector\":\"time > 12:04+09:00\"") != NULL,
@@ -5071,6 +5075,40 @@ int main(void) {
         rc = wz_dissect_selector_bind_in_zone(NULL, NULL, 0, &zoned);
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && zoned == NULL,
               "a null selector rc=%d", rc);
+    }
+    /* (ABI 65) -- the rule binder writes the offset in force onto a date, the
+     * rule onto a clock time, refuses a date the clock skips with its span, and
+     * refuses a null with no string. */
+    {
+        static const char cet[] = "CET-1CEST,M3.5.0,M10.5.0/3";
+        char *ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 2026-07-15T12:00", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "\"selector\":\"time > 2026-07-15T12:00+02:00\"") != NULL,
+                  "the summer offset is not written after the date: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 12:04", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz clock rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "12:04[CET-1CEST,M3.5.0,M10.5.0/3]") != NULL,
+                  "the rule is not written onto the clock time: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 2026-03-29T02:30", NULL, cet, &ruled);
+        CHECK(rc == WZ_DISSECT_OK && ruled != NULL, "selector_bind_in_tz skipped rc=%d", rc);
+        if (ruled != NULL) {
+            CHECK(strstr(ruled, "\"refusal\":\"skipped_time\"") != NULL &&
+                      strstr(ruled, "\"start\":7,\"end\":23") != NULL,
+                  "a skipped date is not refused at its span: %s", ruled);
+            wz_dissect_string_free(ruled);
+        }
+        ruled = NULL;
+        rc = wz_dissect_selector_bind_in_tz("time > 12:04", NULL, NULL, &ruled);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && ruled == NULL, "a null rule rc=%d", rc);
     }
     /* (ABI 36) -- the message list, at 1: the cheapest input it answers is one
      * file with one message. */

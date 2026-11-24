@@ -308,6 +308,106 @@ fn bytes_that_are_not_the_message_are_a_refused_record_with_why() {
     assert!(doc.contains("\"state\":\"refused\",\"why\":"), "{doc}");
 }
 
+/// Each list numbered `100 + n` and each row `1000 * n + produced + 1`, so the
+/// numbers of two lists never meet and a list's id is not its position.
+struct Spread;
+
+impl RowCoordinates for Spread {
+    fn list_id(&self, list: usize) -> Option<u64> {
+        Some(100 + list as u64)
+    }
+
+    fn scouting_list_id(&self, _flow: &FlowKey) -> Option<u64> {
+        None
+    }
+
+    fn row_seq(&self, list: usize, produced: u64) -> Option<u64> {
+        Some(1000 * list as u64 + produced + 1)
+    }
+}
+
+/// One pose with `x` on the flow from source port `port`, as packet `i`.
+fn pose_on(d: &mut Dissection, i: usize, port: u16, x: i64) {
+    let wire = frame_carrying(&push_declaring("demo/pose", 0, &pose(x, 0.5)));
+    let pkt = udp_packet([10, 0, 0, 1], port, [10, 0, 0, 2], 7447, &wire);
+    d.push_packet_at(LINKTYPE_ETHERNET, i, Some(i as u64), &pkt);
+}
+
+/// The values of path `1` the document wrote, in its order.
+fn xs(doc: &str) -> Vec<String> {
+    doc.split("\"typed_value\":")
+        .skip(1)
+        .map(|s| s.split(',').next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The values door reads the selector against the numbers the handle's other
+/// documents print: `row` by the row's place, where it was undecided and wrote
+/// nothing, and `flow` by the list's id, not by its position.
+#[test]
+fn the_values_door_reads_row_and_flow_by_the_documents_numbers() {
+    let mut d = Dissection::new();
+    pose_on(&mut d, 0, 43210, -1);
+    pose_on(&mut d, 1, 43210, -2);
+    pose_on(&mut d, 2, 43210, -3);
+    let text = declarations();
+    let values = |selector: &str| {
+        let filter = crate::filter::Filter::parse(selector).expect("a selector");
+        field_values_since(
+            &d,
+            &Spread,
+            ask(&text, selector, &filter, "1", 0, 5000),
+            &mut ValuesMemory::new(),
+            None,
+        )
+        .expect("a document")
+    };
+    let row = values("row == 1");
+    assert_eq!(xs(&row), ["-2"], "{row}");
+    assert!(row.contains("\"seq\":2,"), "{row}");
+    assert_eq!(xs(&values("row >= 1")), ["-2", "-3"]);
+    assert_eq!(xs(&values("row == 3")), Vec::<String>::new());
+    // The one list is numbered 100, and is at position 0.
+    assert_eq!(xs(&values("flow == 100")), ["-1", "-2", "-3"]);
+    assert_eq!(xs(&values("flow == 0")), Vec::<String>::new());
+}
+
+/// A kept walk whose `row` term picks rows that moved begins again: a pose on
+/// the first flow moves the second flow's row from 1 to 2, and row 1 is then
+/// the first flow's second pose. The same selector and cursor that went on
+/// before must not keep the payload it picked under the old places.
+#[test]
+fn the_values_walk_begins_again_when_the_rows_a_row_term_picks_move() {
+    let mut d = Dissection::new();
+    pose_on(&mut d, 0, 43210, -1);
+    pose_on(&mut d, 1, 43211, -2);
+    let text = declarations();
+    let filter = crate::filter::Filter::parse("row == 1").expect("parses");
+    let mut memory = ValuesMemory::new();
+    let first = field_values_since(
+        &d,
+        &Spread,
+        ask(&text, "row == 1", &filter, "1", 0, 5000),
+        &mut memory,
+        None,
+    )
+    .expect("a document");
+    assert_eq!(xs(&first), ["-2"], "{first}");
+    let restarts = memory.stats().restarts;
+
+    pose_on(&mut d, 2, 43210, -3);
+    let moved = field_values_since(
+        &d,
+        &Spread,
+        ask(&text, "row == 1", &filter, "1", 0, 5000),
+        &mut memory,
+        None,
+    )
+    .expect("a document");
+    assert_eq!(xs(&moved), ["-3"], "{moved}");
+    assert!(memory.stats().restarts > restarts);
+}
+
 /// One values document per record `state`, for the gates that hold the
 /// document's declared vocabulary and carries to what it renders.
 pub(crate) fn documents_for_the_gates() -> Vec<String> {

@@ -23,6 +23,8 @@
 //!   every clock can be compared in, and a consumer that shows times in another
 //!   has the binder write its offset onto every literal that has none
 //!   ([`crate::filter::bind_json_in_zone`]) before a door reads the selector.
+//!   A zone that changes its clock is a POSIX TZ rule in brackets after the
+//!   time (`filter::tz` reads it).
 //!
 //! The comparison is in milliseconds, as `time` always compared, so a fraction
 //! of more than three digits names an instant the field cannot compare and is

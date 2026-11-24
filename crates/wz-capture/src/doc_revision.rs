@@ -5549,6 +5549,68 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // A `row` TERM IS DECIDED BY THE DOORS THAT WRITE NO ROWS, and no key or
+    // word moves on either document.
+    //
+    // * The census (29) reads a `row` term against the places the selection
+    //   document gives the rows before any plane judges a record, so the planes
+    //   a selector narrows count a record matched or rejected by the place of
+    //   the row that carried it, where they counted it `undecided`. A live
+    //   handle's census begins its planes again when those rows move.
+    // * The values document (4) reads the selector as the selection doors do:
+    //   a `row` term by the row's place, where it was undecided and wrote no
+    //   record, and a `flow` term by the handle's `list_id`, where it compared
+    //   the list's position. Records may be written that were not, and the
+    //   reverse.
+    DocumentShape {
+        document: CENSUS,
+        revision: 29,
+        keys: CENSUS_R28_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 4,
+        keys: FIELD_VALUES_R2_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R2_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R2_CARRIES,
+    },
+    // A ZONE THAT CHANGES ITS CLOCK JOINS THE LANGUAGE, and no key moves on
+    // either document.
+    //
+    // * The verdict (13): VALUES MOVE. A `time` value may carry a POSIX TZ
+    //   rule in brackets after the time, inside quotes; a selector that was
+    //   refused for one now reads `ok:true`, and a date with a rule the clock
+    //   skips or shows twice, or a rule that does not read, is refused at the
+    //   value with a `message` saying which.
+    // * The binder's verdict (2) gains three `refusal` words, written only by
+    //   the rule binder (`wz_dissect_selector_bind_in_tz`): `zone`, the rule
+    //   does not read, with no position; `skipped_time` and `repeated_time`,
+    //   a date the rule's clock skips or shows twice, with its span. No key is
+    //   new; each word carries keys an older word already did.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 13,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
+    DocumentShape {
+        document: SELECTOR_BIND,
+        revision: 2,
+        keys: SELECTOR_BIND_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_BIND_R2_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_BIND_R2_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -19833,6 +19895,70 @@ pub const SELECTOR_BIND_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
         WordCarries {
             word: "unknown_node",
             shapes: &[&["document", "end", "message", "name", "ok", "start"]],
+        },
+    ]),
+}];
+
+/// What a binder `refusal` says at revision 2: revision 1's words, and the rule
+/// binder's three: the rule does not read, a date its clock skips, a date its
+/// clock shows twice.
+pub const SELECTOR_BIND_REFUSAL_R2: &[&str] = &[
+    "ambiguous_node",
+    "repeated_time",
+    "selector",
+    "skipped_time",
+    "table",
+    "unknown_node",
+    "zone",
+];
+
+/// The binder verdict's value families at revision 2: the refusal.
+pub const SELECTOR_BIND_R2_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "refusal",
+    values: SELECTOR_BIND_REFUSAL_R2,
+}];
+
+/// Revision 1's carries, and the rule binder's words: `zone` is about the
+/// caller's rule and has no place in the selector, as `table`; `skipped_time`
+/// and `repeated_time` give the date's byte span in the text typed.
+pub const SELECTOR_BIND_R2_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "refusal",
+    shape: CarriesShape::Discriminant(&[
+        WordCarries {
+            word: "ambiguous_node",
+            shapes: &[&[
+                "candidates",
+                "document",
+                "end",
+                "message",
+                "name",
+                "ok",
+                "start",
+            ]],
+        },
+        WordCarries {
+            word: "repeated_time",
+            shapes: &[&["document", "end", "message", "ok", "start"]],
+        },
+        WordCarries {
+            word: "selector",
+            shapes: &[&["document", "end", "message", "ok", "start"]],
+        },
+        WordCarries {
+            word: "skipped_time",
+            shapes: &[&["document", "end", "message", "ok", "start"]],
+        },
+        WordCarries {
+            word: "table",
+            shapes: &[&["document", "message", "ok"]],
+        },
+        WordCarries {
+            word: "unknown_node",
+            shapes: &[&["document", "end", "message", "name", "ok", "start"]],
+        },
+        WordCarries {
+            word: "zone",
+            shapes: &[&["document", "message", "ok"]],
         },
     ]),
 }];
@@ -51184,7 +51310,9 @@ mod tests {
             // and declared, the exchange plane `maybe_other_link`, and a
             // request id began to pair across a named session's links.
             // To 28 when `dropped_by_limits.caps` gained `chain_bytes`.
-            (CENSUS, 28u32),
+            // To 29 when a `row` term began to be read against the places the
+            // documents give the rows: values only.
+            (CENSUS, 29u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -51427,10 +51555,12 @@ mod tests {
             // To 11 when `row`, the row's place in the documents, joined.
             // To 12 when `zids` and `session` joined, and `time` and the
             // intervals began to read dates, clock times and units.
-            (SELECTOR_DIAGNOSE, 12),
+            // To 13 when `time` began to read a zone rule after a time.
+            (SELECTOR_DIAGNOSE, 13),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
-            (SELECTOR_BIND, 1),
+            // To 2 when the rule binder's three refusals joined.
+            (SELECTOR_BIND, 2),
             // The sentence a field document's node offers.
             (SELECTOR_TERM, 1),
             // Every field a selector can name. To 2 when the row's facts joined.
@@ -51572,7 +51702,9 @@ mod tests {
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
             // live ones, and a request's or an error's were joined no more.
-            (FIELD_VALUES, 3),
+            // To 4 when the selector began to read `row` by the row's place
+            // and `flow` by the handle's list id: values only.
+            (FIELD_VALUES, 4),
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its
