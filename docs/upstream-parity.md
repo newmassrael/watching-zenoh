@@ -770,6 +770,7 @@ stops holding.
 |---|---|---|---|---|---|
 | pico, on a host with a heap | how many members a group holds | no cap: the member list grows while the allocator gives (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `ztm->_peers = _z_transport_peer_multicast_slist_push_empty(ztm->_peers);`) | the rows of the group face's table, `GROUP_FACE_ROWS` (32) in `crates/wz-runtime-tokio/src/multicast_glue.rs`; the Join of a member past them is refused and counted | a group grows only to a cap a configuration states | `a_face_with_no_stated_cap_holds_its_rows_where_pico_would_grow` (`multicast_glue.rs`), `the_pico_group_states_no_member_cap` (`crates/wz-capi-pico/src/session.rs`) |
 | pico | a key not in canon form, at a door that makes, declares or sends a key | the view constructor refuses it with `Z_EINVAL` (`vendor/zenoh-pico/src/api/api.c` @ `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`); the owned constructor copies it unjudged (`vendor/zenoh-pico/src/api/api.c` @ `return _z_declared_keyexpr_from_substr(&key->_val, name, len);`), the concatenation keeps a result not in canon form, and a declaration, a put, a get and a reply send whatever text the key holds | refused with `Z_EINVAL` at every such door: the owned constructors, the concatenation, `z_declare_keyexpr`, the declarations of a publisher, subscriber, queryable, querier, liveliness token and liveliness subscriber, `z_put`, `z_delete`, `z_get`, `z_query_reply` and `z_query_reply_del`, all through one judgement (`canon_key` in `crates/wz-capi-pico/src/keyexpr.rs`); a text that needs rewriting goes through an `_autocanonize` door or the join, which rewrite it as pico's do | a key is made of text only when the text is in canon form, as upstream zenoh makes one (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `fn try_from(value: &'a str) -> Result<Self, Self::Error> {`), its concatenation included (`zenoh/src/api/key_expr.rs` @ `key_expr: OwnedKeyExpr::try_from(format!("{self}{s}"))?,`) | `the_owned_constructors_refuse_a_text_not_in_canon_form`, `a_concatenation_is_taken_only_as_it_is`, `the_outbound_gate_reads_a_canon_key_and_refuses_the_rest` (`crates/wz-capi-pico/src/keyexpr.rs`); `crates/wz-capi-pico/tests/it/files/noncanon_keys_refused.rs` |
+| pico | a serial locator's `exclusive` key, on a host tty | no such key: the tty is opened and set with no lock, so a second opener shares it (`vendor/zenoh-pico/src/link/transport/serial/tty_posix.c` @ `static z_result_t _z_posix_tty_open_impl(`) | the key is read as upstream reads it, `true` when the locator states none: an exclusive `flock` and `TIOCEXCL` on the tty, so a second opener of either kind is refused; `exclusive=false` takes a shared `flock` and `TIOCNXCL`, and sharers admit one another (`PosixSerialLine::claim` in `crates/wz-runtime-posix/src/serial.rs`) | a key a locator states is applied with its original's meaning and default (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `const DEFAULT_EXCLUSIVE: bool = true;`); pico has no key, so a pico locator, which states none, takes upstream's default | `an_exclusive_line_refuses_a_second_opener_and_shared_lines_do_not` (`crates/wz-runtime-posix/src/serial.rs`) |
 
 The rule, and why it is the pico preset's alone. A group admits a member on an unauthenticated
 Join, keyed by the source address of the datagram, and a single host on the segment can send
@@ -801,6 +802,17 @@ both do (`vendor/zenoh-pico/src/session/keyexpr.c` @
 What the row costs, stated: a pico program that builds an owned key or a concatenation of a text
 not in canon form, or sends one through an unchecked view, gets `Z_EINVAL` where pico went on,
 and nothing is made or sent; the program asks an `_autocanonize` door for the canon form instead.
+
+Why the serial row follows upstream (main session, 2026-11-25). A locator key that is read and
+not applied is a silent drop of what its writer asked for, so every key of upstream's serial link
+is applied with upstream's meaning. Only `exclusive` belongs to the line; `tout` (the wait
+before an INIT is sent again after the peer's RESET) and `release_on_close` (whether the port is
+let go when the link closes) belong to the link, and are rows of their own when the cooperative
+engine's serial link applies them.
+
+What the row costs, stated: a pico program on a host that opens a tty another process already
+holds through a wz serial link is refused where pico would share the line, and two pico-preset
+nodes cannot open one tty unless their locators say `exclusive=false`.
 
 ## 8. Limits of an original, measured on wz
 

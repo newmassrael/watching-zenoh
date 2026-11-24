@@ -11,6 +11,15 @@
 //! `VMIN = 1` and `VTIME = 0`, the speed out of the same table, and both queues flushed. It is
 //! opened non-blocking, where pico's blocks in its read: a cooperative loop reads what is queued
 //! and waits in `poll`. A pin pair names no tty, and is refused as pico's POSIX tty refuses it.
+//!
+//! The locator's `exclusive` key is applied as upstream zenoh applies it, which pico, having no
+//! such key, does not: upstream's serial link sets the port's access mode with it
+//! (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `let mut port = ZSerial::new(path.clone(), baud_rate, exclusive).map_err(|e| {`),
+//! which on a POSIX host is `TIOCEXCL` and an exclusive `flock`, or `TIOCNXCL` and a shared one
+//! (serialport 4.10.1, the version upstream locks, in its `TTYPort::open` and `set_exclusive`),
+//! taken without waiting, so a line another holds is refused at once. `tout` and
+//! `release_on_close` are the link's, not the line's: upstream waits `tout` before it sends
+//! its INIT again after the peer's RESET, and releases or keeps the port when the link closes.
 //! Nothing here allocates: the line is a file descriptor.
 
 #![cfg(any(target_os = "linux", target_os = "android"))]
@@ -43,6 +52,9 @@ pub enum PosixSerialError {
     Attributes(c_int),
     /// `tcflush` failed with this `errno`.
     Flush(c_int),
+    /// Taking or sharing the line (`ioctl(TIOCEXCL)` or `TIOCNXCL`, then `flock`) failed with
+    /// this `errno`: `EWOULDBLOCK` when another opener holds it.
+    Exclusive(c_int),
     /// `write` failed with this `errno`.
     Write(c_int),
     /// `read` failed with this `errno`.
@@ -77,7 +89,9 @@ pub struct PosixSerialLine {
 
 impl PosixSerialLine {
     /// Open the tty at `path` at `baudrate` and set it as zenoh-pico sets one (see the module).
-    pub fn open(path: &str, baudrate: u32) -> Result<Self, PosixSerialError> {
+    /// `exclusive` takes the line for this opener alone, as the locator's key of that name asks
+    /// (see the module); a line taken so by another is refused here.
+    pub fn open(path: &str, baudrate: u32, exclusive: bool) -> Result<Self, PosixSerialError> {
         let speed = speed_of(baudrate).ok_or(PosixSerialError::Rate(baudrate))?;
         // A path longer than a locator holds is one no locator named; the NUL stays after it.
         if path.len() >= PATH_BYTES || path.bytes().any(|byte| byte == 0) {
@@ -99,9 +113,35 @@ impl PosixSerialLine {
         }
         // Owned from here, so an early return closes it.
         let line = Self { fd };
+        line.claim(exclusive)?;
         line.set_raw(speed)?;
         line.discard_queued()?;
         Ok(line)
+    }
+
+    /// Take the line for this opener alone (an exclusive `flock` and `TIOCEXCL`), or share it (a
+    /// shared `flock` and `TIOCNXCL`), as upstream's port does; the lock is asked without waiting,
+    /// so a line another holds is refused.
+    fn claim(&self, exclusive: bool) -> Result<(), PosixSerialError> {
+        let (mode, lock) = if exclusive {
+            (libc::TIOCEXCL, libc::LOCK_EX)
+        } else {
+            (libc::TIOCNXCL, libc::LOCK_SH)
+        };
+        // The lock first: an opener refused by it has not touched the tty's mode, which another
+        // holds.
+        // SAFETY: this line's own descriptor and value arguments.
+        if unsafe { libc::flock(self.fd, lock | libc::LOCK_NB) } != 0 {
+            return Err(PosixSerialError::Exclusive(errno()));
+        }
+        // SAFETY: this line's own descriptor; the request takes no argument.
+        if unsafe { libc::ioctl(self.fd, mode) } != 0 {
+            return Err(match errno() {
+                libc::ENOTTY => PosixSerialError::NotATerminal,
+                other => PosixSerialError::Exclusive(other),
+            });
+        }
+        Ok(())
     }
 
     /// Set the tty raw at `speed`, eight data bits, no parity, one stop bit, no flow control.
@@ -209,6 +249,10 @@ impl SerialDevice for PosixSerialLine {
 
 impl Drop for PosixSerialLine {
     fn drop(&mut self) {
+        // The exclusive mode is the tty's and outlives the descriptor, so it is let go before the
+        // close, as upstream's port lets it go; the `flock` ends with the descriptor.
+        // SAFETY: this line's own descriptor; the request takes no argument.
+        unsafe { libc::ioctl(self.fd, libc::TIOCNXCL) };
         // SAFETY: `fd` is this line's own descriptor, closed exactly once.
         unsafe { libc::close(self.fd) };
     }
@@ -240,7 +284,7 @@ impl SerialOpen for PosixSerialOpen {
             SerialLine::Device(path) => path.as_str(),
             SerialLine::Pins { .. } => return Err(open_refused(PosixSerialError::Pins)),
         };
-        PosixSerialLine::open(path, at.baudrate).map_err(open_refused)
+        PosixSerialLine::open(path, at.baudrate, at.options.exclusive).map_err(open_refused)
     }
 }
 
@@ -323,7 +367,7 @@ mod tests {
     #[test]
     fn a_line_is_set_raw_eight_n_one_at_its_rate() {
         let pty = Pty::open();
-        let line = PosixSerialLine::open(&pty.path, 115_200).expect("the tty");
+        let line = PosixSerialLine::open(&pty.path, 115_200, true).expect("the tty");
         let tty = attributes(&line);
         assert_eq!(tty.c_cflag & libc::CSIZE, libc::CS8);
         assert_eq!(
@@ -353,7 +397,7 @@ mod tests {
     #[test]
     fn a_line_carries_bytes_both_ways_and_never_blocks_a_read() {
         let pty = Pty::open();
-        let line = PosixSerialLine::open(&pty.path, 9_600).expect("the tty");
+        let line = PosixSerialLine::open(&pty.path, 9_600, true).expect("the tty");
         let mut buf = [0u8; 16];
         assert_eq!(line.try_read(&mut buf), Ok(None), "nothing queued");
         assert_eq!(line.write(b"\x00zenoh\x00"), Ok(7));
@@ -374,6 +418,50 @@ mod tests {
         );
     }
 
+    /// A line taken exclusively refuses a second opener of either mode, and is free again once
+    /// closed; shared lines admit one another and refuse an exclusive opener. The stack reads a
+    /// line held by another as worth a later try. Turned red by a claim that takes no lock or sets
+    /// no mode, by a close that leaves the tty exclusive, or by a held line read as permanent.
+    #[test]
+    fn an_exclusive_line_refuses_a_second_opener_and_shared_lines_do_not() {
+        let pty = Pty::open();
+        let held_by_another = |result: Result<PosixSerialLine, PosixSerialError>| {
+            matches!(
+                result.err(),
+                Some(PosixSerialError::Open(libc::EBUSY))
+                    | Some(PosixSerialError::Exclusive(libc::EWOULDBLOCK))
+            )
+        };
+        let held = PosixSerialLine::open(&pty.path, 9_600, true).expect("the tty");
+        for exclusive in [true, false] {
+            assert!(
+                held_by_another(PosixSerialLine::open(&pty.path, 9_600, exclusive)),
+                "a second opener, exclusive {exclusive}, is refused"
+            );
+        }
+        let at = parse_locator(&std::format!("serial/{}#baudrate=9600", pty.path))
+            .ok()
+            .and_then(|locator| locator.as_serial())
+            .expect("a serial locator");
+        assert_eq!(
+            PosixSerialOpen.open(&at).err(),
+            Some(LinkOpenError::Refused)
+        );
+        drop(held);
+        let shared = PosixSerialLine::open(&pty.path, 9_600, false).expect("free again");
+        let other = PosixSerialLine::open(&pty.path, 9_600, false).expect("a second sharer");
+        assert_eq!(
+            PosixSerialLine::open(&pty.path, 9_600, true).err(),
+            Some(PosixSerialError::Exclusive(libc::EWOULDBLOCK)),
+            "an exclusive opener meets the sharers' lock"
+        );
+        drop((shared, other));
+        assert!(
+            PosixSerialLine::open(&pty.path, 9_600, true).is_ok(),
+            "CONTROL: free once all close"
+        );
+    }
+
     /// What the line cannot be opened from is refused with its reason, and the stack's open reads
     /// each as permanent or worth a later try. Turned red by a refusal mapped to the other kind,
     /// or a pin pair or an unknown rate taken.
@@ -381,15 +469,15 @@ mod tests {
     fn a_line_that_cannot_be_opened_is_refused_with_its_reason() {
         let pty = Pty::open();
         assert_eq!(
-            PosixSerialLine::open(&pty.path, 12_345).err(),
+            PosixSerialLine::open(&pty.path, 12_345, true).err(),
             Some(PosixSerialError::Rate(12_345))
         );
         assert_eq!(
-            PosixSerialLine::open("/dev/null", 9_600).err(),
+            PosixSerialLine::open("/dev/null", 9_600, true).err(),
             Some(PosixSerialError::NotATerminal)
         );
         assert_eq!(
-            PosixSerialLine::open("/nonexistent/tty", 9_600).err(),
+            PosixSerialLine::open("/nonexistent/tty", 9_600, true).err(),
             Some(PosixSerialError::Open(libc::ENOENT))
         );
         let open = |text: &str| {
