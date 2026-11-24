@@ -565,7 +565,18 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     assert_eq!((table.capacity(), table.size()), (asked, bytes));
 
     let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
-    assert_eq!(row(&none, "link group receive buffers").count, 0);
+    assert!(
+        none.rows()
+            .iter()
+            .all(|row| !row.part.starts_with("link group receive")),
+        "a config that names no group plans no table of them: {none:?}"
+    );
+    let mut session =
+        SessionArena::reserve(&none, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = none.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    assert!(tables.group_rx().is_none(), "and lends none");
 }
 
 /// The tokens of faces that went before each was retracted are owed apart from the sets those
