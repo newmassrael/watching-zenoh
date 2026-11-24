@@ -904,10 +904,9 @@ mod lent_handshake {
 }
 
 /// Under `tx-lend-only` a frame the link lends no slot for is refused before a byte of it is
-/// written, and the sequence number minted for it is given back: the next frame of the conduit
-/// carries it, so the reliable channel has no gap no frame fills. Turned red by the refusal that
-/// keeps its SN (the `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out), whose
-/// next frame carries SN 1.
+/// written, and takes no sequence number: the next frame of the conduit carries the one it would
+/// have, so the reliable channel has no gap no frame fills. Turned red by an SN taken before the
+/// slot is lent (`open_frame_lent` minting in its admission again), whose next frame carries SN 1.
 #[cfg(all(feature = "tx-lend-only", feature = "codec-push", feature = "alloc"))]
 mod lent_frame_refusal {
     use alloc::sync::Arc;
@@ -927,6 +926,18 @@ mod lent_frame_refusal {
         lends: AtomicBool,
         slot: Mutex<Vec<u8>>,
         sent: Mutex<Vec<Vec<u8>>>,
+        asked: Mutex<Vec<usize>>,
+    }
+
+    impl DryLink {
+        fn of_width(width: usize, lends: bool) -> Arc<Self> {
+            Arc::new(Self {
+                lends: AtomicBool::new(lends),
+                slot: Mutex::new(alloc::vec![0; width]),
+                sent: Mutex::new(Vec::new()),
+                asked: Mutex::new(Vec::new()),
+            })
+        }
     }
 
     impl BoxedLinkDriver for DryLink {
@@ -938,7 +949,8 @@ mod lent_frame_refusal {
 
         fn close_blocking(&self) {}
 
-        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            self.asked.lock().expect("the asks").push(want);
             self.lends.load(Ordering::SeqCst).then_some(TxSlotGrant {
                 slot: TxSlot(0),
                 headroom: 0,
@@ -985,11 +997,7 @@ mod lent_frame_refusal {
 
     #[test]
     fn a_frame_refused_for_want_of_a_slot_gives_its_sequence_number_back() {
-        let link = Arc::new(DryLink {
-            lends: AtomicBool::new(false),
-            slot: Mutex::new(alloc::vec![0; 512]),
-            sent: Mutex::new(Vec::new()),
-        });
+        let link = DryLink::of_width(512, false);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
@@ -1003,6 +1011,49 @@ mod lent_frame_refusal {
         let sent = link.sent.lock().expect("the sends");
         assert_eq!(sent.len(), 1, "only the second put reached the link");
         // A frame's second byte is its SN, one byte while it is below 128; `params` starts at 0.
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the refused one gave back"
+        );
+    }
+
+    /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing
+    /// measures the message before it is written into the slot. Turned red by a send that asks
+    /// for a size it counted first (`open_frame_lent` asking for anything but `emit.mtu`).
+    #[test]
+    fn a_frame_sent_whole_asks_for_the_batch_budget() {
+        let link = DryLink::of_width(512, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        assert_eq!(put(&actions), Some(Ok(())));
+        let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
+        assert_eq!(
+            *link.asked.lock().expect("the asks"),
+            [budget],
+            "one ask, for the budget"
+        );
+    }
+
+    /// A slot lent short of the frame took the SN the frame was written with, and gives it back
+    /// with the refusal: the next frame of the conduit carries it. Turned red by the
+    /// `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out, whose next frame
+    /// carries SN 1.
+    #[test]
+    fn a_frame_refused_in_a_short_slot_gives_its_sequence_number_back() {
+        let link = DryLink::of_width(4, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        assert_eq!(
+            put(&actions),
+            Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
+        *link.slot.lock().expect("the slot") = alloc::vec![0; 512];
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
         assert_eq!(
             sent[0][1], 0,
             "the second frame carries the SN the refused one gave back"
