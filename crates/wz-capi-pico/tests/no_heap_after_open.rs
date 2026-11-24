@@ -279,11 +279,12 @@ enum Round {
     GroupReceive,
     TransportEventsListener,
     E2eSenderDemux,
+    E2eSupervision,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 27] = [
+    const ALL: [Round; 28] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -311,6 +312,7 @@ impl Round {
         Round::GroupReceive,
         Round::TransportEventsListener,
         Round::E2eSenderDemux,
+        Round::E2eSupervision,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -330,6 +332,7 @@ impl Round {
             Round::E2eSenderDemux => {
                 cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
             }
+            Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -359,7 +362,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 31] = [
+const FAMILIES: [(&str, Round, Part); 32] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -409,6 +412,7 @@ const FAMILIES: [(&str, Round, Part); 31] = [
         Part::All,
     ),
     ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
+    ("e2e-supervision", Round::E2eSupervision, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -592,6 +596,99 @@ impl E2e {
         use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
         wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
         wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+    }
+}
+
+/// The streams a supervisor's table has room for, and the bytes each keeps of its last payload.
+#[cfg(feature = "e2e-supervision")]
+const SUPERVISED_STREAMS: usize = 4;
+#[cfg(feature = "e2e-supervision")]
+const SUPERVISED_CELL: usize = 16;
+
+/// A reception supervisor over the program's storage with one stream added, as a receiver of a
+/// periodic message holds one: each round is a reception of the stream and a poll.
+#[cfg(feature = "e2e-supervision")]
+struct Supervision {
+    supervisor: wz_capi_pico::stream_supervision::wz_ext_owned_stream_supervisor_t,
+    /// The table and the value cells, which the supervisor owns until it is dropped.
+    slots: Vec<wz_capi_pico::stream_supervision::wz_ext_stream_slot_t>,
+    values: Vec<u8>,
+    stream: u32,
+}
+
+#[cfg(feature = "e2e-supervision")]
+impl Supervision {
+    unsafe fn new() -> Self {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_slot_t, wz_ext_stream_supervisor_add, wz_ext_stream_supervisor_loan,
+            wz_ext_stream_supervisor_new,
+        };
+        let mut supervision = Self {
+            supervisor: std::mem::zeroed(),
+            slots: vec![std::mem::zeroed::<wz_ext_stream_slot_t>(); SUPERVISED_STREAMS],
+            values: vec![0u8; SUPERVISED_STREAMS * SUPERVISED_CELL],
+            stream: 0,
+        };
+        assert_eq!(
+            wz_ext_stream_supervisor_new(
+                &mut supervision.supervisor,
+                supervision.slots.as_mut_ptr(),
+                supervision.slots.len(),
+                supervision.values.as_mut_ptr(),
+                SUPERVISED_CELL,
+                0,
+                None,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "the supervisor is made over the program's storage"
+        );
+        // A deadline far past a window, so a round's poll judges the stream and tells no loss.
+        assert_eq!(
+            wz_ext_stream_supervisor_add(
+                wz_ext_stream_supervisor_loan(&supervision.supervisor),
+                1_000,
+                2,
+                1,
+                false,
+                &mut supervision.stream,
+            ),
+            Z_OK,
+            "a stream is supervised"
+        );
+        supervision
+    }
+
+    /// Say the stream was received, with its payload, and poll.
+    unsafe fn round(&self) {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_supervisor_loan, wz_ext_stream_supervisor_poll,
+            wz_ext_stream_supervisor_received,
+        };
+        let supervisor = wz_ext_stream_supervisor_loan(&self.supervisor);
+        let payload = [0xC3u8; 8];
+        assert_eq!(
+            wz_ext_stream_supervisor_received(
+                supervisor,
+                self.stream,
+                payload.as_ptr(),
+                payload.len()
+            ),
+            Z_OK,
+            "a reception is recorded"
+        );
+        let mut told = usize::MAX;
+        assert_eq!(wz_ext_stream_supervisor_poll(supervisor, &mut told), Z_OK);
+        assert_eq!(told, 0, "a stream received within its deadline is not lost");
+    }
+
+    unsafe fn drop_all(mut self) {
+        use wz_capi_pico::stream_supervision::{
+            wz_ext_stream_supervisor_drop, wz_ext_stream_supervisor_move,
+        };
+        wz_ext_stream_supervisor_drop(wz_ext_stream_supervisor_move(&mut self.supervisor));
+        drop(self.slots);
+        drop(self.values);
     }
 }
 
@@ -839,6 +936,8 @@ struct Bench {
     /// A sender and a receiver that keeps its streams per sender.
     #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
     e2e_demux: E2e,
+    #[cfg(feature = "e2e-supervision")]
+    supervision: Supervision,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
     #[cfg(feature = "advanced")]
@@ -877,6 +976,8 @@ impl Bench {
         let e2e = E2e::new();
         #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
         let e2e_demux = E2e::sender_keyed();
+        #[cfg(feature = "e2e-supervision")]
+        let supervision = Supervision::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
         #[cfg(feature = "advanced")]
@@ -921,6 +1022,8 @@ impl Bench {
             e2e,
             #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
             e2e_demux,
+            #[cfg(feature = "e2e-supervision")]
+            supervision,
             #[cfg(feature = "replay-cache")]
             replay,
             #[cfg(feature = "advanced")]
@@ -1011,6 +1114,10 @@ impl Bench {
             Round::E2eSenderDemux => {
                 #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
                 self.e2e_demux.round();
+            }
+            Round::E2eSupervision => {
+                #[cfg(feature = "e2e-supervision")]
+                self.supervision.round();
             }
         }
     }
@@ -1467,6 +1574,8 @@ impl Bench {
         self.e2e.drop_both();
         #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
         self.e2e_demux.drop_both();
+        #[cfg(feature = "e2e-supervision")]
+        self.supervision.drop_all();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
         #[cfg(feature = "advanced")]
