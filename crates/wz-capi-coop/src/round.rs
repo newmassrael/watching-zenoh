@@ -550,6 +550,7 @@ impl RoundRows {
     /// The tables of a round of `counts`, lent from `arena` in the order the plan counts them:
     /// the records, the callbacks, the keys. Refused past the build's bound of a table or past what
     /// the arena has left.
+    #[inline(never)]
     pub(crate) fn lent(arena: &mut Arena, counts: RoundRowCounts) -> Result<Self, LendRefused> {
         Ok(Self {
             records: arena.lend(counts.records)?,

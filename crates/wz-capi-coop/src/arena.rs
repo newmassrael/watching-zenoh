@@ -1613,6 +1613,7 @@ pub(crate) struct SessionArena {
 impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
+    #[inline(never)]
     pub(crate) fn reserve(
         plan: &ArenaPlan,
         memory: &'static dyn ArenaMemory,
@@ -1654,6 +1655,7 @@ impl SessionArena {
     /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
     /// session's links claim as they open and give back as they go. Refused only by an arena
     /// reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
         let rx = self.cells(plan.link_bytes, plan.rx_buffers)?;
         let tx = self.cells(plan.link_bytes, plan.tx_slots)?;
@@ -1669,6 +1671,7 @@ impl SessionArena {
     /// Lend the delivery lane's area `plan` lays out, next after the links' buffers: one buffer of
     /// `DELIVERY_LANE_BYTES`, held by the session's lane for the session's life. Refused only by
     /// an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_lane(
         &mut self,
         plan: &ArenaPlan,
@@ -1680,6 +1683,7 @@ impl SessionArena {
     /// session holds for its life, from which a link claims a buffer when a chain's first fragment
     /// arrives and gives it back when the chain ends. Refused only by an arena reserved by another
     /// plan.
+    #[inline(never)]
     pub(crate) fn lend_reassembly(
         &mut self,
         plan: &ArenaPlan,
@@ -1690,6 +1694,7 @@ impl SessionArena {
     /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
     /// on, none written: the session writes each once as it opens. Refused only by an arena
     /// reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_endpoints(
         &mut self,
         plan: &ArenaPlan,
@@ -1701,6 +1706,7 @@ impl SessionArena {
     /// Lend the cells `plan` lays out for its links' drivers, their gates and their actions
     /// ([`ArenaPlan::holding_cells`]), each `None` for a plan with no such table. Refused only by
     /// an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_cells(
         &mut self,
         plan: &ArenaPlan,
@@ -1717,6 +1723,7 @@ impl SessionArena {
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
     /// in, for the session's life, each key at most `longest` bytes, the session's
     /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_keys(
         &mut self,
         plan: &ArenaPlan,
@@ -1730,6 +1737,7 @@ impl SessionArena {
     /// Lend the place for the ABI's handle `plan` holds, its last row: held by the handle for the
     /// session's life and never given back to the arena, as the lane's area is not. `None` for a
     /// plan with no place. Refused only by an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_handle(
         &mut self,
         plan: &ArenaPlan,
@@ -1743,6 +1751,7 @@ impl SessionArena {
 
     /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
     /// of each kind it holds places of. Refused only by an arena reserved by another plan.
+    #[inline(never)]
     pub(crate) fn lend_entity_places(
         &mut self,
         plan: &ArenaPlan,
@@ -1791,6 +1800,7 @@ impl SessionArena {
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
     /// taking nothing, past `N` or past what is left, which an arena reserved by the plan that
     /// counts the table never is.
+    #[inline(never)]
     pub(crate) fn lend<T, const N: usize>(
         &mut self,
         rows: usize,

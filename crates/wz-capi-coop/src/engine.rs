@@ -424,6 +424,7 @@ fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
 /// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
 /// handed can put in it (`round::holding_a_read`).
+#[inline(never)]
 pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     crate::round::holding_a_read::<
         { caps::PICO_UNICAST_BATCH_BYTES },
@@ -650,6 +651,7 @@ impl OpenKeyIds {
 /// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id. Refused
 /// when the configured bytes are not one to sixteen or are all zero, here and once, so the
 /// session it opens holds a zid.
+#[inline(never)]
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
     let stated = SessionZid::new(zid).map_err(OpenError::InvalidZid)?;
     let len = stated.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
@@ -657,6 +659,7 @@ pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
+#[inline(never)]
 fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     let mut zid = [0u8; 16];
     entropy
@@ -670,6 +673,7 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
 
 /// The zid `zid-derivation = address-ports` derives from the `listen` endpoints and eight bytes
 /// of `entropy` (see `wz_session_core::zid_derivation`), in its wire form.
+#[inline(never)]
 pub(crate) fn derived_zid<T: AsRef<str>>(
     listen: impl IntoIterator<Item = T>,
     entropy: &mut dyn EntropySource,
@@ -2122,6 +2126,7 @@ type LinkGate<C> = <C as LinkGates>::Gate;
 /// The arena a session over `links` opens `config` with: the rows its limits size, a cell for
 /// each link's driver as large as the largest the links open, and a cell for each link's gates.
 /// The one plan an open reserves by.
+#[inline(never)]
 pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
     links: &impl SessionLinks,
     config: &CoopConfig<E>,
@@ -2167,6 +2172,7 @@ impl RuntimeTables {
     /// The tables of a session `config` opens, its task cells together at most the build's
     /// `MAX_TASKS`: the groups' first, as a session that cannot join a group it was told to does
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
+    #[inline(never)]
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig<impl EndpointList>) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
         let links = usize::from(crate::arena::dials(config))
@@ -2187,6 +2193,7 @@ impl RuntimeTables {
     /// open spawns it, and sealed once the open is over (`open_links`). A build that joins none
     /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
     /// that names a group is refused by name there, so the groups' cells are none.
+    #[inline(never)]
     pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
         #[cfg(feature = "group")]
         {
@@ -2627,6 +2634,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial
     /// named; empty for none.
+    #[inline(never)]
     fn endpoint_text<'a>(&'a self, endpoint: Option<&'a DialEndpoint>) -> &'a str {
         endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
     }
@@ -2651,6 +2659,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// counted from before the dials would then already be over, the next read would dial again at
     /// once, and the session would be held through dial after dial with no room for a publish or
     /// a close to take it.
+    #[inline(never)]
     fn dial_or_wait(
         &mut self,
         from: usize,
@@ -2700,6 +2709,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     ///
     /// What became of the link is the driver's to say (`LinkSupervisor::advance`), and the link
     /// stays in its face while what it means for the session is done here.
+    #[inline(never)]
     fn poll_face(
         &mut self,
         at: usize,
@@ -2841,6 +2851,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// End the task of the link of the face at `at`, if it holds one.
+    #[inline(never)]
     fn abort_link(&self, at: usize) {
         if let Some(wire) = self.links.faces().get(at).and_then(|face| face.link.wire()) {
             wire.abort();
@@ -2878,6 +2889,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the session's link to its node, and no other link to the node is kept beside it. A first
     /// turn the replay is given up on ends the link at once, and the next pass over the faces
     /// takes it as lost (`poll_face`).
+    #[inline(never)]
     fn bring_up(&mut self, at: usize, now_us: u64) {
         let Some(face) = self.links.faces().get(at) else {
             return;
@@ -3201,6 +3213,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// own. A port that had no socket or buffer for one just now is looked at again on the next
     /// step, and one that is broken for good is let go of.
     #[cfg(feature = "listen")]
+    #[inline(never)]
     fn accept_links(&mut self) {
         let mut at = 0;
         while let Some(accepted) = self.links.accept_at(at) {
@@ -3236,6 +3249,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The face a link's `actions` are the end of, when something watches the faces (an event is
     /// the snapshot it carries) and the handshake has told who the peer is. A build without the
     /// connectivity plane watches nothing, and its snapshot is not linked.
+    #[inline(never)]
     fn face_of(&self, actions: &McuActions<C>) -> Option<FaceSnapshot> {
         #[cfg(feature = "connectivity")]
         {
@@ -3253,6 +3267,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Tell the watchers of the faces that `face` came up or went, with the session's other
     /// deliveries (`face_of` says whether there is anything to tell).
+    #[inline(never)]
     fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
         #[cfg(feature = "connectivity")]
         if let Some(face) = face {
@@ -3286,6 +3301,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// matching status or a write filter that counted on one reads the session as it now is.
     /// zenoh-pico drops a peer's targets from every write filter when its connection drops
     /// (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`).
+    #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
         if let Some(face) = self.links.faces_mut().iter_mut().find(|face| face.id == id) {
@@ -3495,6 +3511,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its links' receives for as long ([`RouterLend::lend_for`]). Every pass of the session's
     /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
     /// a group's wait makes lends nothing, and a link's receive takes no input in it.
+    #[inline(never)]
     fn run_tasks(&mut self) {
         let Self {
             local,

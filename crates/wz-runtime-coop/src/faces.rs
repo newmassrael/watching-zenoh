@@ -461,6 +461,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// all (one at least, the dial role's), each with a dial under way at most, and `waits` waits
     /// a read makes at once, reserved now. The ports are the open's, taken as it listens
     /// ([`Self::listen`]). Faces taken after are numbered from 1.
+    #[inline(never)]
     pub fn new(links: L, dial: F, faces: usize, waits: usize) -> Self {
         let mut table = Vec::with_capacity(faces.max(1));
         table.push(dial);
@@ -557,6 +558,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
+    #[inline(never)]
     pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial>) {
         if let Some(face) = self.faces.get_mut(at) {
             *face.link_mut() = link;
@@ -566,6 +568,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// Move the link of the face at `at` on at `now_us`: what became of it. The link stays in its
     /// face whatever became of it, for the session to read and replace, but for a dial that is over,
     /// which is let go of here ([`Moved::DialOver`]).
+    #[inline(never)]
     pub fn advance(&mut self, at: usize, now_us: u64) -> Moved<L::Pump> {
         let Some(face) = self.faces.get(at) else {
             return Moved::Stays;
@@ -620,6 +623,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// The face at `at`, whose handshake completed ([`Moved::Established`]), holds its link up.
+    #[inline(never)]
     pub fn establish(&mut self, at: usize) {
         let Some(face) = self.faces.get_mut(at) else {
             return;
