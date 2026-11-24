@@ -4174,15 +4174,16 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 }
 
 // R311dz-pre — bridge the observer's generic reply drain to the action
-// bundle. The inherent `send_response` / `send_response_final`
-// methods (below, in the `impl<R: SessionRuntime, T: TimeSource>` block) carry
-// the real encode + enqueue; these trait methods delegate to them so
-// The observer's reply drain (`flush_query_replies<S: ResponseSink>` and
-// the composing `flush_pending`) can drive any runtime's actions handle.
-// The delegating `self.send_response(..)` calls resolve to the inherent
-// methods (inherent shadows trait in method-call resolution), so there is
-// no recursion. The method set is empty in a build with neither response
-// codec, matching the trait's gated surface.
+// bundle. The inherent `send_response_final` method (below, in the
+// `impl<R: SessionRuntime, T: TimeSource>` block) carries the real encode +
+// enqueue; the trait method delegates to it so the observer's reply drain
+// (`flush_query_replies<S: ResponseSink>` and the composing `flush_pending`)
+// can drive any runtime's actions handle. The delegating call resolves to the
+// inherent method (inherent shadows trait in method-call resolution), so there
+// is no recursion. The owned `send_response` is inherent only: a holder of the
+// bundle as a `ResponseSink` links no encoder of the owned record. The method
+// set is empty in a build with neither response codec, matching the trait's
+// gated surface.
 //
 // R311lq — `SessionLinkActions` is the full-session bundle, so it
 // implements ALL THREE observer drain-sink concerns. They are separate
@@ -4232,10 +4233,6 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
 }
 
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn send_response(&self, response: ResponseOwned) {
-        self.send_response(response);
-    }
     // A staged reply is written as the codec's borrowed `Response` from the stage's own
     // row and encoded into the lent slot: no `QueryReply`, no `ResponseOwned`. Routed as
     // `dispatch_response` routes a response: on the band and with the express bit of the
@@ -4243,38 +4240,31 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     // surface has no error channel, so a transport-down reject drops the emit as the dead
     // link would.
     //
-    // The same writer serves both storage policies. With no allocator a reply the wire
-    // cannot carry is skipped (the heap drain skips one whose bounded field overflows).
-    // With one, the reply is written from its parts unless something needs the OWNED
-    // record: the session's egress policy asks a verdict of it, a routing namespace
-    // decorates its key, the transport's statistics classify its content, or the writer
-    // cannot describe it. Those go the way every owned reply goes, through
-    // [`Self::send_response`].
+    // The same writer serves both storage policies, and a reply the wire cannot carry is
+    // skipped under either: the owned path refuses the same replies (a reply that names no
+    // key), and the heap drain skips one whose bounded field overflows. A reply to a query
+    // that named its key by an id of the link's dictionary (`shared-key-ids`) names it as
+    // the query did. The OWNED record is built only where something reads it: the session's
+    // egress policy asks a verdict of it, a routing namespace decorates its key, or the
+    // transport's statistics classify its content. Those go the way every owned reply goes,
+    // through [`Self::send_response`].
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
-        // A reply whose key mirrors its query's form (`shared-key-ids`) is not a literal the
-        // writer from parts can describe: it goes as an owned reply does, which names it.
-        #[cfg(feature = "shared-key-ids")]
-        if self.reply_is_mirrored(parts.rid, parts.keyexpr) {
+        #[cfg(feature = "alloc")]
+        if !self.reply_can_be_written_from_parts() {
             if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
                 self.send_response(response);
             }
             return;
         }
-        #[cfg(feature = "alloc")]
-        let writer = match crate::lent_response::ResponseWriter::new(parts) {
-            Ok(writer) if self.reply_can_be_written_from_parts() => writer,
-            _ => {
-                if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
-                    self.send_response(response);
-                }
-                return;
-            }
-        };
-        #[cfg(not(feature = "alloc"))]
         let Ok(writer) = crate::lent_response::ResponseWriter::new(parts) else {
             return;
         };
+        #[cfg(feature = "shared-key-ids")]
+        let writer = writer.naming(self.with_facts(|facts| {
+            let keys = &mut facts.link_keys;
+            keys.reply_key(parts.rid, parts.keyexpr)
+        }));
         let qos = parts.qos;
         // The reply's own size: a Response has no size constant (its payload's bound is a u32
         // length), and the link lends a slot of this size. A reply the writer refuses is refused
@@ -16718,16 +16708,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response
     }
 
-    /// Whether a reply on `keyexpr` to the request `rid` names its key otherwise than as the
-    /// literal, which the writer of a reply from its parts cannot do.
-    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
-    fn reply_is_mirrored(&self, rid: crate::wire_id::RequestId, keyexpr: &str) -> bool {
-        self.with_facts(|facts| {
-            let keys = &mut facts.link_keys;
-            keys.reply_key(rid, keyexpr) != crate::shared_key_ids::ReplyKey::Literal
-        })
-    }
-
     /// The key the installed dictionary names `id`, when one is installed and holds it.
     #[cfg(feature = "shared-key-ids")]
     fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
@@ -17998,7 +17978,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// record built: nothing between the handler and the wire needs one. The egress policy
     /// asks its verdict of the owned reply, a routing namespace decorates the owned reply's
     /// key, and the statistics classify the owned reply's content, so a session that holds
-    /// either, or is built to count, sends the owned reply.
+    /// either, or is built to count, sends the owned reply. A build with none of the three
+    /// answers `true` with no read, and links no owned reply for its staged ones.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     fn reply_can_be_written_from_parts(&self) -> bool {
         if cfg!(feature = "transport-stats") {

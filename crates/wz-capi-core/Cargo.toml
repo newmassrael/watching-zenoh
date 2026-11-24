@@ -78,10 +78,12 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
-    # The pico ABI's policy doors and its conformance digest, which a build that names nothing has
-    # (deploy/wz-config.toml, `config-policy`, `conformance-digest`).
+    # The pico ABI's policy doors, its conformance digest and its door of what an open asks of the
+    # operating system, which a build that names nothing has (deploy/wz-config.toml,
+    # `config-policy`, `conformance-digest`, `device-requires`).
     "config-policy",
     "conformance-digest",
+    "device-requires",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -269,6 +271,10 @@ message-catalog = []
 # (`wz-capi-pico/message-payload`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 message-payload = []
+# The doors that read a schema from `.proto` text. The model has nothing behind it: the doors are
+# the pico ABI's own (`wz-capi-pico/proto-text`) over the text reader of `wz-app-frame`, so this
+# feature only carries the capability's name, as `e2e-sender`'s does.
+proto-text = []
 # The object pools. The model has nothing behind them: the pools are the pico ABI's own
 # (`wz-capi-pico/object-pool`, `wz-capi-pico/object-pool-region`), so these features only carry
 # the capabilities' names, as `e2e-sender`'s does.
@@ -298,6 +304,10 @@ config-document = []
 # so each feature only carries the capability's name.
 config-policy = []
 conformance-digest = []
+# The door of a pico config that answers what its open would ask of the operating system
+# (`wz-capi-pico/device-requires`), part of the unstable surface: the derivation is
+# `wz-session-core`'s, so this feature only carries the capability's name.
+device-requires = ["unstable-api"]
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

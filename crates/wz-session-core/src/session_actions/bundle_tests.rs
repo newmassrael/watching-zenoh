@@ -1021,6 +1021,63 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
     );
 }
 
+/// A staged reply leaves through the writer of its parts in a build that reads no owned reply (no
+/// statistics; no policy or namespace is installed here): one the writer takes is written, and one
+/// it refuses is skipped with nothing built. The responder identity of no bytes is the case the
+/// owned builder asserts against, so a refused reply that fell back to the owned record would panic
+/// here.
+///
+/// Turned red by a `send_reply_parts` that sends a reply the writer refuses as an owned one.
+#[cfg(all(
+    feature = "codec-response",
+    not(feature = "transport-stats"),
+    not(feature = "tx-lend-only")
+))]
+mod staged_replies {
+    use core::sync::atomic::Ordering;
+
+    use super::bundle;
+    use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+    use crate::response_sink::ResponseSink as _;
+    use crate::sample::QosLevel;
+
+    fn staged<'a>(keyexpr: &'a str, responder: Option<(&'a [u8], u32)>) -> ReplyParts<'a> {
+        ReplyParts {
+            rid: 5,
+            keyexpr,
+            responder,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"answer"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_staged_reply_the_writer_refuses_is_skipped_and_one_it_takes_is_written() {
+        let (actions, link) = bundle();
+        actions.send_reply_parts(staged("demo/asked", Some((&[], 1))));
+        actions.send_reply_parts(staged("", None));
+        assert_eq!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "nothing of a refused reply reaches the link"
+        );
+        actions.send_reply_parts(staged("demo/asked", Some((&[1, 2, 3, 4], 5))));
+        assert_ne!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "CONTROL: a reply the writer takes is written"
+        );
+    }
+}
+
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {

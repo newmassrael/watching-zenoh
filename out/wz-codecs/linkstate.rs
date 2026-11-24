@@ -19,7 +19,7 @@ use sce_forge_runtime::codec::VecSink;
 use super::linkstate_link::LinkstateLink;
 use super::linkstate_weight::LinkstateWeight;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::linkstate_link::LinkstateLinkView;
 use super::linkstate_weight::LinkstateWeightView;
 use super::locator::LocatorView;
@@ -736,6 +736,21 @@ impl LinkstateWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `Linkstate` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct LinkstateWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for LinkstateWalk {
+    type Entry<'b> = LinkstateView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `LinkstateView` is what a decode of `Linkstate` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `Linkstate` holds it, an embedded body or a variant arm as its
@@ -745,48 +760,24 @@ impl LinkstateWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `Linkstate::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `locators` reads its entries: the walk of every list of `LocatorView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct LinkstateLocatorsWalk;
+pub type LinkstateLocatorsWalk = super::locator::LocatorWalk;
 
-impl ListWalk<0> for LinkstateLocatorsWalk {
-    type Entry<'b> = LocatorView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        LocatorView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
-
+/// How `links` reads its entries: the walk of every list of `LinkstateLinkView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct LinkstateLinksWalk;
+pub type LinkstateLinksWalk = super::linkstate_link::LinkstateLinkWalk;
 
-impl ListWalk<0> for LinkstateLinksWalk {
-    type Entry<'b> = LinkstateLinkView;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        LinkstateLinkView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
-
+/// How `weights` reads its entries: the walk of every list of `LinkstateWeightView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct LinkstateWeightsWalk;
-
-impl ListWalk<0> for LinkstateWeightsWalk {
-    type Entry<'b> = LinkstateWeightView;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        LinkstateWeightView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type LinkstateWeightsWalk = super::linkstate_weight::LinkstateWeightWalk;
 
 /// The group `LinkstateOptionsH` as `LinkstateView` holds it.
 #[allow(dead_code)]
-pub type LinkstateOptionsHView<'a> = LinkstateOptionsH<Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>, Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>;
+pub type LinkstateOptionsHView<'a> = LinkstateOptionsH<Bounded<ListView<'a, super::linkstate_link::LinkstateLinkWalk, 0>, { usize::MAX }>, Bounded<ListView<'a, super::linkstate_weight::LinkstateWeightWalk, 0>, { usize::MAX }>>;
 
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -798,7 +789,7 @@ pub struct LinkstateView<'a> {
     pub zid: Option<::sce_forge_runtime::codec::Bytes<'a, 16>>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<Bounded<ListView<'a, LinkstateLocatorsWalk, 0>, { usize::MAX }>>,
+    pub locators: Option<Bounded<ListView<'a, super::locator::LocatorWalk, 0>, { usize::MAX }>>,
     pub links_len: u64,
     pub options_h: LinkstateOptionsHView<'a>,
 }
@@ -892,7 +883,7 @@ impl<'a> LinkstateView<'a> {
         }
         let links_len = cursor.read_vle_u64()?;
         #[allow(clippy::needless_late_init)]
-        let links: Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>;
+        let links: Bounded<ListView<'a, super::linkstate_link::LinkstateLinkWalk, 0>, { usize::MAX }>;
         {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
@@ -903,7 +894,7 @@ impl<'a> LinkstateView<'a> {
             links = Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?;
         }
         #[allow(clippy::needless_late_init)]
-        let weights: Option<Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>;
+        let weights: Option<Bounded<ListView<'a, super::linkstate_weight::LinkstateWeightWalk, 0>, { usize::MAX }>>;
         if (options & 0x08u8) != 0 {
             let _n = links_len;
             let _rest = cursor.peek_slice(cursor.remaining())?;

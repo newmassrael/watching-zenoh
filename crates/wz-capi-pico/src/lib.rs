@@ -498,8 +498,6 @@ pub mod config;
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
-// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
-// unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
@@ -513,7 +511,9 @@ pub mod clock_source;
     feature = "declarations-synced-event"
 ))]
 pub mod decl_watch;
-#[cfg(feature = "unstable-api")]
+// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
+// unstable surface (docs/target-build-contract.md T9), in a build with `device-requires`.
+#[cfg(feature = "device-requires")]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
 // share, and the instance keys' and the message payloads' doors with them, in a build with any of
@@ -617,8 +617,12 @@ pub mod platform;
 #[cfg(wz_process_pools)]
 mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
-// that read a schema: the instance keys' and the message payloads'.
-#[cfg(any(feature = "instance-key", feature = "message-payload"))]
+// that read a schema from its text: the instance keys' and the message payloads', in a build that
+// links the text reader.
+#[cfg(all(
+    feature = "proto-text",
+    any(feature = "instance-key", feature = "message-payload")
+))]
 #[cfg(not(wz_additional_apart))]
 pub mod proto_file;
 pub mod pubsub;

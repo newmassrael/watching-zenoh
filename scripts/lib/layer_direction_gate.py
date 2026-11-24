@@ -18,7 +18,11 @@ graph and a dev-dependency is not even a cycle.
 application frame (the CRC engine, the judge and the profiles) left the capture
 crate so a session runtime and the C ABIs can use it, and it is built on the
 core. The graph and source rules below cover it; the module rule does not,
-because no application-frame module was ever the core's.
+because no application-frame module was ever the core's. `wz-app-schema`, the
+readers below the application frame (the `.proto` schema, the JSON documents
+of the profiles and the message catalog's reader), is held the same way: it
+reads JSON and key expressions with the core's rules, so it is built on the
+core and never named by it.
 
 ## What is checked
 
@@ -131,6 +135,7 @@ UPPER = {
 ABOVE_CORE = {
     **UPPER,
     "wz-app-frame": "wz_app_frame",
+    "wz-app-schema": "wz_app_schema",
 }
 
 # A module stem is server-layer when it matches this. `extauth` itself and
@@ -940,6 +945,24 @@ def selftest() -> int:
         (
             "the application frame not built on the core",
             {"upper": {"wz-app-frame": ()}},
+            True,
+            "no normal dependency on",
+        ),
+        (
+            "the core names the schema readers' path",
+            {"core_line": "use wz_app_schema::json_doc::Pointer;\n"},
+            True,
+            "names an upper crate's path",
+        ),
+        (
+            "the schema readers built on the core",
+            {"upper": {"wz-app-schema": (_dep(CORE),)}},
+            False,
+            "",
+        ),
+        (
+            "the schema readers not built on the core",
+            {"upper": {"wz-app-schema": ()}},
             True,
             "no normal dependency on",
         ),

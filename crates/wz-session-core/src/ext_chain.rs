@@ -1181,23 +1181,13 @@ fn write_ext_chain<K: sce_forge_runtime::codec::SceSink>(
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
 // The Init and the Open are written by `handshake_encode` (the lend-only Open's
 // chain by `encode_held_chain_into`), and the vector form writes through the vector's
-// own sink, so this form's readers are the tests that hold the two forms to each other.
+// own sink, so this form's readers are the tests that hold the two forms to each other, and it is
+// compiled where they are.
 #[cfg(all(
+    test,
     feature = "alloc",
-    any(
-        all(
-            test,
-            feature = "codec-init-body",
-            feature = "codec-open-body",
-            feature = "codec-close",
-            feature = "codec-frame"
-        ),
-        all(
-            test,
-            feature = "tx-lend-only",
-            any(feature = "codec-init-body", feature = "codec-open-body")
-        )
-    )
+    feature = "tx-lend-only",
+    any(feature = "codec-init-body", feature = "codec-open-body")
 ))]
 pub(crate) fn encode_ext_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The instance keys of the pico C ABI (`wz_ext_instance_keyer_*`): a keyer made from a `.proto`
-//! file and a description the fuzzer writes, then handed payloads to index, last values to set and
-//! read back, and reports to flush.
+//! The instance keys of the pico C ABI (`wz_ext_instance_keyer_*`): a keyer made from a schema's
+//! `FileDescriptorSet` and a description the fuzzer writes, then handed payloads to index, last
+//! values to set and read back, and reports to flush.
 //!
-//! Input: a byte of choices, the file's name and text, the description (each to a NUL), then the
-//! operations, each a unit behind its two-byte little-endian length whose first byte chooses it:
+//! Input: a byte of choices, the descriptor set behind its two-byte little-endian length, the
+//! description (to a NUL), then the operations, each a unit behind its two-byte little-endian
+//! length whose first byte chooses it:
 //!
 //! | op % 4 | operation |
 //! |--------|-----------|
@@ -32,7 +33,6 @@ use std::ffi::CString;
 
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::instance_key::*;
-use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{
     Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK, Z_RES_CHANNEL_NODATA,
 };
@@ -57,8 +57,7 @@ struct Model {
 fuzz_target!(|data: &[u8]| {
     let mut r = Reader::new(data);
     let choices = r.u8();
-    let name = r.c_field();
-    let text = r.c_field();
+    let set = r.sized();
     let description = r.c_field();
     let ops = r.rest();
     let keep = choices & 1 != 0;
@@ -66,7 +65,7 @@ fuzz_target!(|data: &[u8]| {
 
     // The instances are known once a keyer is made, and the storage of the last values is sized
     // from them, so a keyer that keeps them is the second one made from the same text.
-    let mut probe = new_keyer(&name, &text, &description, None);
+    let mut probe = new_keyer(set, &description, None);
     if !unsafe { wz_ext_internal_instance_keyer_check(&probe) } {
         return;
     }
@@ -90,10 +89,10 @@ fuzz_target!(|data: &[u8]| {
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = room;
-        let keyer = new_keyer(&name, &text, &description, Some(&options));
+        let keyer = new_keyer(set, &description, Some(&options));
         assert!(
             unsafe { wz_ext_internal_instance_keyer_check(&keyer) },
-            "instance_keyer_new: the text it made a keyer of is refused with room for every instance"
+            "instance_keyer_new: a schema it made a keyer of is refused with room for each instance"
         );
         keyer
     } else {
@@ -174,24 +173,19 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn new_keyer(
-    name: &CString,
-    text: &CString,
+    set: &[u8],
     description: &CString,
     options: Option<&wz_ext_instance_keyer_options_t>,
 ) -> wz_ext_owned_instance_keyer_t {
-    let files = [wz_ext_proto_file_t {
-        name: name.as_ptr(),
-        text: text.as_ptr(),
-    }];
     let mut this: wz_ext_owned_instance_keyer_t = unsafe { core::mem::zeroed() };
     let mut refusal = empty_string();
     let options = options.map_or(core::ptr::null(), |o| o as *const _);
     // SAFETY: every argument is valid for the call; the storage the options name outlives the keyer.
     let rc = unsafe {
-        wz_ext_instance_keyer_new(
+        wz_ext_instance_keyer_from_descriptor_set(
             &mut this,
-            files.as_ptr(),
-            files.len(),
+            set.as_ptr(),
+            set.len(),
             description.as_ptr(),
             options,
             &mut refusal,

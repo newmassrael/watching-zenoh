@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::open_body::OpenBodyView;
 use super::ext_entry::ExtEntryView;
 
@@ -441,6 +441,21 @@ impl TransportOpenWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `TransportOpen` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct TransportOpenWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for TransportOpenWalk {
+    type Entry<'b> = TransportOpenView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        TransportOpenView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `TransportOpenView` is what a decode of `TransportOpen` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `TransportOpen` holds it, an embedded body or a variant arm as its
@@ -450,25 +465,17 @@ impl TransportOpenWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `TransportOpen::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct TransportOpenExtensionsWalk;
-
-impl ListWalk<0> for TransportOpenExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type TransportOpenExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportOpenView<'a> {
     pub header: u8,
     pub body: OpenBodyView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, TransportOpenExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
 }
 
 impl<'a> Default for TransportOpenView<'a> {

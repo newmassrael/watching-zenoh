@@ -35,8 +35,9 @@
  * may_require is the rest a run may ask for, null when part of it has no
  * facility name, and unknown says why. The words are the manifest's
  * facility vocabulary. The config is read as z_open reads it, and is not
- * consumed. Part of the unstable surface: a library built without its
- * unstable API does not have it.
+ * consumed. Part of the unstable surface, in a library built with the
+ * device-requires capability (on in a build that names nothing, off in
+ * the zenoh-pico preset), which implies the unstable API.
  *
  * Z_OK with the object, or the code z_open would refuse the config with,
  * the string then naming the reason. */
@@ -945,7 +946,7 @@ bool wz_ext_internal_e2e_receiver_check(
  * A message is published on one key expression whatever its instance; a
  * KEYER names up to the build's INSTANCE_KEY_FIELDS fields of the payload's
  * protobuf message (integers, enumerations by their numbers, or strings), read
- * through the program's .proto files, and the values each may take. The
+ * through the program's schema, and the values each may take. The
  * instance of a sample is the position of its values in the product of those
  * lists, row-major (the last field varies fastest), at most
  * INSTANCES_PER_MESSAGE of them; it is never on the wire. A node makes one
@@ -967,16 +968,25 @@ bool wz_ext_internal_e2e_receiver_check(
  * keys and sender slots are exclusive on one message. The last value of each
  * instance is kept in storage the program gives.
  *
+ * THE SCHEMA is the FileDescriptorSet protoc compiles the program's .proto
+ * files into when the program is built (protoc --include_imports -o), handed
+ * over as bytes. A build with the proto-text capability (WZ_FEATURE_PROTO_TEXT
+ * of the config.h of the library's build) also reads the files' text itself,
+ * through wz_ext_proto_file_t; a build without it links no text reader, and
+ * those declarations are not made.
+ *
  * OWNERSHIP AND THREADS. As for the end-to-end doors. The judging and
  * protecting doors hold the keyer's lock, then the receiver's or the
  * sender's. Part of the unstable surface. */
 
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
 /* One .proto file: the name other files import it by, and its text, both
  * NUL-terminated UTF-8, borrowed for the call. */
 typedef struct wz_ext_proto_file_t {
   const char *name;
   const char *text;
 } wz_ext_proto_file_t;
+#endif
 
 typedef struct wz_ext_owned_instance_keyer_t {
   void *_handle;
@@ -1025,22 +1035,34 @@ typedef struct wz_ext_instance_key_t {
 void wz_ext_instance_keyer_options_default(
     wz_ext_instance_keyer_options_t *this_);
 
-/* A keyer of the message description names, over the file_count files
- * (every one is read, with what it imports). description is JSON:
+/* A keyer of the message description names, over the schema in the len
+ * bytes at bytes, a FileDescriptorSet. description is JSON:
  *   {"message": "<full name, package included>",
  *    "fields": [{"path": "<field>" or "<holder>.<field>",
  *                "values": [<integer>, {"range": [<low>, <high>]}, ...]
  *                          or ["<string>", ...]}, ...],
  *    "report_interval_ms": <n>}
  * options may be NULL (no last values). On _Z_ERR_CONFIG_INVALID_VALUE (-89),
- * for schema files, a description or storage that is refused, refusal (which
- * may be NULL) holds the reason. Z_ERR_NULL (-127) for a NULL argument the
- * call needs; Z_EINVAL (-75) for text that is not UTF-8. */
+ * for a schema, a description or storage that is refused, refusal (which may
+ * be NULL) holds the reason, beginning schema, description or storage, or
+ * naming the limit exceeded. Z_ERR_NULL (-127) for a NULL argument the call
+ * needs, NULL bytes with a length, or NULL storage with a value_capacity;
+ * Z_EINVAL (-75) for a description that is not UTF-8. */
+z_result_t wz_ext_instance_keyer_from_descriptor_set(
+    wz_ext_owned_instance_keyer_t *this_, const uint8_t *bytes, size_t len,
+    const char *description, const wz_ext_instance_keyer_options_t *options,
+    z_owned_string_t *refusal);
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
+/* The same keyer over the file_count .proto files (every one is read, with
+ * what it imports), in a build with proto-text. Z_ERR_NULL also for NULL files
+ * with a count or a file with a NULL name or text; Z_EINVAL for any text that
+ * is not UTF-8. */
 z_result_t wz_ext_instance_keyer_new(
     wz_ext_owned_instance_keyer_t *this_, const wz_ext_proto_file_t *files,
     size_t file_count, const char *description,
     const wz_ext_instance_keyer_options_t *options,
     z_owned_string_t *refusal);
+#endif
 z_result_t wz_ext_instance_keyer_instances(
     const wz_ext_loaned_instance_keyer_t *this_, size_t *out);
 /* The instance payload, received or about to be sent at now_ms, is; an
@@ -2294,8 +2316,9 @@ bool wz_ext_internal_message_catalog_check(
  * A catalog message's payload set and read field by field, under .proto
  * files the program hands over when it runs: a program that knows its
  * messages by name and its fields by path, with no code generated for them.
- * It reads a SCHEMA once (every file of wz_ext_proto_file_t, with what each
- * imports), makes a PAYLOAD for message index of a catalog, naming the
+ * It reads a SCHEMA once (the FileDescriptorSet protoc compiled the .proto
+ * files into, or with proto-text every file of wz_ext_proto_file_t, with what
+ * each imports), makes a PAYLOAD for message index of a catalog, naming the
  * message type of the schema it is (its full name, package included), sets
  * values at field paths, encodes the protobuf bytes to put on the key
  * wz_ext_message_payload_key_expr gives, decodes the bytes a sample carries
@@ -2375,15 +2398,24 @@ typedef struct wz_ext_moved_message_payload_t {
   wz_ext_owned_message_payload_t _this;
 } wz_ext_moved_message_payload_t;
 
-/* Read every file (each with what it imports) into a schema. this_ holds the
- * null state on every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal
- * (which may be NULL) holds the reader's diagnostic. Z_ERR_NULL (-127) for a
- * NULL this_, NULL files with a count, or a file with a NULL name or text;
- * Z_EINVAL (-75) for text that is not UTF-8. */
+/* Read the len bytes at bytes, a FileDescriptorSet (what protoc
+ * --include_imports -o writes), into a schema. this_ holds the null state on
+ * every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal (which may be
+ * NULL) holds why the bytes are refused. Z_ERR_NULL (-127) for a NULL this_,
+ * or NULL bytes with a length. */
+z_result_t wz_ext_payload_schema_from_descriptor_set(
+    wz_ext_owned_payload_schema_t *this_, const uint8_t *bytes, size_t len,
+    z_owned_string_t *refusal);
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
+/* Read every file (each with what it imports) into a schema, in a build with
+ * proto-text. As above, and refusal holds the text reader's diagnostic;
+ * Z_ERR_NULL also for NULL files with a count, or a file with a NULL name or
+ * text; Z_EINVAL (-75) for text that is not UTF-8. */
 z_result_t wz_ext_payload_schema_new(wz_ext_owned_payload_schema_t *this_,
                                      const wz_ext_proto_file_t *files,
                                      size_t file_count,
                                      z_owned_string_t *refusal);
+#endif
 const wz_ext_loaned_payload_schema_t *wz_ext_payload_schema_loan(
     const wz_ext_owned_payload_schema_t *this_);
 wz_ext_moved_payload_schema_t *wz_ext_payload_schema_move(

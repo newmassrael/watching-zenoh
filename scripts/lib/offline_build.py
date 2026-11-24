@@ -10,6 +10,8 @@ them reads when it has no network and no `.git`, and a build that proves it.
                                           build every bundle (or the named ones) in a sandbox that
                                           holds only what the entry declares
     offline_build.py --selftest
+    offline_build.py --product-dir        the directory, under the cargo target directory, a build of the
+                                          bundles writes their products to (`cargo.product_dir`)
     offline_build.py --firmware-ids       the firmware build ids, one a line, in the entry's order
     offline_build.py --firmware-cargo ID  that build's cargo argv, one argument a line, run from the
                                           repository root
@@ -25,6 +27,12 @@ A consumer that builds wz as one hermetic action (no `.git`, no network, the pin
 lockfile's crates vendored and a pinned toolchain as its inputs) reads `deploy/offline-build.json`
 as that action's input list. The file is the entry; this script is what holds it to the tree. The
 design is `docs/target-build-contract.md` section 5d.
+
+The consumer reads where the products are from `cargo.product_dir`, a directory under its cargo
+target directory, and does not derive it from `cargo.flags`: the flags name a profile, and the
+directory a profile writes to is cargo's rule, which the entry states once so that a change of the
+profile reaches the consumer as a change of that field. The shape check holds the field to the
+directory the flags give (`flags_product_dir`), and `--build` looks for the products there.
 
 ## --check: the entry against the graph
 
@@ -198,6 +206,11 @@ def shape_findings(decl: object) -> list[str]:
     if not isinstance(cargo, dict) or not all(isinstance(cargo.get(k), str) for k in ("manifest", "lockfile")) \
             or not _strings(cargo.get("flags")):
         out.append("cargo has no `manifest`, `lockfile` and `flags`")
+    elif not isinstance(cargo.get("product_dir"), str):
+        out.append("cargo has no `product_dir`: the directory the consumer reads the products from")
+    elif cargo["product_dir"] != flags_product_dir(cargo["flags"]):
+        out.append(f"cargo.product_dir is {cargo['product_dir']!r}, and a build with cargo.flags writes its "
+                   f"products to {flags_product_dir(cargo['flags'])!r} under the cargo target directory")
     tools = decl["system_tools"]
     if not isinstance(tools, dict) or not tools:
         out.append("system_tools is not a non-empty object")
@@ -294,6 +307,26 @@ def _no_break(value: object) -> bool:
 def profile_dir(profile: str) -> str:
     """The directory of the cargo target directory a profile's products land in."""
     return {"dev": "debug", "test": "debug", "bench": "release"}.get(profile, profile)
+
+
+def flags_product_dir(flags: list[str]) -> str:
+    """The directory under the cargo target directory that `cargo build` with `flags` writes its
+    products to: the profile's (`--release` names `release`, no profile is `dev`), under the
+    target's triple when `--target` names one."""
+    profile, target = "dev", None
+    it = iter(flags)
+    for arg in it:
+        if arg == "--release":
+            profile = "release"
+        elif arg == "--profile":
+            profile = next(it, profile)
+        elif arg.startswith("--profile="):
+            profile = arg.split("=", 1)[1]
+        elif arg == "--target":
+            target = next(it, None)
+        elif arg.startswith("--target="):
+            target = arg.split("=", 1)[1]
+    return f"{target}/{profile_dir(profile)}" if target else profile_dir(profile)
 
 
 def firmware_shape(f: dict, tools: dict) -> list[str]:
@@ -1099,9 +1132,10 @@ def build(decl: dict, ids: list[str]) -> None:
         if made:
             problems.append("called a program a build with no network and no history must not: " + "; ".join(made))
         if rc == 0:
+            products = target / decl["cargo"]["product_dir"]
             for product in b["products"]:
-                if not (target / "release" / product).is_file():
-                    problems.append(f"declared product {product} is not in {target / 'release'}")
+                if not (products / product).is_file():
+                    problems.append(f"declared product {product} is not in {products}")
             holds_reader = any(meta.get(k) and meta[k].dir.resolve() == reader_dir.resolve()
                                for k in graph.packages[b["id"]])
             if holds_reader:
@@ -1147,6 +1181,23 @@ def selftest() -> int:
     bad = json.loads(json.dumps(decl))
     bad["bundles"][1]["features"] = ["lifecycle-doors", "identity-make"]
     expect("unsorted features are a shape finding", any("sorted" in p for p in shape_findings(bad)))
+    expect("the products' directory the consumer reads is the one the entry's flags build into",
+           decl["cargo"]["product_dir"] == flags_product_dir(decl["cargo"]["flags"]))
+    bad = json.loads(json.dumps(decl))
+    bad["cargo"]["product_dir"] = "elsewhere"
+    expect("a products' directory the flags do not build into is a shape finding",
+           any("product_dir" in p for p in shape_findings(bad)))
+    bad = json.loads(json.dumps(decl))
+    del bad["cargo"]["product_dir"]
+    expect("an entry without the products' directory is a shape finding",
+           any("product_dir" in p for p in shape_findings(bad)))
+    expect("the flags name the products' directory by cargo's rule",
+           flags_product_dir(["--locked", "--offline", "--release"]) == "release"
+           and flags_product_dir(["--profile", "ship"]) == "ship"
+           and flags_product_dir(["--profile=bench"]) == "release"
+           and flags_product_dir(["--locked"]) == "debug"
+           and flags_product_dir(["--release", "--target", "x86_64-unknown-linux-gnu"])
+           == "x86_64-unknown-linux-gnu/release")
 
     expect("the channel is read from [toolchain]",
            toolchain_channel('[other]\nchannel = "x"\n[toolchain]\nchannel = "1.2.3"\n') == "1.2.3")
@@ -1473,6 +1524,7 @@ def main() -> int:
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--build", action="store_true")
     mode.add_argument("--selftest", action="store_true")
+    mode.add_argument("--product-dir", action="store_true")
     mode.add_argument("--firmware-ids", action="store_true")
     mode.add_argument("--firmware-cargo", metavar="ID")
     mode.add_argument("--firmware-env", metavar="ID")
@@ -1486,7 +1538,9 @@ def main() -> int:
         decl = load()
         # The printers read the file alone: a caller with no `.git` and no cargo reads them too.
         lines: list[str] | None = None
-        if args.firmware_ids:
+        if args.product_dir:
+            lines = [decl["cargo"]["product_dir"]]
+        elif args.firmware_ids:
             lines = [f["id"] for f in decl["firmware"]]
         elif args.firmware_cargo is not None:
             lines = firmware_argv(firmware_build(decl, args.firmware_cargo))

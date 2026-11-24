@@ -159,7 +159,8 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | shared-key-ids | `wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
 | conformance-digest | `wz_ext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
 | config-policy | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
-| (every build) | `wz_ext_config_device_requires`, `wz_ext_redeclare`, `wz_ext_get_to_peer` | what an open asks of the system; declarations re-sent; a get addressed to one node |
+| device-requires | `wz_ext_config_device_requires` | what an open of a config would ask of the operating system |
+| (every build) | `wz_ext_redeclare`, `wz_ext_get_to_peer` | declarations re-sent; a get addressed to one node |
 
 Each door returns zenoh-pico's result codes, and wz's own two outside their range:
 `WZ_EXT_ERR_POLICY_OFF` (-2), a call the build's policy does not allow, and

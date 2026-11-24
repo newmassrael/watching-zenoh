@@ -4,14 +4,16 @@
 //! `wz_ext_instance_keyer_*`: which instance of a message a sample is, read from fields of its
 //! payload through the message's schema, from C.
 //!
-//! A keyer is made over the program's `.proto` files and a description of the key fields and the
-//! values each may take; the position of a sample's values in the product of those lists is its
-//! instance. With `e2e-receiver` the judging door judges a frame in the receiver's stream of the
-//! instance its payload is, and with `e2e-sender` the protecting door protects a payload on the
-//! sender's counter stream of its instance. A sample of no instance is dropped, counted by reason,
-//! and reported at the rate the description states; with `event-ring` each report is also an
-//! event of the node's log (`WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED`). The last value of each
-//! instance is kept in storage the program gives when it makes the keyer.
+//! A keyer is made over the program's schema, the `FileDescriptorSet` `protoc` compiled its
+//! `.proto` files into when it was built or, in a build with `proto-text`, the files' text, and a
+//! description of the key fields and the values each may take; the position of a sample's values
+//! in the product of those lists is its instance. With `e2e-receiver` the judging door judges a
+//! frame in the receiver's stream of the instance its payload is, and with `e2e-sender` the
+//! protecting door protects a payload on the sender's counter stream of its instance. A sample of
+//! no instance is dropped, counted by reason, and reported at the rate the description states;
+//! with `event-ring` each report is also an event of the node's log
+//! (`WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED`). The last value of each instance is kept in storage
+//! the program gives when it makes the keyer.
 //!
 //! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `instance-key` capability implies `unstable-api`. The keyer is
@@ -24,13 +26,15 @@ use alloc::string::ToString;
 use core::ffi::{c_char, c_void};
 use core::ptr::NonNull;
 
-use wz_app_frame::instance_key::{Dropped, Keyer, LastValues, Limits, Refusal, Report};
+use wz_app_frame::instance_key::{Dropped, Keyer, LastValues, Limits, NewError, Refusal, Report};
+use wz_app_frame::proto_decode::SchemaSet;
 
 use crate::abi::z_owned_string_t;
 use crate::e2e::{
     adopt, behind, bytes_arg, clear_refusal, locked, release, utf8_arg, write_refusal,
 };
 use crate::ffi::{guard_val, guarded};
+#[cfg(feature = "proto-text")]
 use crate::proto_file::{proto_files, wz_ext_proto_file_t};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
@@ -153,8 +157,9 @@ struct CallerStorage {
 
 impl AsRef<[u8]> for CallerStorage {
     fn as_ref(&self) -> &[u8] {
-        // SAFETY: `wz_ext_instance_keyer_new`'s contract: `storage` is writable for `storage_len`
-        // bytes until the keyer is dropped, and only the keyer, under its lock, touches it.
+        // SAFETY: the contract of the doors that make a keyer: `storage` is writable for
+        // `storage_len` bytes until the keyer is dropped, and only the keyer, under its lock,
+        // touches it.
         unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
@@ -252,8 +257,63 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_options_default(
     }
 }
 
-/// A keyer of the message `description` names, over the `file_count` schema files `files` (every
-/// one is read, with what it imports), made as `options` says (null: no last values).
+/// What the build allows one keyer.
+fn limits() -> Limits {
+    Limits {
+        fields: wz_session_core::caps::INSTANCE_KEY_FIELDS,
+        instances: wz_session_core::caps::INSTANCES_PER_MESSAGE,
+    }
+}
+
+/// Write the keyer made, with the last values `options` asks for, to `this_`, or the reason it is
+/// refused to `refusal`.
+///
+/// # Safety
+/// `this_` is writable and holds the gravestone; `options` is null or valid, its `storage`
+/// writable for `storage_len` bytes until the keyer is dropped; `refusal` is null or writable.
+unsafe fn adopt_keyer(
+    this_: *mut wz_ext_owned_instance_keyer_t,
+    made: Result<Keyer, NewError>,
+    options: *const wz_ext_instance_keyer_options_t,
+    refusal: *mut z_owned_string_t,
+) -> ZResult {
+    let options = if options.is_null() {
+        wz_ext_instance_keyer_options_t::default()
+    } else {
+        *options
+    };
+    let keyer = match made {
+        Ok(keyer) => keyer,
+        Err(why) => {
+            write_refusal(refusal, &why.to_string());
+            return Z_ERR_CONFIG_INVALID_VALUE;
+        }
+    };
+    let last = if options.value_capacity == 0 {
+        None
+    } else {
+        let Some(ptr) = NonNull::new(options.storage) else {
+            return Z_ERR_NULL;
+        };
+        let storage = CallerStorage {
+            ptr,
+            len: options.storage_len,
+        };
+        match LastValues::new(storage, keyer.instances(), options.value_capacity) {
+            Ok(last) => Some(last),
+            Err(why) => {
+                write_refusal(refusal, &format!("storage: {why}"));
+                return Z_ERR_CONFIG_INVALID_VALUE;
+            }
+        }
+    };
+    (*this_).handle = adopt(Held { keyer, last });
+    Z_OK
+}
+
+/// A keyer of the message `description` names, over the schema in the `len` bytes at `bytes`, a
+/// `FileDescriptorSet` (what `protoc --include_imports -o` writes for the program's `.proto`
+/// files when it is built), made as `options` says (null: no last values).
 ///
 /// `description` is JSON: `{"message": "<full name>", "fields": [{"path": "<field>", "values":
 /// [...]}, ...], "report_interval_ms": <n>}`. A path names a field, and a field inside a message
@@ -262,8 +322,53 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_options_default(
 /// and at most `INSTANCES_PER_MESSAGE` instances in the product of the lists.
 ///
 /// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
-/// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, the reason, beginning `schema`,
-/// `description` or `storage`, or naming the limit exceeded.
+/// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, the reason, beginning `schema`
+/// (why the bytes are refused), `description` or `storage`, or naming the limit exceeded.
+///
+/// Returns `Z_ERR_NULL` for a null `this_` or `description`, a null `bytes` with a length, or a
+/// null `storage` with a `value_capacity`; `Z_EINVAL` for a description that is not UTF-8;
+/// `_Z_ERR_CONFIG_INVALID_VALUE` for a schema, a description or storage that is refused; `Z_OK`
+/// otherwise.
+///
+/// # Safety
+/// `this_` is writable; `bytes` is null or readable for `len` bytes; `description` is null or a
+/// NUL-terminated C string; `options` is null or valid, its `storage` writable for `storage_len`
+/// bytes until the keyer is dropped and touched by nothing else meanwhile; `refusal` is null or
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_instance_keyer_from_descriptor_set(
+    this_: *mut wz_ext_owned_instance_keyer_t,
+    bytes: *const u8,
+    len: usize,
+    description: *const c_char,
+    options: *const wz_ext_instance_keyer_options_t,
+    refusal: *mut z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        clear_refusal(refusal);
+        if this_.is_null() {
+            return Z_ERR_NULL;
+        }
+        (*this_).handle = core::ptr::null_mut();
+        if description.is_null() || (bytes.is_null() && len != 0) {
+            return Z_ERR_NULL;
+        }
+        let Some(description) = utf8_arg(description) else {
+            return Z_EINVAL;
+        };
+        let made = SchemaSet::from_descriptor_set(bytes_arg(bytes, len))
+            .map_err(NewError::Schema)
+            .and_then(|schema| Keyer::with_schema(schema, description, limits()));
+        adopt_keyer(this_, made, options, refusal)
+    })
+}
+
+/// A keyer of the message `description` names, over the `file_count` schema files `files` (every
+/// one is read, with what it imports), made as `options` says (null: no last values). In a build
+/// with `proto-text`, which links the text reader.
+///
+/// `description`, `this_` and `refusal` are as for [`wz_ext_instance_keyer_from_descriptor_set`],
+/// a schema refusal being the text reader's diagnostic: the file, the line and why.
 ///
 /// Returns `Z_ERR_NULL` for a null `this_` or `description`, a null `files` with a count, a file
 /// with a null name or text, or a null `storage` with a `value_capacity`; `Z_EINVAL` for text that
@@ -275,6 +380,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_options_default(
 /// NUL-terminated C strings; `description` is null or a NUL-terminated C string; `options` is null
 /// or valid, its `storage` writable for `storage_len` bytes until the keyer is dropped and touched
 /// by nothing else meanwhile; `refusal` is null or writable.
+#[cfg(feature = "proto-text")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_instance_keyer_new(
     this_: *mut wz_ext_owned_instance_keyer_t,
@@ -300,42 +406,12 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_new(
         let Some(description) = utf8_arg(description) else {
             return Z_EINVAL;
         };
-        let options = if options.is_null() {
-            wz_ext_instance_keyer_options_t::default()
-        } else {
-            *options
-        };
-        let limits = Limits {
-            fields: wz_session_core::caps::INSTANCE_KEY_FIELDS,
-            instances: wz_session_core::caps::INSTANCES_PER_MESSAGE,
-        };
-        let keyer = match Keyer::new(&proto, description, limits) {
-            Ok(keyer) => keyer,
-            Err(why) => {
-                write_refusal(refusal, &why.to_string());
-                return Z_ERR_CONFIG_INVALID_VALUE;
-            }
-        };
-        let last = if options.value_capacity == 0 {
-            None
-        } else {
-            let Some(ptr) = NonNull::new(options.storage) else {
-                return Z_ERR_NULL;
-            };
-            let storage = CallerStorage {
-                ptr,
-                len: options.storage_len,
-            };
-            match LastValues::new(storage, keyer.instances(), options.value_capacity) {
-                Ok(last) => Some(last),
-                Err(why) => {
-                    write_refusal(refusal, &format!("storage: {why}"));
-                    return Z_ERR_CONFIG_INVALID_VALUE;
-                }
-            }
-        };
-        (*this_).handle = adopt(Held { keyer, last });
-        Z_OK
+        adopt_keyer(
+            this_,
+            Keyer::new(&proto, description, limits()),
+            options,
+            refusal,
+        )
     })
 }
 

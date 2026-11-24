@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# wz-app-schema — the READERS of the documents an application describes its payloads by, run once
-# when a node opens what it was handed: the `.proto` tokenizer, parser and schema linker, whose
-# type tables the application frame's typed reader and writer read for every sample.
+# wz-app-schema — the READERS of the documents an application describes its payloads and its
+# messages by, run once when a node opens what it was handed: the `.proto` tokenizer, parser and
+# schema linker, whose type tables the application frame's typed reader and writer read for every
+# sample; the JSON documents of the profiles, read and refused at a pointer; and the message
+# catalog's reader, its tables and the static tables of an image that links its catalog.
 #
 # Its own crate so the code that interprets a document once can be built for size while the code
 # that reads and writes every sample keeps the speed it is built for: the release profiles build
@@ -11,7 +13,10 @@
 # re-exports its modules at the paths they had there (`wz_app_frame::proto_schema` and the rest),
 # so no consumer names this crate.
 #
-# No dependency, `no_std` and `alloc`.
+# `no_std`. Built on the core (`scripts/lib/layer_direction_gate.py`): the readers read JSON with
+# the core's reader and judge a key expression with its rules, behind `alloc`. Without `alloc`
+# the crate is the catalog's static tables, which link no allocator. The `.proto` text reader is
+# behind `proto-text`; the type tables a schema is read into are not.
 [package]
 name = "wz-app-schema"
 version.workspace = true
@@ -21,19 +26,38 @@ readme.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Readers of an application's payload schema: the .proto tokenizer, parser and linker."
+description = "Readers of an application's payload schema, profiles and message catalog."
 
 [lib]
 name = "wz_app_schema"
 path = "src/lib.rs"
 
 [features]
+default = ["alloc"]
+
+# Every reader, each keeping what it reads on the heap: the JSON documents and the message catalog,
+# read with the core's reader (`wz_session_core::json5`, behind the core's own `alloc`), and the
+# type tables of a `.proto` schema (`proto_types`). Off, the crate is `message_catalog_table`,
+# `crc_table` and `judge_config`, which an image with no allocator links.
+alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
+
+# `proto-text`: the `.proto` text reader (`proto_lex`, `proto_parse`, `proto_schema`), which
+# tokenizes, parses and links the files a program hands over when it runs, into the type tables
+# `alloc` holds. Off, a schema is read only from what `protoc` compiled when the program was built,
+# and no text reader is linked. Not in `default`: a device build names neither feature of
+# `wz-app-frame` that turns it on, so its image links no tokenizer, parser or linker.
+proto-text = ["alloc"]
+
 # `docs`: the comments `protoc` attaches to a message and a field, kept as the tokenizer reads them
 # (`proto_lex::Gap`) and carried to the syntax tree and the linked types (`proto_parse::Docs`). Only a
 # reader that shows a schema to a person reads them (`wz-capture`'s schema description turns it
 # on); off, a node that reads payloads by their schema keeps no comment and links none of the code
-# that sorts them, and the tokens, their places and every refusal are the same.
-docs = []
+# that sorts them, and the tokens, their places and every refusal are the same. The comments are
+# the tokenizer's, so it implies `proto-text`.
+docs = ["proto-text"]
+
+[dependencies]
+wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 
 [lints]
 workspace = true

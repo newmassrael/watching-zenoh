@@ -99,8 +99,9 @@ impl<S: MulticastSocket + 'static> GroupJoiner for HostGroups<S> {
 }
 
 /// The locator of `endpoint` when it names a UDP multicast group, which is what the host joins;
-/// `None` for anything else, a unicast `udp/` address among them.
-fn group_of(endpoint: &str) -> Option<ParsedLocator> {
+/// `None` for anything else, a unicast `udp/` address among them. Public so that an ABI that
+/// answers for an open reads a group as the joiner does.
+pub fn group_of(endpoint: &str) -> Option<ParsedLocator> {
     let parsed = parse_locator(endpoint).ok()?;
     (parsed.proto == Proto::Udp && parsed.addr.ip().is_multicast()).then_some(parsed)
 }

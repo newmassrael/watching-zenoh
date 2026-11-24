@@ -403,6 +403,14 @@ config WZ_CAP_MESSAGE_PAYLOAD
 	  The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors).
 	  Exported by: pico.
 
+config WZ_CAP_PROTO_TEXT
+	bool "proto-text"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  The message payload and instance key doors that read a schema from .proto text at run time (wz_ext_payload_schema_new, wz_ext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled.
+	  Exported by: pico.
+
 config WZ_CAP_APP_TRANSPORT
 	bool "app-transport"
 	default n
@@ -480,6 +488,14 @@ config WZ_CAP_CONFIG_DOCUMENT
 	select WZ_CAP_CONFIG_POLICY
 	help
 	  wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
+	  Exported by: pico.
+
+config WZ_CAP_DEVICE_REQUIRES
+	bool "device-requires"
+	default y
+	select WZ_CAP_UNSTABLE_API
+	help
+	  wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own).
 	  Exported by: pico.
 
 config WZ_CAP_TRANSPORT_COMPRESSION

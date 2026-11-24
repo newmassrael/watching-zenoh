@@ -960,6 +960,8 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// work out under the session's lock, since that wait would be none. Written by the step, under
     /// the lock; a stale `true` costs one step that finds nothing, after which the read waits.
     input_held: AtomicBool,
+    /// Where a read waits for another read to hand back the session's buffer of waits.
+    hand_back: HandBack,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
@@ -1040,6 +1042,8 @@ pub(crate) struct Takes {
     /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
+    /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
+    pub(crate) face_marks: core::sync::atomic::AtomicUsize,
     /// The walks of the tables for rows whose last call ended, made only when a call said one
     /// may wait.
     pub(crate) walks: core::sync::atomic::AtomicUsize,
@@ -1055,9 +1059,63 @@ impl Takes {
     fn wait(&self, wait: &IdleWait) {
         let counter = match wait {
             IdleWait::Input { .. } => &self.polls,
-            IdleWait::None | IdleWait::Sleep(_) => return,
+            IdleWait::None | IdleWait::Sleep(_) | IdleWait::Behind(_) => return,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Where a read that found another read waiting with the session's buffer of waits
+/// ([`IdleWait::Behind`]) waits for the buffer to be handed back: woken then, it steps and its
+/// next wait is on the links, so a read task behind a program's read does not sleep out its bound
+/// while what arrives after that read waits for it.
+struct HandBack {
+    /// The reads waiting here now: a hand-back with none takes no lock.
+    behind: core::sync::atomic::AtomicUsize,
+    /// How many times the buffer was handed back to a read waiting here, under the lock its wait
+    /// is made with, so that a hand-back before the wait begins ends it at once.
+    handed: Mutex<u64>,
+    back: os::Condvar,
+}
+
+impl HandBack {
+    fn new() -> Self {
+        Self {
+            behind: core::sync::atomic::AtomicUsize::new(0),
+            handed: Mutex::new(0),
+            back: os::Condvar::new(),
+        }
+    }
+
+    /// Count in a read that waits here, under the session's lock, which a hand-back is made
+    /// under too: the count of hand-backs it waits to see move.
+    fn enter(&self) -> u64 {
+        self.behind.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.handed)
+    }
+
+    /// Wait, with nothing of the session held, for a hand-back after `seen`, for at most `ms`
+    /// milliseconds. A wake that comes early ends it as well: the read steps, and looks again.
+    fn wait(&self, seen: u64, ms: u32) {
+        let handed = lock(&self.handed);
+        let handed = if *handed == seen {
+            self.back.wait_timeout_ms(handed, u64::from(ms)).0
+        } else {
+            handed
+        };
+        drop(handed);
+        self.behind.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The buffer was handed back, under the session's lock: wake every read waiting for it.
+    fn handed_back(&self) {
+        if self.behind.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let mut handed = lock(&self.handed);
+        *handed = handed.wrapping_add(1);
+        drop(handed);
+        self.back.notify_all();
     }
 }
 
@@ -1397,6 +1455,16 @@ struct Publication<'a> {
     payload: &'a [u8],
     opts: &'a PublishOptions<'a>,
     meta: &'a PushMetadata<'a>,
+}
+
+/// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
+/// the session's tables name it, and how it rides.
+struct LinkLeg<'a> {
+    named: NamedKey<'a>,
+    payload: &'a [u8],
+    kind: SampleKind,
+    meta: &'a PushMetadata<'a>,
+    send: wz_session_core::session_actions::SendAs,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -2249,6 +2317,31 @@ fn issued_so_far(issued: usize) -> Result<usize, Declined> {
 #[cfg(any(feature = "query", feature = "liveliness-get"))]
 fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
     now_us.div_ceil(1000).saturating_add(u64::from(timeout_ms))
+}
+
+/// What every leg of one get is held pending with (`CoopEngine::hold_leg`): the key it was asked
+/// under, its options, whether its callbacks show a reply's timestamp, and the mint of each leg's
+/// callback.
+#[cfg(feature = "query")]
+struct LegAsk<'a, 'o> {
+    keyexpr: &'a str,
+    opts: &'a QueryOptionsOf<'o>,
+    expose: bool,
+    mint: &'a mut dyn FnMut() -> ReplyCallback,
+}
+
+/// What came of holding a leg of a get pending (`CoopEngine::hold_leg`).
+#[cfg(feature = "query")]
+enum LegHeld {
+    /// Held, owed its Finals: its request may go out.
+    Held,
+    /// The table is no longer the session's: the leg is asked of nobody.
+    Gone,
+    /// No row of the table, or of the plane's callbacks, was free: no callback was minted.
+    NoRoom,
+    /// The table refused the registration, `table_full` when for want of a row: the leg's minted
+    /// callback is to be let go of with no lock held.
+    Refused { table_full: bool },
 }
 
 /// A group member's key (`SessionEngine::next_group_member`): its group's place in the session's
@@ -3998,6 +4091,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(any(feature = "listen", feature = "group"))]
                 owed: AtomicBool::new(false),
                 input_held: AtomicBool::new(false),
+                hand_back: HandBack::new(),
                 #[cfg(any(feature = "listen", feature = "group"))]
                 handed_limits,
                 #[cfg(feature = "transport-stats")]
@@ -4915,14 +5009,78 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             opts,
             meta,
         } = *put;
-        let reliable = opts.reliable_bool();
-        let express = meta.is_express();
-        let priority = opts.priority_band();
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
         let Some(named) = tables(&core.session.registry).named_by(keyexpr, wire.mapping_id) else {
             return (Err(FanoutError::ExceedsCapacity), None);
         };
+        let send = wz_session_core::session_actions::SendAs {
+            reliable: opts.reliable_bool(),
+            express: meta.is_express(),
+            priority: opts.priority_band(),
+        };
+        let link_leg = LinkLeg {
+            named,
+            payload,
+            kind: opts.kind,
+            meta,
+            send,
+        };
+        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
+        if stuck.is_some() {
+            return (outcome, stuck);
+        }
+        // And each group the session joined, which its task frames and sends.
+        #[cfg(feature = "group")]
+        let mut outcome = outcome;
+        #[cfg(feature = "group")]
+        for group in &core.transport.groups {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
+                continue;
+            }
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+            let sent = group.publish(GroupPut {
+                keyexpr,
+                wire,
+                payload,
+                kind: opts.kind,
+                meta,
+                reliable: send.reliable,
+                priority: send.priority,
+            });
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        (outcome, None)
+    }
+
+    /// Send `leg` to the session's links by `pass` (`Self::fan_out_in`), each face marked as the
+    /// session's holder's send on it while it is sent (`SendingOn`), as every put the session
+    /// sends to its links is, a plain one through a write filter (`Self::put_plain_in`) among
+    /// them. A link that does not take the plain form (one that rewrites the keys the session
+    /// originates) is sent the owned message in its place, so each link answers for itself.
+    // Out of line: the publish and the put through a write filter send through this one body.
+    #[inline(never)]
+    fn send_on_links(
+        &self,
+        core: &Core<L, C>,
+        leg: &LinkLeg<'_>,
+        skip: Option<&DroppedOn>,
+        pass: Pass,
+    ) -> (Result<usize, FanoutError>, Option<u64>) {
+        let LinkLeg {
+            named,
+            payload,
+            kind,
+            meta,
+            send,
+        } = *leg;
+        let wz_session_core::session_actions::SendAs {
+            reliable,
+            express,
+            priority,
+        } = send;
         let mut outcome = Ok(0);
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = skip;
@@ -4939,11 +5097,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, place);
+            #[cfg(test)]
+            self.takes.face_marks.fetch_add(1, Ordering::Relaxed);
             // Each link names the key as its own key-wire form says. A publication is written from
             // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
             // own shorter writer, unless the session or the build leaves it to the owned send below.
             let key = key_on_link(actions, named);
-            let plain = opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos();
+            let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
             // A send that may not wait is told apart from one whose link has room: one with none
             // ends the fan-out at this face, and a chain of fragments, which such a send does not
             // begin, is sent as the caller's own send.
@@ -4963,7 +5123,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 } else {
                     actions.try_send_publication_qos(
                         key,
-                        opts.kind,
+                        kind,
                         payload,
                         meta,
                         wz_session_core::session_actions::SendAs {
@@ -5005,7 +5165,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             } else {
                 actions.send_publication_qos(
                     key,
-                    opts.kind,
+                    kind,
                     payload,
                     meta,
                     wz_session_core::session_actions::SendAs {
@@ -5022,7 +5182,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Err(FanoutError::ExceedsCapacity)
             } else {
                 let suffix = key.wire().suffix();
-                let push = match (opts.kind, key.wire().id()) {
+                let push = match (kind, key.wire().id()) {
                     (SampleKind::Put, 0) => {
                         push_build::build_push_literal_with_meta(key.text(), payload, meta)
                     }
@@ -5046,26 +5206,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Err(_) => Err(FanoutError::ExceedsCapacity),
                 }
             };
-            if sent.is_err() {
-                outcome = sent;
-            }
-        }
-        // And each group the session joined, which its task frames and sends.
-        #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
-                continue;
-            }
-            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
-            let sent = group.publish(GroupPut {
-                keyexpr,
-                wire,
-                payload,
-                kind: opts.kind,
-                meta,
-                reliable,
-                priority,
-            });
             if sent.is_err() {
                 outcome = sent;
             }
@@ -5455,6 +5595,69 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// Hold one leg of a get pending in the table of `face` (a link's, a group's, or the
+    /// session's own, `LOCAL_FACE`) under `rid`, owed `finals` Finals: the leg's callback minted
+    /// in a row of the plane's, and its sink registered with the deadline and the accepted key the
+    /// get states. Out of line where a get issues more than one kind of leg (to groups, or to the
+    /// session itself, besides its links), so those legs are held by one body and not by a copy
+    /// each; a build whose get asks its links alone has one caller, which keeps it inline.
+    #[cfg(feature = "query")]
+    #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
+    fn hold_leg(
+        &self,
+        core: &Core<L, C>,
+        ask: &mut LegAsk<'_, '_>,
+        face: FaceId,
+        leg_id: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        finals: u32,
+    ) -> LegHeld {
+        let timeout_ms = ask.opts.effective_timeout_ms();
+        // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
+        // before its timeout.
+        let deadline_ms =
+            (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
+        // A get no row holds is refused before its leg's callback is minted.
+        match core
+            .session
+            .registry
+            .borrow_mut()
+            .gets_mut(face)
+            .map(|gets| gets.replies.has_room())
+        {
+            Some(true) => {}
+            Some(false) => return LegHeld::NoRoom,
+            None => return LegHeld::Gone,
+        }
+        // The leg's callback, in a row of the plane's the entry's sink holds.
+        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose) else {
+            return LegHeld::NoRoom;
+        };
+        // SAFETY: the sink goes into a table of pending gets, which the session
+        // reaches under its lock alone, and is handed its replies there.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
+        let sink = ConsolidatingSink::with_hold(
+            ask.opts.resolved_consolidation(),
+            leg_sink,
+            get::LegHold::new(leg_id, &self.gets),
+        );
+        let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
+        let registered = core
+            .session
+            .registry
+            .borrow_mut()
+            .gets_mut(face)
+            .map(|gets| {
+                gets.replies
+                    .register_sink(rid, finals, deadline_ms, accept, sink)
+            });
+        match registered {
+            Some(Ok(_)) => LegHeld::Held,
+            Some(Err(RegisterError::TableFull)) => LegHeld::Refused { table_full: true },
+            Some(Err(_)) | None => LegHeld::Refused { table_full: false },
+        }
+    }
+
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto
     /// the query's link, written into the link's transmit slot under the session's lock, or to the
     /// session's own get. Refused, sending nothing, when its payload or its attachment is longer
@@ -5827,9 +6030,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
-    /// every link, once the write filter let it through: `NotPlain`, with nothing sent, when a
-    /// subscriber of the session, a group or a link that rewrites keys wants it the general way.
+    /// every link, once the write filter let it through, as a publish is sent
+    /// ([`Self::send_on_links`]): `NotPlain`, with nothing sent, when a subscriber of the session or
+    /// a group wants it the general way, or the key names nothing a link carries.
     fn put_plain_in(
+        &self,
         core: &Core<L, C>,
         keyexpr: &str,
         mapping_id: ExprId,
@@ -5855,39 +6060,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
-        // Asked of every link before any is sent to, so the put goes plain to all of them or to
-        // none: a link that rewrites what it originates (a routing namespace) takes the general
-        // publish for the whole of it. Its namespace is installed before the session sends
-        // anything, so no link answers otherwise below.
-        if core
-            .transport
-            .ups()
-            .any(|actions| actions.rewrites_originated_keys())
-        {
-            return FilteredPut::NotPlain;
-        }
         // The key as the session's tables name it, and each link as its key-wire form says.
         let Some(named) = tables(&core.session.registry).named_by(keyexpr, mapping_id) else {
             return FilteredPut::NotPlain;
         };
-        let mut outcome = Ok(0);
-        for actions in core.transport.ups() {
-            let sent = leg(actions
-                .send_plain_put_qos(
-                    key_on_link(actions, named),
-                    payload,
-                    params.qos,
-                    wz_session_core::session_actions::SendAs {
-                        reliable: params.reliable,
-                        express: params.express,
-                        priority: params.priority,
-                    },
-                )
-                .unwrap_or(Err(SendWireError::FeatureDisabled)));
-            if sent.is_err() {
-                outcome = sent;
-            }
-        }
+        // A plain put carries its QoS and nothing else of a publication's.
+        let meta = PushMetadata {
+            qos: params.qos,
+            ..PushMetadata::default()
+        };
+        let leg = LinkLeg {
+            named,
+            payload,
+            kind: SampleKind::Put,
+            meta: &meta,
+            send: wz_session_core::session_actions::SendAs {
+                reliable: params.reliable,
+                express: params.express,
+                priority: params.priority,
+            },
+        };
+        // Marked as a publish for as long as it holds the session, as the general publish is.
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        let (outcome, _) = self.send_on_links(core, &leg, None, Pass::EVERY_FACE);
         FilteredPut::Sent(outcome)
     }
 
@@ -6937,6 +7132,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // states none, applied to every leg's callback, after its replies are consolidated.
             opts.expose_timestamp_by(&guard.0.policy)
         };
+        // What every leg of this get is held with, the mint of each leg's callback among it.
+        let mut ask = LegAsk {
+            keyexpr,
+            opts,
+            expose,
+            mint: leg,
+        };
         let remote = opts.allowed_destination.allows_remote();
         let mut issued: usize = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
@@ -6960,64 +7162,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             // A request id the face's actions allocate, so its peer's answer names it.
             let rid = actions.alloc_next_request_id();
-            let timeout_ms = opts.effective_timeout_ms();
-            // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never
-            // ends before its timeout.
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            match core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| tables.gets.replies.has_room())
-            {
-                Some(true) => {}
-                Some(false) => {
+            // One Final: the face's peer's. Held before the request goes out, so no answer can
+            // arrive before its entry.
+            match self.hold_leg(core, &mut ask, face, leg_id, rid, 1) {
+                LegHeld::Held => {}
+                LegHeld::Gone => continue,
+                LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
                     continue;
                 }
-                None => continue,
-            }
-            // The leg's callback, in a row of the plane's the entry's sink holds.
-            let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld = unheld.saturating_add(1);
-                continue;
-            };
-            // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-            let sink = ConsolidatingSink::with_hold(
-                opts.resolved_consolidation(),
-                leg_sink,
-                get::LegHold::new(leg_id, &self.gets),
-            );
-            // One Final: the face's peer's. Registered before the request goes out, so no answer
-            // can arrive before its entry.
-            let registered = core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        1,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                });
-            if !matches!(registered, Some(Ok(_))) {
-                unheld = unheld.saturating_add(usize::from(matches!(
-                    registered,
-                    Some(Err(RegisterError::TableFull))
-                )));
-                // A leg no table holds is let go of with no lock held.
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
+                LegHeld::Refused { table_full } => {
+                    unheld = unheld.saturating_add(usize::from(table_full));
+                    // A leg no table holds is let go of with no lock held.
+                    drop(guard);
+                    self.end_leg_now(leg_id);
+                    continue;
+                }
             }
             // The link names the key as its own key-wire form says.
             let wire = on_link(&actions, keyexpr, wire);
@@ -7096,59 +7256,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
-            let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            match core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| tables.gets.replies.has_room())
-            {
-                Some(true) => {}
-                Some(false) => {
+            // Held before the query is queued, as a link's leg is before it is sent.
+            match self.hold_leg(core, &mut ask, face, leg_id, rid, finals) {
+                LegHeld::Held => {}
+                LegHeld::Gone => continue,
+                LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
                     continue;
                 }
-                None => continue,
-            }
-            let Some(row) = self.gets.open_leg(leg, expose) else {
-                unheld = unheld.saturating_add(1);
-                continue;
-            };
-            // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-            let sink = ConsolidatingSink::with_hold(
-                opts.resolved_consolidation(),
-                leg_sink,
-                get::LegHold::new(leg_id, &self.gets),
-            );
-            // Registered before the query is queued, as a link's leg is before it is sent.
-            let registered = core
-                .session
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        finals,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                });
-            if !matches!(registered, Some(Ok(_))) {
-                unheld = unheld.saturating_add(usize::from(matches!(
-                    registered,
-                    Some(Err(RegisterError::TableFull))
-                )));
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
+                LegHeld::Refused { table_full } => {
+                    unheld = unheld.saturating_add(usize::from(table_full));
+                    drop(guard);
+                    self.end_leg_now(leg_id);
+                    continue;
+                }
             }
             if !group.ask(rid, keyexpr, wire, opts.query_parts()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
@@ -7182,59 +7303,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let core = &mut guard.0;
             let rid = own.rid();
-            let timeout_ms = opts.effective_timeout_ms();
-            let deadline_ms =
-                (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A get no row holds is refused before its leg's callback is minted.
-            let row = if core.session.registry.borrow().local.replies.has_room() {
-                self.gets.open_leg(leg, expose)
-            } else {
-                None
-            };
-            if let Some(row) = row {
-                // SAFETY: the sink goes into a table of pending gets, which the session
-                // reaches under its lock alone, and is handed its replies there.
-                let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
-                let sink = ConsolidatingSink::with_hold(
-                    opts.resolved_consolidation(),
-                    leg_sink,
-                    get::LegHold::new(leg_id, &self.gets),
-                );
-                let registered = core
-                    .session
-                    .registry
-                    .borrow_mut()
-                    .local
-                    .replies
-                    .register_sink(
-                        rid,
-                        1,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    );
-                if registered.is_err() {
-                    // A leg no table holds is let go of with no lock held.
+            match self.hold_leg(core, &mut ask, LOCAL_FACE, leg_id, rid, 1) {
+                LegHeld::Held => {
+                    if !core.session.note_pending(PendingGet {
+                        face: LOCAL_FACE,
+                        leg: leg_id,
+                        kind: GetKind::Query(rid),
+                        fan: tag,
+                    }) {
+                        unheld = unheld.saturating_add(1);
+                    } else {
+                        // Asked once the legs to the peers were, as zenoh-pico asks it only once
+                        // the send succeeded.
+                        let asked = self.ask_own_queryables(core, own, keyexpr, opts);
+                        drop(guard);
+                        issued = issued.saturating_add(1);
+                        let _ = self.cut_short(fan, tag);
+                        self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
+                    }
+                }
+                // A leg the session's own table refused is let go of with no lock held.
+                LegHeld::Refused { .. } => {
                     drop(guard);
                     self.end_leg_now(leg_id);
-                } else if !core.session.note_pending(PendingGet {
-                    face: LOCAL_FACE,
-                    leg: leg_id,
-                    kind: GetKind::Query(rid),
-                    fan: tag,
-                }) {
-                    unheld = unheld.saturating_add(1);
-                } else {
-                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
-                    // send succeeded.
-                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                    drop(guard);
-                    issued = issued.saturating_add(1);
-                    let _ = self.cut_short(fan, tag);
-                    self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
-            } else {
-                unheld = unheld.saturating_add(1);
+                LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
@@ -7807,6 +7900,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
         // under a stream of batches each read takes the session once, for its step.
+        // A read behind another's wait counts itself in under the session's lock, which the
+        // hand-back it waits for is made under too.
+        let mut seen = None;
         let mut wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
         } else {
@@ -7815,12 +7911,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             // before the session is.
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-                core.0.idle_wait()
+                let wait = core.0.idle_wait();
+                if matches!(wait, IdleWait::Behind(_)) {
+                    seen = Some(self.hand_back.enter());
+                }
+                wait
             })
         };
         #[cfg(test)]
         self.takes.wait(&wait);
-        wait.wait(self.rooms.waits(), sleep_ms);
+        match (&wait, seen) {
+            (IdleWait::Behind(ms), Some(seen)) => self.hand_back.wait(seen, *ms),
+            _ => wait.wait(self.rooms.waits(), sleep_ms),
+        }
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         // One take of the session for the step: its links, what publishes handed to it, and
@@ -7829,7 +7932,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // program that only reads its session sends it; let go of once the session is.
         let (stepped, jobs_due_ms) = match self.live() {
             Some(mut core) => {
+                let handed = matches!(wait, IdleWait::Input { .. });
                 core.0.transport.links.waited(wait);
+                if handed {
+                    self.hand_back.handed_back();
+                }
                 let stepped = self.step(&mut core.0);
                 self.input_held.store(
                     stepped.is_some() && core.0.transport.holds_input(),
@@ -7946,7 +8053,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 (mapping_id, params)
             }
         };
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
+        self.put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds
@@ -8275,5 +8382,60 @@ mod member_key_tests {
         assert_eq!(member_key(u32::MAX, u32::MAX), u64::MAX);
         assert_eq!(member_places(u64::MAX), (u32::MAX, u32::MAX));
         assert_eq!(member_places(member_key(3, u32::MAX) + 1), (4, 0));
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod hand_back_tests {
+    use super::{lock, HandBack};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A read waiting for another read's buffer wakes when the buffer is handed back, well
+    /// before its bound, and is counted out after. Turned red by a hand-back that wakes no one,
+    /// which leaves a read task asleep for its whole bound behind a program's read.
+    #[test]
+    fn a_read_waiting_for_the_buffer_wakes_when_it_is_handed_back() {
+        let back = Arc::new(HandBack::new());
+        let seen = back.enter();
+        let handing = {
+            let back = back.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                back.handed_back();
+            })
+        };
+        let started = Instant::now();
+        back.wait(seen, 5_000);
+        let took = started.elapsed();
+        handing
+            .join()
+            .expect("the thread that hands the buffer back");
+        assert!(
+            took < Duration::from_millis(2_500),
+            "the read slept out its bound ({took:?})"
+        );
+        assert_eq!(back.behind.load(core::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A hand-back made after a read counted itself in and before its wait began ends that wait
+    /// at once. Turned red by a wait that looks for a notification alone, which this one missed.
+    #[test]
+    fn a_hand_back_before_the_wait_begins_ends_it_at_once() {
+        let back = HandBack::new();
+        let seen = back.enter();
+        back.handed_back();
+        let started = Instant::now();
+        back.wait(seen, 5_000);
+        assert!(started.elapsed() < Duration::from_millis(2_500));
+    }
+
+    /// A hand-back with no read waiting takes no lock and moves no count. Turned red by one
+    /// that counts a hand-back no read waits for.
+    #[test]
+    fn a_hand_back_with_no_read_waiting_counts_nothing() {
+        let back = HandBack::new();
+        back.handed_back();
+        assert_eq!(*lock(&back.handed), 0);
     }
 }

@@ -10,7 +10,7 @@
  * One boot runs one cell. The emulator's command line (semihosting SYS_GET_CMDLINE) names it:
  *
  *   mcu-speed <locator> put <size> <puts> 0 0
- *   mcu-speed <locator> sub <size> <window ms> <warm-up ms> 0
+ *   mcu-speed <locator> sub <size> <window ms> <warm-up ms> 0     (size up to MAX_SUB_PAYLOAD)
  *   mcu-speed <locator> rtt <size> <round trips> <warm-up round trips> <timeout ms>
  *
  * The figures are the kernel's: cycles of its cycle counter, the cycles every thread but the idle
@@ -44,6 +44,11 @@
 #define KEY_THR "perf/thr"
 #define SEQ_BYTES 8
 #define MAX_PAYLOAD 1024
+/* A received sample is only counted and never copied into `buf`, so the sub workload takes sizes past
+ * the batch (2,048 bytes), which the router sends in fragments and the library rejoins, up to what both
+ * libraries rejoin (a message of 4,096 bytes with its key and headers).
+ */
+#define MAX_SUB_PAYLOAD 3072
 #define MAX_ROUND_TRIPS 2000
 #define OPEN_ATTEMPTS 30
 #define MATCH_WAIT_MS 20000
@@ -527,7 +532,9 @@ int main(void)
 	    number(argv[6], &timeout_ms) != 0) {
 		return fail("usage");
 	}
-	if (size < SEQ_BYTES || size > MAX_PAYLOAD) {
+	const uint32_t most = strcmp(argv[2], "sub") == 0 ? MAX_SUB_PAYLOAD : MAX_PAYLOAD;
+
+	if (size < SEQ_BYTES || size > most) {
 		return fail("size_out_of_range");
 	}
 	if (open_session(argv[1]) != 0) {

@@ -834,25 +834,16 @@ impl PendingDial<HeapLink> for PendingAppLink {
                         peer: self.to,
                         reads_sources: true,
                     };
-                    heap_link(
-                        self.cells.as_ref(),
-                        datagram_ends_fit(&socket, Some(self.to)),
-                        |place| {
-                            self.owner_waits.datagram(
-                                place.write(UdpDriver::initiator_in(socket, self.to, rx, tx)),
-                            )
-                        },
-                    )
+                    self.owner_waits
+                        .place_datagram(self.cells.as_ref(), socket, self.to, rx, tx)
                 } else {
                     let stream = AppStreamSocket {
                         held,
                         local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                         peer: self.to,
                     };
-                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-                        self.owner_waits
-                            .stream(place.write(StreamDriver::over(stream, rx, tx)))
-                    })
+                    self.owner_waits
+                        .place_stream(self.cells.as_ref(), stream, rx, tx)
                 })
             }
         }
@@ -1278,6 +1269,36 @@ impl OwnerWaits {
         }
         link
     }
+
+    /// The datagram link over `socket` to `peer`, placed in `cells` when the session lent them.
+    /// Every datagram link these links dial, finish dialling or accept is placed here: out of
+    /// line, since the placement and the driver it builds were a copy at each of the three.
+    #[inline(never)]
+    fn place_datagram(
+        self,
+        cells: Option<&LentByteCells>,
+        socket: AppDatagramSocket,
+        peer: SocketAddr,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        heap_link(cells, datagram_ends_fit(&socket, Some(peer)))?
+            .open(|place| self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx))))
+    }
+
+    /// The stream link over `stream`, placed as [`Self::place_datagram`] places a datagram link,
+    /// for the same three callers.
+    #[inline(never)]
+    fn place_stream(
+        self,
+        cells: Option<&LentByteCells>,
+        stream: AppStreamSocket,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        heap_link(cells, stream_ends_fit(&stream))?
+            .open(|place| self.stream(place.write(StreamDriver::over(stream, rx, tx))))
+    }
 }
 
 impl AppLinks {
@@ -1360,22 +1381,14 @@ impl SessionLinks for AppLinks {
                     to.at,
                     self.open_bound.as_ref(),
                 )?;
-                heap_link(
-                    self.cells.as_ref(),
-                    datagram_ends_fit(&socket, Some(to.at)),
-                    |place| {
-                        self.owner_waits
-                            .datagram(place.write(UdpDriver::initiator_in(socket, to.at, rx, tx)))
-                    },
-                )
+                self.owner_waits
+                    .place_datagram(self.cells.as_ref(), socket, to.at, rx, tx)
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
                 let stream = self.dial.dial(to.at)?;
-                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-                    self.owner_waits
-                        .stream(place.write(StreamDriver::over(stream, rx, tx)))
-                })
+                self.owner_waits
+                    .place_stream(self.cells.as_ref(), stream, rx, tx)
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
@@ -1530,15 +1543,9 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        heap_link(
-            self.cells.as_ref(),
-            datagram_ends_fit(&socket, Some(peer)),
-            |place| {
-                self.owner_waits
-                    .datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
-            },
-        )
-        .map(Some)
+        self.owner_waits
+            .place_datagram(self.cells.as_ref(), socket, peer, rx, tx)
+            .map(Some)
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1569,11 +1576,9 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-            self.owner_waits
-                .stream(place.write(StreamDriver::over(stream, rx, tx)))
-        })
-        .map(Some)
+        self.owner_waits
+            .place_stream(self.cells.as_ref(), stream, rx, tx)
+            .map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {

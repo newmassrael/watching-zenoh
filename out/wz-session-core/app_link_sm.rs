@@ -97,6 +97,19 @@ pub enum AppLinkState {
     Closed = 4,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl AppLinkState {
+    pub const ID_Opening: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Opening as u16);
+    pub const ID_Open: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Open as u16);
+    pub const ID_Blocked: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Blocked as u16);
+    pub const ID_Closing: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Closing as u16);
+    pub const ID_Closed: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Closed as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -118,6 +131,25 @@ pub enum AppLinkEvent {
     SessionClose = 8,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 9,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl AppLinkEvent {
+    pub const ID_CloseDone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::CloseDone as u16);
+    pub const ID_LinkAccepted: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkAccepted as u16);
+    pub const ID_LinkClosed: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkClosed as u16);
+    pub const ID_LinkConnected: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkConnected as u16);
+    pub const ID_LinkWritable: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkWritable as u16);
+    pub const ID_SendBlocked: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SendBlocked as u16);
+    pub const ID_SendClosed: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SendClosed as u16);
+    pub const ID_SendFailed: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SendFailed as u16);
+    pub const ID_SessionClose: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SessionClose as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -602,9 +634,9 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
 // SCE-MAP: app_link.scxml:55 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
-            AppLinkState::Closed => {
+            AppLinkState::ID_Closed => {
                 // SCE-MAP: app_link.scxml:98 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -614,7 +646,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
             self.actions.wake_waiters();
                 }
             }
-            AppLinkState::Closing => {
+            AppLinkState::ID_Closing => {
                 // SCE-MAP: app_link.scxml:89 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -624,7 +656,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
             self.actions.close_program();
                 }
             }
-            AppLinkState::Open => {
+            AppLinkState::ID_Open => {
                 // SCE-MAP: app_link.scxml:71 :: Open :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -649,7 +681,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
 // SCE-MAP: app_link.scxml:55 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -667,30 +699,32 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
 // SCE-MAP: app_link.scxml:55 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            AppLinkState::Blocked => {
-                if event == AppLinkEvent::LinkWritable {
+            AppLinkState::ID_Blocked => {
+                if event == AppLinkEvent::ID_LinkWritable {
                     {
                         // Blocked, transition 0
                         return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
-                if event == AppLinkEvent::LinkClosed {
+                if event == AppLinkEvent::ID_LinkClosed {
                     {
                         // Blocked, transition 1
                         return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
-                if event == AppLinkEvent::SessionClose {
+                if event == AppLinkEvent::ID_SessionClose {
                     {
                         // Blocked, transition 2
                         return Some(::sce_rust_runtime::TransitionId(11));
@@ -698,14 +732,14 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
                 }
                 None
             }
-            AppLinkState::Closing => {
-                if event == AppLinkEvent::CloseDone {
+            AppLinkState::ID_Closing => {
+                if event == AppLinkEvent::ID_CloseDone {
                     {
                         // Closing, transition 0
                         return Some(::sce_rust_runtime::TransitionId(12));
                     }
                 }
-                if event == AppLinkEvent::LinkClosed {
+                if event == AppLinkEvent::ID_LinkClosed {
                     {
                         // Closing, transition 1
                         return Some(::sce_rust_runtime::TransitionId(13));
@@ -713,32 +747,32 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
                 }
                 None
             }
-            AppLinkState::Open => {
-                if event == AppLinkEvent::SendBlocked {
+            AppLinkState::ID_Open => {
+                if event == AppLinkEvent::ID_SendBlocked {
                     {
                         // Open, transition 0
                         return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
-                if event == AppLinkEvent::SendClosed {
+                if event == AppLinkEvent::ID_SendClosed {
                     {
                         // Open, transition 1
                         return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
-                if event == AppLinkEvent::SendFailed {
+                if event == AppLinkEvent::ID_SendFailed {
                     {
                         // Open, transition 2
                         return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
-                if event == AppLinkEvent::LinkClosed {
+                if event == AppLinkEvent::ID_LinkClosed {
                     {
                         // Open, transition 3
                         return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
-                if event == AppLinkEvent::SessionClose {
+                if event == AppLinkEvent::ID_SessionClose {
                     {
                         // Open, transition 4
                         return Some(::sce_rust_runtime::TransitionId(8));
@@ -746,26 +780,26 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
                 }
                 None
             }
-            AppLinkState::Opening => {
-                if event == AppLinkEvent::LinkConnected {
+            AppLinkState::ID_Opening => {
+                if event == AppLinkEvent::ID_LinkConnected {
                     {
                         // Opening, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == AppLinkEvent::LinkAccepted {
+                if event == AppLinkEvent::ID_LinkAccepted {
                     {
                         // Opening, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
-                if event == AppLinkEvent::LinkClosed {
+                if event == AppLinkEvent::ID_LinkClosed {
                     {
                         // Opening, transition 2
                         return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
-                if event == AppLinkEvent::SessionClose {
+                if event == AppLinkEvent::ID_SessionClose {
                     {
                         // Opening, transition 3
                         return Some(::sce_rust_runtime::TransitionId(3));

@@ -40,10 +40,10 @@ Each seed is the input layout its target's header comment states:
 - `pico_config`, `pico_e2e`, `pico_instance_key`, `pico_catalog`,
   `pico_payload`: the pico C ABI's own doors, with the documents, profiles,
   schemas and catalogs the crate's own tests use (`crates/wz-capi-pico/tests`,
-  `crates/wz-app-frame/catalog/synthetic.json5`, the `.proto` files of
-  `crates/wz-capture/testdata/nanopb/`), written here in the target's layout:
-  arguments, texts each to a NUL, then operations each behind its two-byte
-  little-endian length.
+  `crates/wz-app-frame/catalog/synthetic.json5`), written here in the target's
+  layout: arguments, texts each to a NUL and a schema's compiled descriptor set
+  behind its two-byte little-endian length, then operations each behind its
+  two-byte little-endian length.
 
 The output is a pure function of the tree: names are the SHA-256 of the
 bytes, so writing twice changes nothing.
@@ -469,24 +469,49 @@ E2E_JUDGED_PROFILE = b"""{
 E2E_JUDGED_VALUES = b'{"ident": {"app": 801, "msg": 99}, "cell": {"kind": 5}, "@address": 4660}'
 
 # The schema and the description of the instance keys' door tests: three bays
-# and two tilts, six instances. Synthetic.
-KEYED_SCHEMA = (
-    b'syntax = "proto3";\npackage syn.door;\n'
-    b"message Reading {\n  optional uint32 bay = 1;\n  sint32 tilt = 2;\n  bytes body = 3;\n}\n"
+# and two tilts, six instances. Synthetic. The schema is the FileDescriptorSet
+# `protoc --include_imports -o` compiles from `door.proto`, which reads
+#   syntax = "proto3"; package syn.door;
+#   message Reading { optional uint32 bay = 1; sint32 tilt = 2; bytes body = 3; }
+# and is `SCHEMA_SET` of crates/wz-capi-pico/tests/it/files/instance_key_doors.rs.
+KEYED_SET = (
+    b"\x0a\x70\x0a\x0a\x64\x6f\x6f\x72\x2e\x70\x72\x6f\x74\x6f\x12\x08\x73\x79\x6e\x2e\x64\x6f"
+    b"\x6f\x72\x22\x50\x0a\x07\x52\x65\x61\x64\x69\x6e\x67\x12\x15\x0a\x03\x62\x61\x79\x18\x01"
+    b"\x20\x01\x28\x0d\x48\x00\x52\x03\x62\x61\x79\x88\x01\x01\x12\x12\x0a\x04\x74\x69\x6c\x74"
+    b"\x18\x02\x20\x01\x28\x11\x52\x04\x74\x69\x6c\x74\x12\x12\x0a\x04\x62\x6f\x64\x79\x18\x03"
+    b"\x20\x01\x28\x0c\x52\x04\x62\x6f\x64\x79\x42\x06\x0a\x04\x5f\x62\x61\x79\x62\x06\x70\x72"
+    b"\x6f\x74\x6f\x33"
 )
 KEYED_DESCRIPTION = (
     b'{"message": "syn.door.Reading", "fields": [{"path": "bay", "values": [12, 30, 44]}, '
     b'{"path": "tilt", "values": [-3, 5]}], "report_interval_ms": 1000}'
 )
 
-# The schema of the message payloads' door tests. Synthetic.
-PAYLOAD_SCHEMA = (
-    b'syntax = "proto3";\npackage syn.door;\n'
-    b"enum Tone {\n  TONE_NONE = 0;\n  TONE_WARM = 1;\n  TONE_COLD = 2;\n}\n"
-    b"message Point {\n  sint32 x = 1;\n  sint32 y = 2;\n}\n"
-    b"message Pose {\n  uint32 serial = 1;\n  int32 offset = 2;\n  double weight = 3;\n  bool lit = 4;\n"
-    b"  string label = 5;\n  bytes blob = 6;\n  Tone tone = 7;\n  Point origin = 8;\n"
-    b"  repeated Point path = 9;\n  optional uint64 stamp = 10;\n}\n"
+# The schema of the message payloads' door tests, the FileDescriptorSet
+# `protoc --include_imports -o` compiles from their `syn/door.proto` (`SCHEMA`
+# and `SCHEMA_SET` of crates/wz-capi-pico/tests/it/files/message_payload_doors.rs).
+# Synthetic.
+PAYLOAD_SET = (
+    b"\x0a\xa0\x03\x0a\x0e\x73\x79\x6e\x2f\x64\x6f\x6f\x72\x2e\x70\x72\x6f\x74\x6f\x12\x08\x73"
+    b"\x79\x6e\x2e\x64\x6f\x6f\x72\x22\x23\x0a\x05\x50\x6f\x69\x6e\x74\x12\x0c\x0a\x01\x78\x18"
+    b"\x01\x20\x01\x28\x11\x52\x01\x78\x12\x0c\x0a\x01\x79\x18\x02\x20\x01\x28\x11\x52\x01\x79"
+    b"\x22\xa1\x02\x0a\x04\x50\x6f\x73\x65\x12\x16\x0a\x06\x73\x65\x72\x69\x61\x6c\x18\x01\x20"
+    b"\x01\x28\x0d\x52\x06\x73\x65\x72\x69\x61\x6c\x12\x16\x0a\x06\x6f\x66\x66\x73\x65\x74\x18"
+    b"\x02\x20\x01\x28\x05\x52\x06\x6f\x66\x66\x73\x65\x74\x12\x16\x0a\x06\x77\x65\x69\x67\x68"
+    b"\x74\x18\x03\x20\x01\x28\x01\x52\x06\x77\x65\x69\x67\x68\x74\x12\x10\x0a\x03\x6c\x69\x74"
+    b"\x18\x04\x20\x01\x28\x08\x52\x03\x6c\x69\x74\x12\x14\x0a\x05\x6c\x61\x62\x65\x6c\x18\x05"
+    b"\x20\x01\x28\x09\x52\x05\x6c\x61\x62\x65\x6c\x12\x12\x0a\x04\x62\x6c\x6f\x62\x18\x06\x20"
+    b"\x01\x28\x0c\x52\x04\x62\x6c\x6f\x62\x12\x22\x0a\x04\x74\x6f\x6e\x65\x18\x07\x20\x01\x28"
+    b"\x0e\x32\x0e\x2e\x73\x79\x6e\x2e\x64\x6f\x6f\x72\x2e\x54\x6f\x6e\x65\x52\x04\x74\x6f\x6e"
+    b"\x65\x12\x27\x0a\x06\x6f\x72\x69\x67\x69\x6e\x18\x08\x20\x01\x28\x0b\x32\x0f\x2e\x73\x79"
+    b"\x6e\x2e\x64\x6f\x6f\x72\x2e\x50\x6f\x69\x6e\x74\x52\x06\x6f\x72\x69\x67\x69\x6e\x12\x23"
+    b"\x0a\x04\x70\x61\x74\x68\x18\x09\x20\x03\x28\x0b\x32\x0f\x2e\x73\x79\x6e\x2e\x64\x6f\x6f"
+    b"\x72\x2e\x50\x6f\x69\x6e\x74\x52\x04\x70\x61\x74\x68\x12\x19\x0a\x05\x73\x74\x61\x6d\x70"
+    b"\x18\x0a\x20\x01\x28\x04\x48\x00\x52\x05\x73\x74\x61\x6d\x70\x88\x01\x01\x42\x08\x0a\x06"
+    b"\x5f\x73\x74\x61\x6d\x70\x2a\x33\x0a\x04\x54\x6f\x6e\x65\x12\x0d\x0a\x09\x54\x4f\x4e\x45"
+    b"\x5f\x4e\x4f\x4e\x45\x10\x00\x12\x0d\x0a\x09\x54\x4f\x4e\x45\x5f\x57\x41\x52\x4d\x10\x01"
+    b"\x12\x0d\x0a\x09\x54\x4f\x4e\x45\x5f\x43\x4f\x4c\x44\x10\x02\x62\x06\x70\x72\x6f\x74\x6f"
+    b"\x33"
 )
 
 # The operations of the `pico_config` seeds: zenoh documents, policies,
@@ -538,11 +563,9 @@ def keyed_reading(bay: int, tilt: int, body: bytes) -> bytes:
             + varint((3 << 3) | 2) + varint(len(body)) + body)
 
 
-def proto_messages(text: bytes) -> list[bytes]:
-    """The full names of the top-level messages a `.proto` text declares."""
-    package = re.search(rb"^\s*package\s+([\w.]+)\s*;", text, re.M)
-    prefix = package.group(1) + b"." if package else b""
-    return [prefix + name for name in re.findall(rb"^message\s+(\w+)", text, re.M)]
+def sized(data: bytes) -> bytes:
+    """`data` behind its two-byte little-endian length, as a target's `Reader::sized` reads it."""
+    return struct.pack("<H", len(data)) + data
 
 
 def pico_ext_seeds(target: str) -> list[bytes]:
@@ -569,8 +592,7 @@ def pico_ext_seeds(target: str) -> list[bytes]:
         ]
     if target == "pico_instance_key":
         def keyed(choices: int, ops: list[bytes]) -> bytes:
-            return (bytes([choices]) + b"door.proto\0" + KEYED_SCHEMA + b"\0" + KEYED_DESCRIPTION + b"\0"
-                    + unit_stream(ops))
+            return bytes([choices]) + sized(KEYED_SET) + KEYED_DESCRIPTION + b"\0" + unit_stream(ops)
         ops = [b"\x00" + keyed_reading(12, -3, b"\0\0"), b"\x00" + keyed_reading(30, 5, b"x"), b"\x00\xff\xff",
                b"\x01", b"\x03" + bytes([16]), b"\x07" + bytes([2]), b"\x02set", b"\x03" + bytes([16]),
                b"\x00" + keyed_reading(99, -3, b""), b"\x05", b"\x00" + keyed_reading(44, 5, bytes(40))]
@@ -582,19 +604,17 @@ def pico_ext_seeds(target: str) -> list[bytes]:
         return [text + b"\0" + names, text.replace(b"id: 402", b"id: 401") + b"\0" + names,
                 text.replace(b"replay_depth: 6", b"replay_depth: 100000") + b"\0", b"{}\0", b"not a catalog\0"]
     if target == "pico_payload":
-        def payload(choices: int, message: bytes, name: bytes, text: bytes, ops: list[bytes]) -> bytes:
-            return bytes([choices]) + message + b"\0" + name + b"\0" + text + b"\0" + unit_stream(ops)
+        def payload(choices: int, message: bytes, ops: list[bytes]) -> bytes:
+            return bytes([choices]) + message + b"\0" + sized(PAYLOAD_SET) + unit_stream(ops)
         pose = b"\x08\x01" + b"\x2a\x02hi" + b"\x4a\x02\x08\x02" + b"\x50\x07"
         ops = [b"\x00" + pose, b"\x01offset\0" + struct.pack("<q", -5), b"\x02serial\0" + struct.pack("<Q", 7),
                b"\x03weight\0" + struct.pack("<d", 1.5), b"\x04lit\0\x01", b"\x05label\0hello\0",
                b"\x05tone\0TONE_WARM\0", b"\x06blob\0\x01\x02", b"\x07label\0", b"\x07path[0].x\0", b"\x07path\0",
                b"\x0fstamp\0", b"\x09offset\0" + struct.pack("<q", 3), b"\x10" + pose, b"\x00\xff"]
-        out = [payload(choices, b"syn.door.Pose", b"syn/door.proto", PAYLOAD_SCHEMA, ops) for choices in (0, 1, 4, 2)]
-        for path in sorted(PROTOS.glob("*.proto")):
-            text = path.read_bytes()
-            for message in proto_messages(text)[:1]:
-                out.append(payload(0, message, path.name.encode(), text, [b"\x00\x08\x01", b"\x07a\0"]))
-        return out
+        return [payload(choices, b"syn.door.Pose", ops) for choices in (0, 1, 4, 2)] + [
+            payload(0, b"syn.door.Point", [b"\x00\x08\x01", b"\x07x\0"]),
+            payload(0, b"syn.door.Tone", []),
+        ]
     raise SystemExit(f"fuzz_seeds: no seeds of `{target}`")
 
 

@@ -52,6 +52,17 @@ pub trait MulticastReplyEnqueue {
     fn enqueue_reply(&self, reply: MulticastTxReply<'_>) {
         self.enqueue(reply.to_item());
     }
+
+    /// Enqueue one staged reply, described by the parts its stage lends. A backing that queues
+    /// owned items builds the owned record from them (the default), and skips a reply the wire
+    /// cannot carry; one that encodes its replies where they wait writes it with the stage's lent
+    /// writer ([`crate::lent_response::ResponseWriter`]), and builds no owned record of it.
+    #[cfg(feature = "codec-response")]
+    fn enqueue_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+            self.enqueue_reply(MulticastTxReply::Response(&response));
+        }
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -87,19 +98,18 @@ impl<Q> MulticastReplySink<Q> {
     }
 }
 
-// The queryable-reply drain (R311lq): the observer hands the sink the owned
-// `Response` (drained from `pending_replies` via `QueryReply::into_response`) and
-// the terminal rid; the sink wraps each in the matching `MulticastTxItem` and
-// enqueues it. `send_response` is the one place a `wz_codecs` owned type is
-// named — here in wz-session-core (which already deps wz-codecs), not in the
-// backing crates. Every method is gated by its own codec, so a build with neither
+// The queryable-reply drain (R311lq): the observer hands the sink each staged reply as
+// its parts and the terminal rid; the sink hands the reply to the backing
+// (`MulticastReplyEnqueue::enqueue_reply_parts`) and wraps the rid in its
+// `MulticastTxItem`. Every method is gated by its own codec, so a build with neither
 // reply codec has a sink with nothing to send: a host that drains a group's whole
 // observer through one sink (`SlotObserver::flush_pending`) names it in every build.
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
+    // A staged reply goes to the backing as its parts, so that a backing that writes its replies
+    // where they wait builds no owned record of it.
     #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: crate::wire::ResponseOwned) {
-        self.queue
-            .enqueue_reply(MulticastTxReply::Response(&response));
+    fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        self.queue.enqueue_reply_parts(parts);
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(
@@ -109,6 +119,17 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
     ) {
         self.queue
             .enqueue(MulticastTxItem::ResponseFinal { request_id, qos });
+    }
+}
+
+// A reply a handler built as the owned record on the tokio engine's own path is sent as it is,
+// the one place a `wz_codecs` owned type is named for a group: here in wz-session-core, not in
+// the backing crates.
+#[cfg(feature = "codec-response")]
+impl<Q: MulticastReplyEnqueue> crate::response_sink::OwnedResponseSink for MulticastReplySink<Q> {
+    fn send_response(&self, response: crate::wire::ResponseOwned) {
+        self.queue
+            .enqueue_reply(MulticastTxReply::Response(&response));
     }
 }
 

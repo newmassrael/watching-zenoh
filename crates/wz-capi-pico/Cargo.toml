@@ -85,6 +85,7 @@ default = [
     "connectivity",
     "config-policy",
     "conformance-digest",
+    "device-requires",
 ]
 # `std`: the library runs on a host, whose standard library gives the engine port's threads and
 # sleep (`wz-capi-port`'s `os`), the locks being `wz-host-sync`'s in its `std` build, which take no
@@ -261,11 +262,14 @@ multicast-transport = [
     "wz-capi-coop?/group-host",
 ]
 # Open-debt item 913 — pico's `Z_FEATURE_MULTICAST_DECLARATIONS` (vendor default 0), off here
-# as there. Both engines tell a group the session's keyexprs and ask it for its members' on it,
-# so it selects neither: the cooperative engine's group reads the declarations the open hands it.
+# as there. Both engines tell a group the session's keyexprs, ask it for its members' on it and
+# read each member's keys by that member's own declarations, so it selects neither: the
+# cooperative engine's group reads the declarations the open hands it, and keeps the members'
+# keyexprs apart by its own `multicast-declarations`.
 multicast-declarations = [
     "multicast-transport",
     "wz-capi-core?/multicast-declarations",
+    "wz-capi-coop?/multicast-declarations",
 ]
 # Open-debt item 911 — pico's `Z_FEATURE_RAWETH_TRANSPORT` (vendor default 0): `z_open` with a
 # `listen` endpoint `reth/<mac>#...` joins a group over raw Ethernet as the session's one
@@ -535,6 +539,16 @@ instance-key = [
     "wz-app-frame/instance-key",
     "wz-capi-core?/instance-key",
 ]
+# `proto-text`: the doors that read a schema from the `.proto` text the program hands over when it
+# runs (`wz_ext_payload_schema_new`, `wz_ext_instance_keyer_new`, `wz_ext_proto_file_t`), over the
+# text reader of `wz-app-frame` (its tokenizer, parser and linker). Without it a schema is read
+# only from the `FileDescriptorSet` `protoc` compiled the files into when the program was built
+# (`wz_ext_payload_schema_from_descriptor_set`, `wz_ext_instance_keyer_from_descriptor_set`) and
+# no text reader is linked, so it is off as the reference build is and in the release package; a
+# build that reads the text a person hands over turns it on. wz's own, part of the unstable
+# surface. It adds doors only beside `message-payload` or `instance-key` and turns neither on;
+# like them it selects no `std` and neither engine.
+proto-text = ["unstable-api", "wz-app-frame?/proto-text", "wz-capi-core?/proto-text"]
 # `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
 # which carries every link of a session opened from the config that names it, over the program's
 # own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off
@@ -644,6 +658,13 @@ config-policy = ["wz-capi-core?/config-policy", "wz-session-core/policy-selectio
 # was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
 # package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.
 conformance-digest = ["wz-capi-core?/conformance-digest"]
+# `device-requires`: `wz_ext_config_device_requires`, the door that answers what an open of a
+# config would ask of the operating system (`src/device_requires.rs`). wz's own, which zenoh-pico
+# has not: on in a build that names nothing and in the host-peer-ext preset, off in the zenoh-pico
+# preset. Part of the unstable surface, so it implies `unstable-api`, which alone is pico's
+# unstable API and carries no door of wz's. Either engine's open is read by it, so it selects
+# neither.
+device-requires = ["unstable-api", "wz-capi-core?/device-requires"]
 # `config-document`: `wz_ext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

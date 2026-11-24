@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The message payloads of the pico C ABI (`wz_ext_payload_schema_*`, `wz_ext_message_payload_*`):
-//! a schema read from a `.proto` file the fuzzer writes, a payload of a message of the catalog the
-//! reader's tests use, and bytes the fuzzer writes decoded into it, values set and read at paths
-//! it writes, and the payload encoded again.
+//! a schema read from a `FileDescriptorSet` the fuzzer writes, a payload of a message of the
+//! catalog the reader's tests use, and bytes the fuzzer writes decoded into it, values set and read
+//! at paths it writes, and the payload encoded again.
 //!
-//! Input: a byte of choices, the message type's full name, the file's name and its text (each to
-//! a NUL), then the operations, each a unit behind its two-byte little-endian length whose first
-//! byte chooses it; the rest of the unit is a path (to a NUL) and then the operation's data:
+//! Input: a byte of choices, the message type's full name (to a NUL), the descriptor set behind its
+//! two-byte little-endian length, then the operations, each a unit behind its two-byte
+//! little-endian length whose first byte chooses it; the rest of the unit is a path (to a NUL) and
+//! then the operation's data:
 //!
 //! | op % 8 | operation |
 //! |--------|-----------|
@@ -39,7 +40,6 @@ use std::ffi::{CStr, CString};
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::message_catalog::*;
 use wz_capi_pico::message_payload::*;
-use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{
     ZResult, WZ_EXT_ERR_PAYLOAD_ABSENT, WZ_EXT_ERR_PAYLOAD_PATH, WZ_EXT_ERR_PAYLOAD_RANGE,
     WZ_EXT_ERR_PAYLOAD_TYPE, WZ_EXT_ERR_PAYLOAD_WIRE, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE,
@@ -74,8 +74,7 @@ fuzz_target!(|data: &[u8]| {
     let mut r = Reader::new(data);
     let choices = r.u8();
     let message = r.c_field();
-    let name = r.c_field();
-    let text = r.c_field();
+    let set = r.sized();
     let ops = r.rest();
 
     let catalog_text = CString::new(CATALOG).expect("the catalog holds no NUL");
@@ -89,21 +88,22 @@ fuzz_target!(|data: &[u8]| {
         "the synthetic catalog is refused ({rc}): the harness is wrong"
     );
 
-    let files = [wz_ext_proto_file_t {
-        name: name.as_ptr(),
-        text: text.as_ptr(),
-    }];
     let mut schema: wz_ext_owned_payload_schema_t = unsafe { core::mem::zeroed() };
     let mut refusal = empty_string();
-    // SAFETY: `schema` is writable; the file's strings are NUL-terminated; `refusal` is writable.
+    // SAFETY: `schema` is writable; `set` is readable for its length; `refusal` is writable.
     let rc = unsafe {
-        wz_ext_payload_schema_new(&mut schema, files.as_ptr(), files.len(), &mut refusal)
+        wz_ext_payload_schema_from_descriptor_set(
+            &mut schema,
+            set.as_ptr(),
+            set.len(),
+            &mut refusal,
+        )
     };
     let why = unsafe { take_string("payload_schema_new", &mut refusal) };
     stated(
         "payload_schema_new",
         rc,
-        &[Z_OK, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE],
+        &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE],
     );
     assert_eq!(
         unsafe { wz_ext_internal_payload_schema_check(&schema) },
