@@ -1648,18 +1648,17 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     }
 }
 
+// The delivery traits are the rows': each names the context its row is told through, here the
+// session's round of deliveries and its query plane.
 #[cfg(feature = "liveliness")]
-// Named by path, not imported: the delivery traits are implemented for every type on rows of no
-// callback, so one in scope would answer a method call of the same name on any receiver first
-// (the round's own `deliver`).
 impl
-    wz_session_core::declare::liveliness_subscriber::LivelinessDelivery<
-        LivelinessRow,
+    wz_session_core::declare::liveliness_subscriber::LivelinessDelivered<
+        RoundDelivery,
         LivelinessSubscriberHandle,
-    > for RoundDelivery
+    > for LivelinessRow
 {
-    fn deliver(
-        &mut self,
+    fn tell(
+        cx: &mut RoundDelivery,
         id: LivelinessSubscriberHandle,
         row: RowAccess<'_, LivelinessRow>,
         sample: LivelinessSample<'_>,
@@ -1672,16 +1671,16 @@ impl
         // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
         // holds, as the round's writer must.
         unsafe {
-            self.round
+            cx.round
                 .offer_liveliness(LivelinessCall::new(call, id), &sample)
         };
     }
 }
 
 #[cfg(feature = "queryable")]
-impl wz_session_core::query::QueryDelivery<QueryableRow, QueryableHandle> for RoundDelivery {
+impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for QueryableRow {
     fn ask(
-        &mut self,
+        cx: &mut RoundDelivery,
         id: QueryableHandle,
         row: RowAccess<'_, QueryableRow>,
         query: &ProvenQuery<'_>,
@@ -1690,7 +1689,7 @@ impl wz_session_core::query::QueryDelivery<QueryableRow, QueryableHandle> for Ro
         // The callback is the program's and never runs under the session's lock: the query is
         // held for it with a call begun on its row, read where it lies, and the replies it makes
         // go out through a responder of the plane's own.
-        self.plane.arrive(id, row.row(), query);
+        cx.plane.arrive(id, row.row(), query);
     }
 }
 
