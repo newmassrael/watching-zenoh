@@ -111,6 +111,10 @@ pub(crate) struct Counts {
     pub(crate) gets: usize,
     /// Liveliness gets each session holds pending.
     pub(crate) liveliness_gets: usize,
+    /// Advanced publishers of each session.
+    pub(crate) advanced_publishers: usize,
+    /// Advanced subscribers of each session, owned and background.
+    pub(crate) advanced_subscribers: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -182,6 +186,8 @@ pub(crate) struct Bounds {
     keyexprs: Option<usize>,
     gets: Option<usize>,
     liveliness_gets: Option<usize>,
+    advanced_publishers: Option<usize>,
+    advanced_subscribers: Option<usize>,
 }
 
 impl Bounds {
@@ -197,6 +203,8 @@ impl Bounds {
             keyexprs: limits.max_declared_keyexprs().most(),
             gets: limits.max_pending_queries().most(),
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
+            advanced_publishers: limits.max_advanced_publishers().most(),
+            advanced_subscribers: limits.max_advanced_subscribers().most(),
         }
     }
 }
@@ -309,12 +317,24 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.liveliness_gets,
             bounds.liveliness_gets,
         )),
+        advanced_publishers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_publishers,
+            bounds.advanced_publishers,
+        )),
+        advanced_subscribers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_subscribers,
+            bounds.advanced_subscribers,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 17;
+const KINDS: usize = 22;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,6 +413,13 @@ impl Plan {
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         {
             plan = plan.with::<crate::get::GetPlace>(Kind::LivelinessGet, objects.liveliness_gets);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        {
+            plan = plan.with::<crate::advanced::AdvPubState>(
+                Kind::AdvancedPublisher,
+                objects.advanced_publishers,
+            );
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -910,6 +937,12 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_gets: each::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
             limits.max_pending_liveliness_gets(),
         ),
+        advanced_publishers: each::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            limits.max_advanced_publishers(),
+        ),
+        advanced_subscribers: each::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            limits.max_advanced_subscribers(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -935,6 +968,8 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         encodings: caps::HELD_ENCODINGS,
         gets: 0,
         liveliness_gets: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1178,6 +1213,8 @@ mod tests {
         keyexprs: Some(7),
         gets: Some(8),
         liveliness_gets: Some(9),
+        advanced_publishers: Some(10),
+        advanced_subscribers: Some(11),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1189,6 +1226,8 @@ mod tests {
         liveliness_subscribers: None,
         gets: None,
         liveliness_gets: None,
+        advanced_publishers: None,
+        advanced_subscribers: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1287,6 +1326,8 @@ mod tests {
             encodings: 12,
             gets: 1,
             liveliness_gets: 1,
+            advanced_publishers: 1,
+            advanced_subscribers: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1696,6 +1737,12 @@ mod tests {
             Kind::LivelinessGet,
             core::mem::size_of::<crate::get::GetPlace>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_publisher",
+            Kind::AdvancedPublisher,
+            core::mem::size_of::<crate::advanced::AdvPubState>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1879,6 +1926,8 @@ mod tests {
         check(Kind::Get);
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         check(Kind::LivelinessGet);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedPublisher);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1900,6 +1949,14 @@ mod tests {
         assert_eq!(
             bounds.liveliness_gets,
             limits.max_pending_liveliness_gets().most()
+        );
+        assert_eq!(
+            bounds.advanced_publishers,
+            limits.max_advanced_publishers().most()
+        );
+        assert_eq!(
+            bounds.advanced_subscribers,
+            limits.max_advanced_subscribers().most()
         );
     }
 

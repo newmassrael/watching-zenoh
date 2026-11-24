@@ -228,13 +228,14 @@ const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
-/// (`query`) and pending liveliness gets (`liveliness-get`), as many as the ABI asks places of,
-/// at most these.
+/// (`query`), pending liveliness gets (`liveliness-get`) and advanced publishers and subscribers
+/// (`advanced`), as many as the ABI asks places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
     * (3 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
         + cfg!(feature = "query") as usize
-        + cfg!(feature = "liveliness-get") as usize);
+        + cfg!(feature = "liveliness-get") as usize
+        + 2 * cfg!(feature = "advanced") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -297,6 +298,16 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "pending liveliness get place flags",
             "pending liveliness get places",
             "MAX_PENDING_LIVELINESS_GETS",
+        ),
+        EntityKind::AdvancedPublisher => (
+            "advanced publisher place flags",
+            "advanced publisher places",
+            "MAX_ADVANCED_PUBLISHERS",
+        ),
+        EntityKind::AdvancedSubscriber => (
+            "advanced subscriber place flags",
+            "advanced subscriber places",
+            "MAX_ADVANCED_SUBSCRIBERS",
         ),
     }
 }
@@ -421,6 +432,12 @@ pub struct EntityRows {
     /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
     /// without `liveliness-get`.
     pub pending_liveliness_gets: usize,
+    /// The advanced publishers (`MAX_ADVANCED_PUBLISHERS`), which the engine keeps no row of: the
+    /// ABI's places of them only; none in a build without `advanced`.
+    pub advanced_publishers: usize,
+    /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
+    /// advanced publishers; none in a build without `advanced`.
+    pub advanced_subscribers: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -511,6 +528,8 @@ impl EntityRows {
             EntityKind::Querier => self.queriers,
             EntityKind::PendingGet => self.pending_gets,
             EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
+            EntityKind::AdvancedPublisher => self.advanced_publishers,
+            EntityKind::AdvancedSubscriber => self.advanced_subscribers,
         }
     }
 
@@ -1741,6 +1760,22 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                 "MAX_PENDING_LIVELINESS_GETS",
                 limits.max_pending_liveliness_gets(),
+            )?
+        } else {
+            0
+        },
+        advanced_publishers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+                "MAX_ADVANCED_PUBLISHERS",
+                limits.max_advanced_publishers(),
+            )?
+        } else {
+            0
+        },
+        advanced_subscribers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+                "MAX_ADVANCED_SUBSCRIBERS",
+                limits.max_advanced_subscribers(),
             )?
         } else {
             0

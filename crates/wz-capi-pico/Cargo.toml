@@ -346,8 +346,9 @@ advanced = [
     "wz-node-time/time-hlc",
     "wz-capi-core?/advanced",
     "wz-capi-coop?/ticker",
-    # The caches keep their samples in the session's ring on the cooperative engine.
-    "wz-capi-coop?/advanced-cache",
+    # The advanced publishers and subscribers lie in places of the session's arena on the
+    # cooperative engine, and their caches keep their samples in the session's ring.
+    "wz-capi-coop?/advanced",
 ]
 # `clock-source`: the clock a program registers (`wz_ext_clock_source_register`), which
 # `z_timestamp_new` reads in place of the system clock, and the report of its standing

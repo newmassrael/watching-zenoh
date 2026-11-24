@@ -122,6 +122,10 @@ impl wz_ext_object_pool_counts_t {
             // `MAX_PENDING_LIVELINESS_GETS`: a get's place is held only while it is pending.
             gets: 0,
             liveliness_gets: 0,
+            // At the bound of the session's `MAX_ADVANCED_PUBLISHERS` and
+            // `MAX_ADVANCED_SUBSCRIBERS`, which the program states no count of.
+            advanced_publishers: 0,
+            advanced_subscribers: 0,
         }
     }
 }
@@ -334,6 +338,8 @@ mod tests {
                 encodings: 16,
                 gets: 0,
                 liveliness_gets: 0,
+                advanced_publishers: 0,
+                advanced_subscribers: 0,
             }
         );
     }
