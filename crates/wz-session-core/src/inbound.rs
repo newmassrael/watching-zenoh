@@ -649,8 +649,10 @@ pub struct InitFacts<'f> {
     pub version: u8,
     /// The peer's role, in its 2-bit wire form.
     pub whatami: u8,
-    /// The peer's zid as the wire carries it.
-    pub zid: &'f [u8],
+    /// The peer's zid, made where the message was read: the read refuses a zid that is none, so
+    /// what it judged is what the session records and checks, and nothing judges it again. `None`
+    /// only for a decoded message built by hand that names no zid.
+    pub zid: Option<crate::session_zid::SessionZid>,
     /// The sizing pair the S flag announces.
     pub s: Option<wz_codecs::init_body::InitBodyS>,
     /// The cookie an InitAck carries.
@@ -1006,7 +1008,7 @@ impl InboundFrame {
                 is_ack: *is_ack,
                 version: body.version,
                 whatami: body.whatami(),
-                zid: body.zid.as_slice(),
+                zid: crate::session_zid::SessionZid::new(body.zid.as_slice()).ok(),
                 s: body.s,
                 cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
             }),
@@ -2082,9 +2084,10 @@ pub(crate) fn control_event(
 /// One transport message that carries no data, read where it lies in the receive buffer: the
 /// session's in-place receive hands every unit that is not a `Frame` or a `Fragment` it read
 /// itself to [`read_control`]. It is the message's facts as the judgement reads them, made once
-/// where the message is read: a handshake body's zid and cookie are ranges of the unit, the
-/// extension chain is the document's view of it, and the admission of that chain is judged with
-/// the read. No second form of the message is kept to be projected into the facts afterwards.
+/// where the message is read: a handshake body's cookie is a range of the unit and its zid the
+/// value the read judged, the extension chain is the document's view of it, and the admission of
+/// that chain is judged with the read. No second form of the message is kept to be projected into
+/// the facts afterwards.
 ///
 /// Its life is the unit's: it is judged and dropped before the receive goes on to the next
 /// message of the unit.
@@ -2167,16 +2170,15 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                         ReadChain::Init(*list.inner())
                     });
                 // A zid that is no zid is refused, after the chain as the decoder refuses it
-                // (`refuse_unnamed_zid`).
-                if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.inner()) {
-                    return Err(InboundParseError::InvalidZid(refused));
-                }
+                // (`refuse_unnamed_zid`), and the one it is goes on in the facts.
+                let zid = crate::session_zid::SessionZid::new(view.body.zid.inner())
+                    .map_err(InboundParseError::InvalidZid)?;
                 (
                     ControlFacts::Init(InitFacts {
                         is_ack: (view.header & wire_const::FLAG_T_INIT_A) != 0,
                         version: view.body.version,
                         whatami: view.body.whatami(),
-                        zid: view.body.zid.inner(),
+                        zid: Some(zid),
                         s: view.body.s,
                         cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
                     }),
@@ -3671,7 +3673,7 @@ mod control_read_tests {
                     assert!(init.is_ack);
                     assert_eq!(init.version, 0x09);
                     assert_eq!(init.whatami, 0x02);
-                    assert_eq!(init.zid, &[0xAA, 0xBB]);
+                    assert_eq!(init.zid.as_deref(), Some(&[0xAA, 0xBB][..]));
                     assert_eq!(init.cookie, Some(&[0x01u8, 0x02, 0x03][..]));
                     assert!(init.s.is_none());
                 }
