@@ -132,6 +132,10 @@ enum Command {
     /// [`Command::Answer`] with each reply stamped by the router's clock.
     #[cfg(feature = "query")]
     AnswerStamped(&'static str, &'static [u8]),
+    /// Hold a queryable on the key `.0` that answers each query once on each of the keys `.1`,
+    /// each with the payload `.2`, as a get on a wildcard is answered by a key of each.
+    #[cfg(feature = "query")]
+    AnswerOnKeys(&'static str, &'static [&'static str], &'static [u8]),
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
@@ -737,6 +741,27 @@ fn run_router(
                                         None,
                                         &stamp,
                                     );
+                                },
+                            ),
+                        )
+                    })
+                    .expect("the router's queryable");
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::AnswerOnKeys(key, keys, value)) => {
+                answering
+                    .borrow_mut()
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    for answered in keys {
+                                        let _ = out.reply_keyed(answered, value);
+                                    }
                                 },
                             ),
                         )

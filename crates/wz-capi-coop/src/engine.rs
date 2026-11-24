@@ -4999,11 +4999,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
-    /// the replies its consolidation kept, each taken out of the plane's held table, then the
-    /// timeout that ended it, as upstream's querier hands them.
+    /// the replies its consolidation made due, each taken out of its row, then those held whole,
+    /// each taken out of the plane's held table, then the timeout that ended it, as upstream's
+    /// querier hands them.
     #[cfg(feature = "query")]
     fn hand_held(&self, ended: Ended) {
         let leg = ended.leg;
+        while let Some(reply) = self.gets.take_due(leg) {
+            self.gets.call(ended.row, &reply);
+        }
         while let Some(reply) = self.gets.take_held(leg) {
             self.gets.call(ended.row, &reply);
         }
@@ -5814,6 +5818,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(feature = "query")]
     fn end_leg_now(&self, leg: u64) {
         let ended = self.gets.ended.lock().forget(leg);
+        self.gets.forget_due(leg);
         while self.gets.take_held(leg).is_some() {}
         if let Some(ended) = ended {
             drop(self.gets.release(ended.row));
@@ -8037,6 +8042,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                 let Some(ended) = next else {
                     break;
                 };
+                self.gets.forget_due(ended.leg);
                 drop(self.gets.release(ended.row));
             }
             drop(self.gets.take_all_held());
