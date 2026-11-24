@@ -335,12 +335,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// face that comes to a full table takes (`faces_full`).
     #[cfg(feature = "listen")]
     pub(super) fn give_up_a_departure(&mut self) {
-        if let Some(at) = self
+        // Found first and the walk let go of, so the place is freed with nothing of the table lent.
+        let departed = self
             .transport
             .links
             .placed()
-            .find_map(|(at, face)| face.told.is_departed().then_some(at))
-        {
+            .find_map(|(at, face)| face.told.is_departed().then_some(at));
+        if let Some(at) = departed {
             self.let_go_departed(at);
         }
     }
