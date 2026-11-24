@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "about": "What a build of the consumer bundles reads when it runs with no network and no .git, and how to give it what it reads; and, under `firmware`, each firmware build a lane runs, as the cargo command, environment and product that lane builds from. Held by scripts/lib/offline_build.py (--check derives it from the crates graph and the tree, --build builds every bundle in a sandbox that has nothing else, --firmware-cargo / --firmware-env / --firmware-field print a firmware build as its lane reads it); the design is docs/target-build-contract.md section 5d.",
+  "about": "What a build of the consumer bundles reads when it runs with no network and no .git, and how to give it what it reads; and, under `firmware`, each firmware build a lane runs, as the cargo command, environment and product that lane builds from. The consumer reads each bundle's products from `cargo.product_dir` under its cargo target directory, and does not derive that directory from `cargo.flags`. Held by scripts/lib/offline_build.py (--check derives it from the crates graph and the tree, --build builds every bundle in a sandbox that has nothing else, --product-dir prints cargo.product_dir, --firmware-cargo / --firmware-env / --firmware-field print a firmware build as its lane reads it); the design is docs/target-build-contract.md section 5d.",
   "source": {
     "tree": "the files the repository tracks at the commit, without .git",
     "submodules": [
@@ -26,7 +26,8 @@
     "manifest": "crates/Cargo.toml",
     "lockfile": "crates/Cargo.lock",
     "crates": "every package of the lockfile, from crates.io, vendored (`cargo vendor --locked`); the lockfile has no git source",
-    "flags": ["--locked", "--offline", "--release"]
+    "flags": ["--locked", "--offline", "--release"],
+    "product_dir": "release"
   },
   "system_tools": {
     "cc": {
