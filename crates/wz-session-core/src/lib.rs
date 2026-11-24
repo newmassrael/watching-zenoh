@@ -1514,12 +1514,6 @@ pub mod declare;
 // `peer_keyexpr_table` / `own_zid` wire-state fields) stays
 // `alloc`-gated per the Track 2 borrow boundary — the no-heap fire
 // path (borrowed `SampleView` dispatch) lands in a later sub-round.
-// Totality debt TD-045 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod pubsub;
 
 // R311ek — shared `source_info` extension-body encoder
