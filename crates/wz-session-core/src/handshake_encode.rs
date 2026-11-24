@@ -501,7 +501,7 @@ pub fn encode_open_into(
 
 /// What [`encode_open_into`] writes before the extension chain: the header byte,
 /// whose Z flag says whether a chain follows (`has_ext`), and the body with the
-/// cookie. The chain is written after it by `ext_chain::encode_ext_chain_into`.
+/// cookie. The chain is written after it by `encode_held_chain_into`.
 ///
 /// The two halves are separate for the lend-only send, which holds the cookie and
 /// the chain under two session mutexes and takes them one after the other: the

@@ -871,7 +871,7 @@ impl<'f> Iterator for ReadEntries<'f> {
 
 /// The extension chain of a handshake message read where it lies (`ControlRead`): the view its
 /// document read it as, walked again by a reader that takes every entry, and what the one walk of
-/// the read found for the readers every build links ([`ChainAnswers`]), which no reader walks it
+/// the read found for the readers every build links (`ChainAnswers`), which no reader walks it
 /// again for.
 #[cfg(all(
     feature = "alloc",
@@ -881,6 +881,7 @@ impl<'f> Iterator for ReadEntries<'f> {
 #[derive(Clone, Copy)]
 pub struct ReadChain<'a> {
     list: ReadList<'a>,
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     answers: ChainAnswers<'a>,
 }
 
@@ -893,6 +894,7 @@ impl ReadChain<'_> {
     /// The chain of a message that hands none to the judgement.
     const EMPTY: Self = Self {
         list: None,
+        #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
         answers: ChainAnswers::NONE,
     };
 }
@@ -903,7 +905,13 @@ impl ReadChain<'_> {
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 #[derive(Clone, Copy)]
 pub(crate) struct ChainAnswers<'a> {
@@ -923,7 +931,13 @@ pub(crate) struct ChainAnswers<'a> {
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 impl<'a> ChainAnswers<'a> {
     /// The answers of a chain with no entry.
@@ -938,12 +952,6 @@ impl<'a> ChainAnswers<'a> {
     };
 
     /// Take what `entry`, the next entry of the walk, answers that no entry before it did.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive"
-    ))]
     pub(crate) fn note(&mut self, entry: &wz_codecs::ext_entry::ExtEntryView<'a>) {
         #[cfg(feature = "codec-init-body")]
         {
