@@ -677,8 +677,8 @@ pub enum FilteredPut {
 pub struct WireKey {
     /// The keyexpr declaration the wire names, `0` for none.
     pub mapping_id: wz_session_core::wire_id::ExprId,
-    /// What follows the declared prefix, `None` when it covers the whole key.
-    pub suffix: Option<String>,
+    /// What follows the declared prefix ([`Self::suffix`]).
+    suffix: Suffix,
     keeps: Keeps,
     /// One hold on the declaration of the key of the entity this key announces, when that is not
     /// the declaration the wire names: the entity's retraction names it, so it is held for as long
@@ -686,14 +686,34 @@ pub struct WireKey {
     also: Option<KeyHold>,
 }
 
+/// The rest of a key past its declared prefix: none, a copy of its own, or text that lies in what
+/// the key keeps ([`WireKey::aliased_in`]), which every copy of the key keeps too.
+#[derive(Clone, Default)]
+enum Suffix {
+    #[default]
+    None,
+    Owned(String),
+    Lent {
+        at: core::ptr::NonNull<u8>,
+        len: usize,
+    },
+}
+
+// SAFETY: lent text is read only, through shared borrows, and lies in what the key keeps, which
+// is `Send + Sync`.
+unsafe impl Send for Suffix {}
+// SAFETY: as `Send`.
+unsafe impl Sync for Suffix {}
+
 /// What a key keeps alive for as long as a declaration made on it stays recorded.
 #[derive(Clone, Default)]
 enum Keeps {
     /// Nothing.
     #[default]
     Nothing,
-    /// An object of the ABI's that retracts the declaration when the last holder lets it go.
-    Anchor { _held: Arc<dyn Send + Sync> },
+    /// An object of the ABI's that retracts the declaration when the last holder lets it go, in a
+    /// box of its own or lodged in a place of the ABI's.
+    Anchor { _held: lodge::Kept },
     /// One hold on the declaration, counted by the engine itself.
     Hold { _held: KeyHold },
 }
@@ -702,7 +722,7 @@ impl core::fmt::Debug for WireKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix)
+            .field("suffix", &self.suffix())
             .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
             .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
             .finish()
@@ -771,14 +791,73 @@ impl WireKey {
     pub fn aliased(mapping_id: wz_session_core::wire_id::ExprId, suffix: Option<String>) -> Self {
         Self {
             mapping_id,
-            suffix,
+            suffix: suffix.map_or(Suffix::None, Suffix::Owned),
             keeps: Keeps::Nothing,
             also: None,
         }
     }
 
+    /// Declaration `mapping_id` followed by `rest` (none when it is empty), which lies in what
+    /// `kept` keeps: the key copies nothing of it, and keeps `kept` for as long as a declaration
+    /// made on it stays recorded.
+    ///
+    /// # Safety
+    /// `rest` lies in the value `kept` counts and stays there, unchanged, while any count of it
+    /// is held.
+    pub unsafe fn aliased_in(
+        mapping_id: wz_session_core::wire_id::ExprId,
+        rest: &str,
+        kept: lodge::Kept,
+    ) -> Self {
+        let suffix = match core::ptr::NonNull::new(rest.as_ptr().cast_mut()) {
+            Some(at) if !rest.is_empty() => Suffix::Lent {
+                at,
+                len: rest.len(),
+            },
+            _ => Suffix::None,
+        };
+        Self {
+            mapping_id,
+            suffix,
+            keeps: Keeps::Anchor { _held: kept },
+            also: None,
+        }
+    }
+
+    /// What follows the declared prefix, `None` when it covers the whole key.
+    pub fn suffix(&self) -> Option<&str> {
+        match &self.suffix {
+            Suffix::None => None,
+            Suffix::Owned(rest) => Some(rest),
+            // SAFETY: lent text lies, unchanged, in what this key keeps (`Self::aliased_in`), and
+            // was a `str` there.
+            Suffix::Lent { at, len } => Some(unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(at.as_ptr(), *len))
+            }),
+        }
+    }
+
+    /// What follows the declared prefix, as a string of its own: the key's own taken, lent text
+    /// copied.
+    pub fn into_suffix(self) -> Option<String> {
+        match self.suffix {
+            Suffix::Owned(rest) => Some(rest),
+            Suffix::None | Suffix::Lent { .. } => self.suffix().map(String::from),
+        }
+    }
+
+    /// A lent rest copied into the key, before what it lies in is let go of.
+    fn own_suffix(&mut self) {
+        if let Suffix::Lent { .. } = self.suffix {
+            self.suffix = self
+                .suffix()
+                .map_or(Suffix::None, |rest| Suffix::Owned(rest.into()));
+        }
+    }
+
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+    pub fn keeping(mut self, anchor: lodge::Kept) -> Self {
+        self.own_suffix();
         self.keeps = Keeps::Anchor { _held: anchor };
         self
     }
@@ -786,6 +865,7 @@ impl WireKey {
     /// This key, holding the declaration `hold` holds for as long as a declaration made on it
     /// stays recorded, in the engine's own count and with nothing of its own on the heap.
     pub fn holding(mut self, hold: KeyHold) -> Self {
+        self.own_suffix();
         self.keeps = Keeps::Hold { _held: hold };
         self
     }
@@ -837,7 +917,7 @@ pub fn interest_on_link(
         suffix: if wire.is_literal() {
             Some(String::from(keyexpr))
         } else {
-            wire.suffix
+            wire.into_suffix()
         },
         mapping_id: wire.mapping_id,
         aggregate: form.aggregate,
@@ -991,10 +1071,42 @@ mod tests {
         assert!(!WireKey::aliased(3, None).is_literal());
     }
 
+    /// A rest that lies in what the key keeps is lent, not copied, to the key and every copy of
+    /// it; keeping something else instead copies it first, so it never outlives what it lay in.
+    ///
+    /// # Control
+    ///
+    /// A key that copies the rest it is given reds the first assertion; a `keeping` that leaves
+    /// the rest lent reds the last.
+    #[test]
+    fn a_kept_rest_is_lent_to_the_key_and_its_copies() {
+        let text: Arc<String> = Arc::new(String::from("demo/data/rest"));
+        let rest = text.get("demo/data".len()..).expect("the rest of the key");
+        // SAFETY: `rest` lies in the string the keep counts, which nothing changes.
+        let key = unsafe { WireKey::aliased_in(9, rest, crate::lodge::Kept::shared(text.clone())) };
+        assert_eq!(key.suffix().map(str::as_ptr), Some(rest.as_ptr()), "lent");
+        let copy = key.clone();
+        assert_eq!(
+            copy.suffix().map(str::as_ptr),
+            Some(rest.as_ptr()),
+            "a copy lends it too"
+        );
+        assert_eq!((copy.mapping_id, copy.suffix()), (9, Some("/rest")));
+        let other: Arc<dyn Send + Sync> = Arc::new(());
+        let rekept = copy.keeping(crate::lodge::Kept::shared(other));
+        assert_eq!(rekept.suffix(), Some("/rest"));
+        assert_ne!(
+            rekept.suffix().map(str::as_ptr),
+            Some(rest.as_ptr()),
+            "keeping something else copies the rest first"
+        );
+    }
+
     #[test]
     fn a_kept_anchor_lives_as_long_as_the_key() {
         let anchor: Arc<dyn Send + Sync> = Arc::new(());
-        let key = WireKey::aliased(7, Some(String::from("rest"))).keeping(anchor.clone());
+        let key = WireKey::aliased(7, Some(String::from("rest")))
+            .keeping(crate::lodge::Kept::shared(anchor.clone()));
         assert_eq!(Arc::strong_count(&anchor), 2);
         let copy = key.clone();
         assert_eq!(Arc::strong_count(&anchor), 3);

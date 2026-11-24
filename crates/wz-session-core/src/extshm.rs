@@ -1490,7 +1490,7 @@ impl ShmAuthDispatch {
     pub fn peer_supports_protocol(&self, protocol: u32) -> bool {
         self.peer_protocols
             .as_ref()
-            .map_or(true, |list| list.contains(&protocol))
+            .is_none_or(|list| list.contains(&protocol))
     }
 
     /// R3040 -- open the handoff for the counter block the peer named, once the

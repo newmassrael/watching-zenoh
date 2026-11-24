@@ -105,8 +105,8 @@ impl SessionZid {
         }
         assert!(nonzero, "a zid is not zero");
         // The array is rebuilt by value, the bytes pushed in from the last, so the
-        // zid's first byte ends up first and the bytes past it stay zero: no index
-        // and no mutable borrow, which a const fn of Rust 1.81 cannot take.
+        // zid's first byte ends up first and the bytes past it stay zero, with no
+        // index into the array.
         let mut bytes = [0u8; ZID_MAX];
         let mut rest = src.as_slice();
         while let [head @ .., last] = rest {

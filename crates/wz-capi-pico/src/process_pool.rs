@@ -381,6 +381,26 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
 /// included, so each keeps its index in every build.
 const KINDS: usize = 23;
 
+/// Write `value` into the element of `row` at `at`, reached by walking the row from its first
+/// element, so no write names an index. A row has no element past its end to write; a plan's rows
+/// hold one per kind, which `KINDS` counts, so a kind's index is always in them.
+const fn put(row: &mut [usize], at: usize, value: usize) {
+    let mut rest = row;
+    let mut left = at;
+    while let [first, more @ ..] = rest {
+        match left.checked_sub(1) {
+            None => {
+                *first = value;
+                return;
+            }
+            Some(next) => {
+                left = next;
+                rest = more;
+            }
+        }
+    }
+}
+
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -517,8 +537,8 @@ impl Plan {
 
     /// This plan with the pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
     const fn with<T>(mut self, kind: Kind, count: usize) -> Self {
-        self.slots[kind as usize] = count;
-        self.sizes[kind as usize] = const { slot_size::<T>() };
+        put(&mut self.slots, kind as usize, count);
+        put(&mut self.sizes, kind as usize, const { slot_size::<T>() });
         self
     }
 
@@ -1330,6 +1350,25 @@ mod tests {
 
     fn counts() -> Counts {
         Counts::default()
+    }
+
+    /// `put` writes the one element it names and no other, and a place past the row's end writes
+    /// nothing. Turned red by a walk that stops one element early or late.
+    #[test]
+    fn put_writes_the_element_it_names_and_nothing_past_the_row() {
+        let mut row = [0usize; 4];
+        put(&mut row, 0, 7);
+        put(&mut row, 3, 9);
+        assert_eq!(row, [7, 0, 0, 9]);
+        put(&mut row, 4, 5);
+        put(&mut row, usize::MAX, 5);
+        assert_eq!(row, [7, 0, 0, 9], "a place past the end writes nothing");
+        const PUT: [usize; 3] = {
+            let mut row = [0usize; 3];
+            put(&mut row, 1, 2);
+            row
+        };
+        assert_eq!(PUT, [0, 2, 0], "it runs when the build is compiled");
     }
 
     /// A plan of `slots` slots of `size` bytes for each kind named.

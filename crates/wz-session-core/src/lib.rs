@@ -791,8 +791,6 @@ pub mod ext_header;
 /// read from. UNCONDITIONAL for the reason [`ext_header`] is: it reads only
 /// header bytes, so an observer build that implements none of these
 /// capabilities still names them.
-// Totality debt TD-102 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod ext_name;
 
 /// R311y630 (§14.1) — the MANDATORY-extension admission rule: which decoded
@@ -996,8 +994,6 @@ pub mod encoding_hint;
 /// plain-put facts, the typed refusal). Moved down from `wz-runtime-tokio`, which re-exports it,
 /// so a C ABI over the cooperative engine describes a publish without that engine.
 #[cfg(feature = "alloc")]
-// Totality debt TD-145 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable)]
 pub mod publish_options;
 
 /// What one query asks for, independent of the runtime that sends it (`QueryOptions`, the
@@ -1005,8 +1001,6 @@ pub mod publish_options;
 /// `wz-runtime-tokio`, which re-exports it, so a session on any runtime asks with one set of
 /// rules.
 #[cfg(feature = "alloc")]
-// Totality debt TD-108 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod query_options;
 
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a
@@ -1064,8 +1058,6 @@ pub mod json5_lex;
 /// moved from wz-runtime-tokio so the MCU connection manager re-dials on the
 /// same arithmetic the AP's re-dial substrates use. Unconditional: it needs
 /// nothing but `core`.
-// Totality debt TD-049 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod retry_period;
 
 /// The list of endpoints a node holds sessions with, with no allocator. Filled by upstream's

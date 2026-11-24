@@ -463,11 +463,9 @@ pub struct HeldFor<'h, O, P: Storage> {
 
 impl<O: Copy + Eq, P: Storage> ReplyHold for HeldFor<'_, O, P> {
     fn displaces(&self, reply: &dyn ReplyView) -> bool {
-        // A `match`, as the crate's MSRV (1.81) has no `Option::is_none_or`.
-        match self.hold.held(self.owner, reply.keyexpr()) {
-            Some(held) => stamp_at_least(reply.timestamp_parts(), held.stamp()),
-            None => true,
-        }
+        self.hold
+            .held(self.owner, reply.keyexpr())
+            .is_none_or(|held| stamp_at_least(reply.timestamp_parts(), held.stamp()))
     }
 
     fn hold(&mut self, reply: &dyn ReplyView, whole: bool) -> Result<(), HoldRefused> {

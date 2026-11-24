@@ -246,14 +246,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Keyexpr => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.keyexprs().iter().nth(left);
-                    row.map_or(true, |(_, row)| {
+                    row.is_none_or(|(_, row)| {
                         actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
                     })
                 }
                 Kind::Subscriber => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.subscribers().iter().nth(left);
-                    let told = row.map_or(true, |(_, row)| {
+                    let told = row.is_none_or(|(_, row)| {
                         tables
                             .named(row.key())
                             .is_some_and(|key| row.callback().declare(key, actions))
@@ -263,13 +263,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Interest => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.interests().iter().nth(left);
-                    row.map_or(true, |(_, row)| super::send_interest(row, actions))
+                    row.is_none_or(|(_, row)| super::send_interest(row, actions))
                 }
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.queryables().iter().nth(left);
-                    let told = row.map_or(true, |(_, row)| {
+                    let told = row.is_none_or(|(_, row)| {
                         tables
                             .named(row.key())
                             .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
@@ -280,7 +280,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Token => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.tokens().iter().nth(left);
-                    let told = row.map_or(true, |(_, row)| {
+                    let told = row.is_none_or(|(_, row)| {
                         tables.named(row.key()).is_some_and(|key| {
                             super::liveliness::declare_token(actions, row.id(), key)
                         })
@@ -291,7 +291,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::LiveSub => {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.liveliness_subscribers().iter().nth(left);
-                    let asked = row.map_or(true, |(_, row)| {
+                    let asked = row.is_none_or(|(_, row)| {
                         row.callback()
                             .ask(row.id(), row.key().as_str(), row.history(), actions)
                     });

@@ -694,6 +694,18 @@ pub const MAX_ADVANCED_SUBSCRIBERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_SAMPLE_MISS_LISTENERS`] is bound.
+pub const MAX_SAMPLE_MISS_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

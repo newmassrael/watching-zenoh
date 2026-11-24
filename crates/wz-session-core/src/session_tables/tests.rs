@@ -1247,6 +1247,38 @@ fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     );
 }
 
+/// An entity's key form names the declaration its wire names while that declaration stands, and
+/// none for a wire that names none or one that went.
+#[test]
+fn a_key_form_names_the_declaration_the_wire_names_while_it_stands() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert_eq!(
+        tables.key_form(declared.id, true),
+        KeyForm {
+            prefix: Some(declared.handle),
+            names_key: true
+        }
+    );
+    assert_eq!(
+        tables.key_form(0, false),
+        KeyForm {
+            prefix: None,
+            names_key: false
+        },
+        "a wire that names no declaration"
+    );
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(
+        tables.key_form(declared.id, true),
+        KeyForm {
+            prefix: None,
+            names_key: true
+        },
+        "a declaration that went is not named"
+    );
+}
+
 #[test]
 fn a_retracted_declaration_goes_whatever_holds_it() {
     let mut tables = Tables::new();

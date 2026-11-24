@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_has_dsl.scxml:10 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -19,15 +19,15 @@ pub fn keyexpr_has_dsl(k: &[u8], s: u32, e: u32) -> bool {
     }
     let mut i: u32 = s;
     while i < e {
-        if k[(i) as usize] == 36 {
-            let i1: u32 = i + 1;
+        if sce_forge_runtime::algorithm::proven::at(&k, i) == 36 {
+            let i1: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
             if i1 < e {
-                if k[(i1) as usize] == 42 {
+                if sce_forge_runtime::algorithm::proven::at(&k, i1) == 42 {
                     return true;
                 }
             }
         }
-        i = i + 1;
+        i = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
     }
     return false;
 }

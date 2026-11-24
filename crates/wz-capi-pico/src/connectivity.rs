@@ -823,12 +823,8 @@ pub(crate) struct LinkListener {
 }
 
 impl LinkListener {
-    // `Option::is_none_or` would read better and is stable since 1.82; this
-    // workspace's MSRV is 1.81, and clippy's `incompatible_msrv` is right to
-    // refuse it.
-    #[allow(clippy::unnecessary_map_or)]
     fn wants(&self, transport: &z_loaned_transport_t) -> bool {
-        self.filter.map_or(true, |(zid, multicast)| {
+        self.filter.is_none_or(|(zid, multicast)| {
             zid == transport.zid.id && multicast == transport.is_multicast
         })
     }
@@ -2361,8 +2357,10 @@ pub unsafe extern "C" fn z_link_events_listener_drop(
 /// The hub's own behaviour, over the tokio engine's registry as the engine a listener is declared
 /// on: the hub reads the faces through the port, and a registry with no face is an engine with
 /// none to replay.
+/// Also the counting allocator of the library's test binary, which other modules' tests read
+/// through `allocations`.
 #[cfg(all(test, feature = "engine-tokio"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2450,11 +2448,11 @@ mod tests {
     }
 
     fn transport_closure(log: &'static Log) -> CClosure<Callback<z_loaned_transport_event_t>> {
-        CClosure::new(ctx(log), Some(on_transport), Some(released))
+        CClosure::uncounted(ctx(log), Some(on_transport), Some(released))
     }
 
     fn link_closure(log: &'static Log) -> CClosure<Callback<z_loaned_link_event_t>> {
-        CClosure::new(ctx(log), Some(on_link), Some(released))
+        CClosure::uncounted(ctx(log), Some(on_link), Some(released))
     }
 
     /// The key of the transport `transport_with_zid(first)` reports.
@@ -2475,7 +2473,7 @@ mod tests {
     }
 
     /// Every allocation of the test's own thread while `run` runs, counted.
-    fn allocations(run: impl FnOnce()) -> usize {
+    pub(crate) fn allocations(run: impl FnOnce()) -> usize {
         COUNTING.with(|count| count.set(Some(0)));
         run();
         COUNTING.with(|count| count.take()).unwrap_or(0)

@@ -663,17 +663,24 @@ impl<const N: usize> CommanderList<N> {
     /// which in a `static` is a compile error that says why.
     pub const fn parse(text: &str) -> Self {
         let mut zids = [[0u8; CREDENTIAL_ZID_BYTES]; N];
+        let mut slots: &mut [DirectoryZid] = &mut zids;
         let mut len = 0;
         let mut rest = text.as_bytes();
         while !rest.is_empty() {
             let (zid, after) = zid_from_hex(rest);
             assert!(
-                len < N,
+                !slots.is_empty(),
                 "the text names more commanders than the list holds"
             );
-            // A `const fn` takes no `&mut` on Rust 1.81, so the row is written by its index,
-            // which the assertion above holds below `N`.
-            zids[len] = zid;
+            // The zid goes into the first row left, so no write names an index.
+            slots = match slots {
+                [slot, more @ ..] => {
+                    *slot = zid;
+                    more
+                }
+                none @ [] => none,
+            };
+            // At most `N`, the rows the list holds.
             len = len.wrapping_add(1);
             rest = match after {
                 // A comma is followed by another entry.
@@ -3783,6 +3790,16 @@ mod tests {
             };
             std::assert!(listed.permits(Verb::Open, Commander::Verified(&one)));
             std::assert!(!listed.permits(Verb::Open, Commander::Verified(&kit)));
+        }
+
+        /// A list fills to the rows it holds, and a text that names one commander more is refused.
+        /// Turned red by a list that drops the commander past its rows instead of refusing it.
+        #[test]
+        #[should_panic(expected = "the text names more commanders than the list holds")]
+        fn a_text_naming_more_commanders_than_the_list_holds_is_refused() {
+            static FULL: CommanderList<2> = CommanderList::parse("1f,2f");
+            std::assert_eq!(FULL.as_slice().len(), 2, "CONTROL: a full list is read");
+            let _ = CommanderList::<2>::parse("1f,2f,3f");
         }
 
         /// Decision D12 end to end through the node's one function: the same request is refused

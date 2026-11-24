@@ -676,6 +676,9 @@ pub enum PublishAliasError {
     /// The sample's record is longer than its session's cache ring; projected from the
     /// underlying [`PublishError::ExceedsCacheRoom`]. No wire bytes were emitted.
     ExceedsCacheRoom,
+    /// The build has no Push codec; projected from the underlying
+    /// [`PublishError::FeatureDisabled`]. No wire bytes were emitted.
+    FeatureDisabled,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -731,6 +734,11 @@ impl std::fmt::Display for PublishAliasError {
                 "PublishAliasError: the sample's record is longer than its \
                  session's cache ring; the Push was not emitted"
             ),
+            PublishAliasError::FeatureDisabled => write!(
+                f,
+                "PublishAliasError: this build has no Push codec (codec-push is \
+                 off); the Push was not emitted"
+            ),
         }
     }
 }
@@ -748,6 +756,7 @@ impl From<PublishError> for PublishAliasError {
             PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
             PublishError::HeldConduit => PublishAliasError::HeldConduit,
             PublishError::ExceedsCacheRoom => PublishAliasError::ExceedsCacheRoom,
+            PublishError::FeatureDisabled => PublishAliasError::FeatureDisabled,
         }
     }
 }

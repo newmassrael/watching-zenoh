@@ -1792,7 +1792,7 @@ fn parse_unit_into(
 ) -> Result<usize, InboundParseError> {
     #[cfg(feature = "alloc")]
     debug_assert!(
-        origin.map_or(true, |o| core::ptr::eq(o.as_slice(), bytes)),
+        origin.is_none_or(|o| core::ptr::eq(o.as_slice(), bytes)),
         "the origin of a decode is the very bytes being decoded"
     );
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
@@ -3929,7 +3929,7 @@ mod control_read_tests {
                 n >>= 7;
             }
             wire.push(n as u8);
-            wire.extend(core::iter::repeat(0x5A).take(len));
+            wire.extend(core::iter::repeat_n(0x5A, len));
             wire
         };
         assert!(read_control(&init_ack(COOKIE_MAX)).is_ok());

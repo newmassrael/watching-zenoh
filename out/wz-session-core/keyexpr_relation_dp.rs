@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_relation_dp.scxml:36 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -30,15 +30,15 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
         if m >= 63 {
             return false;
         }
-        m = m + 1;
+        m = sce_forge_runtime::algorithm::proven::add::<u32>(m, 1);
         if col_star && keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs0, ce0) == 2 {
-            let below0: u32 = m - 1;
+            let below0: u32 = sce_forge_runtime::algorithm::proven::sub::<u32>(m, 1);
             if prev >> below0 & 1 == 1 {
                 prev = prev | 1u64 << m;
             }
         }
         if ce0 < cn {
-            cs0 = ce0 + 1;
+            cs0 = sce_forge_runtime::algorithm::proven::add::<u32>(ce0, 1);
         } else {
             more0 = false;
         }
@@ -58,7 +58,7 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
         while cmore && j < 63 {
             let ce: u32 = keyexpr_chunk_end::keyexpr_chunk_end(c, cs);
             let ckind: u8 = keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs, ce);
-            let jb: u32 = j + 1;
+            let jb: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(j, 1);
             let up: bool = prev >> jb & 1 == 1;
             let left: bool = cur >> j & 1 == 1;
             let diag: bool = prev >> j & 1 == 1;
@@ -87,14 +87,14 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
             }
             j = jb;
             if ce < cn {
-                cs = ce + 1;
+                cs = sce_forge_runtime::algorithm::proven::add::<u32>(ce, 1);
             } else {
                 cmore = false;
             }
         }
         prev = cur;
         if re < rn {
-            rs = re + 1;
+            rs = sce_forge_runtime::algorithm::proven::add::<u32>(re, 1);
         } else {
             rmore = false;
         }

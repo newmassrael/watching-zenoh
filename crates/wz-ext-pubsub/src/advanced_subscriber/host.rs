@@ -66,7 +66,7 @@ use wz_session_core::sink::SampleView;
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
+use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle, Kept};
 use super::plans::{
     parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource, GetParameters,
     RecoveredView,
@@ -237,7 +237,7 @@ struct GetSlot<E: SessionEngine + ?Sized> {
     holders: AtomicUsize,
     /// The subscriber whose table the slot is in, as a leg reaches it: its lodging, which a leg
     /// holds a count of.
-    owner: UnsafeCell<*const c_void>,
+    owner: UnsafeCell<*const Lodging<Shared<E>>>,
     /// What ends the get; taken by its end.
     finish: UnsafeCell<Option<Finish>>,
     /// The get's legs as one thing to cancel, and its registration on the teardown's token: held
@@ -273,7 +273,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     unsafe fn open(&self, owner: &Strong<Shared<E>>, finish: Finish) -> &CancellableFan {
         // SAFETY: the caller's: nothing else reaches the slot yet.
         unsafe {
-            *self.owner.get() = Strong::as_raw(owner);
+            *self.owner.get() = Strong::as_raw(owner).cast::<Lodging<Shared<E>>>();
             *self.finish.get() = Some(finish);
             self.holders.store(1, Ordering::Release);
             (*self.fan.get()).insert(CancellableFan::new())
@@ -287,7 +287,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     unsafe fn owner(&self) -> &Shared<E> {
         // SAFETY: the caller's: `owner` was written before the get had a holder but its issuer,
         // and the subscriber stands while the get does.
-        unsafe { Strong::<Shared<E>>::value_of(*self.owner.get()) }
+        unsafe { Strong::<Shared<E>>::value_of((*self.owner.get()).cast::<c_void>()) }
     }
 
     /// One leg's callback, holding the get and the subscriber until the engine lets it go
@@ -366,7 +366,9 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
         let slot = &*context.cast_const().cast::<GetSlot<E>>();
         let owner = *slot.owner.get();
         slot.release();
-        drop(Strong::<Shared<E>>::from_raw(owner.cast_mut()));
+        drop(Strong::<Shared<E>>::from_raw(
+            owner.cast_mut().cast::<c_void>(),
+        ));
     }
 }
 
@@ -521,7 +523,7 @@ impl<E: SessionEngine + ?Sized> Drop for Token<E> {
 /// shows a peer.
 struct Held<T> {
     entity: T,
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Option<Kept>,
 }
 
 /// The teardown of the gets in flight. Armed until the subscriber goes to the background, which
@@ -602,13 +604,24 @@ pub struct EngineSubscriber<E: SessionEngine + ?Sized = dyn SessionEngine> {
 
 /// The wire form of an entity as the host named it.
 fn wire_of(form: &EntityForm) -> WireKey {
+    if let (true, Some(kept)) = (form.suffix_is_kept(), form.kept()) {
+        // SAFETY: the form's suffix lies in what it keeps (`EntityForm::aliased_in`), which the
+        // key keeps a count of, so it stays there, unchanged, while the key does.
+        return unsafe {
+            WireKey::aliased_in(
+                form.mapping_id(),
+                form.suffix().unwrap_or_default(),
+                kept.clone(),
+            )
+        };
+    }
     let wire = if form.is_literal() {
         WireKey::literal()
     } else {
         WireKey::aliased(form.mapping_id(), form.suffix().map(str::to_owned))
     };
     match form.kept() {
-        Some(anchor) => wire.keeping(Arc::clone(anchor)),
+        Some(anchor) => wire.keeping(anchor.clone()),
         None => wire,
     }
 }
@@ -917,7 +930,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             forms,
         } = self;
         cancel.armed = false;
-        let retain = |keeps: Option<Arc<dyn Send + Sync>>| {
+        let retain = |keeps: Option<Kept>| {
             if let (Some(forms), Some(keeps)) = (forms.as_ref(), keeps) {
                 forms.forms().retain(keeps);
             }

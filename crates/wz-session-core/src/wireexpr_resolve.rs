@@ -116,7 +116,7 @@ pub fn id_and_suffix<S: WireexprStorage>(
 /// with NO keyexpr resolution at all (`dispatcher/queries.rs:595-635`).
 pub fn wireexpr_is_empty<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
-    id == 0 && suffix_opt.map_or(true, str::is_empty)
+    id == 0 && suffix_opt.is_none_or(str::is_empty)
 }
 
 /// R2908 — whether a Wireexpr names a DECLARED keyexpr whole: an id with no
@@ -128,7 +128,7 @@ pub fn wireexpr_is_empty<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> 
 /// answered here.
 pub fn wireexpr_names_a_declaration<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
-    id != 0 && suffix_opt.map_or(true, str::is_empty)
+    id != 0 && suffix_opt.is_none_or(str::is_empty)
 }
 
 /// The TWO id spaces a Wireexpr's mapping bit can name.

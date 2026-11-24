@@ -845,7 +845,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
     fn session_closed(&self) -> bool {
         self.engine
             .upgrade()
-            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
+            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
     }
 }
 
@@ -890,7 +890,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
     fn session_closed(&self) -> bool {
         self.engine
             .upgrade()
-            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
+            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
     }
 }
 

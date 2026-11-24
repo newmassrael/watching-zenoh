@@ -269,7 +269,7 @@ fn interest_ask<'a>(
     let (mapping_id, suffix) = if wire.mapping_id == 0 {
         (0, Some(key.literal()))
     } else {
-        (wire.mapping_id, wire.suffix.as_deref())
+        (wire.mapping_id, wire.suffix())
     };
     Some(InterestAsk {
         mapping_id,

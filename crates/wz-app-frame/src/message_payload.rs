@@ -1679,7 +1679,7 @@ impl<St: Storage> Writer<'_, St> {
                 .iter()
                 .filter(|e| e.parent == parent && !matches!(e.slot, Slot::Kept(_)))
                 .map(|e| e.number)
-                .filter(|&n| after.map_or(true, |a| n > a))
+                .filter(|&n| after.is_none_or(|a| n > a))
                 .min();
             let Some(number) = next else {
                 break;

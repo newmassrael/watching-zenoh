@@ -1524,10 +1524,9 @@ where
         // RX arm, a lease evict in the sweep, a departing Close. Compared
         // without collecting, so an unchanged table allocates nothing.
         if let Some(membership) = membership {
-            // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
             let moved = last_view
                 .as_ref()
-                .map_or(true, |last| !dispatcher.members().eq(last.iter().copied()));
+                .is_none_or(|last| !dispatcher.members().eq(last.iter().copied()));
             if moved {
                 let now: Vec<_> = dispatcher.members().collect();
                 membership.set_members(&now);

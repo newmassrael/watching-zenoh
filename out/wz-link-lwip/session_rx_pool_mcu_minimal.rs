@@ -28,6 +28,14 @@
 //
 // Generated from document `session_rx_pool_mcu_minimal` with section `sram1`,
 // alignment `32`, cache-policy `none`.
+//
+// Total outside `#[cfg(test)]`: no indexing, no unchecked arithmetic,
+// no unwrap, expect or panic. A consumer denies `clippy::indexing_slicing`,
+// `clippy::arithmetic_side_effects` and the rest of the panic-free lint
+// set on the crate that holds this file, and a pool sits on the DMA path,
+// where a panic is a stopped device. Slot tables are reached through
+// `SlotIndex`, a type with no value out of range, rather than through a
+// `usize` and a bounds check.
 
 
 use core::marker::PhantomData;
@@ -142,7 +150,7 @@ pub struct CpuRef;
 /// when this happens at the lexical level.
 #[must_use = "Slot must be returned via pool_return or handed off via link_arm_tx; dropping silently leaks the slot per §synth-5-E lines 1162-1164"]
 pub struct Slot<S> {
-    idx: usize,
+    idx: SlotIndex,
     _state: PhantomData<fn() -> S>,
 }
 
@@ -151,7 +159,87 @@ impl<S> Slot<S> {
     /// for writing a peripheral's DMA descriptor (e.g., for
     /// `Slot<DmaArmedRx>`).
     pub fn idx(&self) -> usize {
-        self.idx
+        self.idx.index()
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slot index — the key of both per-slot tables, in range by its type
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// One slot of the table (§synth-5-E slot table), as a value that
+/// cannot name a slot the table does not have.
+///
+/// A consumer compiles this file under `clippy::indexing_slicing` and
+/// the rest of the panic-free lint set, denied. Indexing
+/// `[_; SLOT_COUNT]` with a `usize` is a bounds check whose failing
+/// arm is a panic, and `get` with an arm for "no such slot" would be a
+/// branch that no handle can take. This type has one variant per slot
+/// and nothing else, so [`Self::of`] and [`Self::of_mut`] reach an
+/// entry by taking the table apart, with neither an index nor a dead
+/// branch. A `usize` that arrives from outside (a completion signal,
+/// a debug probe) is converted once, by [`Self::from_index`], where
+/// "names no slot" is an answer rather than a panic.
+///
+/// Private: a handle's index is minted only by the pool.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+enum SlotIndex {
+    S0 = 0,
+    S1 = 1,
+    S2 = 2,
+    S3 = 3,
+}
+
+impl SlotIndex {
+    /// Every slot, in table order: the order the freelist scans.
+    const ALL: [SlotIndex; SLOT_COUNT] = [
+        SlotIndex::S0,
+        SlotIndex::S1,
+        SlotIndex::S2,
+        SlotIndex::S3,
+    ];
+
+    /// The slot `i` names, or `None` past the end of the table.
+    fn from_index(i: usize) -> Option<Self> {
+        Self::ALL.get(i).copied()
+    }
+
+    /// This slot's position in the table, `0..SLOT_COUNT`.
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// This slot's entry in a per-slot table.
+    fn of<T>(self, table: &[T; SLOT_COUNT]) -> &T {
+        let [
+            t0,
+            t1,
+            t2,
+            t3,
+        ] = table;
+        match self {
+            Self::S0 => t0,
+            Self::S1 => t1,
+            Self::S2 => t2,
+            Self::S3 => t3,
+        }
+    }
+
+    /// This slot's entry in a per-slot table, for writing.
+    fn of_mut<T>(self, table: &mut [T; SLOT_COUNT]) -> &mut T {
+        let [
+            t0,
+            t1,
+            t2,
+            t3,
+        ] = table;
+        match self {
+            Self::S0 => t0,
+            Self::S1 => t1,
+            Self::S2 => t2,
+            Self::S3 => t3,
+        }
     }
 }
 
@@ -225,10 +313,10 @@ impl SessionRxPoolMcuMinimal {
     /// 1141: `free → cpu-mut`. Returns `None` when every slot is in
     /// use, preserving the α-era full-pool semantics.
     pub fn pool_acquire_for_encode(&mut self) -> Option<Slot<CpuMut>> {
-        for (i, st) in self.slot_states.iter_mut().enumerate() {
+        for (idx, st) in SlotIndex::ALL.iter().copied().zip(self.slot_states.iter_mut()) {
             if *st == SlotState::Free {
                 *st = SlotState::CpuMut;
-                return Some(Slot { idx: i, _state: PhantomData });
+                return Some(Slot { idx, _state: PhantomData });
             }
         }
         None
@@ -245,10 +333,10 @@ impl SessionRxPoolMcuMinimal {
     /// writes even after the post-RX invalidate (RFC §synth-5-E lines
     /// 1199-1212).
     pub fn link_arm_rx(&mut self) -> Option<Slot<DmaArmedRx>> {
-        for (i, st) in self.slot_states.iter_mut().enumerate() {
+        for (idx, st) in SlotIndex::ALL.iter().copied().zip(self.slot_states.iter_mut()) {
             if *st == SlotState::Free {
                 *st = SlotState::DmaArmedRx;
-                return Some(Slot { idx: i, _state: PhantomData });
+                return Some(Slot { idx, _state: PhantomData });
             }
         }
         None
@@ -257,7 +345,15 @@ impl SessionRxPoolMcuMinimal {
     /// Inspect a slot's current lifecycle state. Out-of-range index
     /// is `None` so debug introspection cannot panic.
     pub fn slot_state(&self, idx: usize) -> Option<SlotState> {
-        self.slot_states.get(idx).copied()
+        SlotIndex::from_index(idx).map(|slot| *slot.of(&self.slot_states))
+    }
+
+    /// The slot `idx` names, when it names one and that slot is in
+    /// `state`. The one place an index-keyed edge or accessor turns the
+    /// `usize` it was handed into a slot, so each reads the state once
+    /// and every later table access is by `SlotIndex`.
+    fn slot_in(&self, idx: usize, state: SlotState) -> Option<SlotIndex> {
+        SlotIndex::from_index(idx).filter(|slot| *slot.of(&self.slot_states) == state)
     }
 
     /// Which slot a buffer address names, if any.
@@ -274,19 +370,23 @@ impl SessionRxPoolMcuMinimal {
     /// containing it: a completion naming an address the pool never
     /// published is a driver bug, and rounding would turn it into a
     /// plausible-looking index.
+    ///
+    /// Checked arithmetic throughout, because the consumer denies
+    /// `clippy::arithmetic_side_effects`: an address below the table is
+    /// the subtraction's `None`, and the remainder and quotient divide
+    /// by the stride, `size_of::<SlotBytes>()`, which is `slot-size`
+    /// and positive by the parser. `is_multiple_of` would say the
+    /// remainder test in one call, but the generated Rust compiles on
+    /// Rust 1.81, which does not have it.
     pub fn slot_index_of_ptr(&self, ptr: *const u8) -> Option<usize> {
         let base = self.storage.as_ptr() as usize;
-        let addr = ptr as usize;
-        if addr < base {
-            return None;
-        }
         let stride = core::mem::size_of::<SlotBytes>();
-        let offset = addr - base;
-        if offset % stride != 0 {
+        let offset = (ptr as usize).checked_sub(base)?;
+        if offset.checked_rem(stride)? != 0 {
             return None;
         }
-        let idx = offset / stride;
-        (idx < SLOT_COUNT).then_some(idx)
+        let idx = offset.checked_div(stride)?;
+        SlotIndex::from_index(idx).map(SlotIndex::index)
     }
 
     /// Address of a slot in `dma-armed-tx`, for the descriptor
@@ -309,10 +409,8 @@ impl SessionRxPoolMcuMinimal {
     /// `dma-armed-tx`, and the CPU must not write through it while
     /// the transfer runs.
     pub fn dma_armed_tx_ptr(&self, idx: usize) -> Option<*const u8> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
-            return None;
-        }
-        Some(self.storage[idx].0.as_ptr())
+        let slot = self.slot_in(idx, SlotState::DmaArmedTx)?;
+        Some(slot.of(&self.storage).0.as_ptr())
     }
 
     /// Number of slots currently on the freelist.
@@ -337,7 +435,7 @@ impl Slot<CpuMut> {
     /// (spec lines 1186-1188) so the DMA controller reads the
     /// latest CPU writes from main memory.
     pub fn link_arm_tx(self, pool: &mut SessionRxPoolMcuMinimal) {
-        pool.slot_states[self.idx] = SlotState::DmaArmedTx;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::DmaArmedTx;
     }
 
     /// Return the slot to the freelist. Spec §synth-5-E line 1155:
@@ -345,17 +443,17 @@ impl Slot<CpuMut> {
     /// `cpu-mut|cpu-ref → free` author-visible API on lines
     /// 1232-1237. Consumes the handle.
     pub fn pool_return(self, pool: &mut SessionRxPoolMcuMinimal) {
-        pool.slot_states[self.idx] = SlotState::Free;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes.
     pub fn read<'a>(&'a self, pool: &'a SessionRxPoolMcuMinimal) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx].0
+        &self.idx.of(&pool.storage).0
     }
 
     /// Mutable borrow of the slot's bytes.
     pub fn write<'a>(&'a mut self, pool: &'a mut SessionRxPoolMcuMinimal) -> &'a mut [u8; SLOT_SIZE] {
-        &mut pool.storage[self.idx].0
+        &mut self.idx.of_mut(&mut pool.storage).0
     }
 }
 
@@ -372,13 +470,13 @@ impl Slot<CpuRef> {
     /// `cpu-ref → free` ("handler complete; pool_return(slot)").
     /// Consumes the handle.
     pub fn pool_return(self, pool: &mut SessionRxPoolMcuMinimal) {
-        pool.slot_states[self.idx] = SlotState::Free;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes — `cpu-ref` is a shared
     /// CPU-read state per spec line 1135.
     pub fn read<'a>(&'a self, pool: &'a SessionRxPoolMcuMinimal) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx].0
+        &self.idx.of(&pool.storage).0
     }
 }
 
@@ -417,8 +515,7 @@ impl Slot<DmaArmedRx> {
     /// Takes `&mut SessionRxPoolMcuMinimal` because a pointer valid for writes
     /// has to be derived from a mutable borrow.
     pub fn dma_armed_rx_ptr(&self, pool: &mut SessionRxPoolMcuMinimal) -> *mut u8 {
-        pool.storage[self.idx].0.as_mut_ptr()
-    }
+        self.idx.of_mut(&mut pool.storage).0.as_mut_ptr()    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -465,10 +562,10 @@ impl SessionRxPoolMcuMinimal {
     /// The caller must have observed DMA controller signal for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn dma_start_tx(&mut self, idx: usize) -> bool {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
+        let Some(slot) = self.slot_in(idx, SlotState::DmaArmedTx) else {
             return false;
-        }
-        self.slot_states[idx] = SlotState::DmaBusyTx;
+        };
+        *slot.of_mut(&mut self.slot_states) = SlotState::DmaBusyTx;
         true
     }
 
@@ -486,10 +583,10 @@ impl SessionRxPoolMcuMinimal {
     /// The caller must have observed TX-complete IRQ; pool_return(slot) for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn tx_complete(&mut self, idx: usize) -> bool {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyTx) {
+        let Some(slot) = self.slot_in(idx, SlotState::DmaBusyTx) else {
             return false;
-        }
-        self.slot_states[idx] = SlotState::Free;
+        };
+        *slot.of_mut(&mut self.slot_states) = SlotState::Free;
         true
     }
 
@@ -507,11 +604,9 @@ impl SessionRxPoolMcuMinimal {
     /// The caller must have observed RX-complete IRQ for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn rx_complete(&mut self, idx: usize) -> Option<Slot<CpuRef>> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyRx) {
-            return None;
-        }
-        self.slot_states[idx] = SlotState::CpuRef;
-        Some(Slot { idx, _state: PhantomData })
+        let slot = self.slot_in(idx, SlotState::DmaBusyRx)?;
+        *slot.of_mut(&mut self.slot_states) = SlotState::CpuRef;
+        Some(Slot { idx: slot, _state: PhantomData })
     }
 
     /// `dma-armed-tx → cpu-mut` — un-arm before DMA start (error path).
@@ -528,11 +623,9 @@ impl SessionRxPoolMcuMinimal {
     /// The caller must have observed un-arm before DMA start (error path) for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn un_arm_tx(&mut self, idx: usize) -> Option<Slot<CpuMut>> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
-            return None;
-        }
-        self.slot_states[idx] = SlotState::CpuMut;
-        Some(Slot { idx, _state: PhantomData })
+        let slot = self.slot_in(idx, SlotState::DmaArmedTx)?;
+        *slot.of_mut(&mut self.slot_states) = SlotState::CpuMut;
+        Some(Slot { idx: slot, _state: PhantomData })
     }
 
 }
@@ -548,7 +641,7 @@ impl Slot<DmaArmedRx> {
     /// The caller must have observed peripheral start for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn dma_start_rx(self, pool: &mut SessionRxPoolMcuMinimal) {
-        pool.slot_states[self.idx] = SlotState::DmaBusyRx;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::DmaBusyRx;
     }
 }
 
@@ -563,7 +656,7 @@ impl Slot<CpuRef> {
     /// The caller must have observed in-place mutate for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn mutate_in_place(self, pool: &mut SessionRxPoolMcuMinimal) -> Slot<CpuMut> {
-        pool.slot_states[self.idx] = SlotState::CpuMut;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::CpuMut;
         Slot { idx: self.idx, _state: PhantomData }
     }
 }
