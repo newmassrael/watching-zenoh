@@ -587,6 +587,29 @@ config WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS
 	  subscriber's place. Declaring one more is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every room is taken.
 
+config WZ_LIMIT_MAX_ADVANCED_SOURCES
+	int "MAX_ADVANCED_SOURCES"
+	default 16
+	help
+	  The publishers one advanced subscriber orders at once, of each of its two
+	  kinds (those that number their samples and those that only timestamp them):
+	  the rows of the tables kept with the subscriber. A publisher met while every
+	  row is taken takes the row of the one met longest ago that holds no sample
+	  back and waits on no get; while every row does, its samples are delivered as
+	  they come, unordered.
+
+config WZ_LIMIT_ADVANCED_SUBSCRIBER_PENDING_BYTES
+	int "ADVANCED_SUBSCRIBER_PENDING_BYTES"
+	default 1552 if WZ_LIMITS_ZENOH_PICO
+	default 1712
+	help
+	  The bytes one advanced subscriber holds samples back in while what comes
+	  before them is on its way (a recovery or history get): one ring of records,
+	  each a sample's header, key, encoding schema, payload and attachment, as long
+	  as they are. A sample that finds no room is not held: what its publisher holds
+	  goes on first, in order, with a miss reported for each hole given up, and then
+	  it.
+
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
 	default 64

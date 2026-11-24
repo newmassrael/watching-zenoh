@@ -33,6 +33,7 @@ use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
+use wz_runtime_coop::transport::GroupRecord;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
@@ -57,6 +58,8 @@ use wz_session_core::multicast_tx::{
 };
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
+#[cfg(feature = "queryable")]
+use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -1334,6 +1337,65 @@ impl<W: LinkWaits> GroupFace<W> {
         )
         .map_err(|_| FanoutError::ExceedsCapacity)?;
         Ok(0)
+    }
+}
+
+/// What the session's transport reads of the group (`wz_runtime_coop::transport`): each a reading
+/// of the group's own.
+impl<W: LinkWaits> GroupRecord for GroupFace<W> {
+    fn id(&self) -> FaceId {
+        self.id
+    }
+
+    fn took_input(&self) -> bool {
+        GroupFace::took_input(self)
+    }
+
+    fn input(&self) -> Option<LinkWait> {
+        GroupFace::input(self)
+    }
+
+    fn unwaited(&self) -> bool {
+        GroupFace::unwaited(self)
+    }
+
+    fn due_us(&self) -> Option<u64> {
+        GroupFace::due_us(self)
+    }
+
+    fn stop(&self) {
+        GroupFace::stop(self);
+    }
+
+    #[cfg(feature = "query")]
+    fn asks_queries(&self) -> bool {
+        self.declarations().asks_queries()
+    }
+
+    #[cfg(feature = "queryable")]
+    fn answer_sink(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        self.answers_as(generation)
+            .then_some(self.replies() as &dyn ResponseSink)
+    }
+
+    #[cfg(feature = "queryable")]
+    fn write_staged(&self) {
+        GroupFace::write_staged(self);
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_rows(&self) -> usize {
+        GroupFace::member_rows(self)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_row(&self, at: usize) -> Option<FaceLinkRow> {
+        GroupFace::member_row(self, at)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_snapshots(&self) -> Vec<FaceSnapshot> {
+        GroupFace::member_snapshots(self)
     }
 }
 

@@ -97,6 +97,12 @@ pub(super) const MAX_ADVANCED_SUBSCRIBERS: usize =
     limit(option_env!("WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS"), 8);
 pub(super) const MAX_SAMPLE_MISS_LISTENERS: usize =
     limit(option_env!("WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS"), 4);
+pub(super) const MAX_ADVANCED_SOURCES: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_SOURCES"), 16);
+pub(super) const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = limit(
+    option_env!("WZ_LIMIT_ADVANCED_SUBSCRIBER_PENDING_BYTES"),
+    1712,
+);
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_GROUP_ENDPOINT_LEN: usize =
     limit(option_env!("WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"), 96);
