@@ -225,11 +225,13 @@ fn held_plan(
     config: &CoopConfig,
     held: &crate::arena::HeldPlaces,
 ) -> Result<ArenaPlan, ArenaRefused> {
-    crate::engine::session_plan(
-        config,
+    let mut plan = ArenaPlan::of(config, &config.limits)?;
+    crate::engine::lay_out_open(
+        &mut plan,
         crate::engine::link_cells::<PosixClock>(&PosixLinks::new(super::LOOPBACK, PosixTcpDial)),
         held,
-    )
+    )?;
+    Ok(plan)
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
