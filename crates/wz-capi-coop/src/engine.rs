@@ -996,7 +996,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// work out under the session's lock, since that wait would be none. Written by the step, under
     /// the lock; a stale `true` costs one step that finds nothing, after which the read waits.
     input_held: AtomicBool,
-    /// Where a read waits for another read to hand back the session's buffer of waits.
+    /// Where a read waits for another read to hand back the session's buffer of waits. Only a
+    /// build with a read task beside the program's calls has two reads at once.
+    #[cfg(feature = "threads")]
     hand_back: HandBack,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
@@ -1108,6 +1110,7 @@ impl Takes {
 /// ([`IdleWait::Behind`]) waits for the buffer to be handed back: woken then, it steps and its
 /// next wait is on the links, so a read task behind a program's read does not sleep out its bound
 /// while what arrives after that read waits for it.
+#[cfg(feature = "threads")]
 struct HandBack {
     /// The reads waiting here now: a hand-back with none takes no lock.
     behind: core::sync::atomic::AtomicUsize,
@@ -1117,6 +1120,7 @@ struct HandBack {
     back: os::Condvar,
 }
 
+#[cfg(feature = "threads")]
 impl HandBack {
     fn new() -> Self {
         Self {
@@ -4265,6 +4269,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(any(feature = "listen", feature = "group"))]
                 owed: AtomicBool::new(false),
                 input_held: AtomicBool::new(false),
+                #[cfg(feature = "threads")]
                 hand_back: HandBack::new(),
                 #[cfg(any(feature = "listen", feature = "group"))]
                 handed_limits,
@@ -6056,8 +6061,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(mut core) = self.live() else {
             return (false, None);
         };
+        #[cfg(feature = "threads")]
         let handed = matches!(wait, IdleWait::Input { .. });
         core.0.transport.links.waited(wait);
+        #[cfg(feature = "threads")]
         if handed {
             self.hand_back.handed_back();
         }
@@ -8137,7 +8144,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // step left held makes it none, which it is then without the session taken to say so:
         // under a stream of batches each read takes the session once, for its step.
         // A read behind another's wait counts itself in under the session's lock, which the
-        // hand-back it waits for is made under too.
+        // hand-back it waits for is made under too. Without a read task the program's reads are
+        // one at a time, so none is ever behind another.
+        #[cfg(feature = "threads")]
         let mut seen = None;
         let mut wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
@@ -8148,6 +8157,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
                 let wait = core.0.idle_wait();
+                #[cfg(feature = "threads")]
                 if matches!(wait, IdleWait::Behind(_)) {
                     seen = Some(self.hand_back.enter());
                 }
@@ -8156,10 +8166,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(test)]
         self.takes.wait(&wait);
+        #[cfg(feature = "threads")]
         match (&wait, seen) {
             (IdleWait::Behind(ms), Some(seen)) => self.hand_back.wait(seen, *ms),
             _ => wait.wait(self.rooms.waits(), sleep_ms),
         }
+        #[cfg(not(feature = "threads"))]
+        wait.wait(self.rooms.waits(), sleep_ms);
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         let (mut stepped, jobs_due_ms) = self.step_after(wait);
@@ -8609,7 +8622,7 @@ mod member_key_tests {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "threads"))]
 mod hand_back_tests {
     use super::{lock, HandBack};
     use std::sync::Arc;
