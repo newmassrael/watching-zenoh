@@ -54,7 +54,7 @@ use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSa
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::sample::EntityGlobalId;
 use wz_session_core::sample_kind::SampleKind;
@@ -65,7 +65,7 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
 use super::plans::{
-    history_selector, parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource,
+    parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource, GetParameters,
     RecoveredView,
 };
 use super::state::{
@@ -927,12 +927,17 @@ fn declare_detection_token<E: SessionEngine + ?Sized>(
 /// runtime's own query, not an entity of the application), goes where the subscriber was told to,
 /// is bounded by the timeout so a get nobody answers ends, asks every queryable and not the best
 /// match, and takes every sample of a range and not the latest of each key.
-fn get_options<E: SessionEngine + ?Sized>(shared: &Shared<E>, parameters: String) -> QueryOptions {
-    QueryOptions::get()
+fn get_options<'a, E: SessionEngine + ?Sized>(
+    shared: &Shared<E>,
+    parameters: &'a GetParameters,
+) -> QueryOptionsOf<'a> {
+    // `_anyke`: a cached sample comes back on its own key, which a get on the `@adv` namespace
+    // does not intersect; the responder accepts it only with the flag.
+    QueryOptionsOf::get()
         .with_expose_timestamp(true)
         .with_allowed_destination(shared.dest)
         .with_timeout_ms(shared.timeout_ms)
-        .with_parameters(parameters.into_bytes())
+        .with_parameters_lent_anyke(parameters.as_bytes(), true)
         .with_target(QueryTarget::All)
         .with_consolidation(ConsolidationMode::None)
 }
@@ -946,7 +951,7 @@ fn get_options<E: SessionEngine + ?Sized>(shared: &Shared<E>, parameters: String
 fn issue_get<E: SessionEngine + ?Sized>(
     shared: &Arc<Shared<E>>,
     keyexpr: &str,
-    opts: QueryOptions,
+    opts: &QueryOptionsOf<'_>,
     finish: Finish,
 ) {
     let Some(engine) = shared.engine.upgrade() else {
@@ -971,7 +976,7 @@ fn issue_get<E: SessionEngine + ?Sized>(
             // SAFETY: this issuer holds the get until the release below.
             unsafe { slot.leg(shared) }
         };
-        let _ = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, Some(fan), &mut leg);
+        let _ = engine.get_on_wire(keyexpr, &WireKey::literal(), opts, Some(fan), &mut leg);
     }
     // The hold of the issuer goes last: a get with no leg ends here, and one whose legs all ended
     // during the call ends here too, after the call returned.
@@ -987,18 +992,12 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
 ) {
     let zid_hex = zid_to_zenoh_hex(&request.zid);
     let keyexpr = crate::advanced_ke::recovery_get_ke(&shared.base_keyexpr, &zid_hex, request.eid);
-    let range = match request.to_sn {
-        Some(to) => format!("_sn={}..{}", request.from_sn, to),
-        None => format!("_sn={}..", request.from_sn),
-    };
-    let opts = get_options(
-        shared,
-        wz_session_core::selector_params::anyke_params(&[range]),
-    );
+    let parameters = GetParameters::recovery(request.from_sn, request.to_sn);
+    let opts = get_options(shared, &parameters);
     issue_get(
         shared,
         &keyexpr,
-        opts,
+        &opts,
         Finish::Recovery((request.zid, request.eid)),
     );
 }
@@ -1010,8 +1009,13 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
     age: Option<f64>,
 ) {
     let keyexpr = crate::advanced_ke::history_get_ke(&shared.base_keyexpr);
-    let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, &keyexpr, opts, Finish::History);
+    let parameters = GetParameters::history(depth, age);
+    issue_get(
+        shared,
+        &keyexpr,
+        &get_options(shared, &parameters),
+        Finish::History,
+    );
 }
 
 /// Issue the history get of one detected late publisher `(zid, eid)`.
@@ -1024,8 +1028,9 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
 ) {
     let zid_hex = zid_to_zenoh_hex(&zid);
     let keyexpr = crate::advanced_ke::recovery_get_ke(&shared.base_keyexpr, &zid_hex, eid);
-    let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, &keyexpr, opts, Finish::Recovery((zid, eid)));
+    let parameters = GetParameters::history(depth, age);
+    let opts = get_options(shared, &parameters);
+    issue_get(shared, &keyexpr, &opts, Finish::Recovery((zid, eid)));
 }
 
 /// The timestamped twin: the target is the token's own key expression, which is the one the
@@ -1037,8 +1042,9 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, token_keyexpr, opts, Finish::Timestamped(zid));
+    let parameters = GetParameters::history(depth, age);
+    let opts = get_options(shared, &parameters);
+    issue_get(shared, token_keyexpr, &opts, Finish::Timestamped(zid));
 }
 
 /// The get for a publisher whose token's zid does not decode: counted globally, since there is no
@@ -1049,8 +1055,9 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, token_keyexpr, opts, Finish::History);
+    let parameters = GetParameters::history(depth, age);
+    let opts = get_options(shared, &parameters);
+    issue_get(shared, token_keyexpr, &opts, Finish::History);
 }
 
 /// The late-publisher liveliness callback: on a `Put`, open a slot for the detected publisher and

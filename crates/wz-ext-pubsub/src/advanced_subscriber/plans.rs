@@ -177,24 +177,113 @@ impl SampleView for RecoveredView<'_> {
 /// samples on a `z_advanced_pub` oracle.
 #[cfg(feature = "advanced-history")]
 pub fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(max) = sample_depth {
-        parts.push(format!("_max={max}"));
+    let stated = GetParameters::history(sample_depth, max_age);
+    let flag = core::str::from_utf8(wz_session_core::selector_params::anyke_suffix(
+        stated.as_bytes(),
+    ))
+    .unwrap_or(wz_session_core::selector_params::ANYKE_PARAM);
+    format!("{}{flag}", stated.as_str())
+}
+
+/// The most bytes the parameters of a get take as [`GetParameters`] writes them: `_max=` and a
+/// `usize` (25), the separator, `_time=[now(-` (12), the longest text `f64`'s `Display` writes
+/// (a negative subnormal's, 327) and `s)..]` (5), which is more than a `_sn` range of two `u32`s
+/// takes. The flag is not among them: the get writes it after them.
+#[cfg(feature = "advanced-recovery")]
+const GET_PARAMETERS_BYTES: usize = 384;
+
+/// The selector parameters of one get the subscriber asks, written where the caller keeps them
+/// and lent to the get for the call, so asking it takes no memory. The reply-keyexpr-any flag the
+/// subscriber's gets carry is not written here: the get writes it after them
+/// (`QueryOptionsOf::with_parameters_lent_anyke`).
+#[cfg(feature = "advanced-recovery")]
+pub struct GetParameters {
+    bytes: [u8; GET_PARAMETERS_BYTES],
+    len: usize,
+}
+
+#[cfg(feature = "advanced-recovery")]
+impl GetParameters {
+    /// The startup or a late publisher's history get: at most `sample_depth` samples of each
+    /// source, none older than `max_age` seconds.
+    #[cfg(feature = "advanced-history")]
+    pub fn history(sample_depth: Option<usize>, max_age: Option<f64>) -> Self {
+        let mut parameters = Self::none();
+        if let Some(max) = sample_depth {
+            parameters.push(format_args!("_max={max}"));
+        }
+        if let Some(age) = max_age {
+            // R311y442 review (REVIEWER 1, finding 6) — upstream's `TimeExpr` Display
+            // special-cases a zero offset to `now()` rather than `now(-0s)`
+            // (zenoh-util/src/time_range.rs:333-339), and IEEE `-0.0 == 0.0` so a
+            // `max_age(0.0)` lands there. The two forms parse to the same instant, so
+            // this is byte-parity rather than a behaviour change — but the emitted
+            // selector is the thing a foreign peer logs and a future diff compares.
+            if age == 0.0 {
+                parameters.push(format_args!("_time=[now()..]"));
+            } else {
+                parameters.push(format_args!("_time=[now(-{age}s)..]"));
+            }
+        }
+        parameters
     }
-    if let Some(age) = max_age {
-        // R311y442 review (REVIEWER 1, finding 6) — upstream's `TimeExpr` Display
-        // special-cases a zero offset to `now()` rather than `now(-0s)`
-        // (zenoh-util/src/time_range.rs:333-339), and IEEE `-0.0 == 0.0` so a
-        // `max_age(0.0)` lands there. The two forms parse to the same instant, so
-        // this is byte-parity rather than a behaviour change — but the emitted
-        // selector is the thing a foreign peer logs and a future diff compares.
-        if age == 0.0 {
-            parts.push("_time=[now()..]".to_string());
-        } else {
-            parts.push(format!("_time=[now(-{age}s)..]"));
+
+    /// A recovery get: the sequence numbers from `from_sn`, up to `to_sn` when it is bounded.
+    pub fn recovery(from_sn: u32, to_sn: Option<u32>) -> Self {
+        let mut parameters = Self::none();
+        match to_sn {
+            Some(to) => parameters.push(format_args!("_sn={from_sn}..{to}")),
+            None => parameters.push(format_args!("_sn={from_sn}..")),
+        }
+        parameters
+    }
+
+    /// The parameters as the get sends them, the flag aside.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or_default()
+    }
+
+    /// [`Self::as_bytes`] as the text it is: only whole pieces of text are written.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).unwrap_or_default()
+    }
+
+    fn none() -> Self {
+        Self {
+            bytes: [0; GET_PARAMETERS_BYTES],
+            len: 0,
         }
     }
-    wz_session_core::selector_params::anyke_params(&parts)
+
+    /// Write `part` after the separator when one precedes it. A part that does not fit is left
+    /// out whole, so what is written stays a list of whole parameters; the bound above leaves none
+    /// out.
+    fn push(&mut self, part: core::fmt::Arguments<'_>) {
+        use core::fmt::Write as _;
+        let start = self.len;
+        let written = if start == 0 {
+            self.write_fmt(part)
+        } else {
+            self.write_char(wz_session_core::selector_params::PARAM_LIST_SEPARATOR)
+                .and_then(|()| self.write_fmt(part))
+        };
+        if written.is_err() {
+            self.len = start;
+        }
+    }
+}
+
+#[cfg(feature = "advanced-recovery")]
+impl core::fmt::Write for GetParameters {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(core::fmt::Error)?
+            .copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 /// R311y592 — the subscriber's in-flight recovery / history GETs, and the seam

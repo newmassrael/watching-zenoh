@@ -44,6 +44,8 @@ pub use options::{
 #[cfg(feature = "advanced-history")]
 pub use plans::history_selector;
 #[cfg(feature = "advanced-recovery")]
+pub use plans::GetParameters;
+#[cfg(feature = "advanced-recovery")]
 pub use plans::{
     parse_heartbeat_source, recovered_sample_from_reply, recovery_query_timeout_ms,
     AdvPublisherSource, PendingGets, RecoveredView,

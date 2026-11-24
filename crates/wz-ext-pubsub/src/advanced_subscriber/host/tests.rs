@@ -938,8 +938,10 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// What asking a get and subscribing take of the heap: counted on the calling thread, so libtest's
-// other threads move no number.
+// What asking a get and subscribing take of the heap. The crate's other lib tests run beside these
+// on libtest's other threads and allocate as they please; the count is of the thread a test runs
+// on (a thread-local cell the allocator bumps), and a window opens and closes on that thread with
+// nothing handed to another in between, so what the others allocate never reaches it.
 
 /// Counts the allocations made BY THE CURRENT THREAD.
 struct CountingAllocator;
@@ -1102,7 +1104,7 @@ fn a_get_past_the_sessions_bound_ends_at_once() {
     super::issue_get(
         &shared,
         "demo/data/@adv/**",
-        QueryOptions::get(),
+        &QueryOptions::get(),
         super::Finish::History,
     );
 
@@ -1111,5 +1113,41 @@ fn a_get_past_the_sessions_bound_ends_at_once() {
         *delivered.lock().unwrap(),
         [10],
         "the history's end handed on what it held"
+    );
+}
+
+/// The parameters of a history get are written where the caller keeps them and lent to the get's
+/// options with the reply-keyexpr-any flag, which the get writes after them: nothing is allocated,
+/// and the get sends the selector the owned spelling builds.
+#[test]
+fn a_history_gets_parameters_are_lent_and_take_no_memory() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let shared = shared_on(&script, &delivered);
+
+    let before = allocations();
+    let parameters = super::GetParameters::history(Some(4), Some(1.5));
+    let opts = super::get_options(&shared, &parameters);
+    let parts = opts.query_parts();
+    let lent = (
+        parts.parameters.as_ptr(),
+        parts.parameters.len(),
+        parts.anyke,
+    );
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "the parameters and the options allocate nothing");
+    assert_eq!(
+        lent,
+        (
+            parameters.as_bytes().as_ptr(),
+            parameters.as_bytes().len(),
+            true
+        ),
+        "the get reads the caller's bytes and writes the flag after them"
+    );
+    assert_eq!(
+        opts.sent_parameters().as_deref(),
+        Some(crate::advanced_subscriber::plans::history_selector(Some(4), Some(1.5)).as_bytes()),
     );
 }
