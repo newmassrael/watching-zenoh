@@ -2084,8 +2084,6 @@ pub mod chain_staging;
 pub mod chain_loss;
 
 #[cfg(feature = "reassembly")]
-// Totality debt TD-054 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reassembly_dispatch;
 
 /// SCE-generated active scouting state machine (R311ik). The emit comes
