@@ -55,7 +55,7 @@ use crate::arena::{
     PlaceTables, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{BoundedVec, KeyBacking, Lent, TableLender};
+use wz_session_core::bounded::{KeyBacking, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
 #[cfg(feature = "query")]
@@ -1589,7 +1589,8 @@ pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
 /// A table of the session's own declarations: rows lent from the session's arena at its open, as
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
 /// is refused before anything is taken, registered or sent.
-type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
+#[cfg(feature = "query")]
+type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, Lent>;
 
 /// A key as a row of the session's own declarations keeps it: a block of the session's key arena
 /// (`KEY_ARENA_BYTES`) as long as the key, which the row holds by its place, and which is given
