@@ -278,11 +278,12 @@ enum Round {
     AdvancedHistory,
     GroupReceive,
     TransportEventsListener,
+    E2eSenderDemux,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 26] = [
+    const ALL: [Round; 27] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -309,6 +310,7 @@ impl Round {
         Round::AdvancedHistory,
         Round::GroupReceive,
         Round::TransportEventsListener,
+        Round::E2eSenderDemux,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -325,6 +327,9 @@ impl Round {
             Round::AdvancedPut | Round::AdvancedHistory => cfg!(feature = "advanced"),
             Round::GroupReceive => cfg!(feature = "multicast-transport"),
             Round::TransportEventsListener => cfg!(feature = "connectivity"),
+            Round::E2eSenderDemux => {
+                cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
+            }
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -354,7 +359,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 30] = [
+const FAMILIES: [(&str, Round, Part); 31] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -403,6 +408,7 @@ const FAMILIES: [(&str, Round, Part); 30] = [
         Round::TransportEventsListener,
         Part::All,
     ),
+    ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -477,7 +483,31 @@ struct E2e {
 
 #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
 impl E2e {
+    /// The pair whose receiver keeps one stream, named by the caller.
     unsafe fn new() -> Self {
+        Self::judged_under(std::ptr::null())
+    }
+
+    /// The pair whose receiver keeps one slot per sender, taken by the first intact frame of a
+    /// sender: the profile's cell carries the sender identity the slot is keyed by.
+    #[cfg(feature = "e2e-sender-demux")]
+    unsafe fn sender_keyed() -> Self {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_options_default, wz_ext_e2e_receiver_options_t,
+            WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL,
+        };
+        let mut options: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
+        wz_ext_e2e_receiver_options_default(&mut options);
+        options.keying = WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL;
+        options.streams = 1;
+        Self::judged_under(&options)
+    }
+
+    /// A sender and a receiver of the synthetic profile, the receiver made under `options` (null:
+    /// the defaults).
+    unsafe fn judged_under(
+        options: *const wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_options_t,
+    ) -> Self {
         use wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_new;
         use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_new;
         let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
@@ -503,7 +533,7 @@ impl E2e {
                 &mut e2e.receiver,
                 profile.as_ptr(),
                 values.as_ptr(),
-                std::ptr::null(),
+                options,
                 std::ptr::null_mut(),
             ),
             Z_OK,
@@ -806,6 +836,9 @@ struct Bench {
     alive: wz_capi_pico::liveliness::z_owned_liveliness_token_t,
     #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
     e2e: E2e,
+    /// A sender and a receiver that keeps its streams per sender.
+    #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+    e2e_demux: E2e,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
     #[cfg(feature = "advanced")]
@@ -842,6 +875,8 @@ impl Bench {
         };
         #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
         let e2e = E2e::new();
+        #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+        let e2e_demux = E2e::sender_keyed();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
         #[cfg(feature = "advanced")]
@@ -884,6 +919,8 @@ impl Bench {
             alive,
             #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
             e2e,
+            #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+            e2e_demux,
             #[cfg(feature = "replay-cache")]
             replay,
             #[cfg(feature = "advanced")]
@@ -970,6 +1007,10 @@ impl Bench {
             Round::TransportEventsListener => {
                 #[cfg(feature = "connectivity")]
                 self.transport_events_listener();
+            }
+            Round::E2eSenderDemux => {
+                #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+                self.e2e_demux.round();
             }
         }
     }
@@ -1424,6 +1465,8 @@ impl Bench {
         }
         #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
         self.e2e.drop_both();
+        #[cfg(all(feature = "e2e-sender", feature = "e2e-sender-demux"))]
+        self.e2e_demux.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
         #[cfg(feature = "advanced")]

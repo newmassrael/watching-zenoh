@@ -38,6 +38,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "e2e-sender-demux": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "get": {
       "allocs_per_round": 17,
       "locked": false,
@@ -192,6 +197,11 @@
     "e2e-sender": {
       "families": [
         "e2e"
+      ]
+    },
+    "e2e-sender-demux": {
+      "families": [
+        "e2e-sender-demux"
       ]
     },
     "liveliness": {
