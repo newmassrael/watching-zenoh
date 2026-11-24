@@ -52,7 +52,7 @@ use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Static};
+use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage};
 use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -168,8 +168,83 @@ pub trait RoundCalls: 'static {
     /// What the round counts of what it hands out.
     type Tally: RoundTally;
     /// Whether the calls the round owes may run on another thread than the one that holds the
-    /// session's tables, and so the latch the rows count them on.
-    type Form: crate::row_callback::ThreadForm;
+    /// session's tables, and so the latch the rows count them on and where the round keeps its
+    /// records ([`RecordForm`]).
+    type Form: RecordForm;
+}
+
+/// The records a round of one thread holds at once: the most one message makes, a token's
+/// appearance or retraction held for the liveliness subscribers and, as a record of its own, for
+/// the declaration watches. Such a round takes no further message while it holds one
+/// ([`Round::has_room`]), and the sources that write records unasked write one a round.
+pub const ONE_THREAD_RECORDS: usize = 2;
+
+/// Where a round keeps its records, by how its calls stand to its threads ([`ThreadForm`]). A
+/// round whose calls may run on another thread takes the records of many messages before a
+/// delivery hands them out, as many as the session's `DELIVERY_LANE_EVENTS`, in rows its arena
+/// lends. A round of one thread is handed out after each message, so it keeps the records of one
+/// ([`ONE_THREAD_RECORDS`]) in itself and its arena lends it none.
+pub trait RecordForm: ThreadForm {
+    /// The records of a round of this form, each a `T`.
+    type Records<T>: RecordRows<T>;
+
+    /// Whether the session's arena lends the records' rows ([`RoundRows::RECORD_BYTES`]).
+    const LENT: bool;
+
+    /// The records of a round of `rows` records, lent from `arena` where the form lends them.
+    ///
+    /// # Errors
+    /// Refused past the build's bound of the table or past what the arena has left.
+    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused>;
+}
+
+/// The records of a round, in the order they were written.
+pub trait RecordRows<T>: Default + core::ops::Deref<Target = [T]> + core::ops::DerefMut {
+    /// Hold `value` after the others.
+    ///
+    /// # Errors
+    /// The value, handed back, when every row holds one.
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
+
+    /// How many more records the rows take.
+    fn free_slots(&self) -> usize;
+
+    /// Hold no record.
+    fn clear(&mut self);
+}
+
+impl<T, const N: usize, P: Storage> RecordRows<T> for BoundedVec<T, N, P> {
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
+        BoundedVec::push(self, value)
+    }
+
+    fn free_slots(&self) -> usize {
+        BoundedVec::free_slots(self)
+    }
+
+    fn clear(&mut self) {
+        BoundedVec::clear(self);
+    }
+}
+
+impl RecordForm for crate::row_callback::Threads {
+    type Records<T> = BoundedVec<T, { caps::DELIVERY_LANE_EVENTS }, Lent>;
+
+    const LENT: bool = true;
+
+    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused> {
+        arena.lend(rows)
+    }
+}
+
+impl RecordForm for crate::row_callback::OneThread {
+    type Records<T> = BoundedVec<T, ONE_THREAD_RECORDS, Static>;
+
+    const LENT: bool = false;
+
+    fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T>, LendRefused> {
+        Ok(BoundedVec::new_static())
+    }
 }
 
 /// What the session's planes are made of in an engine's own types beyond what its round owes:
@@ -244,6 +319,17 @@ pub struct ReadRoom {
 fn holds_its_sender(reliability: Reliability, qos: Option<QosLevel>) -> bool {
     reliability == Reliability::Reliable
         && qos.is_some_and(|qos| qos.congestion() != CongestionControl::Drop)
+}
+
+/// A source of records the gate does not hold back, which tells the round while it owes records
+/// the round had no room for ([`Round::owe`]). Each is told apart, so one that no longer owes
+/// leaves the links held while another still does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owing {
+    /// The tokens of a lost link still to be retracted.
+    Retractions = 1,
+    /// A declaration watch's catch-up, which a round of one thread takes a record at a time.
+    CatchUp = 2,
 }
 
 /// What a round did not hand a callback, by why.
@@ -597,15 +683,20 @@ impl RoundRowCounts {
 
 /// The tables of a round, lent from its session's arena ([`RoundRows::lent`]).
 pub struct RoundRows<C: RoundCalls> {
-    records: BoundedVec<Entry<C>, { caps::DELIVERY_LANE_EVENTS }, Lent>,
+    records: <C::Form as RecordForm>::Records<Entry<C>>,
     callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
     keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
     longest_key: usize,
 }
 
 impl<C: RoundCalls> RoundRows<C> {
-    /// The bytes of one record of a round.
-    pub const RECORD_BYTES: usize = core::mem::size_of::<Entry<C>>();
+    /// The bytes of the session's arena one record of a round takes: none where the round keeps
+    /// its records in itself ([`RecordForm::LENT`]).
+    pub const RECORD_BYTES: usize = if <C::Form as RecordForm>::LENT {
+        core::mem::size_of::<Entry<C>>()
+    } else {
+        0
+    };
 
     /// The bytes of one callback a record of a round owes.
     pub const CALLBACK_BYTES: usize = core::mem::size_of::<Owed<C>>();
@@ -621,9 +712,13 @@ impl<C: RoundCalls> RoundRows<C> {
                 core::mem::align_of::<Entry<C>>() == core::mem::align_of::<Span>(),
                 "a record holds nothing aligned wider than its spans"
             );
+            assert!(
+                <C::Form as RecordForm>::LENT || Round::<C>::MESSAGE_RECORDS <= ONE_THREAD_RECORDS,
+                "a round of one thread keeps the records of one message"
+            );
         }
         Ok(Self {
-            records: arena.lend(counts.records)?,
+            records: <C::Form as RecordForm>::records(arena, counts.records)?,
             callbacks: arena.lend(counts.callbacks)?,
             keys: arena.lend(counts.key_bytes())?,
             longest_key: counts.longest_key,
@@ -654,8 +749,9 @@ struct Table<C: RoundCalls> {
     /// Whether a delivery handed the records out and ended their calls: what they hold is the lock
     /// holder's to let go of before the next record is written ([`Self::clear`]).
     spent: bool,
-    /// As many records as the session's `DELIVERY_LANE_EVENTS`, rows its arena lent.
-    entries: BoundedVec<Entry<C>, { caps::DELIVERY_LANE_EVENTS }, Lent>,
+    /// The records, kept where the round's form keeps them ([`RecordForm`]): as many as the
+    /// session's `DELIVERY_LANE_EVENTS`, rows its arena lent, or those of one message.
+    entries: <C::Form as RecordForm>::Records<Entry<C>>,
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
     /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows its arena lent.
     callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
@@ -1069,10 +1165,10 @@ pub struct Round<C: RoundCalls> {
     /// ([`Self::lends_a_datagram`]): set by the session's writes, cleared as a delivery empties
     /// the table.
     lends: AtomicBool,
-    /// Whether a source the gate does not hold back owes the round records it had no room for (a
-    /// lost face's tokens, still to be retracted): no link is read until it has handed them, so
-    /// they come before anything the link brings after the loss ([`Self::owe`]).
-    owes: AtomicBool,
+    /// The sources the gate does not hold back that owe the round records it had no room for, a
+    /// bit each ([`Owing`]): no link is read until they have handed them, so they come before
+    /// anything the link brings after ([`Self::owe`]).
+    owes: AtomicU8,
     /// Where the datagram lies that a link lends the session's step now, when the link leaves it
     /// where it lies until it is next asked to receive (the engine's gate on the link): its first byte
     /// and its length. Written under the session's lock.
@@ -1219,7 +1315,7 @@ impl<C: RoundCalls> Round<C> {
             ptr::write(addr_of_mut!((*table).key), None);
             ptr::write(addr_of_mut!((*table).fan), Fan::None);
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
-            ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
+            ptr::write(addr_of_mut!((*at).owes), AtomicU8::new(0));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).rejoining), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).kept), UnsafeCell::new(None));
@@ -1939,15 +2035,20 @@ impl<C: RoundCalls> Round<C> {
         unsafe { *self.lending.get() = range };
     }
 
-    /// Whether a source the gate does not hold back still owes the round records (`owed`): the
-    /// links are read no further until it says it owes none.
-    pub fn owe(&self, owed: bool) {
-        self.owes.store(owed, Ordering::Release);
+    /// Whether `source`, which the gate does not hold back, still owes the round records
+    /// (`owed`): the links are read no further until every source says it owes none.
+    pub fn owe(&self, source: Owing, owed: bool) {
+        let bit = source as u8;
+        if owed {
+            self.owes.fetch_or(bit, Ordering::AcqRel);
+        } else {
+            self.owes.fetch_and(!bit, Ordering::AcqRel);
+        }
     }
 
     /// Whether a source the gate does not hold back still owes the round records ([`Self::owe`]).
     pub fn owes(&self) -> bool {
-        self.owes.load(Ordering::Acquire)
+        self.owes.load(Ordering::Acquire) != 0
     }
 
     /// Answer the queries the round hands their queryables through `answering`, the engine the
@@ -1979,6 +2080,31 @@ impl<C: RoundCalls> Round<C> {
             self.released.end_query(call);
             return false;
         };
+        // The queryables one query reaches owe calls of one record, as the subscribers of a sample
+        // do: a query is one record whatever the queryables it reaches.
+        let joins = match table.entries.last() {
+            Some(Entry {
+                what: Held::Query(query),
+                ..
+            }) => {
+                let query = <C::Queries as Presence>::read::<HeldQuery>(query);
+                query.rid == view.rid() && query.generation.get() == generation
+            }
+            _ => false,
+        };
+        if joins && Self::joins(table) {
+            if let Err(full) = table.callbacks.push(Owed::Query(call)) {
+                self.refuse(true);
+                self.released.settle(full.0);
+                return false;
+            }
+            if let Some(last) = table.entries.last_mut() {
+                last.owed = last.owed.saturating_add(1);
+            }
+            // SAFETY: the caller's contract: the session's lock is held.
+            unsafe { self.filled(table) };
+            return true;
+        }
         if !Self::takes(table, 1) {
             self.refuse(true);
             self.released.end_query(call);

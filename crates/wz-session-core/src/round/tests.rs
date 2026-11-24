@@ -1004,3 +1004,107 @@ fn a_captured_fan_out_hands_every_call_in_order() {
     assert_eq!(log.ended(), 3);
     assert!(log.handed().is_empty(), "the put hands the sample itself");
 }
+
+/// A round of one thread keeps the records of one message in itself: two, as a token held for its
+/// liveliness subscribers and for the declaration watches makes, and a third finds no room and is
+/// counted; its arena lends it no row of records. The CONTROL is the round of threads, whose lent
+/// rows take the third. Turned red by a round of one thread that keeps its records in lent rows.
+#[test]
+fn a_round_of_one_thread_keeps_two_records_in_itself_and_refuses_a_third() {
+    assert_eq!(
+        RoundRows::<Single>::RECORD_BYTES,
+        0,
+        "the arena lends a round of one thread no record"
+    );
+    assert!(
+        RoundRows::<Lean>::RECORD_BYTES > 0,
+        "CONTROL: a round of threads is lent its records"
+    );
+    let log = Arc::new(Log::default());
+    let threads = round::<Lean>();
+    let single = round::<Single>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        assert!(single.has_room_for(ONE_THREAD_RECORDS, 1));
+        assert!(
+            !single.has_room_for(ONE_THREAD_RECORDS + 1, 0),
+            "no room for more records than one message makes"
+        );
+        for (row, key) in [(1, "k/1"), (2, "k/2"), (3, "k/3")] {
+            fan_out(&threads, &[row], &Sample(key), &log);
+            fan_out(&single, &[row + 10], &Sample(key), &log);
+        }
+        threads.seal();
+        single.seal();
+    }
+    assert_eq!(
+        threads.counts(),
+        RoundCounts::default(),
+        "CONTROL: the round of threads took all three"
+    );
+    assert_eq!(single.counts().dropped, 1, "the third found no room");
+    assert!(threads.deliver() && single.deliver());
+    assert_eq!(
+        log.handed(),
+        [
+            "1 sample k/1",
+            "2 sample k/2",
+            "3 sample k/3",
+            "11 sample k/1",
+            "12 sample k/2"
+        ]
+    );
+}
+
+/// The queryables one query reaches owe calls of one record, in the order they were reached: a
+/// round of one record holds the query for both, and refuses the next query, which is another
+/// record. Turned red by a query written as a record for each queryable.
+#[test]
+fn a_query_for_two_queryables_is_one_record_owing_both() {
+    let log = Arc::new(Log::default());
+    let kept = round_of::<Kept>(1, 4);
+    let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log.clone()));
+    kept.answer_queries_with(Arc::downgrade(&answers));
+    let call = |row| Call {
+        row,
+        log: log.clone(),
+    };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    let taken = unsafe {
+        let taken = [
+            kept.offer_query(call(3), &Query("q/1"), 9),
+            kept.offer_query(call(4), &Query("q/1"), 9),
+            kept.offer_query(call(5), &Query("q/1"), 8),
+        ];
+        kept.seal();
+        taken
+    };
+    assert_eq!(
+        taken,
+        [true, true, false],
+        "the second queryable joins the record; another link's query is a record of its own"
+    );
+    assert_eq!(kept.counts().held_over, 1);
+    assert!(kept.deliver());
+    assert_eq!(log.handed(), ["3 query q/1 9", "4 query q/1 9"]);
+    assert_eq!(
+        log.ended(),
+        3,
+        "every call is ended, the refused one at once"
+    );
+}
+
+/// Each source the gate does not hold back owes apart: one that no longer owes leaves the links
+/// held while the other still does. Turned red by one flag both sources write.
+#[test]
+fn a_source_that_owes_no_more_leaves_the_links_held_while_another_owes() {
+    let round = round::<Lean>();
+    assert!(!round.owes());
+    round.owe(Owing::Retractions, true);
+    round.owe(Owing::CatchUp, true);
+    round.owe(Owing::Retractions, false);
+    assert!(round.owes(), "the catch-up still owes");
+    round.owe(Owing::CatchUp, false);
+    assert!(!round.owes(), "CONTROL: none owes");
+}

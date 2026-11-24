@@ -21,7 +21,9 @@
 //! is declared, as records of the same round: at once when the round takes them all, or else as
 //! soon as a delivery has emptied it ([`DeclWatches::owes`]), so a watch declared from inside a
 //! callback, while the round is handed out, is told them by the next round. Until then it is told
-//! no live event, which its catch-up, read off the peers' tables as they stand then, holds.
+//! no live event, which its catch-up, read off the peers' tables as they stand then, holds. A round
+//! of one thread holds the records of one message, so it is told its catch-up a declaration a
+//! round, the links read no further until it is whole.
 
 use alloc::sync::Arc;
 
@@ -38,13 +40,18 @@ use wz_session_core::declare::MatchingReport;
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::round::{DeclEvent, DeclEventKind};
+use wz_session_core::round::{DeclEvent, DeclEventKind, Owing};
+use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
-use crate::round::Round;
+use crate::round::{CoopForm, Round};
+
+/// Whether a watch is told its catch-up in parts: a round of one thread is handed out after each
+/// message and holds the records of one alone, so it takes a catch-up a declaration a round.
+const IN_PARTS: bool = !<CoopForm as ThreadForm>::OTHER_THREADS;
 
 /// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
 /// declarations the engine reads for its publishers' write filters, queryables with a querier or a
@@ -200,6 +207,9 @@ struct Watch {
     lost: u64,
     /// Owed what the peers hold, told before any live event, which it is not told meanwhile.
     catching_up: bool,
+    /// How many of the declarations its catch-up reads off the peers' tables, in the order they
+    /// hand them, it was already told: what a catch-up told in parts goes on from.
+    told: usize,
 }
 
 /// A row of the table: the watch it holds, if any, and the cell its sink lies in.
@@ -362,6 +372,58 @@ unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
     }
 }
 
+/// Hold in `round`, for `watch` whose sink lies in `cell`, the declarations of its kind the peers
+/// of `faces` hold now past the ones it was told, `most` of them at most, each named as its face's
+/// peer: whether none is left. One the round takes no record of is counted as lost.
+///
+/// # Safety
+/// The caller holds the session's lock.
+unsafe fn tell_held<'f, I>(
+    round: &Round,
+    watch: &mut Watch,
+    cell: &Arc<Cell>,
+    faces: &impl Fn() -> I,
+    most: usize,
+) -> bool
+where
+    I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
+{
+    let from = watch.told;
+    let mut at: usize = 0;
+    for (tables, peer) in faces() {
+        held_of(watch.plane, tables, |id, keyexpr, held| {
+            let this = at;
+            at = at.saturating_add(1);
+            if this < from || this.saturating_sub(from) >= most {
+                return;
+            }
+            let event = DeclEvent {
+                kind: DeclEventKind::Declared,
+                id,
+                keyexpr,
+                peer: peer.as_deref(),
+            };
+            // SAFETY: the caller's contract.
+            if !unsafe { round.offer_decl_watch(WatchCall::begun(cell), event, held) } {
+                watch.lost = watch.lost.saturating_add(1);
+            }
+            watch.told = watch.told.saturating_add(1);
+        });
+    }
+    watch.told >= at
+}
+
+/// Tell `round` whether a watch of `table` is still owed its catch-up, in a round that takes it in
+/// parts ([`IN_PARTS`]): while one is, no link is read, so nothing a link brings overtakes it.
+fn owe_catch_up(round: &Round, table: &Table) {
+    if IN_PARTS {
+        round.owe(
+            Owing::CatchUp,
+            table.watches().any(|watch| watch.catching_up),
+        );
+    }
+}
+
 /// Hold `event` of `plane`, whose key lies in `held` when its row keeps it in the session's key
 /// arena, in `round` for every watch of `table` it reaches, each told its losses first: one record
 /// the watches join one after the other. A watch still owed its catch-up is told none of it.
@@ -491,6 +553,7 @@ impl DeclWatches {
             plane,
             lost: 0,
             catching_up: true,
+            told: 0,
         });
         Ok(id)
     }
@@ -505,10 +568,13 @@ impl DeclWatches {
 
     /// Hold in the round what the watches are owed and it now has room for: to each watch still
     /// owed its catch-up, the declarations of its kind the peers of `faces` hold now, each named as
-    /// its face's peer, all at once ahead of any live event, and to each watch the events it lost.
-    /// A catch-up the round has not the room for waits for a round that has; one larger than a
-    /// whole round is told as the loss of that many declarations. `faces` is read twice, once to
-    /// count and once to hold.
+    /// its face's peer, ahead of any live event, and to each watch the events it lost. A round of
+    /// threads takes a catch-up all at once: one it has not the room for waits for a round that
+    /// has, and one larger than a whole round is told as the loss of that many declarations. A round
+    /// of one thread holds the records of one message ([`IN_PARTS`]), so it takes a catch-up a
+    /// declaration a round, in the order the peers' tables hand them, and the links are read no
+    /// further until every catch-up is told ([`Owing::CatchUp`]). `faces` is read twice, once
+    /// to count and once to hold.
     ///
     /// # Safety
     /// The caller holds the session's lock.
@@ -518,6 +584,8 @@ impl DeclWatches {
     {
         let round = &self.shared.round;
         let mut table = lock(&self.shared.table);
+        // A round of one thread takes one declaration of one catch-up a round, each part a record.
+        let mut part_left = IN_PARTS;
         for Row { watch, cell } in &mut table.rows {
             let Some(watch) = watch.as_mut() else {
                 continue;
@@ -526,27 +594,27 @@ impl DeclWatches {
                 let count = faces()
                     .map(|(tables, _)| held(watch.plane, tables))
                     .fold(0usize, usize::saturating_add);
-                let records = count.saturating_add(usize::from(watch.lost != 0));
+                let left = count.saturating_sub(watch.told);
+                let records = left.saturating_add(usize::from(watch.lost != 0));
                 // SAFETY: the caller's contract.
                 if unsafe { round.has_room_for(records, records) } {
                     watch.catching_up = false;
                     // SAFETY: the caller's contract.
                     unsafe { tell_lost(round, watch, cell) };
-                    for (tables, peer) in faces() {
-                        held_of(watch.plane, tables, |id, keyexpr, held| {
-                            let event = DeclEvent {
-                                kind: DeclEventKind::Declared,
-                                id,
-                                keyexpr,
-                                peer: peer.as_deref(),
-                            };
-                            // SAFETY: the caller's contract.
-                            if !unsafe {
-                                round.offer_decl_watch(WatchCall::begun(cell), event, held)
-                            } {
-                                watch.lost = watch.lost.saturating_add(1);
-                            }
-                        });
+                    // SAFETY: the caller's contract.
+                    unsafe { tell_held(round, watch, cell, &faces, usize::MAX) };
+                    watch.told = 0;
+                    continue;
+                }
+                if IN_PARTS {
+                    // SAFETY: the caller's contract.
+                    if part_left && unsafe { round.has_room_for(1, 1) } {
+                        part_left = false;
+                        // SAFETY: the caller's contract.
+                        if unsafe { tell_held(round, watch, cell, &faces, 1) } {
+                            watch.catching_up = false;
+                            watch.told = 0;
+                        }
                     }
                     continue;
                 }
@@ -562,6 +630,7 @@ impl DeclWatches {
             // SAFETY: the caller's contract.
             unsafe { tell_lost(round, watch, cell) };
         }
+        owe_catch_up(round, &table);
     }
 
     /// Stop watch `id`: nothing more is told it, and the observers of its kind leave `app` with
@@ -593,6 +662,7 @@ impl DeclWatches {
                 uninstall(app, observers);
             }
         }
+        owe_catch_up(&self.shared.round, &table);
         drop(table);
         Some(sink)
     }
@@ -611,6 +681,7 @@ impl DeclWatches {
             slot.gone = true;
             slot.sink.take()
         });
+        owe_catch_up(&self.shared.round, &table);
         drop(table);
         sinks.into_iter().flatten()
     }
