@@ -70,11 +70,11 @@ impl<F, const N: usize, P: Storage> PendingLegs for BoundedVec<PendingGet<F>, N,
 
     fn drop_face(&mut self, face: u64, mut gone: impl FnMut(PendingGet<F>)) {
         let mut at = 0;
-        while at < self.len() {
-            if self[at].face == face {
+        while let Some(leg) = self.get(at) {
+            if leg.face == face {
                 gone(self.remove(at));
             } else {
-                at += 1;
+                at = at.saturating_add(1);
             }
         }
     }
