@@ -78,7 +78,6 @@ use super::{key_on_link, CoopEngine};
 /// ended once the query was handed to the callback, or dropped unhanded, with no lock held; an
 /// undeclared row is let go of by whoever ends its last call.
 pub(crate) struct QueryableRow {
-    id: QblId,
     retraction: Option<RetractionKey>,
     /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
     /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
@@ -98,16 +97,14 @@ impl super::RowHolds for QueryableRow {
 }
 
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, keeping `holds`, answering through
+    /// A queryable retracted as `retraction` names it, keeping `holds`, answering through
     /// `sink`.
     pub(crate) fn new(
-        id: QblId,
         retraction: Option<RetractionKey>,
         holds: WireHolds,
         sink: QueryableSink,
     ) -> Self {
         Self {
-            id,
             retraction,
             holds,
             sink,
@@ -130,16 +127,16 @@ impl QueryableRow {
         self.sink.call(query, responder, holder);
     }
 
-    /// Declare this queryable, on `key`, answering for the whole of it when `complete`, over
-    /// `actions`: whether the link took it.
+    /// Declare queryable `id`, the id its row in the tables holds, on `key`, answering for the
+    /// whole of it when `complete`, over `actions`: whether the link took it.
     pub(super) fn declare<C: ClockSource + 'static>(
-        &self,
+        id: QblId,
         key: NamedKey<'_>,
         complete: bool,
         actions: &McuActions<C>,
     ) -> bool {
         actions
-            .send_declare_queryable(self.id, key_on_link(actions, key), complete)
+            .send_declare_queryable(id, key_on_link(actions, key), complete)
             .is_ok()
     }
 
@@ -648,7 +645,6 @@ mod round_tests {
     /// A queryable's row, boxed so it lies where it is while a call of it runs.
     fn row() -> Box<QueryableRow> {
         Box::new(QueryableRow::new(
-            1,
             None,
             WireKey::literal().into_holds(),
             QueryableSink::shared(|_, _, _| {}),

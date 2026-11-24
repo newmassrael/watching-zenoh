@@ -45,11 +45,10 @@ struct Row {
 }
 
 impl Row {
-    /// Row `tag`, handing what it hears to `sink`, the timestamp shown.
-    fn new(tag: u8, sink: SubscriberSink) -> Self {
+    /// A row handing what it hears to `sink`, the timestamp shown.
+    fn new(sink: SubscriberSink) -> Self {
         Self {
             row: Box::new(SubscriberRow::new(
-                u32::from(tag),
                 None,
                 WireKey::literal().into_holds(),
                 sink,
@@ -130,17 +129,14 @@ type Noted = Arc<Mutex<Vec<(u8, u8, usize)>>>;
 /// and where its payload lies.
 fn noting(tag: u8, seen: &Noted) -> Row {
     let seen = seen.clone();
-    Row::new(
-        tag,
-        SubscriberSink::shared(move |sample: &dyn SampleView| {
-            let payload = sample.payload();
-            seen.lock().unwrap().push((
-                tag,
-                payload.first().copied().unwrap_or(0),
-                payload.as_ptr() as usize,
-            ));
-        }),
-    )
+    Row::new(SubscriberSink::shared(move |sample: &dyn SampleView| {
+        let payload = sample.payload();
+        seen.lock().unwrap().push((
+            tag,
+            payload.first().copied().unwrap_or(0),
+            payload.as_ptr() as usize,
+        ));
+    }))
 }
 
 /// A put whose payload, attachment, encoding schema and timestamp id lie in `datagram` (its
@@ -211,35 +207,32 @@ fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
     let rest: Arc<Mutex<Vec<String>>> = Arc::default();
     let callback = {
         let (seen, rest, source) = (seen.clone(), rest.clone(), source.clone());
-        Row::new(
-            7,
-            SubscriberSink::shared(move |view: &dyn SampleView| {
-                seen.lock().unwrap().push((
-                    view.keyexpr().to_owned(),
-                    view.payload().to_vec(),
-                    view.attachment().map(<[u8]>::to_vec),
-                    view.encoding_parts()
-                        .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
-                    view.payload().as_ptr() as usize,
-                ));
-                let mut rest = rest.lock().unwrap();
-                if view.kind() != SampleKind::Put {
-                    rest.push("kind".to_owned());
-                }
-                if view.reliability() != Reliability::BestEffort {
-                    rest.push("reliability".to_owned());
-                }
-                if view.qos() != Some(QosLevel::from_raw(5)) {
-                    rest.push("qos".to_owned());
-                }
-                if view.timestamp_parts() != Some((42, &[1u8, 2, 3][..])) {
-                    rest.push("timestamp".to_owned());
-                }
-                if view.source_info() != Some(&source) {
-                    rest.push("source info".to_owned());
-                }
-            }),
-        )
+        Row::new(SubscriberSink::shared(move |view: &dyn SampleView| {
+            seen.lock().unwrap().push((
+                view.keyexpr().to_owned(),
+                view.payload().to_vec(),
+                view.attachment().map(<[u8]>::to_vec),
+                view.encoding_parts()
+                    .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
+                view.payload().as_ptr() as usize,
+            ));
+            let mut rest = rest.lock().unwrap();
+            if view.kind() != SampleKind::Put {
+                rest.push("kind".to_owned());
+            }
+            if view.reliability() != Reliability::BestEffort {
+                rest.push("reliability".to_owned());
+            }
+            if view.qos() != Some(QosLevel::from_raw(5)) {
+                rest.push("qos".to_owned());
+            }
+            if view.timestamp_parts() != Some((42, &[1u8, 2, 3][..])) {
+                rest.push("timestamp".to_owned());
+            }
+            if view.source_info() != Some(&source) {
+                rest.push("source info".to_owned());
+            }
+        }))
     };
     // SAFETY (each call): this thread is the round's one writer, as a session's step is, and the
     // datagram outlives the round's record of it.
@@ -537,17 +530,14 @@ impl SampleView for HeldSample<'_> {
 type Keyed = Arc<Mutex<Vec<(String, usize)>>>;
 
 /// A callback that notes the keyexpr of each sample it is handed and where it lies.
-fn keyed(tag: u8, seen: &Keyed) -> Row {
+fn keyed(seen: &Keyed) -> Row {
     let seen = seen.clone();
-    Row::new(
-        tag,
-        SubscriberSink::shared(move |sample: &dyn SampleView| {
-            let key = sample.keyexpr();
-            seen.lock()
-                .unwrap()
-                .push((key.to_owned(), key.as_ptr() as usize));
-        }),
-    )
+    Row::new(SubscriberSink::shared(move |sample: &dyn SampleView| {
+        let key = sample.keyexpr();
+        seen.lock()
+            .unwrap()
+            .push((key.to_owned(), key.as_ptr() as usize));
+    }))
 }
 
 /// A key a sample names by a row of the session's key arena is read where the row's block lies,
@@ -560,7 +550,7 @@ fn a_held_key_is_read_where_its_block_lies_after_its_row_lets_go() {
     let keys = key_space();
     let round = round_reading(keys);
     let seen: Keyed = Arc::default();
-    let first = keyed(1, &seen);
+    let first = keyed(&seen);
     let row = keys.key("demo/alias").expect("room");
     let at = row.as_str().as_ptr() as usize;
     // SAFETY (each call): this thread is the round's one writer, as a session's step is.
@@ -598,7 +588,7 @@ fn a_row_given_a_new_key_does_not_move_a_held_one() {
     let keys = key_space();
     let round = round_reading(keys);
     let seen: Keyed = Arc::default();
-    let first = keyed(1, &seen);
+    let first = keyed(&seen);
     let mut row = keys.key("demo/a").expect("room");
     let at_a = row.as_str().as_ptr() as usize;
     // SAFETY (each call): this thread is the round's one writer.
@@ -625,7 +615,7 @@ fn a_round_that_reads_no_key_arena_copies_the_key() {
     let keys = key_space();
     let round = round(4);
     let seen: Keyed = Arc::default();
-    let first = keyed(1, &seen);
+    let first = keyed(&seen);
     let row = keys.key("demo/alias").expect("room");
     let at = row.as_str().as_ptr() as usize;
     // SAFETY (each call): this thread is the round's one writer.
@@ -683,13 +673,10 @@ fn a_round_is_handed_to_one_delivery_at_a_time() {
     let inner: Arc<Mutex<Vec<bool>>> = Arc::default();
     let again = Arc::downgrade(&round);
     let noted = inner.clone();
-    let callback = Row::new(
-        1,
-        SubscriberSink::shared(move |_: &dyn SampleView| {
-            let handed = again.upgrade().is_some_and(|round| round.deliver());
-            noted.lock().unwrap().push(handed);
-        }),
-    );
+    let callback = Row::new(SubscriberSink::shared(move |_: &dyn SampleView| {
+        let handed = again.upgrade().is_some_and(|round| round.deliver());
+        noted.lock().unwrap().push(handed);
+    }));
     let datagram = [1u8, 1, 2, 2];
     // SAFETY (each call): this thread is the round's one writer, no delivery runs, and the
     // datagram outlives the round's records of it.

@@ -245,9 +245,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.subscribers().iter().nth(left);
                     let told = row.is_none_or(|(_, row)| {
-                        tables
-                            .named(row.key())
-                            .is_some_and(|key| row.callback().declare(key, actions))
+                        tables.named(row.key()).is_some_and(|key| {
+                            super::SubscriberRow::declare(row.id(), key, actions)
+                        })
                     });
                     told
                 }
@@ -261,9 +261,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.queryables().iter().nth(left);
                     let told = row.is_none_or(|(_, row)| {
-                        tables
-                            .named(row.key())
-                            .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                        tables.named(row.key()).is_some_and(|key| {
+                            super::QueryableRow::declare(row.id(), key, row.complete(), actions)
+                        })
                     });
                     told
                 }
@@ -410,7 +410,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 let told = tables.subscribers().get(handle).is_some_and(|row| {
                     tables
                         .named(row.key())
-                        .is_some_and(|key| row.callback().declare(key, actions))
+                        .is_some_and(|key| super::SubscriberRow::declare(row.id(), key, actions))
                 });
                 told
             },
@@ -480,9 +480,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             &|actions| {
                 let tables = super::tables(registry);
                 let told = tables.queryables().get(handle).is_some_and(|row| {
-                    tables
-                        .named(row.key())
-                        .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                    tables.named(row.key()).is_some_and(|key| {
+                        super::QueryableRow::declare(row.id(), key, row.complete(), actions)
+                    })
                 });
                 told
             },
