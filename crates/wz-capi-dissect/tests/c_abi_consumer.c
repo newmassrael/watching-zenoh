@@ -590,7 +590,7 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":6") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":7") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
     CHECK(strstr(doc, "\"continued\":false") != NULL,
@@ -682,7 +682,7 @@ static int check_selection_since_door(void) {
         CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
               "selection_since_declaring rc=%d", rc);
         CHECK(strstr(declaring,
-                     "\"document\":{\"name\":\"selection_since\",\"revision\":6") !=
+                     "\"document\":{\"name\":\"selection_since\",\"revision\":7") !=
                   NULL,
               "the since document under declarations: %s", declaring);
         CHECK(strstr(declaring, "\"continued\":false") != NULL,
@@ -1205,8 +1205,10 @@ static int check_open_with_door(void) {
               "reassembly_window_ms offset");
         CHECK(offsetof(wz_dissect_live_options, chain_bytes) == 56,
               "chain_bytes offset");
-        CHECK(sizeof(wz_dissect_live_options) == 64,
-              "the options are %zu bytes, expected 64",
+        CHECK(offsetof(wz_dissect_live_options, stream_bytes_total) == 64,
+              "stream_bytes_total offset");
+        CHECK(sizeof(wz_dissect_live_options) == 72,
+              "the options are %zu bytes, expected 72",
               sizeof(wz_dissect_live_options));
     }
 
@@ -3199,7 +3201,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":16},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":17},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"

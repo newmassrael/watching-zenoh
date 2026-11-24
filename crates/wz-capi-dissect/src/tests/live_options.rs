@@ -74,7 +74,12 @@ fn the_options_layout_is_the_one_the_header_declares() {
     assert_eq!(offset_of!(O, stream_bytes_per_direction), 40);
     assert_eq!(offset_of!(O, reassembly_window_ms), 48);
     assert_eq!(offset_of!(O, chain_bytes), 56);
-    assert_eq!(size_of::<O>(), 64, "ABI 62 appended two fields, ABI 64 one");
+    assert_eq!(offset_of!(O, stream_bytes_total), 64);
+    assert_eq!(
+        size_of::<O>(),
+        72,
+        "ABI 62 appended two fields, ABI 64 one, ABI 66 one"
+    );
     assert_eq!(
         LIVE_OPTIONS_FIRST_SIZE, 40,
         "the six fields the first published struct holds"
@@ -487,4 +492,76 @@ fn a_raised_chain_ceiling_reassembles_what_the_default_gives_up_on() {
         Err(WZ_DISSECT_ERR_INVALID_ARG),
         "a ceiling past the most a chain may join is refused, not clamped"
     );
+}
+
+/// THE TOTAL BYTE CEILING IS THE CALLER'S AND TAKES THE OLDEST BYTES FIRST: one
+/// TCP flow writes three keep-alives one way and then two the other, under a
+/// ceiling of two units over both directions. The first direction's bytes
+/// arrived first and go first, the second's are held, every message is a
+/// record, each byte taken is counted, and `caps` names the ceiling. Unset,
+/// the preset's is in force: none under `WZ_DISSECT_LIMITS_NONE`.
+#[test]
+fn a_total_byte_ceiling_takes_the_oldest_bytes_over_both_directions() {
+    // One framing unit: a two-byte little-endian length and a keep-alive.
+    let unit = [0x01, 0x00, 0x04];
+    let feed = |total: u64| {
+        let handle = open_with(&WzDissectLiveOptions {
+            stream_bytes_total: total,
+            ..options(WZ_DISSECT_LIMITS_NONE)
+        })
+        .expect("the ceiling opens");
+        for i in 0..3u32 {
+            push_live(
+                handle,
+                WZ_DISSECT_NO_TIMESTAMP,
+                &tcp_packet(1000 + 3 * i, &unit),
+            );
+        }
+        for i in 0..2u32 {
+            push_live(
+                handle,
+                WZ_DISSECT_NO_TIMESTAMP,
+                &tcp_packet_reverse(5000 + 3 * i, &unit),
+            );
+        }
+        handle
+    };
+
+    let held = feed(6);
+    let doc = live_retention(held).expect("a fed handle");
+    assert_eq!(
+        in_group(&doc, "frames_per_flow", "stream_bytes_total"),
+        "6",
+        "{doc}"
+    );
+    assert_eq!(
+        in_group(&doc, "scout_askers", "stream_bytes"),
+        "9",
+        "the three units of the first direction were taken: {doc}"
+    );
+    let records = drain_all(held);
+    assert_eq!(
+        records.len(),
+        5,
+        "every keep-alive is a record: {records:?}"
+    );
+    for record in &records {
+        let want = if record.direction == 0 {
+            Err(WZ_DISSECT_ERR_BYTES_RETIRED)
+        } else {
+            Ok(vec![0x04])
+        };
+        assert_eq!(live_bytes(held, record), want, "{record:?}");
+    }
+    unsafe { wz_dissect_live_close(held) };
+
+    let unset = feed(0);
+    let doc = live_retention(unset).expect("a fed handle");
+    assert_eq!(
+        in_group(&doc, "frames_per_flow", "stream_bytes_total"),
+        "null",
+        "{doc}"
+    );
+    assert_eq!(in_group(&doc, "scout_askers", "stream_bytes"), "0");
+    unsafe { wz_dissect_live_close(unset) };
 }

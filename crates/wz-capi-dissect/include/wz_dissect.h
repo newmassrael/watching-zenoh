@@ -1757,7 +1757,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":28,
+ *     {"document":{"name":"census","revision":29,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1803,13 +1803,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":83,"key":"kind","values":[...],
+ *     {"name":"fields","revision":84,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":28,"key":"mode","values":[...],
+ *     {"name":"census","revision":29,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -2239,7 +2239,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 65
+#define WZ_DISSECT_ABI_REVISION 66
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2473,6 +2473,14 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * under the census's `fragment_chains.aborted_capacity_overflow`. Census 28,
  * fields 83, summary 10, session_table 16, selection 8, retention 5, health 6,
  * selection_since 6 and row_facts 23 carry it.
+ *
+ * (ABI 66) -- and `caps` names `stream_bytes_total`, between
+ * `stream_bytes_per_direction` and `chain_bytes`: the reassembled bytes
+ * every TCP flow keeps together, or `null` for none. The bytes it takes are
+ * counted in `dropped_by_limits.stream_bytes` with the per-direction
+ * ceiling's, so read that against both. Census 29, fields 84, summary 11,
+ * session_table 17, selection 9, retention 6, health 7, selection_since 7 and
+ * row_facts 24 carry it.
  *
  * R2630 -- and the group counts `scouting`: the SCOUT and HELLO datagrams a
  * `frames_per_flow` ceiling evicted from a flow's scouting list. It shares
@@ -2954,7 +2962,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":16},"ok":true,
+ *     {"document":{"name":"session_table","revision":17},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -6789,7 +6797,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":83,"key":"state",
+ *     "value_families":[{"name":"fields","revision":84,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7275,6 +7283,28 @@ int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total
  * its own. The byte ceiling above plays no part in it. It is echoed as
  * `dropped_by_limits.caps.chain_bytes`, always a number.
  *
+ * A TOTAL BYTE CEILING, `stream_bytes_total` (ABI 66): the reassembled bytes
+ * every TCP flow keeps TOGETHER, both directions of each. The per-direction
+ * ceiling bounds memory by twice the number of flows times itself (8 GiB at
+ * 1,024 flows of 4 MiB a direction); this is the figure you size memory by.
+ * Past it the OLDEST bytes held go, whichever flow and direction holds them:
+ * "oldest" is the order the bytes arrived in, the packet that carried the first
+ * byte each direction still holds, and within one packet the order of the
+ * flows. Like the per-direction ceiling it takes bytes and never messages: a
+ * held message whose bytes it takes keeps its record and rows, and from then
+ * wz_dissect_live_message_bytes answers WZ_DISSECT_ERR_BYTES_RETIRED for it.
+ * Every byte it takes is counted in `dropped_by_limits.stream_bytes`, beside
+ * what the per-direction ceiling took, and the figure is echoed as
+ * `dropped_by_limits.caps.stream_bytes_total`, `null` where none is in force.
+ * `0` keeps the preset's: none under WZ_DISSECT_LIMITS_NONE, and under
+ * WZ_DISSECT_LIMITS_LIVE_TAP 83,886,080 (80 MiB: ten flows of both directions'
+ * ceiling, as frames_total is ten flows of frames_per_flow). A value too large
+ * for size_t is WZ_DISSECT_ERR_INVALID_ARG. What it costs: a pass over the TCP
+ * flows per segment that adds bytes, and per run of bytes given up once the
+ * ceiling is reached, proportional to the flows held. The two byte ceilings
+ * apply together, and the bytes a held TLS record still covers are not taken
+ * before the record goes.
+ *
  * WHAT THE CHAIN CEILING COSTS. A chain's buffer grows with the fragments it
  * stages, so a ceiling of 16 MiB costs nothing until a message that large
  * arrives, and then what that message's bytes are while it is being joined. A
@@ -7324,6 +7354,10 @@ typedef struct wz_dissect_live_options {
     /* (ABI 64) The bytes one fragment chain may join into a message; 0 keeps
      * the preset's, 65,536. */
     uint64_t chain_bytes;
+    /* (ABI 66) The reassembled bytes every TCP flow keeps together, both
+     * directions of each; 0 keeps the preset's, none under
+     * WZ_DISSECT_LIMITS_NONE. */
+    uint64_t stream_bytes_total;
 } wz_dissect_live_options;
 
 int wz_dissect_live_open_with(const wz_dissect_live_options *options,
@@ -9222,7 +9256,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":6},
+ *     {"document":{"name":"selection_since","revision":7},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],

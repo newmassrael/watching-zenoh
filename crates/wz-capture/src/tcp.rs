@@ -787,6 +787,13 @@ impl StreamAssembler {
         runs.chain(held).min()
     }
 
+    /// One past the last byte of the run that holds stream offset `offset`: the
+    /// bytes from `offset` up to it came in one packet. `None` past the stream.
+    pub(crate) fn run_end_after(&self, offset: usize) -> Option<usize> {
+        let first = self.runs.first_ending_after(offset as u64);
+        self.runs.iter_from(first).next().map(|run| run.end())
+    }
+
     /// Whether the stream still holds the bytes `from..to`: they have arrived and
     /// have not been trimmed. A cheap answer to what [`Self::bytes`] answers by
     /// reading them, for a caller that is about to remember where they stand.

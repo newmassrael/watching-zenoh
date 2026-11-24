@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 65
+EXPECTED_VERSION = 66
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -547,7 +547,10 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # ceiling of each stream direction and the reassembly window), and a caller
     # compiled against 61 is read as having left them zero. ABI 64 brought none
     # either: the same struct grew `chain_bytes`, the bytes one fragment chain
-    # may join, read as zero (the preset's 65,536) from an older caller.
+    # may join, read as zero (the preset's 65,536) from an older caller. ABI 66
+    # brought none either: the same struct grew `stream_bytes_total`, the bytes
+    # every TCP flow keeps together, read as zero (the preset's) from an older
+    # caller.
     "wz_dissect_live_open_with": 61,
     # (ABI 63) -- a live handle told that the container it follows has ended,
     # and handed the next container of the same capture: the dissection goes on

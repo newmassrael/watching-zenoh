@@ -503,6 +503,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // `wz_dissect_live_oldest_container`: a handle that moved on to a later
     // container of its capture is lent it, and says which containers it still
     // reads, so the caller releases the ones before.
+    // 66, for `wz_dissect_live_options` growing `stream_bytes_total` at its end:
+    // the reassembled bytes every TCP flow keeps together. No symbol moves. The
+    // `caps` group of every document that carries `dropped_by_limits` gained
+    // `stream_bytes_total` on the same step.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -520,7 +524,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 65;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 66;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3796,6 +3800,10 @@ pub struct WzDissectLiveOptions {
     /// (ABI 64) The bytes one fragment chain may join into a message: `0` keeps
     /// the preset's, which is 65,536 under either preset.
     pub chain_bytes: u64,
+    /// (ABI 66) The reassembled bytes every TCP flow keeps together, both
+    /// directions of each: `0` keeps the preset's, none under
+    /// `WZ_DISSECT_LIMITS_NONE`.
+    pub stream_bytes_total: u64,
 }
 
 impl WzDissectLiveOptions {
@@ -3810,6 +3818,7 @@ impl WzDissectLiveOptions {
         stream_bytes_per_direction: 0,
         reassembly_window_ms: 0,
         chain_bytes: 0,
+        stream_bytes_total: 0,
     };
 }
 
@@ -3926,6 +3935,14 @@ fn caller_ceiling(value: u64, preset: Option<usize>) -> Option<Option<usize>> {
 /// a direction holds at most four open chains, so the most chains can hold is
 /// four times it per direction of every flow.
 ///
+/// # The total byte ceiling (ABI 66)
+///
+/// `stream_bytes_total` is what `DissectionLimits` calls by that name: the
+/// reassembled bytes every TCP flow keeps together. Past it the oldest bytes go,
+/// whichever flow and direction holds them, in the order they arrived; like the
+/// per-direction ceiling it takes bytes and never messages, and every byte it
+/// takes is counted in `dropped_by_limits.stream_bytes`.
+///
 /// # Safety
 /// `options` must point to a `wz_dissect_live_options` of at least the size
 /// its `size` field says, `serial_link_types` within it must point to
@@ -3974,6 +3991,12 @@ pub unsafe extern "C" fn wz_dissect_live_open_with(
         return WZ_DISSECT_ERR_INVALID_ARG;
     }
     limits.chain_bytes = chain_bytes;
+    let Some(stream_bytes_total) =
+        caller_ceiling(options.stream_bytes_total, limits.stream_bytes_total)
+    else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.stream_bytes_total = stream_bytes_total;
     let Ok(count) = usize::try_from(options.serial_link_type_count) else {
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
@@ -8622,7 +8645,8 @@ mod tests {
     const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":null,\"frames_total\":null,\
-         \"stream_bytes_per_direction\":null,\"chain_bytes\":65536,\
+         \"stream_bytes_per_direction\":null,\"stream_bytes_total\":null,\
+         \"chain_bytes\":65536,\
          \"skipped_packets\":null,\"max_flows_per_table\":null,\
          \"max_scout_askers\":null}}";
 
@@ -8635,7 +8659,8 @@ mod tests {
     const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":10000,\"frames_total\":100000,\
-         \"stream_bytes_per_direction\":4194304,\"chain_bytes\":65536,\
+         \"stream_bytes_per_direction\":4194304,\"stream_bytes_total\":83886080,\
+         \"chain_bytes\":65536,\
          \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
          \"max_scout_askers\":1024}}";
 
@@ -11032,7 +11057,9 @@ mod tests {
         // `wz_dissect_live_oldest_container`: two symbols, the first retaining
         // the caller's container pointer as the lending doors do, the second two
         // `uint64_t` the caller owns out. No struct is new.
-        assert_eq!(wz_dissect_abi_version(), 65);
+        // 66, for the options struct growing `stream_bytes_total`; no symbol
+        // moves.
+        assert_eq!(wz_dissect_abi_version(), 66);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -16614,7 +16641,7 @@ mod tests {
             "the three requests are open: {first}"
         );
         assert!(
-            first.contains("\"name\":\"selection_since\",\"revision\":6}"),
+            first.contains("\"name\":\"selection_since\",\"revision\":7}"),
             "{first}"
         );
         let cursor = through_seq_of(&first);

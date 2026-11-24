@@ -3605,6 +3605,10 @@ pub fn write_dropped_by_limits<W: DocOut>(d: &crate::Dissection, out: &mut W) {
     out.opt_uint(cap(l.frames_total));
     out.key("stream_bytes_per_direction");
     out.opt_uint(cap(l.stream_bytes_per_direction));
+    // The bytes every TCP flow keeps together, `null` where no ceiling holds
+    // them.
+    out.key("stream_bytes_total");
+    out.opt_uint(cap(l.stream_bytes_total));
     // The bytes one fragment chain may join. Never `null`: a chain always has
     // a ceiling, the observer's own when the limits name none.
     out.key("chain_bytes");

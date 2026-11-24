@@ -5188,6 +5188,33 @@ pub struct DissectionLimits {
     /// first, so this bites only for a flow whose held messages themselves span
     /// more than this.
     pub stream_bytes_per_direction: Option<usize>,
+    /// Reassembled bytes kept IN ALL, over both directions of every TCP flow.
+    /// Beyond it the OLDEST bytes held go, whichever flow and direction holds
+    /// them.
+    ///
+    /// # What it bounds, and what [`Self::stream_bytes_per_direction`] cannot
+    ///
+    /// The per-direction ceiling bounds memory by twice the NUMBER OF FLOWS times
+    /// itself: 1 024 flows at 4 MiB a direction may hold 8 GiB. This is the figure
+    /// a caller sizing memory means, as [`Self::frames_total`] is for messages.
+    /// "Oldest" is the order the bytes arrived in: the packet that carried the
+    /// first byte each direction still holds, and within one packet the order of
+    /// the flows. The two byte ceilings are independent and both apply.
+    ///
+    /// # What it takes
+    ///
+    /// Bytes, never messages, as the per-direction ceiling: a held message whose
+    /// bytes it takes is kept whole first and keeps its record and rows, and from
+    /// then its bytes are retired. Every byte it takes is counted in
+    /// [`DissectionDrops::stream_bytes`]. The bytes a held TLS record still covers
+    /// are not taken before the record goes.
+    ///
+    /// # What it costs
+    ///
+    /// A pass over the TCP flows per segment that adds bytes, and the same pass
+    /// per run of bytes given up once the ceiling is reached: proportional to the
+    /// number of flows held, which [`Self::max_flows_per_table`] bounds.
+    pub stream_bytes_total: Option<usize>,
     /// The bytes one fragment chain may join into a message. `None` is
     /// [`DEFAULT_CHAIN_BYTES`] and NOT unbounded: a chain always has a ceiling,
     /// so [`Self::chain_bytes_in_force`] is what a document echoes. A message
@@ -5313,6 +5340,10 @@ impl DissectionLimits {
             // its own 10 000 as before.
             frames_total: Some(100_000),
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
+            // Ten flows of both directions' ceiling, as `frames_total` is ten flows
+            // of the per-flow ceiling: the per-direction ceiling alone bounds memory
+            // by the number of flows.
+            stream_bytes_total: Some(10 * 2 * 4 * 1024 * 1024),
             // The observer's own default, named so the preset bounds the axis
             // it has always bounded.
             chain_bytes: Some(DEFAULT_CHAIN_BYTES),
@@ -5604,6 +5635,7 @@ mod live_tap_tests {
             frames_per_flow,
             frames_total,
             stream_bytes_per_direction,
+            stream_bytes_total,
             chain_bytes,
             skipped_packets,
             max_flows_per_table,
@@ -5621,6 +5653,7 @@ mod live_tap_tests {
             ("frames_per_flow", frames_per_flow),
             ("frames_total", frames_total),
             ("stream_bytes_per_direction", stream_bytes_per_direction),
+            ("stream_bytes_total", stream_bytes_total),
             ("chain_bytes", chain_bytes),
             ("skipped_packets", skipped_packets),
             ("max_flows_per_table", max_flows_per_table),
@@ -9603,6 +9636,81 @@ impl Dissection {
             self.drops.stream_bytes += flow.trim_stream_to(Direction::B, keep);
         }
         self.enforce_total_frames();
+        self.enforce_total_stream_bytes();
+    }
+
+    /// The reassembled bytes every TCP flow retains, both directions together:
+    /// what [`DissectionLimits::stream_bytes_total`] bounds.
+    fn total_retained_stream_bytes(&self) -> usize {
+        self.flows
+            .iter()
+            .map(|f| f.low_to_high.retained_len() + f.high_to_low.retained_len())
+            .sum()
+    }
+
+    /// The direction of a TCP flow whose oldest retained byte arrived first, as
+    /// `(packet, flow, direction)`, leaving out the directions in `stuck` (by
+    /// flow and direction index), or `None` when no other direction retains a
+    /// byte. The order is `(packet, flow, direction)`, so a tie is decided by the
+    /// flow tables' order and not left to chance; a first byte no packet can be
+    /// named for reads as packet `0`, the oldest there is.
+    fn oldest_retained_stream_byte(&self, stuck: &[(usize, usize)]) -> Option<(usize, Direction)> {
+        let mut oldest: Option<(usize, usize, usize)> = None;
+        for (i, flow) in self.flows.iter().enumerate() {
+            for direction in [Direction::A, Direction::B] {
+                let side = dir_index(direction);
+                let assembler = flow.assembler(direction);
+                if assembler.retained_len() == 0 || stuck.contains(&(i, side)) {
+                    continue;
+                }
+                let packet = assembler
+                    .packet_for_offset(assembler.retained_from())
+                    .unwrap_or(0);
+                let key = (packet, i, side);
+                // A `match` and not `is_none_or`, which is newer than this crate's MSRV.
+                match oldest {
+                    Some(best) if best <= key => {}
+                    _ => oldest = Some(key),
+                }
+            }
+        }
+        oldest.map(|(_, i, side)| (i, [Direction::A, Direction::B][side]))
+    }
+
+    /// Hold the reassembled bytes every TCP flow retains inside
+    /// [`DissectionLimits::stream_bytes_total`]: while more are retained than the
+    /// ceiling allows, give up the oldest bytes held, a run of one packet's bytes
+    /// at a time and no more than the excess, whichever flow and direction holds
+    /// them.
+    ///
+    /// Called after the per-flow ceilings, at every place a stream can have
+    /// grown. A direction that can give up nothing (the bytes a held TLS record
+    /// covers) is passed over for the next oldest, so the walk ends. Every byte
+    /// taken is counted in [`DissectionDrops::stream_bytes`].
+    fn enforce_total_stream_bytes(&mut self) {
+        let Some(cap) = self.limits.stream_bytes_total else {
+            return;
+        };
+        let mut held = self.total_retained_stream_bytes();
+        let mut stuck: Vec<(usize, usize)> = Vec::new();
+        while held > cap {
+            let Some((i, direction)) = self.oldest_retained_stream_byte(&stuck) else {
+                return;
+            };
+            let assembler = self.flows[i].assembler(direction);
+            let from = assembler.retained_from();
+            let to = assembler
+                .run_end_after(from)
+                .unwrap_or_else(|| assembler.len())
+                .min(from + (held - cap));
+            let taken = self.flows[i].trim_stream_before(direction, to);
+            if taken == 0 {
+                stuck.push((i, dir_index(direction)));
+                continue;
+            }
+            self.drops.stream_bytes += taken;
+            held = held.saturating_sub(taken);
+        }
     }
 
     /// Decoded messages held that [`DissectionLimits::frames_total`] counts: each
@@ -16967,6 +17075,61 @@ mod datagram_tests {
         assert!(
             flow.packet_for(Direction::A, live).is_some(),
             "the first RETAINED offset must still attribute"
+        );
+    }
+
+    /// THE TOTAL BYTE CEILING TAKES THE OLDEST BYTES OF ANY FLOW: two TCP flows
+    /// written one after the other hold no more than the ceiling between them,
+    /// the flow written first gives up its bytes first, every byte taken is
+    /// counted, and no message goes with them. With no ceiling nothing is taken.
+    #[test]
+    fn the_total_byte_ceiling_takes_the_oldest_bytes_of_any_flow() {
+        let msg = framed_keepalive();
+        let unit = msg.len();
+        let read = |limits: DissectionLimits| {
+            let mut d = Dissection::with_limits(limits);
+            let mut packet = 0usize;
+            for sport in [1111u16, 2222] {
+                for i in 0..5u32 {
+                    let pkt = tcp_packet_on(sport, 1000 + i * unit as u32, &msg);
+                    d.push_packet(LINKTYPE_ETHERNET, packet, &pkt);
+                    packet += 1;
+                }
+            }
+            d
+        };
+        let retained = |d: &Dissection, i: usize| {
+            let flow = &d.flows()[i];
+            flow.low_to_high.retained_len() + flow.high_to_low.retained_len()
+        };
+
+        let d = read(DissectionLimits {
+            stream_bytes_total: Some(6 * unit),
+            ..DissectionLimits::default()
+        });
+        assert_eq!(
+            (retained(&d, 0), retained(&d, 1)),
+            (unit, 5 * unit),
+            "the first flow's bytes went first and the two hold the ceiling"
+        );
+        assert_eq!(d.drops().stream_bytes, 4 * unit, "every byte taken counts");
+
+        let whole = read(DissectionLimits::default());
+        for i in 0..2 {
+            assert_eq!(
+                d.flows()[i].frames().len(),
+                whole.flows()[i].frames().len(),
+                "flow {i}: bytes go, never messages"
+            );
+        }
+        assert_eq!(
+            (
+                retained(&whole, 0),
+                retained(&whole, 1),
+                whole.drops().stream_bytes
+            ),
+            (5 * unit, 5 * unit, 0),
+            "control: with no ceiling every byte is held"
         );
     }
 
