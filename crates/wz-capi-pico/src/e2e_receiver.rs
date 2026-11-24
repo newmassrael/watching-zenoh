@@ -24,6 +24,7 @@ use crate::e2e::{
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
+use crate::sized::{Out, SizedOut};
 
 /// The caller names the stream of every frame: one per message, or per instance of it.
 pub const WZ_EXT_E2E_KEYING_INDEXED: u8 = 0;
@@ -116,10 +117,14 @@ impl Default for wz_ext_e2e_receiver_options_t {
     }
 }
 
-/// The verdict on one frame, as C reads it. A number whose `has` bit is clear is 0.
+/// The verdict on one frame, as C reads it, written into a struct the program sized
+/// (`crate::sized`). A number whose `has` bit is clear is 0.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_e2e_verdict_t {
+    /// The bytes of the struct the program was compiled with; a door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// A `WZ_EXT_E2E_*` status.
     pub status: u8,
     /// The `WZ_EXT_E2E_FAILED_*` bits of the integrity checks the frame failed.
@@ -148,6 +153,35 @@ pub struct wz_ext_e2e_verdict_t {
     /// the status.
     pub payload_offset: usize,
     pub payload_len: usize,
+}
+
+impl Default for wz_ext_e2e_verdict_t {
+    /// No verdict, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            status: 0,
+            failed: 0,
+            has: 0,
+            timeout: 0,
+            unslotted: 0,
+            reserved: [0; 3],
+            counter: 0,
+            step: 0,
+            kind: 0,
+            result: 0,
+            sender: 0,
+            silence_ms: 0,
+            stream: 0,
+            payload_offset: 0,
+            payload_len: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_e2e_verdict_t {
+    const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// The most sender slots a receiver of this build keeps.
@@ -352,12 +386,13 @@ pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
 /// keying the receiver chooses the stream, and `stream` must be 0.
 ///
 /// Returns `Z_OK` with the verdict, whatever it says; `Z_EINVAL` for a stream the receiver does
-/// not have (the verdict is zeroed and nothing moved); `Z_ERR_NULL` for a null receiver or `out`,
-/// the gravestone, or a null frame with a length.
+/// not have (the verdict is zeroed and nothing moved), and for a `struct_size` short of the struct,
+/// nothing written then; `Z_ERR_NULL` for a null receiver or `out`, the gravestone, or a null
+/// frame with a length.
 ///
 /// # Safety
 /// `this_` is null or a loaned receiver; `frame` is readable for `len` bytes; `out` is null or
-/// writable.
+/// a struct of `struct_size` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_e2e_receiver_judge(
     this_: *const wz_ext_loaned_e2e_receiver_t,
@@ -368,10 +403,11 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_judge(
     out: *mut wz_ext_e2e_verdict_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
-        *out = wz_ext_e2e_verdict_t::default();
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
+        out.put(&wz_ext_e2e_verdict_t::default());
         let Some(receiver) = behind::<Receiver>(word(this_)) else {
             return Z_ERR_NULL;
         };
@@ -380,7 +416,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_judge(
         }
         match locked(receiver).receive(stream, bytes_arg(frame, len), now_ms) {
             Ok(verdict) => {
-                *out = to_c(&verdict);
+                out.put(&to_c(&verdict));
                 Z_OK
             }
             Err(_) => Z_EINVAL,
@@ -502,4 +538,24 @@ pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_check(
     this_: *const wz_ext_owned_e2e_receiver_t,
 ) -> bool {
     guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A verdict is refused, untouched, to a struct a byte short of its own, before the receiver
+    /// is read. Turned red by a write before the size is read.
+    #[test]
+    fn a_verdict_short_of_its_struct_is_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_e2e_verdict_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size; no receiver or frame is named.
+                unsafe {
+                    wz_ext_e2e_receiver_judge(core::ptr::null(), 0, core::ptr::null(), 0, 0, out)
+                }
+            },
+            Z_EINVAL,
+        );
+    }
 }

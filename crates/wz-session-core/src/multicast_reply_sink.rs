@@ -479,7 +479,7 @@ mod tests {
         let mut replies = Vec::new();
         answers.take_answers(|reply| match reply {
             MulticastTxReply::DeclareReply(declare) => replies.push(declare.clone()),
-            #[allow(unreachable_patterns)]
+            #[cfg(feature = "codec-response")]
             _ => panic!("an answer is a declaration reply"),
         });
         assert_eq!(

@@ -2,37 +2,43 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The session's round of deliveries: a record is handed to its callbacks as it was offered, read
-//! where it lies in a lent datagram or from the round's own bytes; a sealed round refuses and
-//! counts by the record's congestion control; the gate reads a link only while the round has the
-//! room of a record and no record lies in the datagram the link lent.
+//! where it lies in a lent datagram, a rejoined message or the session's key arena, a key that
+//! lies nowhere else copied into the round's keys; a record with a part that lies nowhere the
+//! round reads it is refused and counted; a sealed round refuses and counts by the record's
+//! congestion control; the gate reads a link only while the round has the room of a record and no
+//! record lies in the datagram the link lent.
 
+use alloc::rc::Rc;
 use alloc::sync::Arc;
+use core::cell::Cell;
 use core::num::NonZeroU32;
 use std::sync::Mutex;
 
 use wz_capi_port::{SubscriberSink, WireKey};
 use wz_session_core::byte_cells::{ByteCells, ByteSource, KeptBytes};
 use wz_session_core::caps;
-use wz_session_core::limit_binding::Quota;
+use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::row_callback::RowCallback;
-use wz_session_core::sample::{
-    EncodingHint, QosLevel, Sample, SampleKind, SourceInfo, TimestampHint,
-};
+use wz_session_core::sample::{QosLevel, Sample, SampleKind, SourceInfo};
 use wz_session_core::session_tables::SubscriberHandle;
 use wz_session_core::sink::{BorrowedSample, SampleView};
 
-use super::entity_tables::lowered;
 use crate::engine::{SubscriberCall, SubscriberRow};
 use crate::round::{LetGo, ReadRoom, Round, RoundCounts, RoundGate};
+#[cfg(feature = "query")]
+use {
+    crate::engine::LegId,
+    core::sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
 
-/// A round over an area of `bytes`, holding `events` records at once, which outlives the test.
-fn round(bytes: usize, events: usize) -> Arc<Round> {
-    Round::leaked(bytes, events)
+/// A round holding `events` records at once, which outlives the test.
+fn round(events: usize) -> Arc<Round> {
+    Round::leaked(events)
 }
 
 /// A subscriber row a test hands samples to, boxed so it lies where it is while a call of it runs,
@@ -72,28 +78,29 @@ impl Row {
     }
 }
 
-/// The room of a record of `bytes` bytes for one subscriber.
-fn room(bytes: usize) -> ReadRoom {
-    ReadRoom {
-        bytes,
-        callbacks: 1,
-    }
-}
+/// The room of a record for one subscriber.
+const ONE: ReadRoom = ReadRoom { callbacks: 1 };
 
-/// A best-effort put of `len` bytes of `byte` on `demo/round`.
+/// A best-effort put of `len` bytes of `byte` on `demo/round`, its payload lying nowhere a round
+/// reads it: what is offered to a round that refuses it before placing a part (sealed).
 fn filled(len: usize, byte: u8) -> Sample {
     Sample::new_put("demo/round", vec![byte; len]).with_reliability(Reliability::BestEffort)
 }
 
-/// A best-effort put on `demo/round` whose payload is borrowed where it lies, as a sample read in
-/// place is.
-fn borrowed(payload: &[u8]) -> BorrowedSample<'_> {
+/// A best-effort put of `payload` on `keyexpr`, borrowed where it lies, as a sample read in place
+/// is.
+fn put<'a>(keyexpr: &'a str, payload: &'a [u8]) -> BorrowedSample<'a> {
     BorrowedSample {
-        keyexpr: "demo/round",
+        keyexpr,
         payload,
         kind: SampleKind::Put,
         reliability: Reliability::BestEffort,
     }
+}
+
+/// A best-effort put on `demo/round` whose payload is borrowed where it lies.
+fn borrowed(payload: &[u8]) -> BorrowedSample<'_> {
+    put("demo/round", payload)
 }
 
 /// A link that has nothing to give: what a gate over it holds back is the gate's alone.
@@ -103,6 +110,18 @@ impl wz_runtime_coop::session_drive::SessionDatagramLink for Quiet {
     fn service(&self) {}
 
     fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        None
+    }
+}
+
+/// A link with nothing to give that counts how often it is asked to receive.
+struct Counting(Rc<Cell<usize>>);
+
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Counting {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        self.0.set(self.0.get() + 1);
         None
     }
 }
@@ -127,28 +146,70 @@ fn noting(tag: u8, seen: &Noted) -> Row {
     )
 }
 
-/// A sample with every part, offered with no datagram lent, is written into the round and handed
-/// to its subscriber with every part as it was offered; the round is empty once it is handed.
+/// A put whose payload, attachment, encoding schema and timestamp id lie in `datagram` (its
+/// first 7, 3, 4 and 3 bytes), at the data priority, with `source` beside it.
+struct Whole<'d> {
+    datagram: &'d [u8],
+    source: &'d SourceInfo,
+}
+
+impl SampleView for Whole<'_> {
+    fn keyexpr(&self) -> &str {
+        "demo/a"
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.datagram[..7]
+    }
+
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+
+    fn reliability(&self) -> Reliability {
+        Reliability::BestEffort
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        Some(QosLevel::from_raw(5))
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        Some(&self.datagram[7..10])
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        Some(self.source)
+    }
+
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        Some((42, &self.datagram[14..17]))
+    }
+
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        Some((7, Some(&self.datagram[10..14])))
+    }
+}
+
+/// A sample with every part, each lying in the datagram a link lends, is handed to its subscriber
+/// with every part as it was offered, its payload read where it lies; the round is empty once it
+/// is handed. Turned red by a part the round drops, or reads anywhere but where it lies.
 #[test]
-fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
+fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
     type Seen = (
         String,
         Vec<u8>,
         Option<Vec<u8>>,
         Option<(u32, Option<Vec<u8>>)>,
+        usize,
     );
-    let round = round(1024, 4);
+    let round = round(4);
     let source = SourceInfo::new(&[9, 9], 3, 4);
-    let sample = Sample::new_put("demo/a", b"payload".to_vec())
-        .with_attachment(b"att".to_vec())
-        .with_encoding(EncodingHint {
-            packed_id: 7,
-            schema: Some(b"text".to_vec()),
-        })
-        .with_timestamp(TimestampHint::new(42, &[1, 2, 3]).unwrap())
-        .with_qos(QosLevel::from_raw(5))
-        .with_source_info(source.clone())
-        .with_reliability(Reliability::BestEffort);
+    let datagram = *b"payloadatttext\x01\x02\x03";
+    let sample = Whole {
+        datagram: &datagram,
+        source: &source,
+    };
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
     let rest: Arc<Mutex<Vec<String>>> = Arc::default();
     let callback = {
@@ -162,6 +223,7 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
                     view.attachment().map(<[u8]>::to_vec),
                     view.encoding_parts()
                         .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
+                    view.payload().as_ptr() as usize,
                 ));
                 let mut rest = rest.lock().unwrap();
                 if view.kind() != SampleKind::Put {
@@ -182,8 +244,11 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
             }),
         )
     };
-    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is, and the
+    // datagram outlives the round's record of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
     unsafe { round.offer_sample(callback.call(), &sample, true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver(), "the sealed round is handed out");
     assert_eq!(
@@ -192,7 +257,8 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
             "demo/a".to_owned(),
             b"payload".to_vec(),
             Some(b"att".to_vec()),
-            Some((7, Some(b"text".to_vec())))
+            Some((7, Some(b"text".to_vec()))),
+            datagram.as_ptr() as usize
         )]
     );
     assert_eq!(
@@ -202,7 +268,7 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
     );
     assert!(!round.deliver(), "nothing is left");
     assert_eq!(round.counts(), RoundCounts::default());
-    assert_eq!(round.samples_lent(), 0, "nothing was lent");
+    assert_eq!(round.samples_lent(), 1, "read where it lies");
 }
 
 /// The samples of a datagram a link lends are read where they lie: one record for a sample
@@ -212,10 +278,10 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
 fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let round = round(1024, 4);
+    let round = round(4);
     // SAFETY (every call on the round and the gate here): this thread is the round's one writer,
     // as a session's step is under its lock, and the datagram outlives every use below.
-    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), ONE) };
     let seen: Noted = Arc::default();
     let (first, second) = (noting(1, &seen), noting(2, &seen));
     let datagram = [1u8, 1, 2, 2];
@@ -271,8 +337,8 @@ fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
     static CHAINS: ByteCells<8, 2> = ByteCells::new();
-    let round = round(1024, 4);
-    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
+    let round = round(4);
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), ONE) };
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
     let datagram = [1u8, 1];
@@ -286,7 +352,7 @@ fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..]), true) };
     unsafe { round.set_lending(None) };
     assert!(round.lends_a_datagram(), "the chain is held where it lies");
-    unsafe { round.let_go_of_kept() };
+    unsafe { round.settle() };
     assert_eq!(
         CHAINS.in_use(),
         1,
@@ -314,13 +380,14 @@ fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
 }
 
 /// A rejoined message whose records the table does not read is given back as its offer ends, and
-/// a second one in the same round, while the table reads the first, is copied and given back:
-/// the round keeps one buffer at most, the one its table reads. Turned red by a round that keeps
-/// a buffer it reads nothing in, or lets go of the first while the table still reads it.
+/// a second one in the same round, while the table reads the first, finds no place: its record is
+/// refused and counted and its buffer given back, so the round keeps one buffer at most, the one
+/// its table reads. Turned red by a round that keeps a buffer it reads nothing in, reads a second
+/// one, or lets go of the first while the table still reads it.
 #[test]
 fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
     static CHAINS: ByteCells<8, 2> = ByteCells::new();
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
     let unread = kept_in(&CHAINS, 3, 2);
@@ -335,7 +402,6 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
     let one = kept_in(&CHAINS, 4, 2);
     let two = kept_in(&CHAINS, 5, 2);
     let at_one = one.as_slice().as_ptr() as usize;
-    let at_two = two.as_slice().as_ptr() as usize;
     unsafe { round.lend_rejoined(&one) };
     unsafe { round.offer_sample(first.call(), &borrowed(one.as_slice()), true) };
     unsafe { round.end_rejoined(one) };
@@ -345,27 +411,240 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
     assert_eq!(
         CHAINS.in_use(),
         1,
-        "the second, copied, went back; the first is kept"
+        "the second, unread, went back; the first is kept"
+    );
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1,
+        },
+        "the second's record found no place"
     );
     unsafe { round.seal() };
     assert!(round.deliver());
-    let places: Vec<(u8, usize)> = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(_, byte, at)| (*byte, *at))
-        .collect();
-    assert_eq!(places.len(), 2);
-    assert_eq!(places[0], (4, at_one), "the first read where it lies");
-    assert_eq!(places[1].0, 5, "the second handed whole");
-    assert_ne!(places[1].1, at_two, "CONTROL: the second was copied");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 4, at_one)],
+        "the first alone, read where it lies"
+    );
     assert_eq!(round.samples_lent(), 1);
-    unsafe { round.let_go_of_kept() };
+    unsafe { round.settle() };
     assert_eq!(
         CHAINS.in_use(),
         0,
         "emptied, the lock holder let go of the first"
     );
+}
+
+/// A group's receive buffer given back while a record of the round reads a datagram in it is
+/// kept, the round sealed and handed out meanwhile, and goes back to its table once the lock
+/// holder settles the round after the delivery; one in which no record reads goes back at once.
+/// Turned red by a round that lets go of the buffer a delivery reads, or keeps one it reads
+/// nothing in.
+#[cfg(feature = "group")]
+#[test]
+fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
+    static RX: ByteCells<16, 2> = ByteCells::new();
+    let round = round(4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let mut buf = RX.claim().expect("a group's buffer");
+    buf.as_mut_slice()[..2].copy_from_slice(&[7, 7]);
+    let (base, _) = buf.raw();
+    // SAFETY: the first two bytes of the buffer, which the claim holds until it is given back and
+    // the round, which keeps it, lets go of it after the delivery read them.
+    let datagram = unsafe { core::slice::from_raw_parts(base.cast_const(), 2) };
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.set_lending(Some(datagram)) };
+    unsafe { round.offer_sample(first.call(), &borrowed(datagram), true) };
+    unsafe { round.set_lending(None) };
+    unsafe { round.seal() };
+    unsafe { round.keep_rx(buf) };
+    assert_eq!(RX.in_use(), 1, "a sealed record reads in it, so it is kept");
+    let other = RX.claim().expect("the other buffer");
+    unsafe { round.keep_rx(other) };
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "CONTROL: nothing reads in the other, so it went back"
+    );
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 7, base as usize)],
+        "read where it lies"
+    );
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "handed out with no lock held, it waits for the lock holder"
+    );
+    unsafe { round.settle() };
+    assert_eq!(RX.in_use(), 0, "settled, the buffer is its table's again");
+}
+
+/// A key arena of 256 bytes the test leaks, so it outlives every key and round of the test.
+fn key_space() -> KeySpace {
+    use crate::arena::{AllocatorMemory, SessionArena};
+
+    let bytes = KeySpace::span_bytes(256).expect("a small arena");
+    let arena: &'static mut SessionArena = Box::leak(Box::new(
+        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
+    ));
+    arena
+        .arena_mut()
+        .lend_keys(256, SessionLimits::defaults().max_keyexpr_bytes_held())
+        .expect("the arena holds the key arena")
+}
+
+/// A round as `round` makes one, that reads the keys of `keys` where their blocks lie.
+fn round_reading(keys: KeySpace) -> Arc<Round> {
+    let mut round = round(4);
+    Arc::get_mut(&mut round)
+        .expect("not shared yet")
+        .reads_keys_in(keys);
+    round
+}
+
+/// A put of no payload whose keyexpr is the whole text of `key`, as a peer's alias read where its
+/// row keeps it is.
+struct HeldSample<'k> {
+    key: &'k KeyRef,
+}
+
+impl SampleView for HeldSample<'_> {
+    fn keyexpr(&self) -> &str {
+        self.key.as_str()
+    }
+
+    fn payload(&self) -> &[u8] {
+        &[]
+    }
+
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+
+    fn reliability(&self) -> Reliability {
+        Reliability::BestEffort
+    }
+
+    fn keyexpr_held(&self) -> Option<&KeyRef> {
+        Some(self.key)
+    }
+}
+
+/// What [`keyed`] callbacks write: each sample's keyexpr and where it lies.
+type Keyed = Arc<Mutex<Vec<(String, usize)>>>;
+
+/// A callback that notes the keyexpr of each sample it is handed and where it lies.
+fn keyed(tag: u8, seen: &Keyed) -> Row {
+    let seen = seen.clone();
+    Row::new(
+        tag,
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            let key = sample.keyexpr();
+            seen.lock()
+                .unwrap()
+                .push((key.to_owned(), key.as_ptr() as usize));
+        }),
+    )
+}
+
+/// A key a sample names by a row of the session's key arena is read where the row's block lies,
+/// after the row let go of it (the alias undeclared while the record waited): the round holds the
+/// block, one count for the records that read it in turn, until the lock holder settles the
+/// round after the delivery. Turned red by a round that copies the key, takes a count for each
+/// record or none, or hands the count back with no lock held.
+#[test]
+fn a_held_key_is_read_where_its_block_lies_after_its_row_lets_go() {
+    let keys = key_space();
+    let round = round_reading(keys);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let row = keys.key("demo/alias").expect("room");
+    let at = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    assert!(
+        keys.counts().used > 0,
+        "the round holds the block its row let go of"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [("demo/alias".to_owned(), at), ("demo/alias".to_owned(), at)],
+        "each record read where the block lies"
+    );
+    assert!(
+        keys.counts().used > 0,
+        "handed out with no lock held, the block waits for the lock holder"
+    );
+    unsafe { round.settle() };
+    assert_eq!(
+        keys.counts().used,
+        0,
+        "one count for both records, handed back once"
+    );
+}
+
+/// The row a held key was read from given another key, as a face's rows are when the face goes
+/// and the next one takes them: the record still reads the first key where its block lies, and the
+/// new key takes another block. Turned red by a block given back while the round holds it.
+#[test]
+fn a_row_given_a_new_key_does_not_move_a_held_one() {
+    let keys = key_space();
+    let round = round_reading(keys);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let mut row = keys.key("demo/a").expect("room");
+    let at_a = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    row = keys.key("demo/b").expect("room");
+    let at_b = row.as_str().as_ptr() as usize;
+    assert_ne!(at_a, at_b, "the held block is not given to the new key");
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [("demo/a".to_owned(), at_a), ("demo/b".to_owned(), at_b)]
+    );
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "both blocks back once settled");
+}
+
+/// The CONTROL of the two above: a round that reads no key arena copies the key into its keys, so
+/// the block goes back as soon as its row lets go of it, before the delivery, which reads the copy.
+#[test]
+fn a_round_that_reads_no_key_arena_copies_the_key() {
+    let keys = key_space();
+    let round = round(4);
+    let seen: Keyed = Arc::default();
+    let first = keyed(1, &seen);
+    let row = keys.key("demo/alias").expect("room");
+    let at = row.as_str().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_sample(first.call(), &HeldSample { key: &row }, true) };
+    drop(row);
+    assert_eq!(
+        keys.counts().used,
+        0,
+        "nothing holds the block once its row lets go"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "demo/alias", "the copy reads the key");
+    assert_ne!(seen[0].1, at, "read from the round's copy");
 }
 
 /// A round let go of at its session's end ends the calls its records owe, before the arena that
@@ -374,12 +653,16 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
 /// while the record waits, which finds the call running.
 #[test]
 fn a_round_let_go_of_ends_the_calls_its_records_owe() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let (first, second) = (noting(1, &seen), noting(2, &seen));
-    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
-    unsafe { round.offer_sample(first.call(), &filled(4, 1), true) };
-    unsafe { round.offer_sample(second.call(), &filled(4, 2), true) };
+    let datagram = [1u8, 1, 2, 2];
+    // SAFETY (each call): this thread is the round's one writer, no delivery runs, and the
+    // datagram outlives the round's records of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..2]), true) };
+    unsafe { round.offer_sample(second.call(), &borrowed(&datagram[2..]), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(!first.retire(), "CONTROL: the waiting record owes a call");
     unsafe { round.let_go() };
@@ -399,7 +682,7 @@ fn a_round_let_go_of_ends_the_calls_its_records_owe() {
 /// the delivery after it, which finds the round emptied.
 #[test]
 fn a_round_is_handed_to_one_delivery_at_a_time() {
-    let round = round(1024, 4);
+    let round = round(4);
     let inner: Arc<Mutex<Vec<bool>>> = Arc::default();
     let again = Arc::downgrade(&round);
     let noted = inner.clone();
@@ -410,9 +693,13 @@ fn a_round_is_handed_to_one_delivery_at_a_time() {
             noted.lock().unwrap().push(handed);
         }),
     );
-    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
-    unsafe { round.offer_sample(callback.call(), &filled(4, 1), true) };
-    unsafe { round.offer_sample(callback.call(), &filled(4, 2), true) };
+    let datagram = [1u8, 1, 2, 2];
+    // SAFETY (each call): this thread is the round's one writer, no delivery runs, and the
+    // datagram outlives the round's records of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(callback.call(), &borrowed(&datagram[..2]), true) };
+    unsafe { round.offer_sample(callback.call(), &borrowed(&datagram[2..]), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver(), "the sealed round is handed out");
     assert_eq!(
@@ -429,13 +716,17 @@ fn a_round_is_handed_to_one_delivery_at_a_time() {
 /// CONTROL is a row still declared, handed the same record.
 #[test]
 fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let (gone, kept) = (noting(1, &seen), noting(2, &seen));
-    let sample = filled(4, 9);
-    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
+    let datagram = [9u8; 4];
+    let sample = borrowed(&datagram);
+    // SAFETY (each call): this thread is the round's one writer, no delivery runs, and the
+    // datagram outlives the round's record of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
     unsafe { round.offer_sample(gone.call(), &sample, true) };
     unsafe { round.offer_sample(kept.call(), &sample, false) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(!gone.retire(), "a call of it waits");
     assert_eq!(
@@ -458,11 +749,15 @@ fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
 /// the row's latch until it is handed out.
 #[test]
 fn a_refused_call_is_ended_at_once() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let (held, refused) = (noting(1, &seen), noting(2, &seen));
-    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
-    unsafe { round.offer_sample(held.call(), &filled(4, 1), true) };
+    let datagram = [1u8; 4];
+    // SAFETY (each call): this thread is the round's one writer, no delivery runs, and the
+    // datagram outlives the round's record of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(held.call(), &borrowed(&datagram), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     unsafe { round.offer_sample(refused.call(), &filled(4, 2), true) };
     assert_eq!(round.counts().dropped, 1);
@@ -479,13 +774,17 @@ fn a_refused_call_is_ended_at_once() {
 /// that subscriber twice.
 #[test]
 fn a_sample_offered_again_to_its_subscriber_is_a_record_of_its_own() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
-    let sample = filled(4, 3);
-    // SAFETY (each call): this thread is the round's one writer.
+    let datagram = [3u8; 4];
+    let sample = borrowed(&datagram);
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives the
+    // round's records of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
     unsafe { round.offer_sample(first.call(), &sample, true) };
     unsafe { round.offer_sample(first.call(), &sample, false) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());
     let tags: Vec<(u8, u8)> = seen
@@ -503,14 +802,18 @@ fn a_sample_offered_again_to_its_subscriber_is_a_record_of_its_own() {
 /// row of one fan-out, which joins the first's record.
 #[test]
 fn a_record_is_joined_only_by_the_rows_of_its_own_fan_out() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let (first, second, third) = (noting(1, &seen), noting(2, &seen), noting(3, &seen));
-    let sample = filled(4, 7);
-    // SAFETY (each call): this thread is the round's one writer.
+    let datagram = [7u8; 4];
+    let sample = borrowed(&datagram);
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives the
+    // round's records of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
     unsafe { round.offer_sample(first.call(), &sample, true) };
     unsafe { round.offer_sample(second.call(), &sample, false) };
     unsafe { round.offer_sample(third.call(), &sample, true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());
     let tags: Vec<u8> = seen.lock().unwrap().iter().map(|(t, _, _)| *t).collect();
@@ -527,11 +830,15 @@ fn a_record_is_joined_only_by_the_rows_of_its_own_fan_out() {
 /// reliable sample with no QoS having zenoh's default, `drop`.
 #[test]
 fn a_sealed_round_refuses_and_counts_by_congestion_control() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
-    // SAFETY (each call): this thread is the round's one writer.
-    unsafe { round.offer_sample(first.call(), &filled(4, 1), true) };
+    let datagram = [1u8, 1, 5, 5];
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives the
+    // round's records of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..2]), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     unsafe { round.offer_sample(first.call(), &filled(4, 2), true) };
     let held = filled(4, 3)
@@ -544,13 +851,16 @@ fn a_sealed_round_refuses_and_counts_by_congestion_control() {
         round.counts(),
         RoundCounts {
             dropped: 2,
-            held_over: 1
+            held_over: 1,
+            unplaced: 0
         }
     );
     assert!(round.deliver());
     let bytes: Vec<u8> = seen.lock().unwrap().iter().map(|(_, b, _)| *b).collect();
     assert_eq!(bytes, [1], "only what came before the seal");
-    unsafe { round.offer_sample(first.call(), &filled(4, 5), true) };
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram[2..]), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(
         round.deliver(),
@@ -558,39 +868,48 @@ fn a_sealed_round_refuses_and_counts_by_congestion_control() {
     );
 }
 
-/// The gate reads a link while the round has the room of a record, and not once what was written
-/// leaves less than that room or the round holds as many records as it may; an empty round takes
-/// a record whatever its room, so a link is never stopped for good.
+/// The gate reads a link while the round has the room of a record, an entry and the callbacks it
+/// owes, and not once too few callbacks are left or the round holds as many records as it may; an
+/// empty round takes a record whatever its room, so a link is never stopped for good.
 #[test]
 fn the_gate_reads_a_link_only_while_the_round_has_a_records_room() {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let round = round(64, 4);
-    // SAFETY (each call): this thread is the round's one writer.
-    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
+    let every = ReadRoom {
+        callbacks: caps::DELIVERY_LANE_CALLBACKS,
+    };
+    let round = round(4);
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives the
+    // rounds' records of it.
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), every) };
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
+    let datagram = [1u8, 2];
     assert!(gate.takes_input(), "an empty round");
-    unsafe { round.offer_sample(first.call(), &filled(24, 1), true) };
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..1]), true) };
+    unsafe { round.set_lending(None) };
     assert!(
-        gate.takes_input(),
-        "40 bytes left of 64, a record's 32 among them"
+        !gate.takes_input(),
+        "one callback owed leaves less than a record owing every one"
     );
-    unsafe { round.offer_sample(first.call(), &filled(16, 2), true) };
-    assert!(!gate.takes_input(), "24 bytes left, short of a record");
     unsafe { round.seal() };
     assert!(round.deliver());
     assert!(gate.takes_input(), "handed out, the room is back");
 
-    let one = self::round(1024, 1);
-    // SAFETY: as above.
-    let gate = unsafe { RoundGate::new(Quiet, one.clone(), room(32)) };
-    unsafe { one.offer_sample(first.call(), &filled(4, 1), true) };
+    let one = self::round(1);
+    let gate = unsafe { RoundGate::new(Quiet, one.clone(), ONE) };
+    unsafe { one.set_lending(Some(&datagram[..])) };
+    unsafe { one.offer_sample(first.call(), &borrowed(&datagram[1..]), true) };
+    unsafe { one.set_lending(None) };
     assert!(!gate.takes_input(), "a round of one record holds one");
-    let huge = unsafe { RoundGate::new(Quiet, self::round(64, 4), room(4096)) };
+    let more = ReadRoom {
+        callbacks: caps::DELIVERY_LANE_CALLBACKS + 1,
+    };
+    let huge = unsafe { RoundGate::new(Quiet, self::round(4), more) };
     assert!(
         huge.takes_input(),
-        "an empty round takes a record longer than its area"
+        "an empty round takes a record owing more callbacks than it holds"
     );
 }
 
@@ -602,9 +921,9 @@ fn the_gate_reads_a_link_only_while_the_round_has_a_records_room() {
 fn the_gate_reads_no_link_while_retractions_are_owed() {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let round = round(1024, 4);
+    let round = round(4);
     // SAFETY: this thread is the round's one writer.
-    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), ONE) };
     round.owe(true);
     assert!(!gate.takes_input(), "owed, no link is read");
     round.owe(false);
@@ -619,11 +938,15 @@ fn the_gate_reads_no_link_while_retractions_are_owed() {
     should_panic(expected = "a record the gate let through found no room")
 )]
 fn a_gated_record_that_finds_no_room_is_a_defect() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
-    // SAFETY (each call): this thread is the round's one writer.
-    unsafe { round.offer_sample(first.call(), &filled(4, 1), true) };
+    let datagram = [1u8; 4];
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives the
+    // round's record of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     #[cfg(debug_assertions)]
     round.offering_gated(true);
@@ -640,7 +963,7 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
 #[cfg(feature = "local-subscriber")]
 #[test]
 fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
-    let round = round(1024, 4);
+    let round = round(4);
     let seen: Noted = Arc::default();
     let (third, first) = (noting(3, &seen), noting(1, &seen));
     let sample = filled(8, 1);
@@ -666,7 +989,10 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
     unsafe { round.seal() };
     assert!(!round.deliver(), "nothing was held");
     let held = noting(4, &seen);
-    unsafe { round.offer_sample(held.call(), &sample, true) };
+    let datagram = [4u8; 8];
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(held.call(), &borrowed(&datagram), true) };
+    unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver(), "CONTROL: once taken, an offer is held");
 }
@@ -716,14 +1042,14 @@ fn hearing(tag: u8, heard: &Heard) -> Hearing {
 }
 
 /// A token is one record however many liveliness subscribers it reaches, its key read where it
-/// lies in the lent datagram or written into the round when it lies elsewhere, and each is handed
-/// to its callbacks in the order it came.
+/// lies in the lent datagram or copied into the round's keys when it lies elsewhere, and each is
+/// handed to its callbacks in the order it came.
 #[cfg(feature = "liveliness")]
 #[test]
 fn the_tokens_of_a_round_are_handed_in_order() {
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
-    let round = round(1024, 4);
+    let round = round(4);
     let heard: Heard = Arc::default();
     let (first, second) = (hearing(1, &heard), hearing(2, &heard));
     let datagram = *b"demo/t/1";
@@ -735,9 +1061,9 @@ fn the_tokens_of_a_round_are_handed_in_order() {
     };
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.offer_liveliness(first.call(), &put(lying, 1)) };
-    unsafe { round.offer_liveliness(second.call(), &put(lying, 1)) };
-    unsafe { round.offer_liveliness(first.call(), &put("demo/t/2", 2)) };
+    unsafe { round.offer_liveliness(first.call(), &put(lying, 1), None) };
+    unsafe { round.offer_liveliness(second.call(), &put(lying, 1), None) };
+    unsafe { round.offer_liveliness(first.call(), &put("demo/t/2", 2), None) };
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());
@@ -752,26 +1078,95 @@ fn the_tokens_of_a_round_are_handed_in_order() {
     assert_eq!(round.counts(), RoundCounts::default());
 }
 
+/// A token whose key is a key of the session's key arena, as the retraction of a lost face's token
+/// names it, is read where the key's block lies after the row let go of it: the round holds a count
+/// until the lock holder settles it after the delivery. Turned red by a round that copies the key
+/// or keeps the block past the settle.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_token_named_by_a_held_key_is_read_where_its_block_lies() {
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let keys = key_space();
+    let round = round_reading(keys);
+    let heard: Heard = Arc::default();
+    let first = hearing(1, &heard);
+    let row = keys.key("demo/t/held").expect("room");
+    let retracted = LivelinessSample {
+        kind: LivelinessSampleKind::Delete,
+        keyexpr: row.as_str(),
+        token_id: 3,
+    };
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.offer_liveliness(first.call(), &retracted, Some(&row)) };
+    drop(row);
+    assert!(keys.counts().used > 0, "the round holds the token's block");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(*heard.lock().unwrap(), [(1, "demo/t/held".to_owned(), 3)]);
+    assert!(keys.counts().used > 0, "it waits for the lock holder");
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "settled, the block is back");
+}
+
 /// What a leg's callback a test holds is handed: the request id, the key, the payload and where
 /// the payload lies.
 #[cfg(feature = "query")]
 type Answers = Arc<Mutex<Vec<(u32, String, Vec<u8>, usize)>>>;
 
-/// A leg's callback that notes each reply it is handed.
+/// One leg's callback, held as the session's plane holds a leg's: called through its holder, with
+/// the counts the round's records take of its row and give back.
 #[cfg(feature = "query")]
-fn answering(answers: &Answers) -> Arc<wz_capi_port::ReplyCallback> {
+struct OneLeg {
+    callback: wz_capi_port::ReplyCallback,
+    held: AtomicUsize,
+    released: AtomicUsize,
+}
+
+#[cfg(feature = "query")]
+impl crate::round::LegHolders for OneLeg {
+    fn hold(&self, leg: LegId) -> bool {
+        assert_eq!(leg, LegId::FIRST, "the test's one leg");
+        self.held.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn call(&self, _leg: LegId, reply: &dyn wz_session_core::reply_sink::ReplyView) {
+        self.callback.call(reply);
+    }
+
+    fn release(&self, _leg: LegId) -> Option<wz_capi_port::ReplyCallback> {
+        self.released.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+}
+
+/// A leg whose callback notes each reply it is handed.
+#[cfg(feature = "query")]
+fn answering(answers: &Answers) -> Arc<OneLeg> {
     use wz_session_core::reply_sink::ReplyView;
     let answers = answers.clone();
-    Arc::new(wz_capi_port::ReplyCallback::shared(
-        move |reply: &dyn ReplyView| {
+    Arc::new(OneLeg {
+        callback: wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
             answers.lock().unwrap().push((
                 reply.rid(),
                 reply.keyexpr().to_owned(),
                 reply.payload().to_vec(),
                 reply.payload().as_ptr() as usize,
             ));
-        },
-    ))
+        }),
+        held: AtomicUsize::new(0),
+        released: AtomicUsize::new(0),
+    })
+}
+
+/// `round`, told that `legs` holds the callbacks of the legs its replies are for.
+#[cfg(feature = "query")]
+fn holding_legs(mut round: Arc<Round>, legs: &Arc<OneLeg>) -> Arc<Round> {
+    Arc::get_mut(&mut round)
+        .expect("not shared yet")
+        .calls_legs_of(legs.clone());
+    round
 }
 
 /// A reply whose parts lie in a datagram a link lends, its key resolved elsewhere.
@@ -804,34 +1199,50 @@ impl wz_session_core::reply_sink::ReplyView for Lying<'_> {
 }
 
 /// A reply of a datagram a link lends is handed to its leg's callback where its payload lies, and
-/// one offered with no datagram lent is written into the round; the round is idle only once both
-/// are handed, which is what a leg's end waits for.
+/// one whose payload lies nowhere the round reads it is refused, counted as held over (a reply
+/// holds its sender) and apart, and takes no count of its leg's row; the round is idle only once
+/// the held one is handed, which is what a leg's end waits for. Turned red by a round that copies
+/// a reply, or refuses one after taking its leg's count.
 #[cfg(feature = "query")]
 #[test]
-fn a_reply_is_handed_where_it_lies_or_from_the_round() {
-    let round = round(1024, 4);
+fn a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused() {
     let answers: Answers = Arc::default();
-    let callback = answering(&answers);
+    let legs = answering(&answers);
+    let round = holding_legs(round(4), &legs);
     let datagram = *b"answer";
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.offer_reply(&callback, &Lying { payload: &datagram }) };
+    unsafe { round.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
     unsafe { round.set_lending(None) };
     let elsewhere = b"elsewhere".to_vec();
     unsafe {
         round.offer_reply(
-            &callback,
+            LegId::FIRST,
             &Lying {
                 payload: &elsewhere,
             },
         )
     };
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 0,
+            held_over: 1,
+            unplaced: 1,
+        },
+        "the reply lying elsewhere found no place"
+    );
+    assert_eq!(
+        legs.held.load(Ordering::SeqCst),
+        1,
+        "the refused reply took no count"
+    );
     assert!(!round.is_idle(), "a reply is held");
     unsafe { round.seal() };
     assert!(round.deliver());
     assert!(round.is_idle(), "handed out");
     let answers = answers.lock().unwrap();
-    assert_eq!(answers.len(), 2);
+    assert_eq!(answers.len(), 1, "the held reply alone");
     assert_eq!(
         (
             answers[0].0,
@@ -842,97 +1253,204 @@ fn a_reply_is_handed_where_it_lies_or_from_the_round() {
         (4, "demo/answer", &b"answer"[..], datagram.as_ptr() as usize),
         "read where it lies"
     );
-    assert_eq!(answers[1].2, b"elsewhere");
-    assert_ne!(
-        answers[1].3,
-        elsewhere.as_ptr() as usize,
-        "written into the round, not read where the view held it"
-    );
 }
 
-/// The build's area holds the sample of the build's largest rejoined message on its longest key,
-/// which is what lets a session's area be sized from its own message under the build's; an area
-/// one byte short of a message's sample does not hold it.
+/// A reply's record holds one count of its leg's row from its offer until its call is ended, which
+/// the delivery that hands it out gives back; a reply the round refuses takes no count, and a round
+/// never told of the legs holds no reply. Turned red by a record that holds no count while it waits
+/// for its delivery, or one whose count is never given back.
+#[cfg(feature = "query")]
 #[test]
-fn the_builds_area_holds_the_builds_largest_message() {
-    use crate::round::{holds_a_read, read_bytes, sample_overhead};
-
-    assert!(holds_a_read::<
-        { caps::DELIVERY_LANE_BYTES },
-        { caps::PICO_UNICAST_BATCH_BYTES },
-        { caps::PICO_FRAG_MAX_BYTES },
-        { caps::MAX_KEYEXPR_BYTES },
-        { caps::MAX_SUBSCRIPTIONS },
-        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-    >());
-    assert_eq!(
-        read_bytes(1000, 500, 8, 2),
-        1000 + 32,
-        "a batch longer than a message"
-    );
-    assert_eq!(
-        read_bytes(500, 1000, 8, 2),
-        1000 + 32,
-        "a message longer than a batch"
-    );
-    assert!(holds_a_read::<{ 1000 + 32 }, 1000, 500, 8, 2, 0>());
-    assert!(!holds_a_read::<{ 1000 + 31 }, 1000, 500, 8, 2, 0>());
-    assert_eq!(
-        sample_overhead(8, 2),
-        32,
-        "a key of 8, a clock id of 16 and two subscribers' shares of 4"
-    );
-}
-
-/// The speed image's area (`deploy/zephyr-mcu-speed/arm_w.conf`) is the room of one record at the
-/// limits that image states: its batch of 2,048 bytes, its largest rejoined message of 4,096, its
-/// keys of 64 bytes and one subscriber, 4,180 bytes; an area one byte shorter holds no read.
-#[test]
-fn the_speed_images_area_is_the_room_of_one_record() {
-    use crate::round::{holds_a_read, read_bytes};
-
-    assert_eq!(read_bytes(2048, 4096, 64, 1), 4180);
-    assert!(holds_a_read::<4180, 2048, 4096, 64, 1, 1>());
-    assert!(!holds_a_read::<4179, 2048, 4096, 64, 1, 1>());
-}
-
-/// An area stated shorter than what one record can hand it is lengthened to hold it, from the
-/// session's own (lowered) message length and batch and not the build's, the larger of the two;
-/// an area stated longer is kept.
-#[test]
-fn an_area_is_sized_from_the_sessions_message() {
-    use crate::round::{holding_a_read, sample_overhead};
-
-    let frag = caps::PICO_FRAG_MAX_BYTES / 4;
-    let short = lowered(|l| {
-        l.select_delivery_lane_bytes(1)?;
-        l.select_pico_frag_max_bytes(Quota::at_most(frag))
-    });
-    let held = holding_a_read::<
-        { caps::PICO_UNICAST_BATCH_BYTES },
-        { caps::PICO_FRAG_MAX_BYTES },
-        { caps::MAX_KEYEXPR_BYTES },
-        { caps::MAX_SUBSCRIPTIONS },
-        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-    >(short);
-    let subscribers = if cfg!(feature = "liveliness") {
-        caps::MAX_SUBSCRIPTIONS.max(caps::MAX_LIVELINESS_SUBSCRIPTIONS)
-    } else {
-        caps::MAX_SUBSCRIPTIONS
+fn a_replys_record_holds_its_legs_row_until_its_call_is_ended() {
+    let answers: Answers = Arc::default();
+    let legs = answering(&answers);
+    let told = holding_legs(round(4), &legs);
+    let datagram = *b"r";
+    let counts = |legs: &OneLeg| {
+        (
+            legs.held.load(Ordering::SeqCst),
+            legs.released.load(Ordering::SeqCst),
+        )
     };
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+    unsafe { told.set_lending(Some(&datagram[..])) };
+    unsafe { told.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
+    assert_eq!(counts(&legs), (1, 0), "the record holds the leg's row");
+    unsafe { told.seal() };
+    unsafe { told.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
+    assert_eq!(counts(&legs), (1, 0), "a reply refused takes no count");
+    unsafe { told.set_lending(None) };
+    assert!(told.deliver());
+    assert_eq!(answers.lock().unwrap().len(), 1);
     assert_eq!(
-        held.delivery_lane_bytes(),
-        frag.max(short.pico_unicast_batch_bytes())
-            + sample_overhead(caps::MAX_KEYEXPR_BYTES, subscribers)
+        counts(&legs),
+        (1, 1),
+        "its call ended, the record gave its count back"
     );
 
-    let long = SessionLimits::defaults();
-    let kept = holding_a_read::<
-        { caps::PICO_UNICAST_BATCH_BYTES },
-        { caps::PICO_FRAG_MAX_BYTES },
-        { caps::MAX_KEYEXPR_BYTES },
-        { caps::MAX_SUBSCRIPTIONS },
-        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-    >(long);
-    assert_eq!(kept.delivery_lane_bytes(), long.delivery_lane_bytes());
+    let told_none = round(4);
+    unsafe { told_none.set_lending(Some(&datagram[..])) };
+    unsafe { told_none.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
+    unsafe { told_none.set_lending(None) };
+    assert!(
+        told_none.is_idle(),
+        "a round told of no legs holds no reply"
+    );
+}
+
+/// A reply whose key is a key of the session's key arena is read where its block lies, the round
+/// holding a count past the row's own until it is settled after the delivery. Turned red by a
+/// round that copies a reply's held key or never hands its count back.
+#[cfg(feature = "query")]
+#[test]
+fn a_reply_named_by_a_held_key_is_read_where_its_block_lies() {
+    struct HeldReply<'k> {
+        key: &'k KeyRef,
+    }
+
+    impl wz_session_core::reply_sink::ReplyView for HeldReply<'_> {
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            5
+        }
+
+        fn keyexpr(&self) -> &str {
+            self.key.as_str()
+        }
+
+        fn keyexpr_held(&self) -> Option<&KeyRef> {
+            Some(self.key)
+        }
+
+        fn kind(&self) -> wz_session_core::reply_sink::ReplyKind {
+            wz_session_core::reply_sink::ReplyKind::Put
+        }
+
+        fn payload(&self) -> &[u8] {
+            &[]
+        }
+
+        fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+            None
+        }
+    }
+
+    let keys = key_space();
+    let answers: Answers = Arc::default();
+    let legs = answering(&answers);
+    let round = holding_legs(round_reading(keys), &legs);
+    let row = keys.key("demo/answer/held").expect("room");
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.offer_reply(LegId::FIRST, &HeldReply { key: &row }) };
+    drop(row);
+    assert!(keys.counts().used > 0, "the round holds the reply's block");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(answers.lock().unwrap()[0].1, "demo/answer/held");
+    unsafe { round.settle() };
+    assert_eq!(keys.counts().used, 0, "settled, the block is back");
+}
+
+/// A record whose payload lies in the datagram a link lends is read there; one whose payload lies
+/// nowhere the round reads it is refused, counted with the records that found no room and apart,
+/// and handed to no callback. Turned red by a round that copies a part, or refuses one without
+/// counting it.
+#[test]
+fn a_record_with_a_part_the_round_cannot_read_where_it_lies_is_refused_and_counted() {
+    let round = round(4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let datagram = [1u8, 2];
+    let elsewhere = b"x".to_vec();
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&datagram), true) };
+    unsafe { round.set_lending(None) };
+    unsafe { round.offer_sample(first.call(), &borrowed(&elsewhere), true) };
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1,
+        }
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 1, datagram.as_ptr() as usize)],
+        "the lent record alone, read where it lies"
+    );
+    assert_eq!(
+        (round.samples_handed(), round.samples_lent()),
+        (1, 1),
+        "the round handed out the lent record alone"
+    );
+}
+
+/// The gate asks a filling round for room in its keys: once the keys a session composed leave no
+/// room for one more of the longest, no link is read until the round is handed out, so no key
+/// finds no place. Turned red by a gate that asks for none of the keys.
+#[test]
+fn the_gate_stops_a_link_where_the_rounds_keys_have_no_room() {
+    let round = round(8);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let half = caps::MAX_KEYEXPR_BYTES / 2 + 1;
+    let (a, b) = ("a".repeat(half), "b".repeat(half));
+    // SAFETY (each call): this thread is the round's one writer and holds no borrow of its table.
+    unsafe { round.offer_sample(first.call(), &put(&a, &[]), true) };
+    assert!(
+        unsafe { round.has_room(ONE) },
+        "CONTROL: one key leaves room for another"
+    );
+    unsafe { round.offer_sample(first.call(), &put(&b, &[]), true) };
+    assert!(
+        !unsafe { round.has_room(ONE) },
+        "two keys leave no room for one more of the longest"
+    );
+    assert_eq!(round.counts(), RoundCounts::default(), "nothing refused");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    unsafe { round.settle() };
+    assert!(
+        unsafe { round.has_room(ONE) },
+        "handed out, the keys are free"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+/// While a record reads a rejoined message, the gate reads no link, so no second rejoined message
+/// can reach the round (a datagram carries one fragment at most, at its end); the round is handed
+/// out all the same, with the gate shut, and the next read the gate lets through finds the
+/// message's buffer back. Turned red by a delivery that waits for a read, or a gate that reads a
+/// link while the round reads the rejoined message.
+#[test]
+fn a_round_reading_a_rejoined_message_is_handed_out_with_its_gate_shut() {
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    static CHAINS: ByteCells<8, 1> = ByteCells::new();
+    let round = round(4);
+    let reads = Rc::new(Cell::new(0));
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    let gate = unsafe { RoundGate::new(Counting(reads.clone()), round.clone(), ONE) };
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let mut buf = CHAINS.claim().expect("the chain's buffer");
+    buf.as_mut_slice().fill(9);
+    let kept = KeptBytes::of(buf, 4);
+    let message = kept.as_slice().as_ptr() as usize;
+    unsafe { round.lend_rejoined(&kept) };
+    unsafe { round.offer_sample(first.call(), &borrowed(kept.as_slice()), true) };
+    unsafe { round.end_rejoined(kept) };
+    assert!(gate.try_recv().is_none());
+    assert!(!gate.recv_with(&mut |_| {}));
+    assert_eq!(reads.get(), 0, "the gate reads no link");
+    unsafe { round.seal() };
+    assert!(round.deliver(), "handed out with the gate shut");
+    assert_eq!(*seen.lock().unwrap(), [(1, 9, message)]);
+    assert_eq!(CHAINS.in_use(), 1, "the buffer waits for the lock holder");
+    assert!(gate.try_recv().is_none());
+    assert_eq!(reads.get(), 1, "the gate reads the link again");
+    assert_eq!(CHAINS.in_use(), 0, "and let go of the buffer first");
 }

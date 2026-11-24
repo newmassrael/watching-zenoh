@@ -127,6 +127,8 @@ use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, Mu
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::policy::SessionPolicy;
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+use wz_session_core::session_zid::SessionZid;
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::sn::{self, MulticastTxConduits};
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
@@ -163,11 +165,11 @@ const PAYLOAD_LEN: usize = 200;
 const KEYEXPR: &str = "demo/mc";
 /// Our own zenoh id (the §3.2 self key; own-zid JOINs are beacon-filtered).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
-const SELF_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
+const SELF_ZID: SessionZid = SessionZid::from_array([0xAA, 0xBB, 0xCC, 0xDD]);
 /// The crafted peer's zenoh id — distinct from ours so its JOIN is admitted
 /// (not own-zid-filtered), creating the peer entry the echoed fragments match.
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
-const PEER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+const PEER_ZID: SessionZid = SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
 
 /// The full e2e result: the multicast drive [`MulticastOutcome`] plus the
 /// per-stage signals. The host test asserts the strong combination
@@ -435,12 +437,12 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 /// caller overrides `batch_size` to the tiny value that forces fragmentation
 /// (and matches it on both sides so `validate_join` admits the peer).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
-fn params(zid: &[u8], policy: &SessionPolicy) -> MulticastParams {
+fn params(zid: SessionZid, policy: &SessionPolicy) -> MulticastParams {
     // The e2e reads no run-time document, so it resolves no limits: the build's are its group's.
     let limits = wz_session_core::limits::SessionLimits::BUILD;
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: wz_session_core::multicast_params::zid_vec(zid),
+        zid,
         lease_ms: 5_000,
         join_interval_ms: 1,
         seq_num_res: 0x02,

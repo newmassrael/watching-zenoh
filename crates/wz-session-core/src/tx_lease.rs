@@ -307,6 +307,8 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
 }
 
 impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         self.len
     }

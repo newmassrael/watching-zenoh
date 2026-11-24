@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    HeldKey, KeyAsk, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys, SubscriberSink, WireKey,
+    HeldKey, KeyAsk, KeyHolds, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::key_arena::block_bytes;
 use wz_session_core::limit_binding::Quota;

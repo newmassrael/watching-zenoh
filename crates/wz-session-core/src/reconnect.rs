@@ -32,7 +32,9 @@
 
 use alloc::string::String;
 
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, TxSlot, TxSlotGrant};
+use crate::link::{
+    BoxedLinkDriver, LinkDropCause, LinkSendOutcome, SessionRuntime, TxSlot, TxSlotGrant,
+};
 use crate::locator::{AnyLocator, ParsedLocator, Proto};
 use crate::reliability::Reliability;
 use crate::send_declare_error::SendDeclareError;
@@ -450,7 +452,8 @@ impl DeclarationCache {
     pub fn record(&mut self, entry: CachedDeclaration) -> crate::replay_cursor::Insertion {
         let place = self.entries.len();
         self.entries.push(entry);
-        self.generation += 1;
+        // Read for change only, so a wrap after 2^64 changes would still read as one.
+        self.generation = self.generation.wrapping_add(1);
         match &mut self.replay {
             Some(cursor) => {
                 let insertion = cursor.inserted(place);
@@ -475,7 +478,7 @@ impl DeclarationCache {
             return crate::replay_cursor::Removal::Retract;
         };
         self.entries.remove(place);
-        self.generation += 1;
+        self.generation = self.generation.wrapping_add(1);
         match &mut self.replay {
             Some(cursor) => {
                 let removal = cursor.removed(place);
@@ -554,35 +557,39 @@ impl<S> Default for LentSlots<S> {
 }
 
 impl<S: Clone> LentSlots<S> {
-    /// Remember that `sink` lent `inner`, and name it for the session.
-    fn record(&mut self, sink: S, inner: TxSlot) -> TxSlot {
-        let number = match self.free.pop() {
-            Some(number) => number,
-            None => {
-                self.entries.push(None);
-                (self.entries.len() - 1) as u32
-            }
-        };
-        self.entries[number as usize] = Some((sink, inner));
-        TxSlot(number)
+    /// Remember that `sink` lent `inner`, and name it for the session. `sink` comes back
+    /// when no number is left to name it by, and the caller gives the slot back to it.
+    fn record(&mut self, sink: S, inner: TxSlot) -> Result<TxSlot, S> {
+        match self.free.pop() {
+            Some(number) => match self.entries.get_mut(number as usize) {
+                Some(place) => {
+                    *place = Some((sink, inner));
+                    Ok(TxSlot(number))
+                }
+                None => Err(sink),
+            },
+            None => match u32::try_from(self.entries.len()) {
+                Ok(number) => {
+                    self.entries.push(Some((sink, inner)));
+                    Ok(TxSlot(number))
+                }
+                Err(_) => Err(sink),
+            },
+        }
     }
 
-    /// The sink and its own number for a slot still outstanding. A number this
-    /// seam never gave, or already settled, is a contract violation by the
-    /// caller and fails loudly.
-    fn lookup(&self, outer: TxSlot) -> (S, TxSlot) {
-        self.entries[outer.0 as usize]
-            .clone()
-            .expect("a slot the session names is a slot this seam lent")
+    /// The sink and its own number for a slot still outstanding, or `None` for a number
+    /// this seam never gave or has settled, which the caller answers as a link that
+    /// lent nothing.
+    fn lookup(&self, outer: TxSlot) -> Option<(S, TxSlot)> {
+        self.entries.get(outer.0 as usize)?.clone()
     }
 
     /// [`Self::lookup`] and release the number: the slot is settled.
-    fn settle(&mut self, outer: TxSlot) -> (S, TxSlot) {
-        let entry = self.entries[outer.0 as usize]
-            .take()
-            .expect("a slot the session names is a slot this seam lent");
+    fn settle(&mut self, outer: TxSlot) -> Option<(S, TxSlot)> {
+        let entry = self.entries.get_mut(outer.0 as usize)?.take()?;
         self.free.push(outer.0);
-        entry
+        Some(entry)
     }
 }
 
@@ -761,7 +768,13 @@ where
         // On a clone, outside the swap lock, as `wait_for_room` does.
         let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
         let grant = R::link_driver(&sink).tx_slot_acquire(want, priority)?;
-        let slot = R::with_mutex_mut(&self.lent, |lent| lent.record(sink, grant.slot));
+        let slot = match R::with_mutex_mut(&self.lent, |lent| lent.record(sink, grant.slot)) {
+            Ok(slot) => slot,
+            Err(sink) => {
+                R::link_driver(&sink).tx_slot_abort(grant.slot);
+                return None;
+            }
+        };
         Some(TxSlotGrant {
             slot,
             headroom: grant.headroom,
@@ -769,8 +782,10 @@ where
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
-        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.lookup(slot));
-        R::link_driver(&sink).tx_slot_storage(inner)
+        match R::with_mutex_mut(&self.lent, |lent| lent.lookup(slot)) {
+            Some((sink, inner)) => R::link_driver(&sink).tx_slot_storage(inner),
+            None => (core::ptr::null_mut(), 0),
+        }
     }
 
     fn tx_slot_send(
@@ -781,13 +796,18 @@ where
         reliability: Reliability,
         priority: crate::qos::Priority,
     ) -> LinkSendOutcome {
-        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.settle(slot));
-        R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+        match R::with_mutex_mut(&self.lent, |lent| lent.settle(slot)) {
+            Some((sink, inner)) => {
+                R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+            }
+            None => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
-        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.settle(slot));
-        R::link_driver(&sink).tx_slot_abort(inner)
+        if let Some((sink, inner)) = R::with_mutex_mut(&self.lent, |lent| lent.settle(slot)) {
+            R::link_driver(&sink).tx_slot_abort(inner);
+        }
     }
 
     fn tx_slot_spare(&self) -> bool {
@@ -1041,7 +1061,14 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn tx_slot_acquire(&self, want: usize, priority: crate::qos::Priority) -> Option<TxSlotGrant> {
         let sink = self.inner.borrow().clone();
         let grant = R::link_driver(&sink).tx_slot_acquire(want, priority)?;
-        let slot = self.lent.borrow_mut().record(sink, grant.slot);
+        let recorded = self.lent.borrow_mut().record(sink, grant.slot);
+        let slot = match recorded {
+            Ok(slot) => slot,
+            Err(sink) => {
+                R::link_driver(&sink).tx_slot_abort(grant.slot);
+                return None;
+            }
+        };
         Some(TxSlotGrant {
             slot,
             headroom: grant.headroom,
@@ -1049,8 +1076,12 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
-        let (sink, inner) = self.lent.borrow().lookup(slot);
-        R::link_driver(&sink).tx_slot_storage(inner)
+        // The borrow ends with the statement, before the link is asked.
+        let lent = self.lent.borrow().lookup(slot);
+        match lent {
+            Some((sink, inner)) => R::link_driver(&sink).tx_slot_storage(inner),
+            None => (core::ptr::null_mut(), 0),
+        }
     }
 
     fn tx_slot_send(
@@ -1061,13 +1092,20 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         reliability: Reliability,
         priority: crate::qos::Priority,
     ) -> LinkSendOutcome {
-        let (sink, inner) = self.lent.borrow_mut().settle(slot);
-        R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+        let lent = self.lent.borrow_mut().settle(slot);
+        match lent {
+            Some((sink, inner)) => {
+                R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+            }
+            None => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
-        let (sink, inner) = self.lent.borrow_mut().settle(slot);
-        R::link_driver(&sink).tx_slot_abort(inner)
+        let lent = self.lent.borrow_mut().settle(slot);
+        if let Some((sink, inner)) = lent {
+            R::link_driver(&sink).tx_slot_abort(inner);
+        }
     }
 
     fn tx_slot_spare(&self) -> bool {
@@ -1507,5 +1545,33 @@ mod declaration_cache_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lent_slots_tests {
+    use super::{LentSlots, TxSlot};
+
+    /// A slot is named by the number it was recorded under until it is settled: a number never
+    /// given, or given and settled, names nothing, and a settled number is the next one given.
+    #[test]
+    fn a_number_names_its_slot_until_it_is_settled() {
+        let mut lent = LentSlots::<u8>::default();
+        let first = lent.record(1, TxSlot(10)).expect("a number is free");
+        let second = lent.record(2, TxSlot(20)).expect("a number is free");
+        assert_eq!(lent.lookup(first), Some((1, TxSlot(10))));
+        assert_eq!(
+            lent.lookup(TxSlot(7)),
+            None,
+            "a number never given names nothing"
+        );
+        assert_eq!(lent.settle(first), Some((1, TxSlot(10))));
+        assert_eq!(lent.lookup(first), None, "a settled number names nothing");
+        assert_eq!(lent.settle(first), None, "a slot is settled once");
+        let again = lent
+            .record(3, TxSlot(30))
+            .expect("the settled number is free");
+        assert_eq!(again, first, "the settled number is given again");
+        assert_eq!(lent.settle(second), Some((2, TxSlot(20))));
     }
 }

@@ -39,7 +39,7 @@ use crate::ext_chain::ChainHeaders;
 use crate::handshake_encode::{encode_close, encode_init, encode_keep_alive, encode_open};
 use crate::inbound::{parse_inbound, InboundFrame};
 use crate::parse_error::InboundParseError;
-use crate::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use crate::session_init_params::{cookie_bytes, SessionInitParams};
 use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 /// The InitAck of `wz-codecs`' `transport_messages` test: a router with zid
@@ -73,7 +73,7 @@ const UPSTREAM_OAMS: [&[u8]; 3] = [
 fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
         whatami,
-        zid: zid_bytes(zid),
+        zid: crate::session_zid::SessionZid::new(zid).expect("a 1 to 16 byte zid, not all zero"),
         // 0x0A on the wire: `seq_num_res | req_id_res << 2`.
         seq_num_res: 2,
         req_id_res: 2,
@@ -81,7 +81,7 @@ fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams
         lease_ms,
         keep_alive: crate::session_init_params::KeepAliveConf::default(),
         initial_sn: 0x1234,
-        cookie: cookie_bytes(&[0x01, 0x02, 0x03]),
+        cookie: cookie_bytes([0x01, 0x02, 0x03]),
         tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,

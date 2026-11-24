@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken};
 use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
@@ -53,14 +53,14 @@ pub(super) fn remote_get() -> QueryOptions {
 }
 
 /// Ask a get on `keyexpr` with `opts`, its legs recorded in what is returned, each holding
-/// `registration` when there is one, as a C get's callbacks hold theirs. `step`, when given, is
-/// stepped from inside each reply callback.
+/// `registration` (the get's fan, which is its registration on its token) when there is one, as a
+/// C get's callbacks hold theirs. `step`, when given, is stepped from inside each reply callback.
 pub(super) fn ask(
     engine: &Engine,
     keyexpr: &str,
     opts: &QueryOptions,
     fan: Option<&CancellableFan>,
-    registration: Option<Arc<Registration>>,
+    registration: Option<Arc<CancellableFan>>,
     step: Option<Arc<Engine>>,
 ) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
@@ -125,6 +125,47 @@ fn a_get_is_answered_and_ends_with_its_final() {
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
+/// A get that keeps the latest reply of each key holds its replies to its Final and hands each to
+/// its callback after it, from the rows it held them in, before its end: one reply on each of three
+/// keys, one of them deeper than the others. Turned red by a held reply put back in the round of
+/// deliveries, which a build that reads a reply only where it lies has no place for, and whose gate
+/// admits the room of one record where the Final releases three.
+#[test]
+fn a_latest_get_hands_each_key_it_held_after_its_final() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(
+        &router,
+        &engine,
+        Command::AnswerOnKeys(
+            "demo/m/**",
+            &["demo/m/a", "demo/m/b", "demo/m/b/c/deeper"],
+            b"v",
+        ),
+    );
+    let opts =
+        remote_get().with_consolidation(wz_session_core::query_mode::ConsolidationMode::Latest);
+    let (issued, leg) = ask(&engine, "demo/m/**", &opts, None, None, None);
+    assert_eq!(issued, Ok(1));
+    until(&engine, "the leg to end", || leg.lock().unwrap().ended);
+    let leg = leg.lock().unwrap();
+    let mut keys: Vec<&str> = leg
+        .replies
+        .iter()
+        .map(|(kind, key, payload)| {
+            assert_eq!((*kind, payload.as_slice()), (ReplyKind::Put, &b"v"[..]));
+            key.as_str()
+        })
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["demo/m/a", "demo/m/b", "demo/m/b/c/deeper"]);
+    assert_eq!(
+        engine.round_counts().held_over,
+        0,
+        "no reply was refused a place"
+    );
+}
+
 /// A get nobody answers ends at its deadline with zenoh's timeout reply, swept by the step that
 /// comes due, not one idle wait later. The CONTROL is the leg halfway: it is still open.
 #[test]
@@ -162,17 +203,16 @@ fn a_cancelled_get_ends_without_a_step() {
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let token = CancellationToken::new();
-    let (fan, registration) = register_fan(&token).expect("a fresh token registers");
-    let registration = Arc::new(registration);
+    let fan = register_fan(&token).expect("a fresh token registers");
     let (issued, leg) = ask(
         &engine,
         "demo/g/a",
         &remote_get(),
         Some(&fan),
-        Some(registration.clone()),
+        Some(fan.clone()),
         None,
     );
-    drop(registration);
+    drop(fan);
     assert_eq!(issued, Ok(1));
     assert!(
         !leg.lock().unwrap().ended,

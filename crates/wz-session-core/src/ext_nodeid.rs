@@ -82,16 +82,11 @@ pub fn sync_header_z(header: &mut u8, chain_present: bool) {
 /// terminates the chain) — zenoh's per-entry `FLAG_Z` invariant. The single
 /// owner of this normalisation for every owned ext chain.
 pub fn apply_chain_z_bits<S: ExtEntryStorage>(entries: &mut [ExtEntryOwned<S>]) {
-    if entries.is_empty() {
-        return;
-    }
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter_mut().enumerate() {
-        entry.header = if i == last {
-            entry.header & !EXT_FLAG_Z
-        } else {
-            entry.header | EXT_FLAG_Z
-        };
+    if let Some((last, before)) = entries.split_last_mut() {
+        for entry in before {
+            entry.header |= EXT_FLAG_Z;
+        }
+        last.header &= !EXT_FLAG_Z;
     }
 }
 
@@ -194,13 +189,12 @@ pub fn set_z64_ext<S: ExtEntryStorage>(
         };
         exts.get_or_insert_with(Vec::new).push(entry);
     }
-    let empty = exts.as_ref().map(|l| l.is_empty()).unwrap_or(true);
-    if empty {
+    if let Some(list) = exts.as_mut().filter(|list| !list.is_empty()) {
+        apply_chain_z_bits(list);
+        true
+    } else {
         *exts = None;
         false
-    } else {
-        apply_chain_z_bits(exts.as_mut().expect("non-empty => Some"));
-        true
     }
 }
 

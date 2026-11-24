@@ -135,7 +135,7 @@ unsafe fn index(
     payload: &[u8],
     now: u64,
 ) -> wz_ext_instance_key_t {
-    let mut out: wz_ext_instance_key_t = std::mem::zeroed();
+    let mut out = wz_ext_instance_key_t::default();
     let rc = wz_ext_instance_keyer_index(
         wz_ext_instance_keyer_loan(k),
         payload.as_ptr(),
@@ -263,7 +263,7 @@ fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
         );
         assert_eq!(kept.last, WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT);
 
-        let mut report: wz_ext_instance_key_t = std::mem::zeroed();
+        let mut report = wz_ext_instance_key_t::default();
         assert!(!wz_ext_instance_keyer_flush(
             wz_ext_instance_keyer_loan(&k),
             5_999,
@@ -378,7 +378,7 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
             wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&this), &mut instances),
             Z_ERR_NULL
         );
-        let mut out: wz_ext_instance_key_t = std::mem::zeroed();
+        let mut out = wz_ext_instance_key_t::default();
         assert_eq!(
             wz_ext_instance_keyer_index(
                 wz_ext_instance_keyer_loan(&this),
@@ -451,7 +451,7 @@ fn a_report_of_drops_is_an_event_of_the_nodes_log() {
         let mut cursor = 0u64;
         let mut found = false;
         for _ in 0..4096 {
-            let mut event: wz_ext_event_t = std::mem::zeroed();
+            let mut event = wz_ext_event_t::default();
             let mut args = [0u64; 4];
             assert_eq!(
                 wz_ext_event_read(&mut cursor, &mut event, args.as_mut_ptr(), args.len()),
@@ -553,7 +553,7 @@ mod streams {
         let mut out = vec![0u8; 64];
         let mut written = usize::MAX;
         let mut counter = u64::MAX;
-        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+        let mut key = wz_ext_instance_key_t::default();
         let rc = wz_ext_instance_keyer_protect(
             wz_ext_instance_keyer_loan(k),
             wz_ext_e2e_sender_loan(tx),
@@ -576,8 +576,8 @@ mod streams {
         frame: &[u8],
         now: u64,
     ) -> (ZResult, wz_ext_instance_key_t, wz_ext_e2e_verdict_t) {
-        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
-        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        let mut key = wz_ext_instance_key_t::default();
+        let mut verdict = wz_ext_e2e_verdict_t::default();
         let rc = wz_ext_instance_keyer_judge(
             wz_ext_instance_keyer_loan(k),
             wz_ext_e2e_receiver_loan(rx),

@@ -242,7 +242,7 @@ mod wait_parked {
             #[cfg(feature = "host-lock-sys")]
             {
                 let now = wz_host_sync::monotonic_ns();
-                (now < self.at_ns).then(|| Duration::from_nanos(self.at_ns - now))
+                (now < self.at_ns).then(|| Duration::from_nanos(self.at_ns.saturating_sub(now)))
             }
         }
     }
@@ -526,8 +526,10 @@ impl Held {
                 .with(|table| table.holds_remainder(self.handle));
             let taken = if held { 0 } else { self.send_once(part)? };
             if taken < part.len() {
+                // What the program did not take of this part: `taken` is below its length here.
+                let rest = part.get(taken..).unwrap_or_default();
                 self.transport
-                    .with(|table| table.hold_remainder(self.handle, &part[taken..]))
+                    .with(|table| table.hold_remainder(self.handle, rest))
                     .map_err(|_| AppLinkError::Full)?;
             }
         }
@@ -1629,13 +1631,13 @@ mod tests {
     use alloc::vec;
     use std::sync::Mutex;
     use wz_session_core::app_link_table::{AppLinkTable, ProgramEvent, ProgramOpen, ProgramSend};
-    use wz_session_core::app_transport::{AppPort, TableLock};
+    use wz_session_core::app_transport::{AppPort, LockedCall, TableLock};
 
     struct HostLock(Mutex<AppLinkTable>);
 
     impl TableLock for HostLock {
-        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-            f(&mut self.0.lock().unwrap());
+        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+            f(&mut self.0.lock().unwrap())
         }
     }
 

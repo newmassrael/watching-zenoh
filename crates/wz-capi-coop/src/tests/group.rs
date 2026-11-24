@@ -20,7 +20,9 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
+use wz_session_core::app_transport::{
+    AppPort, AppTransport, LockedCall, SessionTransport, TableLock,
+};
 use wz_session_core::locality::Locality;
 use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
@@ -171,8 +173,8 @@ impl AppPort for MemberStack {
 struct Table(Mutex<AppLinkTable>);
 
 impl TableLock for Table {
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-        f(&mut self.0.lock().unwrap());
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+        f(&mut self.0.lock().unwrap())
     }
 }
 
@@ -485,7 +487,7 @@ mod asked {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{
-        HeldQuery, QueryCallback, QueryHolder, Refusal, ReplyCallback, SessionDrive, SessionEngine,
+        HeldQuery, QueryHolder, QueryableSink, Refusal, ReplyCallback, SessionDrive, SessionEngine,
         WireKey,
     };
     use wz_session_core::locality::Locality;
@@ -548,12 +550,14 @@ mod asked {
                 false,
                 Locality::Remote,
                 None,
-                Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-                    Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         out.reply_keyed(query.keyexpr(), payload)
                             .expect("a reply on the query's own key");
-                    }) as QueryCallback
-                }),
+                    },
+                ),
             )
             .expect("the engine has queryables in this build");
     }
@@ -620,12 +624,13 @@ mod asked {
                 false,
                 Locality::Remote,
                 None,
-                Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                    let slot = Arc::clone(&slot);
-                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          _out: &mut dyn ReplyOut,
+                          holder: &dyn QueryHolder| {
                         *slot.lock().unwrap() = Some(holder.hold_query(query));
-                    }) as QueryCallback
-                }),
+                    },
+                ),
             )
             .expect("the engine has queryables in this build");
         until_members_know_each_other(&first, &second);
@@ -822,7 +827,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -1918,7 +1923,7 @@ mod in_place {
     use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
     use wz_session_core::limits::SessionLimits;
     use wz_session_core::multicast_join::encode_join;
-    use wz_session_core::multicast_params::{zid_vec, GroupJoinRule, MulticastParams};
+    use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::push_build::build_push_literal;
     use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
@@ -1932,7 +1937,7 @@ mod in_place {
         let policy = SessionPolicy::defaults();
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid_vec(&[member; 4]),
+            zid: wz_session_core::session_zid::SessionZid::from_array([member; 4]),
             lease_ms: 10_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,
@@ -2124,11 +2129,15 @@ mod in_place {
                 &mut dispatcher,
                 &mut reasm,
                 &local,
-                &datagram,
-                from,
-                1_000,
-                resume,
-                true,
+                wz_session_core::multicast_rx::GroupDatagram {
+                    bytes: &datagram,
+                    src: from,
+                    now_ms: 1_000,
+                },
+                wz_session_core::multicast_rx::GroupWalk {
+                    resume,
+                    may_stop: true,
+                },
                 host,
                 &(),
             )
@@ -2166,11 +2175,15 @@ mod in_place {
             &mut dispatcher,
             &mut reasm,
             &local,
-            &datagram,
-            from,
-            1_000,
-            None,
-            false,
+            wz_session_core::multicast_rx::GroupDatagram {
+                bytes: &datagram,
+                src: from,
+                now_ms: 1_000,
+            },
+            wz_session_core::multicast_rx::GroupWalk {
+                resume: None,
+                may_stop: false,
+            },
             &mut whole,
             &(),
         );

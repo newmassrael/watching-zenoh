@@ -4619,8 +4619,10 @@ fn admin_session_of_peer_files_the_row_under_the_named_peer() {
     *actions
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") =
-        Some(wz_session_core::session_init_params::zid_bytes(&peer));
+        .expect("remote_peer_zid poisoned in test fixture") = Some(
+        wz_session_core::session_zid::SessionZid::new(&peer)
+            .expect("a 1 to 16 byte zid, not all zero"),
+    );
     let row = actions
         .admin_session_of_peer()
         .expect("a named peer is a transport");
@@ -13592,6 +13594,72 @@ fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
     drop(control);
 }
 
+/// A matching listener's watch holds its publisher's key in place: on a key longer than it holds
+/// the listener is refused before anything is registered or emitted, while the poll of the same
+/// publisher, which keeps no key, still answers.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn a_publisher_matching_listener_past_the_watch_key_bound_is_refused() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let long = format!(
+        "home/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let pubr = session.declare_publisher(long, PublishOptions::put());
+    let frames = driver.frame_count();
+    assert_eq!(
+        pubr.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::KeyexprTooLong)
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.remote_subscribers.matching_listener_len()),
+        0,
+        "no watch is registered"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    assert!(
+        !pubr.get_matching_status().matching,
+        "the poll answers over the borrowed key"
+    );
+}
+
+/// The querier's twin of the publisher's refusal above.
+#[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+#[test]
+fn a_querier_matching_listener_past_the_watch_key_bound_is_refused() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let long = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let querier = session.declare_querier(long, QueryOptions::default());
+    let frames = driver.frame_count();
+    assert_eq!(
+        querier.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::KeyexprTooLong)
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.remote_queryables.matching_listener_len()),
+        0,
+        "no watch is registered"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    assert!(
+        !querier.get_matching_status().matching,
+        "the poll answers over the borrowed key"
+    );
+}
+
 /// The querier's twin of the publisher's refusal above.
 #[cfg(all(
     feature = "session-matching",
@@ -17615,8 +17683,10 @@ fn told_by_a_named_peer(peer: &[u8]) -> Vec<DeclEvent> {
         .actions()
         .remote_peer_zid
         .lock()
-        .expect("remote_peer_zid poisoned in test fixture") =
-        Some(wz_session_core::session_init_params::zid_bytes(peer));
+        .expect("remote_peer_zid poisoned in test fixture") = Some(
+        wz_session_core::session_zid::SessionZid::new(peer)
+            .expect("a 1 to 16 byte zid, not all zero"),
+    );
     let seen = Arc::new(Mutex::new(Vec::<DeclEvent>::new()));
     let writer = seen.clone();
     let listener = session

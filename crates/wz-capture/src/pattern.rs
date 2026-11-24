@@ -44,16 +44,14 @@ impl Eq for Pattern {}
 
 /// Why a pattern did not compile.
 ///
-/// Each build constructs one of the two: a build with the engine never refuses
-/// for want of one, and a build without it never compiles a text it could
-/// refuse. Both stay declared so the one `match` over them reads the same in
-/// either build.
+/// Each build has the one it makes: a build with the engine never refuses for
+/// want of one, and a build without it never compiles a text it could refuse.
 pub(crate) enum PatternRefusal {
     /// The build has no engine (`filter-regex` is off).
-    #[cfg_attr(feature = "filter-regex", allow(dead_code))]
+    #[cfg(not(feature = "filter-regex"))]
     Unsupported,
     /// The engine refused the text; its own words.
-    #[cfg_attr(not(feature = "filter-regex"), allow(dead_code))]
+    #[cfg(feature = "filter-regex")]
     Invalid(String),
 }
 

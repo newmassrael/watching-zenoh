@@ -36,6 +36,7 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL, Z_OK,
 };
+use crate::sized::{Out, SizedOut};
 
 #[cfg(any(
     feature = "e2e-sender",
@@ -78,10 +79,14 @@ pub struct wz_ext_moved_message_catalog_t {
     pub(crate) _this: wz_ext_owned_message_catalog_t,
 }
 
-/// One message's entry, as C reads it. A number whose `has` bit is clear is 0.
+/// One message's entry, as C reads it, written into a struct the program sized (`crate::sized`).
+/// A number whose `has` bit is clear is 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct wz_ext_message_entry_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// The literal key the message is put on, NUL-terminated, valid while the catalog lives.
     pub key_expr: *const c_char,
     /// Its id.
@@ -102,8 +107,10 @@ pub struct wz_ext_message_entry_t {
 }
 
 impl Default for wz_ext_message_entry_t {
+    /// No entry, in a struct of this build's size.
     fn default() -> Self {
         Self {
+            struct_size: core::mem::size_of::<Self>(),
             key_expr: core::ptr::null(),
             id: 0,
             period_ms: 0,
@@ -115,6 +122,11 @@ impl Default for wz_ext_message_entry_t {
             reserved: 0,
         }
     }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_message_entry_t {
+    const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// What a catalog handle holds: the catalog, and each message's key as a C string.
@@ -336,13 +348,14 @@ pub unsafe extern "C" fn wz_ext_message_catalog_node(
     })
 }
 
-/// The entry of message `index`, written to `out`, which is zeroed on every error.
+/// The entry of message `index`, written to `out`, which is zeroed on every error but a short one.
 ///
 /// Returns `Z_OK`; `Z_ERR_INVALID` for a message the catalog does not have; `Z_ERR_NULL` for a
-/// null argument or the gravestone.
+/// null argument or the gravestone; `Z_EINVAL` for a `struct_size` short of the struct, nothing
+/// written then.
 ///
 /// # Safety
-/// `this_` is null or a loaned catalog; `out` is null or writable.
+/// `this_` is null or a loaned catalog; `out` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_message_catalog_entry(
     this_: *const wz_ext_loaned_message_catalog_t,
@@ -350,10 +363,11 @@ pub unsafe extern "C" fn wz_ext_message_catalog_entry(
     out: *mut wz_ext_message_entry_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
-        *out = wz_ext_message_entry_t::default();
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
+        out.put(&wz_ext_message_entry_t::default());
         let Some(held) = held(this_) else {
             return Z_ERR_NULL;
         };
@@ -395,7 +409,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_entry(
             has |= WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE;
         }
         entry.has = has;
-        *out = entry;
+        out.put(&entry);
         Z_OK
     })
 }
@@ -743,4 +757,22 @@ pub unsafe extern "C" fn wz_ext_internal_message_catalog_check(
     this_: *const wz_ext_owned_message_catalog_t,
 ) -> bool {
     guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An entry is refused, untouched, to a struct a byte short of its own, before the catalog is
+    /// read. Turned red by a write before the size is read.
+    #[test]
+    fn an_entry_short_of_its_struct_is_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_message_entry_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size; no catalog is named.
+                unsafe { wz_ext_message_catalog_entry(core::ptr::null(), 0, out) }
+            },
+            Z_EINVAL,
+        );
+    }
 }

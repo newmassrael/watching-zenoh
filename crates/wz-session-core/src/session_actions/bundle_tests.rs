@@ -23,10 +23,10 @@ use wz_codecs::whatami::WhatAmI;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 use super::SessionLinkActions;
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime};
+use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, ShareValues};
 use crate::reliability::Reliability;
 use crate::session_init_params::{
-    cookie_bytes, zid_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+    cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 
 /// A runtime whose locks are std's and that runs no task: the bundle's tests call it from the
@@ -94,16 +94,18 @@ impl crate::entropy::EntropySource for NoEntropy {
     }
 }
 
+impl ShareValues for PlainRuntime {
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Arc::new(value)
+    }
+}
+
 impl SessionRuntime for PlainRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
     type Driver = dyn BoxedLinkDriver;
     type Shared<U> = Arc<U>;
     type IterationWork = ();
     type EntropyDraw = NoEntropy;
-
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
-    }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
@@ -178,14 +180,14 @@ impl BoxedLinkDriver for CountingLink {
 fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[0x51; 4]),
+        zid: crate::session_zid::SessionZid::from_array([0x51; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::default(),
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
@@ -215,7 +217,7 @@ mod action_trace {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
-    use super::{bundle, PlainRuntime, StillClock};
+    use super::{bundle, NoEntropy, PlainRuntime, StillClock};
     use crate::close_reason::CloseReason;
     use crate::session_actions::SessionActionsBinding;
     use crate::session_fsm_unicast::SessionFsmUnicastActions;
@@ -483,4 +485,28 @@ mod handshake_records {
             "no lease is taken from an OpenSyn that was only read"
         );
     }
+}
+
+/// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
+/// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
+/// message, and the send answers that as a value.
+#[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+#[test]
+fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
+    let (actions, link) = bundle();
+    let long = "k".repeat(usize::from(u16::MAX) + 1);
+    let key = crate::named_key::NamedKey::literal(&long).expect("a key");
+    let sent =
+        actions.send_plain_put_qos(key, b"v", None, true, false, crate::qos::Priority::DEFAULT);
+    assert_eq!(
+        sent,
+        Some(Err(crate::send_wire_error::SendWireError::Codec(
+            sce_forge_runtime::codec::CodecError::LengthOutOfRange
+        )))
+    );
+    assert_eq!(
+        link.written.load(Ordering::SeqCst),
+        0,
+        "nothing was written"
+    );
 }

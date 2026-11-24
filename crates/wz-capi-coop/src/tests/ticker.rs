@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine, Tick, WireKey};
+use wz_capi_port::{SessionDrive, SessionEngine, Tick, Tickers, WireKey};
 use wz_session_core::publish_options::PublishOptions;
 
 use super::{open, until, CatchAll, Router};

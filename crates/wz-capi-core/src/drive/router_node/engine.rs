@@ -160,6 +160,41 @@ fn plane_of(plane: FilterPlane) -> MatchPlane {
     }
 }
 
+impl wz_capi_port::KeyHolds for RouterState {
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
+    /// here and there is nothing to count.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+}
+
+impl wz_capi_port::Tickers for RouterState {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
+        // of its own, so a host with no thread left to give holds no more of them.
+        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
+            .ok_or(Refusal::TableFull)?;
+        let id = self.engine.local_id();
+        self.engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, job);
+        Ok(id)
+    }
+
+    fn stop_ticker(&self, id: TickerId) {
+        // Dropped outside the lock: the job's tick may be what called in.
+        let job = self
+            .engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        drop(job);
+    }
+}
+
 impl SessionEngine for RouterState {
     fn is_closed(&self) -> bool {
         RouterState::is_closed(self)
@@ -304,11 +339,6 @@ impl SessionEngine for RouterState {
         Err(Refusal::NotBuilt)
     }
 
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-
-    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
-    /// here and there is nothing to count.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -325,7 +355,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -340,7 +370,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -436,11 +466,18 @@ impl SessionEngine for RouterState {
     ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        // The node's queries are held through the node itself, which the one sink is called with.
+        let holder = self.query_holder();
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
             allowed_origin,
-            Box::new(sink(self.query_holder())),
+            Box::new(
+                move |query: &dyn wz_session_core::query_sink::QueryView,
+                      out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                    sink.call(query, out, &*holder);
+                },
+            ),
         );
         self.engine
             .queryables
@@ -546,7 +583,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -582,7 +619,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -634,37 +671,14 @@ impl SessionEngine for RouterState {
         let id = face.tokens_get_id();
         let cancel_face = Arc::clone(&face);
         // A fan already cancelled issues no leg: the get is over, having asked nobody.
-        if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
+        if fan.is_some_and(|fan| {
+            !crate::fan_undo::record(fan, Box::new(move || cancel_face.end_tokens_get(id)))
+        }) {
             return Ok(0);
         }
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
         face.get_tokens(id, keyexpr, on_key, on_final);
         Ok(1)
-    }
-
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
-        // of its own, so a host with no thread left to give holds no more of them.
-        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
-            .ok_or(Refusal::TableFull)?;
-        let id = self.engine.local_id();
-        self.engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, job);
-        Ok(id)
-    }
-
-    fn stop_ticker(&self, id: TickerId) {
-        // Dropped outside the lock: the job's tick may be what called in.
-        let job = self
-            .engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-        drop(job);
     }
 }
 

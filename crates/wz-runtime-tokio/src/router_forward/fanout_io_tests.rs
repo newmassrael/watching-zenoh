@@ -177,9 +177,10 @@ fn face_over(sender: &Arc<SenderWrite>, peer: Zid) -> (Arc<SessionLinkActions>, 
     ));
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
-        *s = Some(wz_session_core::session_init_params::zid_bytes(
-            peer.as_slice(),
-        ))
+        *s = Some(
+            wz_session_core::session_zid::SessionZid::new(peer.as_slice())
+                .expect("a 1 to 16 byte zid, not all zero"),
+        )
     });
     TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(0b10));
     (actions, rx)

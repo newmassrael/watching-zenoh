@@ -185,15 +185,20 @@ where
             let row = match self.declared.iter().position(|(done, _)| *done == key) {
                 Some(row) => row,
                 None => {
+                    let row = self.declared.len();
                     self.declared.push((key, 0));
-                    self.declared.len() - 1
+                    row
                 }
             };
-            let sent = &mut self.declared[row].1;
-            while *sent < self.declarations.len()
-                && declare_one(actions, *sent, &self.declarations[*sent])
-            {
-                *sent += 1;
+            let Some((_, sent)) = self.declared.get_mut(row) else {
+                continue;
+            };
+            for (index, declaration) in self.declarations.iter().enumerate().skip(*sent) {
+                if !declare_one(actions, index, declaration) {
+                    break;
+                }
+                // One past a place in the list, which is no longer than memory holds.
+                *sent = index.saturating_add(1);
             }
         }
     }

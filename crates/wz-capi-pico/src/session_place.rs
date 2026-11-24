@@ -1,47 +1,74 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The place a session's handle lies in on the cooperative engine: a span of the session's own
-//! arena, which the open reserves with the rest of the session (`wz_capi_coop::arena::HandlePlace`),
-//! so the handle takes no memory of its own and an open whose arena cannot hold it opens nothing.
+//! The place a session's handle lies in. On the cooperative engine it is a span of the session's
+//! own arena, which the open reserves with the rest of the session
+//! (`wz_capi_coop::arena::HandlePlace`), so the handle takes no memory of its own and an open whose
+//! arena cannot hold it opens nothing; on the tokio engine it is the session's object slot.
 //!
-//! A word beside the handle says whether the place still holds it. `z_session_drop` clears the
+//! Beside the handle lies what stays in the place after the handle is let go of (the count of the
+//! closures the session answers for, which a closure let go of after the handle still tells), and
+//! a word that says whether the place still holds the handle. `z_session_drop` clears the
 //! word and moves the handle out before letting it go, so a copy of the owned session kept past the
 //! drop finds the place vacant and is refused rather than read. The place stands as long as the
 //! session's memory does, which an entity declared on the session keeps standing; a copy kept past
 //! the session's last holder names memory the program has let go, as a copy of zenoh-pico's own
 //! owned session does.
 
+// A place of the cooperative engine's arena is asked for by its layout and handed as an address.
+#[cfg(not(feature = "engine-tokio"))]
 use core::alloc::Layout;
 use core::mem::MaybeUninit;
+#[cfg(not(feature = "engine-tokio"))]
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// A value of `T` in a place it does not own, and whether the place still holds it.
+/// A value of `T` in a place it does not own, whether the place still holds it, and what stays in
+/// the place, `S`, once the value is taken out.
 #[repr(C)]
-pub(crate) struct HeldPlace<T> {
+pub(crate) struct HeldPlace<T, S = ()> {
     held: AtomicBool,
     value: MaybeUninit<T>,
+    beside: S,
 }
 
-impl<T> HeldPlace<T> {
-    /// The layout the place is asked for.
+impl<T, S> HeldPlace<T, S> {
+    /// The layout the place is asked for, of the cooperative engine's arena.
+    #[cfg(not(feature = "engine-tokio"))]
     pub(crate) const LAYOUT: Layout = Layout::new::<Self>();
 
-    /// Write `value` into the place at `at`, which holds it from then on, and answer the place.
+    /// Write `value` into the place at `at`, which holds it from then on, with `beside` beside
+    /// it, and answer the place.
     ///
     /// # Safety
     /// `at` is valid for writes of [`Self::LAYOUT`], aligned to it, and holds no live value.
-    pub(crate) unsafe fn fill(at: NonNull<u8>, value: T) -> *mut Self {
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(crate) unsafe fn fill(at: NonNull<u8>, value: T, beside: S) -> *mut Self {
         let place = at.cast::<Self>().as_ptr();
         // SAFETY: the caller's contract.
         unsafe {
             place.write(Self {
                 held: AtomicBool::new(true),
                 value: MaybeUninit::new(value),
+                beside,
             })
         };
         place
+    }
+
+    /// A place that holds `value`, with `beside` beside it, for a slot to be filled with.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) fn holding(value: T, beside: S) -> Self {
+        Self {
+            held: AtomicBool::new(true),
+            value: MaybeUninit::new(value),
+            beside,
+        }
+    }
+
+    /// What lies beside the value, whether the place still holds it or not.
+    pub(crate) fn beside(&self) -> &S {
+        &self.beside
     }
 
     /// The value, while the place holds it.
@@ -73,7 +100,7 @@ impl<T> HeldPlace<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "engine-tokio")))]
 mod tests {
     use super::HeldPlace;
     use core::cell::Cell;
@@ -97,7 +124,7 @@ mod tests {
         let mut memory = MaybeUninit::<HeldPlace<Counted<'_>>>::uninit();
         let at = NonNull::from(&mut memory).cast::<u8>();
         // SAFETY: `memory` is a place of the layout, aligned, holding nothing.
-        let place = unsafe { HeldPlace::fill(at, Counted(&drops)) };
+        let place = unsafe { HeldPlace::fill(at, Counted(&drops), ()) };
         let copy = place;
         // SAFETY: the place's memory is `memory`, which stands for the whole test.
         unsafe {
@@ -113,11 +140,31 @@ mod tests {
         assert_eq!(drops.get(), 1, "the value is dropped once");
     }
 
-    /// The place's layout holds the value and the word beside it.
+    /// The place's layout holds the value, the word beside it and what stays.
     #[test]
     fn a_places_layout_holds_its_value() {
         let layout = HeldPlace::<[u64; 3]>::LAYOUT;
         assert!(layout.size() > core::mem::size_of::<[u64; 3]>());
         assert!(layout.align() >= core::mem::align_of::<[u64; 3]>());
+        let with_beside = HeldPlace::<[u64; 3], u64>::LAYOUT;
+        assert!(with_beside.size() >= layout.size() + core::mem::size_of::<u64>());
+    }
+
+    /// What lies beside the value stays in the place after the value is taken out.
+    #[test]
+    fn what_lies_beside_the_value_stays_after_its_take() {
+        let drops = Cell::new(0);
+        let mut memory = MaybeUninit::<HeldPlace<Counted<'_>, u32>>::uninit();
+        let at = NonNull::from(&mut memory).cast::<u8>();
+        // SAFETY: `memory` is a place of the layout, aligned, holding nothing, and stands for the
+        // whole test.
+        unsafe {
+            let place = HeldPlace::fill(at, Counted(&drops), 7);
+            assert_eq!(*(*place).beside(), 7);
+            drop(HeldPlace::take(place).expect("the value is taken"));
+            assert!((*place).held().is_none());
+            assert_eq!(*(*place).beside(), 7, "what lies beside stays");
+        }
+        assert_eq!(drops.get(), 1);
     }
 }

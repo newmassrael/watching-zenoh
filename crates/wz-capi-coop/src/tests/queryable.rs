@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_capi_port::{HeldQuery, QueryCallback, QueryHolder, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{HeldQuery, QueryHolder, QueryableSink, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
@@ -19,9 +19,8 @@ use super::{open, until, CatchAll, Command, Engine, Router};
 fn declare(
     engine: &Engine,
     keyexpr: &str,
-    answer: impl Fn(&Arc<dyn QueryHolder>, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
+    answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
 ) {
-    let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -29,12 +28,7 @@ fn declare(
             false,
             Locality::Remote,
             None,
-            Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                let answer = answer.clone();
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    answer(&holder, query, out)
-                }) as QueryCallback
-            }),
+            QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build");
 }

@@ -96,7 +96,7 @@ pub const ARM: &[(&str, &[&str])] = &[
 /// Each limit, the environment name a build states it by, and its default.
 pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_KEYEXPR_BYTES", "WZ_LIMIT_MAX_KEYEXPR_BYTES", 256),
-    ("KEY_ARENA_BYTES", "WZ_LIMIT_KEY_ARENA_BYTES", 97152),
+    ("KEY_ARENA_BYTES", "WZ_LIMIT_KEY_ARENA_BYTES", 11984),
     ("MAX_SUBSCRIPTIONS", "WZ_LIMIT_MAX_SUBSCRIPTIONS", 100),
     ("MATCH_MEMO_SLOTS", "WZ_LIMIT_MATCH_MEMO_SLOTS", 8),
     (
@@ -128,6 +128,12 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "MAX_MATCHING_LISTENERS",
         "WZ_LIMIT_MAX_MATCHING_LISTENERS",
         16,
+    ),
+    ("MAX_DECL_WATCHES", "WZ_LIMIT_MAX_DECL_WATCHES", 4),
+    (
+        "MAX_TRANSPORT_EVENTS_LISTENERS",
+        "WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS",
+        4,
     ),
     (
         "MAX_DECLARED_KEYEXPRS",
@@ -197,6 +203,21 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_TASKS", "WZ_LIMIT_MAX_TASKS", 16),
     ("MAX_TIMERS", "WZ_LIMIT_MAX_TIMERS", 16),
     ("MAX_TICKERS", "WZ_LIMIT_MAX_TICKERS", 16),
+    (
+        "ADVANCED_CACHE_BYTES",
+        "WZ_LIMIT_ADVANCED_CACHE_BYTES",
+        1712,
+    ),
+    (
+        "MAX_ADVANCED_PUBLISHERS",
+        "WZ_LIMIT_MAX_ADVANCED_PUBLISHERS",
+        8,
+    ),
+    (
+        "MAX_ADVANCED_SUBSCRIBERS",
+        "WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS",
+        8,
+    ),
     ("MAX_LOCATOR_LEN", "WZ_LIMIT_MAX_LOCATOR_LEN", 64),
     ("MAX_STATIC_CONNECT", "WZ_LIMIT_MAX_STATIC_CONNECT", 8),
     ("MAX_PEER_NODES", "WZ_LIMIT_MAX_PEER_NODES", 0),

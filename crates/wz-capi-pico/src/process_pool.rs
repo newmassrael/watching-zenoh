@@ -31,7 +31,8 @@
 //! the reservation is made before any session opens. The build's counts are `HELD_SESSIONS`
 //! sessions, each holding as many entities as the session limits the library opens under admit
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
-//! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`), `HELD_SAMPLES`, `HELD_REPLIES`,
+//! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`, and for the gets it holds pending
+//! `MAX_PENDING_QUERIES` and `MAX_PENDING_LIVELINESS_GETS`), `HELD_SAMPLES`, `HELD_REPLIES`,
 //! `HELD_QUERIES`, `HELD_PAYLOADS` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
 //! configs, `HELD_HELLOS` kept hellos and `HELD_PAYLOAD_BYTES` bytes of payload. A program that states its
 //! own counts reserves them before its first object through the doors instead.
@@ -106,6 +107,20 @@ pub(crate) struct Counts {
     pub(crate) payload_bytes: usize,
     /// Owned encodings, each with room for a schema of `MAX_ENCODING_SCHEMA_BYTES`.
     pub(crate) encodings: usize,
+    /// Gets each session holds pending, its queriers' among them.
+    pub(crate) gets: usize,
+    /// Liveliness gets each session holds pending.
+    pub(crate) liveliness_gets: usize,
+    /// Matching listeners of each session, its publishers' and queriers' together.
+    pub(crate) matching_listeners: usize,
+    /// Declaration watches of each session.
+    pub(crate) decl_watches: usize,
+    /// Transport events listeners of each session.
+    pub(crate) transport_events_listeners: usize,
+    /// Advanced publishers of each session.
+    pub(crate) advanced_publishers: usize,
+    /// Advanced subscribers of each session, owned and background.
+    pub(crate) advanced_subscribers: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -175,6 +190,13 @@ pub(crate) struct Bounds {
     liveliness_subscribers: Option<usize>,
     queriers: Option<usize>,
     keyexprs: Option<usize>,
+    gets: Option<usize>,
+    liveliness_gets: Option<usize>,
+    matching_listeners: Option<usize>,
+    decl_watches: Option<usize>,
+    transport_events_listeners: Option<usize>,
+    advanced_publishers: Option<usize>,
+    advanced_subscribers: Option<usize>,
 }
 
 impl Bounds {
@@ -188,6 +210,13 @@ impl Bounds {
             liveliness_subscribers: limits.max_liveliness_subscriptions().most(),
             queriers: limits.max_queriers().most(),
             keyexprs: limits.max_declared_keyexprs().most(),
+            gets: limits.max_pending_queries().most(),
+            liveliness_gets: limits.max_pending_liveliness_gets().most(),
+            matching_listeners: limits.max_matching_listeners().most(),
+            decl_watches: limits.max_decl_watches().most(),
+            transport_events_listeners: limits.max_transport_events_listeners().most(),
+            advanced_publishers: limits.max_advanced_publishers().most(),
+            advanced_subscribers: limits.max_advanced_subscribers().most(),
         }
     }
 }
@@ -288,12 +317,57 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
         keyexprs: planned!(bounded(true, sessions, stated.keyexprs, bounds.keyexprs)),
         payload_bytes: stated.payload_bytes,
         encodings: stated.encodings,
+        gets: planned!(bounded(
+            cfg!(feature = "query"),
+            sessions,
+            stated.gets,
+            bounds.gets,
+        )),
+        liveliness_gets: planned!(bounded(
+            cfg!(feature = "liveliness-get"),
+            sessions,
+            stated.liveliness_gets,
+            bounds.liveliness_gets,
+        )),
+        matching_listeners: planned!(bounded(
+            true,
+            sessions,
+            stated.matching_listeners,
+            bounds.matching_listeners,
+        )),
+        decl_watches: planned!(bounded(
+            cfg!(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )),
+            sessions,
+            stated.decl_watches,
+            bounds.decl_watches,
+        )),
+        transport_events_listeners: planned!(bounded(
+            cfg!(feature = "connectivity"),
+            sessions,
+            stated.transport_events_listeners,
+            bounds.transport_events_listeners,
+        )),
+        advanced_publishers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_publishers,
+            bounds.advanced_publishers,
+        )),
+        advanced_subscribers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_subscribers,
+            bounds.advanced_subscribers,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 15;
+const KINDS: usize = 22;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +389,7 @@ impl Plan {
         // reserve where the doors are.
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
         {
-            plan = plan.with::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
+            plan = plan.with::<crate::session::SessionPlace>(Kind::Session, objects.sessions);
         }
         // An entity of the cooperative engine lies in its own session's arena, as many as the
         // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
@@ -324,11 +398,11 @@ impl Plan {
         {
             plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
             plan =
-                plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
+                plan.with::<crate::pubsub::SubscriberPlace>(Kind::Subscriber, objects.subscribers);
         }
         #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         {
-            plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+            plan = plan.with::<crate::query::QueryablePlace>(Kind::Queryable, objects.queryables);
         }
         #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         {
@@ -336,7 +410,7 @@ impl Plan {
                 Kind::LivelinessToken,
                 objects.liveliness_tokens,
             );
-            plan = plan.with::<crate::pubsub::SubscriberState>(
+            plan = plan.with::<crate::pubsub::SubscriberPlace>(
                 Kind::LivelinessSubscriber,
                 objects.liveliness_subscribers,
             );
@@ -358,10 +432,57 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "query"))]
         {
-            plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
+            plan = plan.with::<crate::object_slot::Answering<crate::querier::QuerierState>>(
+                Kind::Querier,
+                objects.queriers,
+            );
         }
         plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
         plan = plan.with::<crate::encoding::HeldEncoding>(Kind::Encoding, objects.encodings);
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        {
+            plan = plan.with::<crate::get::GetPlace>(Kind::Get, objects.gets);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        {
+            plan = plan.with::<crate::get::GetPlace>(Kind::LivelinessGet, objects.liveliness_gets);
+        }
+        #[cfg(feature = "engine-tokio")]
+        {
+            plan = plan.with::<crate::matching::MatchingPlace>(
+                Kind::MatchingListener,
+                objects.matching_listeners,
+            );
+        }
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        {
+            plan =
+                plan.with::<crate::decl_watch::WatchPlace>(Kind::DeclWatch, objects.decl_watches);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        {
+            plan = plan.with::<crate::connectivity::TransportPlace>(
+                Kind::TransportEventsListener,
+                objects.transport_events_listeners,
+            );
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        {
+            plan = plan.with::<crate::advanced::AdvPubState>(
+                Kind::AdvancedPublisher,
+                objects.advanced_publishers,
+            );
+            plan = plan.with::<crate::advanced::AdvSubPlace>(
+                Kind::AdvancedSubscriber,
+                objects.advanced_subscribers,
+            );
+        }
         let mut kind = 0;
         let mut holds = plan.area != 0;
         while kind < KINDS {
@@ -874,6 +995,23 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         ),
         queriers: each::<{ caps::MAX_QUERIERS }>(limits.max_queriers()),
         keyexprs: each::<{ caps::MAX_DECLARED_KEYEXPRS }>(limits.max_declared_keyexprs()),
+        gets: each::<{ caps::MAX_PENDING_QUERIES }>(limits.max_pending_queries()),
+        liveliness_gets: each::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+            limits.max_pending_liveliness_gets(),
+        ),
+        matching_listeners: each::<{ caps::MAX_MATCHING_LISTENERS }>(
+            limits.max_matching_listeners(),
+        ),
+        decl_watches: each::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches()),
+        transport_events_listeners: each::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+            limits.max_transport_events_listeners(),
+        ),
+        advanced_publishers: each::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            limits.max_advanced_publishers(),
+        ),
+        advanced_subscribers: each::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            limits.max_advanced_subscribers(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -897,6 +1035,13 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         keyexprs: 0,
         payload_bytes: caps::HELD_PAYLOAD_BYTES,
         encodings: caps::HELD_ENCODINGS,
+        gets: 0,
+        liveliness_gets: 0,
+        matching_listeners: 0,
+        decl_watches: 0,
+        transport_events_listeners: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1138,6 +1283,13 @@ mod tests {
         liveliness_subscribers: Some(5),
         queriers: Some(6),
         keyexprs: Some(7),
+        gets: Some(8),
+        liveliness_gets: Some(9),
+        matching_listeners: Some(10),
+        decl_watches: Some(11),
+        transport_events_listeners: Some(12),
+        advanced_publishers: Some(10),
+        advanced_subscribers: Some(11),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1147,6 +1299,13 @@ mod tests {
         queriers: None,
         keyexprs: None,
         liveliness_subscribers: None,
+        gets: None,
+        liveliness_gets: None,
+        matching_listeners: None,
+        decl_watches: None,
+        transport_events_listeners: None,
+        advanced_publishers: None,
+        advanced_subscribers: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1243,6 +1402,13 @@ mod tests {
             keyexprs: 1,
             payload_bytes: 11,
             encodings: 12,
+            gets: 1,
+            liveliness_gets: 1,
+            matching_listeners: 1,
+            decl_watches: 1,
+            transport_events_listeners: 1,
+            advanced_publishers: 1,
+            advanced_subscribers: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1560,7 +1726,7 @@ mod tests {
         row(
             "session",
             Kind::Session,
-            core::mem::size_of::<crate::session::PicoSessionHandle>(),
+            core::mem::size_of::<crate::session::SessionPlace>(),
         );
         row(
             "publisher",
@@ -1570,13 +1736,13 @@ mod tests {
         row(
             "subscriber",
             Kind::Subscriber,
-            core::mem::size_of::<crate::pubsub::SubscriberState>(),
+            core::mem::size_of::<crate::pubsub::SubscriberPlace>(),
         );
         #[cfg(feature = "queryable")]
         row(
             "queryable",
             Kind::Queryable,
-            core::mem::size_of::<crate::query::QueryableState>(),
+            core::mem::size_of::<crate::query::QueryablePlace>(),
         );
         #[cfg(feature = "liveliness")]
         {
@@ -1588,7 +1754,7 @@ mod tests {
             row(
                 "liveliness_subscriber",
                 Kind::LivelinessSubscriber,
-                core::mem::size_of::<crate::pubsub::SubscriberState>(),
+                core::mem::size_of::<crate::pubsub::SubscriberPlace>(),
             );
         }
         row(
@@ -1628,7 +1794,7 @@ mod tests {
         row(
             "querier",
             Kind::Querier,
-            core::mem::size_of::<crate::querier::QuerierState>(),
+            core::mem::size_of::<crate::object_slot::Answering<crate::querier::QuerierState>>(),
         );
         row(
             "keyexpr",
@@ -1639,6 +1805,54 @@ mod tests {
             "encoding",
             Kind::Encoding,
             core::mem::size_of::<crate::encoding::HeldEncoding>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        row(
+            "get",
+            Kind::Get,
+            core::mem::size_of::<crate::get::GetPlace>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        row(
+            "liveliness_get",
+            Kind::LivelinessGet,
+            core::mem::size_of::<crate::get::GetPlace>(),
+        );
+        #[cfg(feature = "engine-tokio")]
+        row(
+            "matching_listener",
+            Kind::MatchingListener,
+            core::mem::size_of::<crate::matching::MatchingPlace>(),
+        );
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        row(
+            "decl_watch",
+            Kind::DeclWatch,
+            core::mem::size_of::<crate::decl_watch::WatchPlace>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        row(
+            "transport_events_listener",
+            Kind::TransportEventsListener,
+            core::mem::size_of::<crate::connectivity::TransportPlace>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_publisher",
+            Kind::AdvancedPublisher,
+            core::mem::size_of::<crate::advanced::AdvPubState>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_subscriber",
+            Kind::AdvancedSubscriber,
+            core::mem::size_of::<crate::advanced::AdvSubPlace>(),
         );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
@@ -1819,6 +2033,26 @@ mod tests {
         check(Kind::Querier);
         check(Kind::Keyexpr);
         check(Kind::Encoding);
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        check(Kind::Get);
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        check(Kind::LivelinessGet);
+        #[cfg(feature = "engine-tokio")]
+        check(Kind::MatchingListener);
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        check(Kind::DeclWatch);
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        check(Kind::TransportEventsListener);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedPublisher);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedSubscriber);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1836,6 +2070,28 @@ mod tests {
         );
         assert_eq!(bounds.queriers, limits.max_queriers().most());
         assert_eq!(bounds.keyexprs, limits.max_declared_keyexprs().most());
+        assert_eq!(bounds.gets, limits.max_pending_queries().most());
+        assert_eq!(
+            bounds.liveliness_gets,
+            limits.max_pending_liveliness_gets().most()
+        );
+        assert_eq!(
+            bounds.matching_listeners,
+            limits.max_matching_listeners().most()
+        );
+        assert_eq!(bounds.decl_watches, limits.max_decl_watches().most());
+        assert_eq!(
+            bounds.transport_events_listeners,
+            limits.max_transport_events_listeners().most()
+        );
+        assert_eq!(
+            bounds.advanced_publishers,
+            limits.max_advanced_publishers().most()
+        );
+        assert_eq!(
+            bounds.advanced_subscribers,
+            limits.max_advanced_subscribers().most()
+        );
     }
 
     /// The free blocks of `order`, by their offsets, first to last.

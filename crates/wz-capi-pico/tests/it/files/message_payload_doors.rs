@@ -16,6 +16,7 @@
 #![cfg(feature = "message-payload")]
 
 use std::ffi::{CStr, CString};
+use std::ops::{Deref, DerefMut};
 
 use wz_capi_pico::message_catalog::*;
 use wz_capi_pico::message_payload::*;
@@ -65,6 +66,31 @@ message Pose {
 "#;
 
 type Owned = wz_ext_owned_message_payload_t;
+
+/// The values and the bytes a payload of these tests holds at once: room for every test's.
+const FIELDS: usize = 32;
+const BYTES: usize = 256;
+
+/// A payload and the program's storage it keeps its values in, which outlives it.
+#[derive(Debug)]
+struct Made {
+    payload: Owned,
+    _storage: Vec<u8>,
+}
+
+impl Deref for Made {
+    type Target = Owned;
+
+    fn deref(&self) -> &Owned {
+        &self.payload
+    }
+}
+
+impl DerefMut for Made {
+    fn deref_mut(&mut self) -> &mut Owned {
+        &mut self.payload
+    }
+}
 
 /// The text of a string slot a door wrote, which is then dropped; empty for the null state.
 unsafe fn take(out: &mut z_owned_string_t) -> String {
@@ -133,6 +159,39 @@ fn payload(
     index: usize,
     schema: &wz_ext_owned_payload_schema_t,
     message: &str,
+) -> Result<Made, (ZResult, String)> {
+    payload_holding(catalog, index, schema, message, FIELDS, BYTES)
+}
+
+/// [`payload`] in storage of `fields` values and `bytes` bytes, sized by the library.
+fn payload_holding(
+    catalog: &wz_ext_owned_message_catalog_t,
+    index: usize,
+    schema: &wz_ext_owned_payload_schema_t,
+    message: &str,
+    fields: usize,
+    bytes: usize,
+) -> Result<Made, (ZResult, String)> {
+    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(fields, bytes)];
+    let options = wz_ext_message_payload_options_t {
+        storage: storage.as_mut_ptr(),
+        storage_len: storage.len(),
+        fields,
+        bytes,
+    };
+    made_with(catalog, index, schema, message, &options).map(|payload| Made {
+        payload,
+        _storage: storage,
+    })
+}
+
+/// The payload `wz_ext_message_payload_new` makes under `options`, or the code and the reason.
+fn made_with(
+    catalog: &wz_ext_owned_message_catalog_t,
+    index: usize,
+    schema: &wz_ext_owned_payload_schema_t,
+    message: &str,
+    options: *const wz_ext_message_payload_options_t,
 ) -> Result<Owned, (ZResult, String)> {
     let message = text(message);
     unsafe {
@@ -144,6 +203,7 @@ fn payload(
             index,
             wz_ext_payload_schema_loan(schema),
             message.as_ptr(),
+            options,
             &mut refusal,
         );
         let why = take(&mut refusal);
@@ -338,6 +398,7 @@ fn a_schema_or_a_payload_that_cannot_be_made_is_refused_by_code() {
                 POSE,
                 std::ptr::null(),
                 name.as_ptr(),
+                std::ptr::null(),
                 std::ptr::null_mut()
             ),
             Z_ERR_NULL,
@@ -561,6 +622,94 @@ fn a_list_is_counted_and_an_element_cleared() {
     }
     assert_eq!(encoded(&p), Vec::<u8>::new());
     drop_payload(&mut p);
+    drop_schema(&mut s);
+    drop_catalog(&mut c);
+}
+
+/// A payload keeps its values in the storage the program sized: the storage is refused short of
+/// its size, a value past its slots or its bytes is refused with nothing changed, and bytes whose
+/// values do not fit it leave the payload empty.
+#[test]
+fn a_payload_holds_what_its_storage_was_sized_for_and_refuses_past_it() {
+    let mut c = catalog();
+    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+
+    assert_eq!(wz_ext_message_payload_storage_size(0, 0), 0);
+    assert_eq!(wz_ext_message_payload_storage_size(0, 9), 9);
+    assert!(
+        wz_ext_message_payload_storage_size(2, 9) > wz_ext_message_payload_storage_size(1, 9),
+        "each value takes room"
+    );
+    assert_eq!(
+        wz_ext_message_payload_storage_size(usize::MAX, 1),
+        0,
+        "a size past the address space"
+    );
+
+    // The storage short of its size, and no options at all, are refused with the gravestone.
+    let size = wz_ext_message_payload_storage_size(2, 8);
+    let mut short = vec![0u8; size - 1];
+    let options = wz_ext_message_payload_options_t {
+        storage: short.as_mut_ptr(),
+        storage_len: short.len(),
+        fields: 2,
+        bytes: 8,
+    };
+    let (rc, why) = made_with(&c, POSE, &s, "syn.door.Pose", &options).expect_err("refused");
+    assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
+    assert!(
+        why.contains("storage"),
+        "the sentence names the storage: {why}"
+    );
+    let (rc, _) = made_with(&c, POSE, &s, "syn.door.Pose", std::ptr::null()).expect_err("refused");
+    assert_eq!(rc, Z_ERR_NULL, "no options");
+    let no_storage = wz_ext_message_payload_options_t {
+        storage: std::ptr::null_mut(),
+        storage_len: size,
+        fields: 2,
+        bytes: 8,
+    };
+    let (rc, _) = made_with(&c, POSE, &s, "syn.door.Pose", &no_storage).expect_err("refused");
+    assert_eq!(rc, Z_ERR_NULL, "a null storage of a size");
+
+    // One slot: the second value is refused and the first is as it was.
+    let mut one = payload_holding(&c, POSE, &s, "syn.door.Pose", 1, 0).expect("made");
+    assert_eq!(set_uint(&one, "serial", 150), Z_OK);
+    assert_eq!(set_int(&one, "offset", 1), Z_ERR_OVERFLOW);
+    assert!(
+        !refusal_of(&one).is_empty(),
+        "the refusal leaves its sentence"
+    );
+    assert_eq!(get_uint(&one, "serial"), Ok(150));
+    assert_eq!(encoded(&one), [0x08, 0x96, 0x01]);
+
+    // Three bytes: a string past them is refused and the one held is kept.
+    let mut few = payload_holding(&c, POSE, &s, "syn.door.Pose", 4, 3).expect("made");
+    assert_eq!(set_string(&few, "label", "ab"), Z_OK);
+    assert_eq!(set_string(&few, "label", "abcdef"), Z_ERR_OVERFLOW);
+    assert_eq!(encoded(&few), [0x2A, 0x02, b'a', b'b']);
+
+    // Bytes of two values decoded into one slot leave the payload empty.
+    let mut wide = payload(&c, POSE, &s, "syn.door.Pose").expect("made");
+    assert_eq!(set_uint(&wide, "serial", 150), Z_OK);
+    assert_eq!(set_int(&wide, "offset", 1), Z_OK);
+    let sent = encoded(&wide);
+    assert_eq!(sent, [0x08, 0x96, 0x01, 0x10, 0x01]);
+    unsafe {
+        assert_eq!(
+            wz_ext_message_payload_decode(loan(&one), sent.as_ptr(), sent.len()),
+            Z_ERR_OVERFLOW
+        );
+    }
+    assert_eq!(
+        encoded(&one),
+        Vec::<u8>::new(),
+        "the refused decode left it empty"
+    );
+
+    drop_payload(&mut wide);
+    drop_payload(&mut few);
+    drop_payload(&mut one);
     drop_schema(&mut s);
     drop_catalog(&mut c);
 }

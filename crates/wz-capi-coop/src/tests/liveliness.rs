@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::{KeyHolds, LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
 

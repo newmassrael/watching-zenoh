@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    FilterPlane, QueryHolder, QueryableSink, ReplyCallback, SessionDrive, SessionEngine,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -250,12 +250,12 @@ fn a_query_is_answered_to_its_face_and_a_lost_face_leaves_the_other() {
             false,
             Locality::Remote,
             None,
-            Arc::new(|_: Arc<dyn QueryHolder>| {
-                Box::new(|query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     out.reply_keyed(query.keyexpr(), b"mine")
                         .expect("a reply on the query's own key");
-                }) as QueryCallback
-            }),
+                },
+            ),
         )
         .expect("the engine has queryables in this build");
     until(&engine, "both routers to see the queryable", || {

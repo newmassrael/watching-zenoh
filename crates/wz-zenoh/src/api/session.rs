@@ -1060,7 +1060,7 @@ impl Engine {
     /// (`ADMIN_QUERYABLE_COMPLETE`, after `zenoh/src/net/runtime/adminspace.rs` @
     /// `ext_info: QueryableInfoType::DEFAULT,`).
     fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
-        use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+        use wz_capi_port::{QueryHolder, QueryableSink};
         use wz_runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE;
         use wz_session_core::query_sink::{QueryView, ReplyOut};
 
@@ -1075,15 +1075,13 @@ impl Engine {
                 );
             }
             Engine::Tokio(state) => {
-                // One callback for each face, every one answering through the same handler: the
-                // answer is made inside the call, so the face's own query is never kept.
-                let sink: QueryableSink =
-                    Arc::new(move |_holder: Arc<dyn QueryHolder>| -> QueryCallback {
-                        let handler = Arc::clone(&handler);
-                        Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                            handler(view, out)
-                        })
-                    });
+                // One callback, answering through the handler: the answer is made inside the
+                // call, so the face's own query is never kept.
+                let sink = QueryableSink::shared(
+                    move |view: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| { handler(view, out) },
+                );
                 let _ = state.shared.declare_port_queryable_on_links(
                     key.to_owned(),
                     tokio_engine::wire_key_of(0, None),
@@ -1373,12 +1371,19 @@ impl Engine {
                     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
                     promotion,
                 );
-                let handler = sink(router.node.query_holder());
+                // The node's queries are held through the node itself, which the one sink is
+                // called with.
+                let holder = router.node.node_query_holder();
                 let id = router.node.forwarder().host_queryable_from(
                     key,
                     complete,
                     tokio_engine::engine_locality(origin),
-                    handler,
+                    Box::new(
+                        move |query: &dyn wz_session_core::query_sink::QueryView,
+                              out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                            sink.call(query, out, &holder);
+                        },
+                    ),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a queryable {id}, which is more than an id holds")
@@ -1468,7 +1473,7 @@ impl Engine {
     /// What stops the legs of a query that is about to be asked.
     fn new_query_fan(&self) -> Arc<QueryFan> {
         match self {
-            Engine::Tokio(_) | Engine::Router(_) => QueryFan::new(),
+            Engine::Tokio(_) | Engine::Router(_) => Arc::new(QueryFan::new()),
         }
     }
 
@@ -1557,7 +1562,7 @@ impl Engine {
                     tokio_engine::router_plane_of(kind),
                     key,
                     tokio_engine::engine_locality(destination),
-                    Box::new(move |matching| sink(matching)),
+                    Box::new(move |matching| sink.call(matching)),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a matching listener {id}, more than an id holds")
@@ -3050,9 +3055,8 @@ mod tokio_engine {
             #[cfg(all(feature = "unstable", feature = "shared-memory"))]
             promotion,
         });
-        Arc::new(move |holder: Arc<dyn QueryHolder>| {
-            let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+        QueryableSink::shared(
+            move |view: &dyn QueryView, _out: &mut dyn ReplyOut, holder: &dyn QueryHolder| {
                 let held = holder.hold_query(view);
                 match query_of(
                     view,
@@ -3067,8 +3071,8 @@ mod tokio_engine {
                     Ok(query) => delivery.ordered.deliver(query),
                     Err(error) => tracing::error!("a query could not be delivered: {error}"),
                 }
-            })
-        })
+            },
+        )
     }
 
     /// The query the engine's view of a request is, answered through `held`, its large replies
@@ -4100,7 +4104,7 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> MatchingSink {
         let ordered = Ordered::new(callback, notifier);
-        Arc::new(move |matching| ordered.deliver(MatchingStatus { matching }))
+        MatchingSink::shared(move |matching| ordered.deliver(MatchingStatus { matching }))
     }
 
     /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a

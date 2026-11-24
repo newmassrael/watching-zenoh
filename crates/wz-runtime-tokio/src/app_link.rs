@@ -39,7 +39,9 @@ use wz_session_core::app_link_table::{
 };
 #[cfg(any(feature = "transport-link-udp", feature = "transport-multicast"))]
 use wz_session_core::app_link_table::{DatagramRead, Received};
-pub use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
+pub use wz_session_core::app_transport::{
+    AppPort, AppTransport, LockedCall, SessionTransport, TableLock,
+};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::link::LinkKind;
 
@@ -59,11 +61,11 @@ impl HostTableLock {
 }
 
 impl TableLock for HostTableLock {
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
         f(&mut self
             .0
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()));
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 }
 

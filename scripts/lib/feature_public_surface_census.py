@@ -623,7 +623,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # doors inside it. Off by default, as upstream has no such doors.
         # `message-payload` gates `pub mod message_payload`, whose public items are wz's own doors
         # `wz_ext_payload_schema_new`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
-        # `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
+        # `_options_default`, `_storage_size`, `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
         # `_encode`, `_decode`, `_refusal`, `_loan`, `_move`, `_drop`, the four `wz_ext_internal_*`
         # doors of the two handles, and the types they take, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors. It and `instance-key` each gate

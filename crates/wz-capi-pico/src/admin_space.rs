@@ -63,7 +63,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use wz_capi_port::{QueryHolder, QueryRowSink, SessionEngine};
+use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine};
 use wz_session_core::face::FaceSnapshot;
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::link::LinkKind;
@@ -94,15 +94,14 @@ pub(crate) struct AdminSpaceSlot {
 /// The queryables a started admin space holds, undeclared together when it stops.
 ///
 /// Fields are held for their drop, never read.
-#[allow(dead_code)]
 struct Running {
     /// pico's own documents, at `@/<zid>/pico/**`.
-    pico: PlainQueryable,
+    _pico: PlainQueryable,
     /// wz's resource snapshot, at `wz/@/<zid>/snapshot`: under the wz-owned root and not inside
     /// pico's tree, as the hosted admin space serves its own, so a query for pico's documents
     /// meets exactly the documents pico has.
     #[cfg(feature = "resource-snapshot")]
-    snapshot: PlainQueryable,
+    _snapshot: PlainQueryable,
 }
 
 impl AdminSpaceSlot {
@@ -163,7 +162,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             session: Arc::downgrade(&handle.drive.engine()),
             identity,
         });
-        let sink = QueryRowSink::shared(
+        let sink = QueryableSink::shared(
             move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answerer.answer(query, out)
             },
@@ -181,9 +180,9 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             Err(code) => return code,
         };
         *running = Some(Running {
-            pico,
+            _pico: pico,
             #[cfg(feature = "resource-snapshot")]
-            snapshot,
+            _snapshot: snapshot,
         });
         Z_OK
     })
@@ -197,7 +196,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
 fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQueryable, ZResult> {
     let key = wz_session_core::wz_root::snapshot_key(zid);
     let declared = key.clone();
-    let sink = QueryRowSink::shared(
+    let sink = QueryableSink::shared(
         move |_query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
             // The queryable is declared on this one key, so every query it is handed reaches it.
             if let Some(body) = crate::snapshot::latest_json() {

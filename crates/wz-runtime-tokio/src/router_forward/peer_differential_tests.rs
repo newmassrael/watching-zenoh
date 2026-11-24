@@ -339,9 +339,10 @@ impl Node {
             Step::Up(id, zid_byte, wire) => {
                 let (actions, sink) = recording_actions();
                 TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
-                    *s = Some(wz_session_core::session_init_params::zid_bytes(
-                        zid(*zid_byte).as_slice(),
-                    ))
+                    *s = Some(
+                        wz_session_core::session_zid::SessionZid::new(zid(*zid_byte).as_slice())
+                            .expect("a 1 to 16 byte zid, not all zero"),
+                    )
                 });
                 TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(*wire as u8));
                 self.fwd.register(FaceId(*id), &actions);

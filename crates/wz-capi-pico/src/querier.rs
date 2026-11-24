@@ -42,7 +42,7 @@
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
 
-use wz_capi_port::cancellation::CancellationToken;
+use wz_capi_port::cancellation::{CancellationToken, TokenRef};
 use wz_capi_port::FilterPlane;
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
@@ -57,6 +57,8 @@ use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
 };
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
@@ -251,21 +253,11 @@ pub(crate) struct QuerierState {
     /// `&querier->_encoding);  // it is safe to use alias`). Kept as it was moved in, and lent
     /// to each get that names none.
     encoding: Option<crate::encoding::OwnedEncoding>,
-    /// The release latches of the gets issued through this querier. Undeclaring it waits for
-    /// their reply callbacks to finish and their closures to be dropped, as pico's
-    /// `_z_sync_group_wait` does.
-    gets: crate::ffi::LatchList,
     /// Cancels the gets this querier still has pending when it is undeclared, as pico's
     /// `_z_unregister_pending_queries_from_querier` does. Every get takes it, unless the program
-    /// gave that get a token of its own.
-    cancel: Arc<wz_capi_port::cancellation::CancellationToken>,
-}
-
-impl Drop for QuerierState {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.gets.wait_all();
-    }
+    /// gave that get a token of its own. It lies in the querier's place, and each get's fan is
+    /// registered on it there.
+    cancel: CancellationToken,
 }
 
 impl QuerierState {
@@ -323,10 +315,19 @@ impl z_owned_querier_t {
     }
 }
 
+/// Let go of a querier: its pending gets are cancelled, as pico's
+/// `_z_unregister_pending_queries_from_querier` does, and the release waits for their reply
+/// callbacks to finish and their closures to be dropped, as pico's `_z_sync_group_wait` does. The
+/// gets' closures are counted in the querier's place (`crate::object_slot::Answering`), which goes
+/// back with the last of the querier and them.
+///
 /// # Safety
-/// `h` must be a live handle a querier's slot was filled for.
+/// `h` must be a live handle a querier's slot was filled for, let go of once.
 unsafe fn free_querier(h: *mut c_void) {
-    crate::object_slot::release_entity(h as *mut QuerierState);
+    let state = h as *mut QuerierState;
+    (*state).cancel.cancel();
+    crate::object_slot::closures_of::<_, ()>(state).wait_none();
+    crate::object_slot::retire_entity::<_, ()>(state);
 }
 
 impl_handle_ownership7!(
@@ -444,7 +445,7 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(filter) => filter,
             Err(rc) => return rc,
         };
-        let state = slot.fill(QuerierState {
+        let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid,
             shared: engine,
@@ -457,9 +458,10 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
-            gets: crate::ffi::LatchList::default(),
-            cancel: wz_capi_port::cancellation::CancellationToken::new(),
-        });
+            cancel: CancellationToken::default(),
+        }));
+        // The querier is the first thing in its place, so the place is its handle.
+        let state = state.cast::<QuerierState>();
         (*state).bind();
         *querier = z_owned_querier_t {
             handle: state as *mut c_void,
@@ -479,8 +481,9 @@ pub unsafe extern "C" fn z_undeclare_querier(querier: *mut z_moved_querier_t) ->
         let handle = (*querier)._this.handle;
         if !handle.is_null() {
             (*querier)._this = z_owned_querier_t::null_value();
-            // The `Drop` impl retracts this querier's matching listeners; its place goes back.
-            crate::object_slot::release_entity(handle as *mut QuerierState);
+            // Its drop retracts this querier's matching listeners; its place goes back with the
+            // last of it and its gets' closures.
+            free_querier(handle);
         }
         Z_OK
     })
@@ -542,7 +545,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         if callback.is_null() {
             return Z_ERR_NULL;
         }
-        let closure = crate::get::adopt_reply_closure(callback);
+        let mut closure = crate::get::adopt_reply_closure(callback);
         // A payload or an attachment the program moved out of a callback's sample is copied, and
         // with no room for the copy the get is refused; `closure` drops, reporting it over.
         let (payload, attachment) = match (payload, attachment) {
@@ -555,7 +558,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             // `closure` drops here, running the caller's `drop(context)`.
             None => return Z_ERR_NULL,
         };
-        state.gets.keep(closure.release_latch());
+        // Undeclaring the querier waits for this get's closure, and its place stands until then.
+        crate::object_slot::count_in_entity::<_, (), _>(core::ptr::from_ref(state), &mut closure);
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
@@ -587,20 +591,28 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                 .map(crate::encoding::OwnedEncoding::view),
             source_info,
         };
-        let token = token.or_else(|| Some(state.cancel.clone()));
-        issue_get(
-            Arc::as_ref(&state.shared),
-            state.key.literal().to_owned(),
-            state.key.wire(Arc::as_ref(&state.shared)),
-            params_in,
-            state.target,
-            state.consolidation,
-            state.timeout_ms,
-            state.accept_replies,
-            payload,
-            attachment,
-            state.qos,
+        let token = Some(match token {
+            Some(token) => TokenRef::shared(token),
+            // SAFETY: the querier's token lies in its place, which is not given back before
+            // `free_querier` has cancelled the token, and that waits for every fan on it.
+            None => unsafe { TokenRef::placed(&state.cancel) },
+        });
+        let ask = crate::get::GetAsk {
+            parameters: params_in,
+            target: state.target,
+            consolidation: state.consolidation,
+            timeout_ms: state.timeout_ms,
+            accept_replies: state.accept_replies,
+            payload: payload.as_ref(),
+            attachment: attachment.as_ref(),
+            qos: state.qos,
             value_meta,
+        };
+        issue_get(
+            &state.shared,
+            state.key.literal(),
+            state.key.wire(Arc::as_ref(&state.shared)),
+            &ask,
             closure,
             token,
             None,

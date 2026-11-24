@@ -597,7 +597,7 @@ mod tests {
     use wz_link_lwip::test_bind::session_multicast_rx as bind_session_multicast_rx;
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_join::encode_join;
-    use wz_session_core::multicast_params::{zid_vec, MulticastParams};
+    use wz_session_core::multicast_params::MulticastParams;
     #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
     use wz_session_core::multicast_tx::multicast_tx_emit;
     use wz_session_core::WhatAmI;
@@ -619,7 +619,8 @@ mod tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid_vec(zid),
+            zid: wz_session_core::session_zid::SessionZid::new(zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

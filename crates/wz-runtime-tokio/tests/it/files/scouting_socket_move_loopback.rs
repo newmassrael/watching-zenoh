@@ -210,7 +210,10 @@ async fn discover(scout: (Ipv4Addr, u16), resp: (Ipv4Addr, u16)) -> ScoutOutcome
         .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
         what: WHAT_ROUTER | WHAT_PEER,
-        zid: Some(wz_session_core::session_init_params::zid_bytes(SCOUT_ZID)),
+        zid: Some(
+            wz_session_core::session_zid::SessionZid::new(SCOUT_ZID)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        ),
         timeout_ms: 500,
         exit_on_first: true,
     });

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    FilterId, FilterPlane, KeyHolds, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -390,7 +390,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
+    let first_sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     let first = engine
         .declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false)
         .expect("a row is free");
@@ -399,8 +399,12 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     });
     let asked = router.seen(|s| s.interests);
 
-    let refused_sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let held = Arc::downgrade(&refused_sink);
+    // The sink holds the one strong count of the token the weak one reads.
+    let token = Arc::new(());
+    let held = Arc::downgrade(&token);
+    let refused_sink: MatchingSink = MatchingSink::shared(move |_matching: bool| {
+        let _ = &token;
+    });
     let refused =
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
     assert_eq!(refused, Err(Refusal::TableFull));
@@ -412,7 +416,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 
     engine.undeclare_matching_listener(first);
-    let again: MatchingSink = Arc::new(|_matching: bool| {});
+    let again: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert!(
         engine
             .declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false)
@@ -421,23 +425,32 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     );
 }
 
-/// The queryables' table at its limit refuses one more: no callback minted, nothing sent.
+/// The queryables' table at its limit refuses one more: its callback let go at once, nothing sent.
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
-    use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+    use wz_capi_port::{QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    /// Counts its own drop: a callback the engine let go of.
+    struct LetGo(Arc<AtomicUsize>);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
-    let sink = |minted: &Arc<AtomicUsize>| -> QueryableSink {
-        let minted = minted.clone();
-        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            minted.fetch_add(1, Ordering::SeqCst);
-            Box::new(|_query: &dyn QueryView, _out: &mut dyn ReplyOut| {}) as QueryCallback
-        })
+    let let_go = Arc::new(AtomicUsize::new(0));
+    let sink = |let_go: &Arc<AtomicUsize>| -> QueryableSink {
+        let guard = LetGo(let_go.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                let _held = &guard;
+            },
+        )
     };
     let declare = |key: &str| {
         engine.declare_queryable_on_wire(
@@ -446,7 +459,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
             false,
             Locality::Remote,
             None,
-            sink(&minted),
+            sink(&let_go),
         )
     };
     let before = router.seen(|s| s.declares);
@@ -456,12 +469,17 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     });
     let seen = router.seen(|s| s.declares);
 
+    assert_eq!(
+        let_go.load(Ordering::SeqCst),
+        0,
+        "the declared one's callback is held"
+    );
     assert_eq!(declare("demo/qbl/2"), Err(Refusal::TableFull));
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
+        let_go.load(Ordering::SeqCst),
         1,
-        "no callback for a refusal"
+        "a refusal lets its callback go at once"
     );
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 
@@ -596,7 +614,7 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         filter(&engine, FilterPlane::Subscribers, past),
         Err(Refusal::KeyTooLong)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
         Err(Refusal::KeyTooLong),
@@ -614,6 +632,31 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         declare_subscriber(&engine, "demo/k/9", &dropped).is_ok(),
         "a key of the session's bound is taken"
     );
+}
+
+/// A matching listener's criterion holds its key in place, so a key longer than that is refused
+/// for its length before anything is taken or sent, and its sink is let go of.
+#[test]
+fn a_listener_on_a_key_past_the_criterion_is_refused_for_its_length() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let before = router.seen(|s| s.declares);
+    let past = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let token = Arc::new(());
+    let held = Arc::clone(&token);
+    let listener = MatchingSink::shared(move |_matching: bool| {
+        let _ = &held;
+    });
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, &past, listener, false),
+        Err(Refusal::KeyTooLong)
+    );
+    settle(&engine);
+    assert_eq!(Arc::strong_count(&token), 1, "the refused sink is let go");
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
 }
 
 /// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
@@ -645,7 +688,7 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
         declare_subscriber(&engine, "demo/k/3", &dropped),
         Err(Refusal::TableFull)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
         Err(Refusal::TableFull),

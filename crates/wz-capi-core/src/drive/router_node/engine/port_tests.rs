@@ -33,6 +33,7 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::face::FaceEventKind;
+use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
@@ -40,7 +41,7 @@ use super::*;
 use crate::drive::{FaceDrive, NodeRole};
 use crate::faces::no_shm_clients;
 use crate::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
-use wz_capi_port::PeerLists;
+use wz_capi_port::{PeerLists, QueryHolder};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -230,14 +231,13 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
             false,
             Locality::Any,
             None,
-            Arc::new(move |_holder| {
-                let counted = Arc::clone(&counted);
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     counted.fetch_add(1, Ordering::SeqCst);
                     out.reply_keyed(query.keyexpr(), b"from the router")
                         .expect("a reply on the query's own key");
-                })
-            }),
+                },
+            ),
         )
         .expect("a node has queryables");
 
@@ -312,7 +312,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         .next_entity_id
         .store(u64::from(u32::MAX), Ordering::Relaxed);
     let answer = || -> QueryableSink {
-        Arc::new(|_holder| Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}))
+        QueryableSink::shared(|_: &dyn QueryView, _: &mut dyn ReplyOut, _: &dyn QueryHolder| {})
     };
     let queryables = |key: &str| {
         engine.matching_status(
@@ -571,7 +571,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
         .declare_matching_listener(
             FilterPlane::Subscribers,
             "wz/port/match/a",
-            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
+            wz_capi_port::MatchingSink::shared(move |matching| sink.lock().unwrap().push(matching)),
             false,
         )
         .expect("a node holds every matching listener it is asked for");
@@ -1044,9 +1044,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let sink = Arc::clone(&sink);
-                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          _out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let shared = query
                             .payload_shared()
                             .and_then(|bytes| bytes.shm_chunk())
@@ -1054,8 +1055,8 @@ mod shared_memory {
                         sink.lock()
                             .unwrap()
                             .push((query.payload().unwrap_or_default().to_vec(), shared));
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
         (got, id)
@@ -1214,9 +1215,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1224,8 +1226,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
 
@@ -1315,9 +1317,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1325,8 +1328,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a node has queryables");
 

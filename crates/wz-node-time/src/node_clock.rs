@@ -284,8 +284,8 @@ struct NodeClock {
 /// so is what the host knows about them: one report moves every node that reads them.
 #[cfg(feature = "time-hlc")]
 enum StandingHome {
-    /// Built outside a `clock-source` build, and by the tests of one.
-    #[cfg_attr(feature = "clock-source", allow(dead_code))]
+    /// A standing of the node's own: outside a `clock-source` build, and for a node over a
+    /// source the application owns (`NodeClock::for_node_over_source_by`).
     Own(alloc::boxed::Box<crate::standing_cell::StandingCell>),
     #[cfg(feature = "clock-source")]
     Shared(&'static crate::clock_registry::ClockRegistry),

@@ -616,7 +616,9 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
     // parse has just held to name this node. A reply the arena refuses is counted there; the
     // open has happened either way, as the heap profile's reply says.
-    let tail = &key[2 + zid_hex.len() + 1 + whatami.len() + 1..];
+    let Some(tail) = node_key_tail(key, zid_hex, whatami) else {
+        return;
+    };
     let _ = arena.serve_leg(
         query,
         out,
@@ -630,6 +632,16 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
 
 /// The lifecycle legs of a node that binds all four verbs: the capability document, and the verb a
 /// literal key of this node names, decided by the one function every transport is decided by.
+/// The key past `@/<zid>/<whatami>/`: the tail a reply names. `None` for a key that does not
+/// name this node, which the caller's parse has already refused.
+fn node_key_tail<'k>(key: &'k str, zid_hex: &str, whatami: &str) -> Option<&'k str> {
+    key.strip_prefix("@/")?
+        .strip_prefix(zid_hex)?
+        .strip_prefix('/')?
+        .strip_prefix(whatami)?
+        .strip_prefix('/')
+}
+
 #[cfg(feature = "lifecycle-verbs")]
 #[inline(never)]
 fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleNode + ?Sized>(
@@ -652,20 +664,22 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         VERBS_TAIL,
         AdminLegEncoding::Json,
         |body| {
-            let mut bound: [&str; 4] = [""; 4];
-            let mut count = 0;
-            for (verb, word) in [
+            let words = [
                 (Verb::Close, CLOSE_VERB),
                 (Verb::Reset, RESET_VERB),
                 (Verb::Status, STATUS_VERB),
                 (Verb::Open, OPEN_VERB),
-            ] {
-                if node.binds(verb) {
-                    bound[count] = word;
-                    count += 1;
-                }
+            ]
+            .into_iter()
+            .filter(|&(verb, _)| node.binds(verb))
+            .map(|(_, word)| word);
+            let mut bound: [&str; 4] = [""; 4];
+            let mut count = 0;
+            for (filled, (slot, word)) in (1..).zip(bound.iter_mut().zip(words)) {
+                *slot = word;
+                count = filled;
             }
-            write_verb_list(body, &bound[..count]);
+            write_verb_list(body, bound.get(..count).unwrap_or_default());
         },
     );
     let key = query.keyexpr();
@@ -707,7 +721,9 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     // The key's own tail, `session/<verb>/..`: it follows `@/<zid>/<whatami>/`, which the parse has
     // just held to name this node. A reply the arena refuses is counted there; the verb has
     // happened either way, as the heap profile's reply says.
-    let tail = &key[2 + zid_hex.len() + 1 + whatami.len() + 1..];
+    let Some(tail) = node_key_tail(key, zid_hex, whatami) else {
+        return;
+    };
     let _ = arena.serve_leg(
         query,
         out,
@@ -938,4 +954,28 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: InBand>(
             None => buffer.push_str("{}"),
         });
     });
+}
+
+#[cfg(test)]
+mod node_key_tail_tests {
+    use super::node_key_tail;
+
+    /// The tail of a key that names this node is what follows its zid and role; a key that names
+    /// another node or another role, or stops at the role, has none.
+    #[test]
+    fn the_tail_follows_this_nodes_zid_and_role() {
+        assert_eq!(
+            node_key_tail("@/aa/peer/session/open/1f", "aa", "peer"),
+            Some("session/open/1f")
+        );
+        assert_eq!(
+            node_key_tail("@/ab/peer/session/open/1f", "aa", "peer"),
+            None
+        );
+        assert_eq!(
+            node_key_tail("@/aa/client/session/open/1f", "aa", "peer"),
+            None
+        );
+        assert_eq!(node_key_tail("@/aa/peer", "aa", "peer"), None);
+    }
 }

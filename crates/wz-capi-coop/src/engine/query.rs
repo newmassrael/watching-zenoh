@@ -7,8 +7,8 @@
 //!
 //! A C callback never runs under the session's lock (decision D8), and the observer asks a
 //! queryable from inside its dispatch, which runs under it. So a query that reaches a queryable's
-//! row ([`QueryableRow`]) only begins a call on the row, is copied out ([`OwnedQuery`]) and HOLDS
-//! its `ResponseFinal`
+//! row ([`QueryableRow`]) only begins a call on the row, is held in the session's round of
+//! deliveries where its parts lie (`crate::round`) and HOLDS its `ResponseFinal`
 //! ([`FinalHolds`]); the C callback runs when the deliveries are handed out, writes its replies
 //! into a responder built as the dispatch's would have been, and the replies go out on the query's
 //! link before the hold is let go. The dispatch's own Final for that request id waits for the last
@@ -20,10 +20,11 @@
 //! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
 //! program drops it; until then it answers on its own link.
 //!
-//! The session's own get is the exception to the copy (`local-queryable`): the queryables it
+//! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted ([`QueryPlane::take_asked`]) and the get hands each of them its own view
-//! ([`OwnGet`]) once the session's lock is let go, inside the call. Only a queryable whose callback
-//! the asking thread is inside of has the query copied, to be handed when that callback returns.
+//! ([`OwnGet`]) once the session's lock is let go, inside the call. Nothing of the query is copied:
+//! a queryable whose callback the asking thread is inside of is called there too, as zenoh-pico
+//! calls it.
 //!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
 //! arrives when every row is taken is refused and counted: it is not handed to a callback, and
@@ -36,7 +37,6 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::ptr::NonNull;
 #[cfg(feature = "local-queryable")]
@@ -49,7 +49,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, WireKey};
+use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryableSink, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -64,11 +64,12 @@ use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo};
+use wz_session_core::sample::QosLevel;
+#[cfg(feature = "local-queryable")]
+use wz_session_core::sample::{EncodingHint, SourceInfo};
 use wz_session_core::session_tables::QueryableHandle;
 use wz_session_mcu::dial::McuActions;
 
-use super::queued::Queued;
 use super::{key_on_link, lock, CoopEngine};
 
 /// One of the session's own queryables, as a row of the session's tables holds it: the row keeps
@@ -83,25 +84,38 @@ pub(crate) struct QueryableRow {
     retraction: Option<RetractionKey>,
     /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
     /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
-    /// session held. A build without groups reads none of it and holds it for that alone.
-    #[cfg_attr(not(feature = "group"), allow(dead_code))]
+    /// session held.
+    #[cfg(feature = "group")]
     wire: WireKey,
-    /// The program's callback, minted once the tables took the row ([`Self::mint`]), so a refused
-    /// declaration mints none. Called where the row lies, one call at a time, as it is `FnMut`.
-    call: Mutex<Option<QueryCallback>>,
+    /// The key as the ABI named it, held for what it keeps alive alone (the declaration the ABI
+    /// made it on): a build without groups tells no one the key, and the declaration goes with
+    /// the row, let go of with no lock of the session held.
+    #[cfg(not(feature = "group"))]
+    _keeps: WireKey,
+    /// The program's callback, called where the row lies through a shared borrow, with the holder
+    /// of the face each query came in on; a refused declaration lets it go with the row.
+    sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
 }
 
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it, its
-    /// callback not minted yet.
-    pub(super) fn new(id: QblId, retraction: Option<RetractionKey>, wire: WireKey) -> Self {
+    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
+    /// answering through `sink`.
+    pub(crate) fn new(
+        id: QblId,
+        retraction: Option<RetractionKey>,
+        wire: WireKey,
+        sink: QueryableSink,
+    ) -> Self {
         Self {
             id,
             retraction,
+            #[cfg(feature = "group")]
             wire,
-            call: Mutex::new(None),
+            #[cfg(not(feature = "group"))]
+            _keeps: wire,
+            sink,
             latch: CallLatch::new(),
         }
     }
@@ -117,21 +131,14 @@ impl QueryableRow {
         &self.wire
     }
 
-    /// Hold `call`, the callback the program's sink minted for this row once the tables took it.
-    pub(super) fn mint(&self, call: QueryCallback) {
-        *lock(&self.call) = Some(call);
-    }
-
-    /// Hand `query` to the callback, its replies made through `responder`, unless the queryable
-    /// was undeclared since the call was begun: the one place a query is handed to a queryable's
-    /// callback.
-    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
+    /// Hand `query` to the callback, its replies made through `responder` and its holds taken
+    /// through `holder`, unless the queryable was undeclared since the call was begun: the one
+    /// place a query is handed to a queryable's callback.
+    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut, holder: &dyn QueryHolder) {
         if self.latch.retired() {
             return;
         }
-        if let Some(call) = lock(&self.call).as_mut() {
-            call(query, responder);
-        }
+        self.sink.call(query, responder, holder);
     }
 
     /// Declare this queryable, on `key`, answering for the whole of it when `complete`, over
@@ -193,14 +200,14 @@ impl RowCallback for QueryableRow {
 /// copied nor dropped unended: each is ended once ([`Self::end`]), or its row would keep its slot
 /// for good.
 #[must_use = "a call is ended, or its row is never let go of"]
-pub(super) struct QueryableCall {
+pub(crate) struct QueryableCall {
     call: QueryableRowCall,
     handle: QueryableHandle,
 }
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for threads: its latch, and its
-// callback behind its mutex, a callback that is `Send`. The row lies in the session's arena, which
+// callback, which is `Send + Sync` and called through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
 
@@ -212,27 +219,26 @@ impl QueryableCall {
         unsafe { self.call.0.as_ref() }
     }
 
-    /// The queryable's id: what a get of the session's own made from inside its callback reads it
-    /// running by.
-    #[cfg(feature = "local-queryable")]
-    pub(super) fn id(&self) -> QblId {
-        self.row().id
-    }
-
     /// Whether the queryable was undeclared since the call was begun: its callback is handed
     /// nothing more.
     pub(super) fn retired(&self) -> bool {
         self.row().latch.retired()
     }
 
-    /// Hand `query` to the queryable's callback, its replies made through `responder`.
-    pub(super) fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
-        self.row().ask(query, responder);
+    /// Hand `query` to the queryable's callback, its replies made through `responder` and its
+    /// holds taken through `holder`.
+    pub(super) fn ask(
+        &self,
+        query: &dyn QueryView,
+        responder: &mut dyn ReplyOut,
+        holder: &dyn QueryHolder,
+    ) {
+        self.row().ask(query, responder, holder);
     }
 
     /// End the call: the handle of its row when it was the last call of an undeclared queryable,
     /// which the caller lets go of (`SessionTables::release_queryable`).
-    pub(super) fn end(self) -> Option<QueryableHandle> {
+    pub(crate) fn end(self) -> Option<QueryableHandle> {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
         // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
@@ -241,57 +247,14 @@ impl QueryableCall {
     }
 }
 
-/// A query copied out of the dispatch that delivered it, for a callback that runs after.
-pub(super) struct OwnedQuery {
-    keyexpr: String,
-    parameters: Option<Vec<u8>>,
-    payload: Option<Vec<u8>>,
-    attachment: Option<Vec<u8>>,
-    encoding: Option<EncodingHint>,
-    source_info: Option<SourceInfo>,
-    rid: wz_session_core::wire_id::RequestId,
-    qos: QosLevel,
-}
-
-impl OwnedQuery {
-    pub(super) fn of(view: &dyn QueryView) -> Self {
+#[cfg(test)]
+impl QueryableCall {
+    /// A call begun on `row`, named `handle`: what a test hands the round as the dispatch would.
+    pub(crate) fn begun(row: &QueryableRow, handle: QueryableHandle) -> Self {
         Self {
-            keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec),
-            payload: view.payload().map(<[u8]>::to_vec),
-            attachment: view.attachment().map(<[u8]>::to_vec),
-            encoding: view.encoding().cloned(),
-            source_info: view.source_info().cloned(),
-            rid: view.rid(),
-            qos: view.qos(),
+            call: RowCallback::begin(row).expect("a live row begins a call"),
+            handle,
         }
-    }
-}
-
-impl QueryView for OwnedQuery {
-    fn keyexpr(&self) -> &str {
-        &self.keyexpr
-    }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters.as_deref()
-    }
-    fn attachment(&self) -> Option<&[u8]> {
-        self.attachment.as_deref()
-    }
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.source_info.as_ref()
-    }
-    fn payload(&self) -> Option<&[u8]> {
-        self.payload.as_deref()
-    }
-    fn encoding(&self) -> Option<&EncodingHint> {
-        self.encoding.as_ref()
-    }
-    fn rid(&self) -> wz_session_core::wire_id::RequestId {
-        self.rid
-    }
-    fn qos(&self) -> QosLevel {
-        self.qos
     }
 }
 
@@ -299,13 +262,15 @@ impl QueryView for OwnedQuery {
 /// accept (`_anyke` admits any key), its QoS.
 pub(super) fn responder_for<'a>(
     rid: wz_session_core::wire_id::RequestId,
-    keyexpr: &str,
+    keyexpr: &'a str,
     parameters: Option<&[u8]>,
     qos: QosLevel,
     replies: &'a mut dyn StagesReplies,
 ) -> QueryResponder<'a> {
     let accept = ReplyKeyExpr::from_parameter_bytes(parameters);
-    QueryResponder::new(rid, keyexpr.to_owned(), accept, qos, replies)
+    // The key is borrowed where the query lies for as long as its callback runs: nothing of it is
+    // copied to answer.
+    QueryResponder::borrowing(rid, keyexpr, accept, qos, replies)
 }
 
 /// Where a query's replies go as its queryable makes them: each one onto the link the query came in
@@ -632,9 +597,6 @@ pub(super) struct QueryPlane {
     #[cfg(feature = "local-queryable")]
     asking: AtomicBool,
     pub(super) holds: Mutex<FinalHolds>,
-    /// The queries waiting for their callbacks, in the order they arrived: the call begun on the
-    /// row of the queryable each matched, the query, and the generation of its link.
-    pub(super) queries: Queued<VecDeque<(QueryableCall, OwnedQuery, u64)>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -655,8 +617,10 @@ pub(super) type Asked = BoundedVec<QueryableCall, { caps::MAX_QUERYABLES }, Stat
 
 /// A row of an undeclared queryable being let go of, counted from before it leaves its table,
 /// under the session's lock, until this is dropped, after the row was ([`QueryPlane::letting_go`]).
+#[cfg(feature = "local-queryable")]
 pub(super) struct LettingGo<'p>(&'p AtomicUsize);
 
+#[cfg(feature = "local-queryable")]
 impl Drop for LettingGo<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
@@ -672,7 +636,6 @@ impl QueryPlane {
             #[cfg(feature = "local-queryable")]
             asking: AtomicBool::new(false),
             holds: Mutex::new(FinalHolds::holding(rows)),
-            queries: Queued::new(VecDeque::new()),
             refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
@@ -681,10 +644,17 @@ impl QueryPlane {
     }
 
     /// What a query that reached the queryable `row`, the row `handle` names, does: hold its
-    /// Final and begin a call on the row, the query copied out for it; or, with no row left for
-    /// its Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it
-    /// and it is counted. Under the session's lock, from its dispatch.
-    pub(super) fn arrive(&self, handle: QueryableHandle, row: &QueryableRow, view: &dyn QueryView) {
+    /// Final and begin a call on the row, the query held in `round` where its parts lie
+    /// ([`Round::offer_query`](crate::round::Round::offer_query)); or, with no row left for its
+    /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
+    /// it is counted. Under the session's lock, from its dispatch.
+    pub(super) fn arrive(
+        &self,
+        round: &crate::round::Round,
+        handle: QueryableHandle,
+        row: &QueryableRow,
+        view: &dyn QueryView,
+    ) {
         let generation = self.arriving_on();
         if !lock(&self.holds).admit(generation, view.rid()) {
             self.refused.fetch_add(1, Ordering::Relaxed);
@@ -708,13 +678,18 @@ impl QueryPlane {
         } else {
             call
         };
-        self.queries
-            .lock()
-            .push_back((call, OwnedQuery::of(view), generation));
+        // A link's query is held in the round of deliveries, read where its parts lie, and handed
+        // to the callback in the order it came among the records; one the round has no room for
+        // owes its Final as one that reached no queryable.
+        // SAFETY: a query arrives from the session's dispatch, under the session's lock.
+        if !unsafe { round.offer_query(call, view, generation) } {
+            lock(&self.holds).release(generation, view.rid());
+        }
     }
 
     /// Count a row of an undeclared queryable as being let go of: taken before the row leaves its
     /// table, under the session's lock, and dropped once the row was dropped, with no lock held.
+    #[cfg(feature = "local-queryable")]
     pub(super) fn letting_go(&self) -> LettingGo<'_> {
         self.letting_go.fetch_add(1, Ordering::AcqRel);
         LettingGo(&self.letting_go)
@@ -987,5 +962,153 @@ mod refusal_tests {
             holds.owe(0, 2, QosLevel::DEFAULT),
             "a refused take noted nothing, so the Final goes out"
         );
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod round_tests {
+    //! A link's query held in the session's round of deliveries: handed to the queryable it reached
+    //! with its parts read where they lie, its call ended by the round.
+    use super::*;
+    use crate::round::{AnswersQueries, Round};
+    use core::num::NonZeroU32;
+
+    /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
+    /// where they lie, the generation it came in under, and its encoding's packed id with where
+    /// its schema lies.
+    type Noted = std::sync::Mutex<Vec<(String, Option<Vec<u8>>, usize, u64, Option<(u32, usize)>)>>;
+
+    /// An engine stand-in that notes what it is asked to answer.
+    struct Noting(Noted);
+
+    impl AnswersQueries for Noting {
+        fn answer_query(&self, _call: &QueryableCall, query: &dyn QueryView, generation: u64) {
+            self.0.lock().unwrap().push((
+                query.keyexpr().to_owned(),
+                query.parameters().map(<[u8]>::to_vec),
+                query
+                    .parameters()
+                    .map_or(0, |parameters| parameters.as_ptr() as usize),
+                generation,
+                query.encoding_parts().map(|(packed_id, schema)| {
+                    (
+                        packed_id,
+                        schema.map_or(0, |schema| schema.as_ptr() as usize),
+                    )
+                }),
+            ));
+        }
+    }
+
+    /// A query whose key, parameters and encoding lie where the test lends them.
+    struct Asked<'d> {
+        key: &'d str,
+        parameters: &'d [u8],
+        encoding: Option<(u32, Option<&'d [u8]>)>,
+    }
+
+    impl QueryView for Asked<'_> {
+        fn keyexpr(&self) -> &str {
+            self.key
+        }
+
+        fn parameters(&self) -> Option<&[u8]> {
+            Some(self.parameters)
+        }
+
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            self.encoding
+        }
+
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            3
+        }
+
+        fn qos(&self) -> QosLevel {
+            QosLevel::DEFAULT
+        }
+    }
+
+    /// A queryable's row, boxed so it lies where it is while a call of it runs, and its handle.
+    fn row() -> (Box<QueryableRow>, QueryableHandle) {
+        let row = Box::new(QueryableRow::new(
+            1,
+            None,
+            WireKey::literal(),
+            QueryableSink::shared(|_, _, _| {}),
+        ));
+        let handle =
+            QueryableHandle::from_bits(NonZeroU32::new(1).expect("not zero")).expect("an index");
+        (row, handle)
+    }
+
+    /// The datagram a query of key `demo/q` and parameters `a=1` lies in.
+    const DATAGRAM: [u8; 10] = *b"demo/q?a=1";
+
+    /// A query that lies in a lent datagram is held in the round and handed, on its delivery, to
+    /// the engine that answers it, its key, parameters and encoding's schema read where they lie
+    /// and its link's generation with it; the round ends its call, so the row has none running
+    /// after. Turned red by a round that copies the query's parts, drops its encoding or keeps
+    /// its call.
+    #[test]
+    fn a_query_is_handed_where_its_parts_lie_and_its_call_ended() {
+        let datagram = DATAGRAM;
+        let key = core::str::from_utf8(&datagram[..6]).expect("a key");
+        let round = Round::leaked(4);
+        let noting = Arc::new(Noting(Noted::default()));
+        // Made of the stand-in's own type, then unsized where the round takes it.
+        let answering: Weak<Noting> = Arc::downgrade(&noting);
+        round.answer_queries_with(answering);
+        let (row, handle) = row();
+        // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+        unsafe { round.set_lending(Some(&datagram[..])) };
+        // The schema is a range of the datagram as a frame's would be: here, its key's first part.
+        let asked = Asked {
+            key,
+            parameters: &datagram[7..],
+            encoding: Some((0x0B, Some(&datagram[..4]))),
+        };
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
+        unsafe { round.set_lending(None) };
+        unsafe { round.seal() };
+        assert!(round.deliver());
+        assert_eq!(
+            *noting.0.lock().unwrap(),
+            [(
+                "demo/q".to_owned(),
+                Some(b"a=1".to_vec()),
+                datagram[7..].as_ptr() as usize,
+                7,
+                Some((0x0B, datagram.as_ptr() as usize))
+            )],
+            "handed where its parameters and schema lie, under its link's generation"
+        );
+        assert!(row.retire(), "the round ended the call");
+    }
+
+    /// The CONTROL: a round no engine answers through hands the query to none, and ends its call
+    /// all the same.
+    #[test]
+    fn a_round_no_engine_answers_through_ends_the_call_unhanded() {
+        let datagram = DATAGRAM;
+        let key = core::str::from_utf8(&datagram[..6]).expect("a key");
+        let round = Round::leaked(4);
+        let (row, handle) = row();
+        // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+        unsafe { round.set_lending(Some(&datagram[..])) };
+        let asked = Asked {
+            key,
+            parameters: &datagram[7..],
+            encoding: None,
+        };
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row, handle), &asked, 7) });
+        unsafe { round.set_lending(None) };
+        unsafe { round.seal() };
+        assert!(round.deliver());
+        assert!(row.retire(), "the round ended the call");
     }
 }

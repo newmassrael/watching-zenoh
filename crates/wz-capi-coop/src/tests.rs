@@ -95,6 +95,13 @@ enum Command {
     /// routes to once the subscriber has declared a key expression to it: the id is one the
     /// session under test declared, and the key is what that declaration says.
     PushReceiverAlias(wz_session_core::wire_id::ExprId, &'static [u8]),
+    /// Declare the key `.1` under id `.0` in the router's own space, as a peer that names its
+    /// keys by alias does.
+    DeclareKeyexpr(wz_session_core::wire_id::ExprId, &'static str),
+    /// In one batch window, so that one frame carries all three: push `.1` naming id `.0` of the
+    /// router's space with no suffix, undeclare the id, and push `.1` on it again, which the
+    /// receiver can no longer resolve.
+    PushAliasThenUndeclare(wz_session_core::wire_id::ExprId, &'static [u8]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -125,6 +132,10 @@ enum Command {
     /// [`Command::Answer`] with each reply stamped by the router's clock.
     #[cfg(feature = "query")]
     AnswerStamped(&'static str, &'static [u8]),
+    /// Hold a queryable on the key `.0` that answers each query once on each of the keys `.1`,
+    /// each with the payload `.2`, as a get on a wildcard is answered by a key of each.
+    #[cfg(feature = "query")]
+    AnswerOnKeys(&'static str, &'static [&'static str], &'static [u8]),
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
@@ -639,6 +650,33 @@ fn run_router(
                 let _ =
                     actions.send_network_message(NetworkMessage::Push(Box::new(push)), true, false);
             }
+            Ok(Command::DeclareKeyexpr(id, key)) => {
+                let declare = wz_session_core::declare_build::build_declare_kexpr(id, key)
+                    .expect("a declaration");
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(declare)),
+                    true,
+                    false,
+                );
+            }
+            Ok(Command::PushAliasThenUndeclare(id, value)) => {
+                let aliased = || {
+                    NetworkMessage::Push(Box::new(
+                        wz_session_core::push_build::build_push_aliased(id, None, value)
+                            .expect("a Push naming an id"),
+                    ))
+                };
+                let undeclare = wz_session_core::declare_build::build_undeclare_kexpr(id);
+                let _ = actions.batch_start();
+                let _ = actions.send_network_message(aliased(), true, false);
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(undeclare)),
+                    true,
+                    false,
+                );
+                let _ = actions.send_network_message(aliased(), true, false);
+                let _ = actions.batch_stop();
+            }
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -703,6 +741,27 @@ fn run_router(
                                         None,
                                         &stamp,
                                     );
+                                },
+                            ),
+                        )
+                    })
+                    .expect("the router's queryable");
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::AnswerOnKeys(key, keys, value)) => {
+                answering
+                    .borrow_mut()
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    for answered in keys {
+                                        let _ = out.reply_keyed(answered, value);
+                                    }
                                 },
                             ),
                         )
@@ -1440,7 +1499,7 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let into = log.clone();
     (
-        Arc::new(move |matching| into.lock().unwrap().push(matching)),
+        wz_capi_port::MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
         log,
     )
 }
@@ -1458,12 +1517,15 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         complete_required: false,
     };
     let (sink, told) = heard();
-    let kept = Arc::downgrade(&sink);
     assert_eq!(
         engine.declare_matching_listener(plane, "demo/q", sink, false),
         Err(wz_capi_port::Refusal::NotBuilt)
     );
-    assert!(kept.upgrade().is_none(), "the refused sink is not kept");
+    assert_eq!(
+        Arc::strong_count(&told),
+        1,
+        "the refused sink is not kept: the log is held by nothing else"
+    );
     assert_eq!(
         engine.declare_write_filter(
             plane,
@@ -1914,8 +1976,10 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::handle(layout),
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::handle(layout),
+        },
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -1986,8 +2050,10 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             || config(router),
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
-            &AllocatorMemory,
-            held,
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held,
+            },
         )
         .expect("the session opens")
     };
@@ -2044,6 +2110,82 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.give_back_place(theirs), Ok(()));
     assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
     assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
+}
+
+/// A place the ABI gives back on the thread that holds its session's lock (the last count of a
+/// get let go of by a drop made under the lock) would wait on itself: a debug build fails there at
+/// once, so no such path survives a test. Turned red by a hold of the lock the thread does not
+/// mark.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "taken again on the thread that holds it")]
+fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
+    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces, OpenStorage};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_capi_port::PlaceLender;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(48, 8).expect("a layout");
+    let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
+    let router = Router::start(CatchAll::None);
+    let engine = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        OpenStorage {
+            memory: &AllocatorMemory,
+            held,
+        },
+    )
+    .expect("the session opens");
+    let place = engine
+        .claim_place(EntityKind::Subscriber)
+        .expect("a place for a subscriber");
+    let _ = engine.under_the_lock(|| engine.give_back_place(place));
+}
+
+/// A session of the `advanced-cache` build keeps a ring of `ADVANCED_CACHE_BYTES` for its caches,
+/// zeroed at its open and its own: what one call writes the next reads, and another session's
+/// ring is another span.
+#[cfg(feature = "advanced-cache")]
+#[test]
+fn an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches() {
+    use wz_session_core::caps::ADVANCED_CACHE_BYTES;
+
+    let (router, other_router) = (Router::start(CatchAll::None), Router::start(CatchAll::None));
+    let (one, other) = (open(&router), open(&other_router));
+    let ring = one.cache_bytes().expect("the session keeps a ring");
+    let mut seen = (0, false);
+    ring.with_cache_bytes(&mut |bytes| {
+        seen = (bytes.len(), bytes.iter().all(|byte| *byte == 0));
+        if let Some(first) = bytes.first_mut() {
+            *first = 7;
+        }
+    });
+    assert_eq!(
+        seen,
+        (ADVANCED_CACHE_BYTES, true),
+        "the ring is the limit's, zeroed"
+    );
+    other
+        .cache_bytes()
+        .expect("the other session keeps a ring")
+        .with_cache_bytes(&mut |bytes| {
+            if let Some(first) = bytes.first_mut() {
+                *first = 9;
+            }
+        });
+    let mut first = None;
+    ring.with_cache_bytes(&mut |bytes| first = bytes.first().copied());
+    assert_eq!(
+        first,
+        Some(7),
+        "a session's ring is its own and keeps what was written"
+    );
 }
 
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
@@ -2496,8 +2638,10 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         },
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2538,8 +2682,10 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         listener,
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());

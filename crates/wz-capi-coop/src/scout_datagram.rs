@@ -22,13 +22,13 @@
 use core::ffi::c_int;
 use core::net::SocketAddr;
 
+use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
     deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutParams, ScoutWindowPlace,
     ScoutedHello,
 };
-use wz_session_core::session_zid::SessionZid;
 
 /// How long one wait for a Hello lasts before the window reads its clock again: a few
 /// milliseconds, so the window answers a Hello at once and ends close to its budget without
@@ -41,15 +41,11 @@ const READ_WAIT_MS: c_int = 2;
 /// the table holds it, in the order upstream delivers them (after the window, last responder
 /// first). The number delivered; a socket that cannot be opened is a window nobody answers, `0`.
 ///
-/// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
-/// ABI's to refuse before it scouts.
-#[allow(clippy::too_many_arguments)]
+/// `ask.zid` is the asker the Scout names, `None` for none; a configured zid that is not one is
+/// the ABI's to refuse before it scouts.
 pub fn run_scout<U, C>(
     clock: &C,
-    group: SocketAddr,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     table: &mut HelloTable,
     buffer: &mut [u8],
     on_hello: impl FnMut(&HelloRow),
@@ -59,11 +55,12 @@ where
     C: ClockSource + Clone + 'static,
 {
     let params = ScoutParams {
-        what,
-        zid,
-        timeout_ms: budget_ms,
+        what: ask.what,
+        zid: ask.zid,
+        timeout_ms: ask.budget_ms,
         exit_on_first: false,
     };
+    let group = SocketAddr::new(ask.group, ask.port);
     window::<U, C>(clock, group, params, table, buffer);
     deliver_rows_in_upstream_order(table, on_hello)
 }
@@ -74,10 +71,7 @@ where
 /// [`run_scout`]'s.
 pub fn scout_first<U, C>(
     clock: &C,
-    group: SocketAddr,
-    what: u8,
-    zid: Option<SessionZid>,
-    budget_ms: u64,
+    ask: ScoutAsk,
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) -> Option<ScoutedHello>
@@ -86,11 +80,12 @@ where
     C: ClockSource + Clone + 'static,
 {
     let params = ScoutParams {
-        what,
-        zid,
-        timeout_ms: budget_ms,
+        what: ask.what,
+        zid: ask.zid,
+        timeout_ms: ask.budget_ms,
         exit_on_first: true,
     };
+    let group = SocketAddr::new(ask.group, ask.port);
     window::<U, C>(clock, group, params, table, buffer);
     table.first().map(HelloRow::to_hello)
 }

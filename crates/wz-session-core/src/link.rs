@@ -1651,6 +1651,21 @@ impl LinkSubject {
     }
 }
 
+/// A [`SessionRuntime`] that holds a value behind its [`Shared`](SessionRuntime::Shared)
+/// pointer (tokio `Arc::new`, the cooperative heap profile's `Rc::new`). Generic-`R` code
+/// (the [`SessionLinkActions`] constructor) shares a `SessionCore` / `LinkState` through
+/// this without naming the concrete pointer type.
+///
+/// A trait of its own because the fixed-memory profile has no pointer to share behind: its
+/// bundle holds its kernel and its link as its own fields, so it does not implement this, and a
+/// constructor that would ask it to share does not compile for it.
+///
+/// [`SessionLinkActions`]: crate::session_actions::SessionLinkActions
+pub trait ShareValues: SessionRuntime {
+    /// Wrap `value` in the profile's [`Shared`](SessionRuntime::Shared) pointer.
+    fn share<U>(value: U) -> Self::Shared<U>;
+}
+
 /// Runtime-tier extension that owns the per-profile *storage* of a
 /// [`BoxedLinkDriver`]. A session-tier trait (rather than a method on
 /// `wz_runtime_core::Runtime`) because `BoxedLinkDriver` lives in
@@ -1755,15 +1770,6 @@ pub trait SessionRuntime: Runtime + Sized {
     /// session's handshake is, as [`ActionsHandle`](Self::ActionsHandle) is.
     #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
     type EntropyDraw: crate::entropy::EntropySource;
-
-    /// Wrap an owned value in the per-profile [`Shared`](Self::Shared) pointer
-    /// (tokio `Arc::new`, lwIP `Rc::new`). Generic-`R` code (the
-    /// [`SessionLinkActions`] constructor + the multilink join) shares a
-    /// `SessionCore` / `LinkState` through this without naming the concrete
-    /// pointer type.
-    ///
-    /// [`SessionLinkActions`]: crate::session_actions::SessionLinkActions
-    fn share<U>(value: U) -> Self::Shared<U>;
 
     /// Per-profile shared handle to the [`SessionLinkActions`] bundle one
     /// logical FSM instance drives. The tokio AP profile binds

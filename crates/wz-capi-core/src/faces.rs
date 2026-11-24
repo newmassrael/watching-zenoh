@@ -1590,7 +1590,8 @@ const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 struct DeclWatchEntry {
     id: DeclWatchId,
     plane: DeclPlane,
-    sink: DeclWatchSink,
+    /// Shared by the watch's listener on each face, so it is let go of with the last of them.
+    sink: Arc<DeclWatchSink>,
 }
 
 /// Whether this build hears the peers' declarations of `plane`: the runtime's registry of that
@@ -1621,12 +1622,12 @@ const fn hears_declarations_of(plane: DeclPlane) -> bool {
 fn install_decl_watch(
     session: &TokioSession,
     plane: DeclPlane,
-    sink: &DeclWatchSink,
+    sink: &Arc<DeclWatchSink>,
 ) -> Option<DeclListener> {
     let sink = Arc::clone(sink);
     let callback = move |event: DeclEvent| {
         if let Some(event) = port_decl_event(&event) {
-            sink(event);
+            sink.call(event);
         }
     };
     // A subscriber or a queryable the peer declared before the watch was installed (a watch
@@ -1808,7 +1809,7 @@ fn deliver_matching_flip(
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
             let _guard = MatchingDeliveryGuard::enter();
-            sink(now);
+            sink.call(now);
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -1982,6 +1983,27 @@ impl TransportsCell {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .groups = groups;
+    }
+}
+
+/// A hold of the registry's lock and this thread's mark of it, let go of together.
+struct InnerGuard<'a> {
+    guard: MutexGuard<'a, Inner>,
+    // Read by a debug build only; let go of after the lock.
+    _held: wz_capi_port::sync::SessionHeld,
+}
+
+impl core::ops::Deref for InnerGuard<'_> {
+    type Target = Inner;
+
+    fn deref(&self) -> &Inner {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for InnerGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Inner {
+        &mut self.guard
     }
 }
 
@@ -2389,7 +2411,7 @@ pub struct SharedSession {
     /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
     /// query replies and the batch calls).
     closed: Arc<std::sync::atomic::AtomicBool>,
-    /// The periodic jobs a C ABI started on the session ([`SessionEngine::start_ticker`]), each a
+    /// The periodic jobs a C ABI started on the session ([`wz_capi_port::Tickers::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
     /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
     /// starts one, so a build without it carries neither the table nor the task.
@@ -3069,7 +3091,7 @@ impl SharedSession {
         id: u64,
         peer_zid: Option<&[u8]>,
         dialled: bool,
-    ) -> Option<MutexGuard<'_, Inner>> {
+    ) -> Option<InnerGuard<'_>> {
         // Decided under the lock that inserts the face, so two faces that come up
         // together cannot both pass: the one that takes the lock second sees the
         // first.
@@ -3238,10 +3260,20 @@ impl SharedSession {
     /// it somehow does, the registry is still structurally sound (a panic
     /// cannot leave a `BTreeMap` torn), and refusing to serve the session
     /// afterwards would be a worse failure than continuing.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ///
+    /// The thread marks the hold before it takes it, as the cooperative engine marks its own
+    /// (`wz_capi_port::sync::SessionHeld`): a take on the thread that holds the lock already (a
+    /// drop made under it that reaches the session again) fails a debug build there instead of
+    /// waiting on itself.
+    fn lock(&self) -> InnerGuard<'_> {
+        let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(&self.inner).cast());
+        InnerGuard {
+            guard: self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            _held: held,
+        }
     }
 
     /// A face reached Established: build its session and replay the whole
@@ -5457,9 +5489,12 @@ impl SharedSession {
                 (Some(fan), Ok(interest_id)) => {
                     let undo = session.clone();
                     let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo.cancel_pending_liveliness_get(interest_id);
-                    })
+                    !crate::fan_undo::record(
+                        fan,
+                        Box::new(move || {
+                            undo.cancel_pending_liveliness_get(interest_id);
+                        }),
+                    )
                 }
                 _ => false,
             };
@@ -6004,7 +6039,7 @@ impl SharedSession {
         // `false` when the token cancelled while the fan was running.
         let mut issue_recorded = |leg: QueryLeg<'_>| -> bool {
             match (issue(leg), fan) {
-                (Some(rid), Some(fan)) => fan.record(leg.canceller(rid)),
+                (Some(rid), Some(fan)) => crate::fan_undo::record(fan, leg.canceller(rid)),
                 _ => true,
             }
         };
@@ -6918,6 +6953,7 @@ impl SharedSession {
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;
+        let sink = Arc::new(sink);
         for face in guard.faces.values_mut() {
             if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
                 face.decl_watches.insert(id, listener);
@@ -7727,7 +7763,8 @@ mod matching_aggregate_tests {
             .expect("a session with ids left declares");
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
-        let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
+        let sink: MatchingSink =
+            MatchingSink::shared(move |matching| log.lock().unwrap().push(matching));
         shared.declare_plane_matching_listener(
             FilterPlane::Subscribers,
             "wz/local/a".to_owned(),
@@ -7769,13 +7806,13 @@ mod matching_aggregate_tests {
     #[test]
     fn a_periodic_job_runs_until_it_is_stopped() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use wz_capi_port::SessionEngine;
+        use wz_capi_port::Tickers;
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
         let runs = Arc::new(AtomicUsize::new(0));
         let count = runs.clone();
-        let id = SessionEngine::start_ticker(
+        let id = Tickers::start_ticker(
             &shared,
             10,
             Arc::new(move || {
@@ -7790,8 +7827,8 @@ mod matching_aggregate_tests {
             assert!(std::time::Instant::now() < deadline, "no third run in 5 s");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        SessionEngine::stop_ticker(&shared, id);
-        SessionEngine::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
         std::thread::sleep(std::time::Duration::from_millis(30));
         let after = runs.load(Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(80));
@@ -8408,7 +8445,7 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
                 log.lock().unwrap().push(now);
                 let probe = probe
                     .upgrade()
@@ -8436,7 +8473,7 @@ mod matching_aggregate_tests {
     fn the_verdict_is_the_or_across_faces() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8461,7 +8498,7 @@ mod matching_aggregate_tests {
     fn a_purge_after_an_ordinary_false_is_silent() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
@@ -8493,7 +8530,7 @@ mod matching_aggregate_tests {
             let inflight = inflight.clone();
             let overlaps = overlaps.clone();
             let log = observed.clone();
-            Arc::new(move |now| {
+            MatchingSink::shared(move |now| {
                 if inflight.fetch_add(1, Ordering::SeqCst) != 0 {
                     overlaps.fetch_add(1, Ordering::SeqCst);
                 }
@@ -8569,12 +8606,14 @@ mod matching_aggregate_tests {
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
-                // Keep the probe owned BY the closure, exactly as a C sink owns
-                // its context, so the probe's drop is the closure's drop.
-                let _ = &probe;
-                log.lock().unwrap().push(now);
-            }))))
+            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+                move |now| {
+                    // Keep the probe owned BY the closure, exactly as a C sink owns
+                    // its context, so the probe's drop is the closure's drop.
+                    let _ = &probe;
+                    log.lock().unwrap().push(now);
+                },
+            ))))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8621,14 +8660,16 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
-            entered_tx.send(()).expect("the test thread is waiting");
-            release_rx
-                .lock()
-                .unwrap()
-                .recv()
-                .expect("the test thread releases the sink");
-        }))));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+            move |_now| {
+                entered_tx.send(()).expect("the test thread is waiting");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("the test thread releases the sink");
+            },
+        ))));
 
         let deliverer = {
             let state = state.clone();
@@ -8681,7 +8722,7 @@ mod matching_aggregate_tests {
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
                 let state = weak.upgrade().expect("alive during its own call");
                 // The re-entrant undeclare. It must RETURN, and it must decline
                 // to take the sink rather than block on this frame's own lock.

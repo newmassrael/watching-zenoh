@@ -317,8 +317,11 @@ mod enforcement {
         use crate::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
         struct Lock(std::sync::Mutex<AppLinkTable>);
         impl TableLock for Lock {
-            fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-                f(&mut self.0.lock().unwrap());
+            fn lock_with(
+                &self,
+                f: &mut dyn FnMut(&mut AppLinkTable) -> crate::app_transport::LockedCall,
+            ) -> crate::app_transport::LockedCall {
+                f(&mut self.0.lock().unwrap())
             }
         }
         struct Up;

@@ -141,6 +141,15 @@ host-sys = ["wz-capi-port/os-sys", "wz-runtime-coop/host-lock-sys"]
 # starts none leaves it out, so the job table, the cut to a read's wait and the run after a step
 # are not in its text (the capability-cost gate measures it).
 ticker = []
+# The ring the advanced publishers' caches keep their samples in (`ADVANCED_CACHE_BYTES`): one
+# span of the session's arena, reserved and zeroed at its open, lent under a lock of its own
+# (`wz_capi_port::CacheBytes`), so a cache's put copies its sample into the session's memory. A
+# build with no advanced publisher leaves it out, and its plan has no row for it.
+advanced-cache = []
+# The advanced publishers and subscribers an ABI holds (`MAX_ADVANCED_PUBLISHERS`,
+# `MAX_ADVANCED_SUBSCRIBERS`): a place of the session's arena for each, laid out at its open, and
+# the ring their caches keep their samples in. A build with no advanced plane has no row for them.
+advanced = ["advanced-cache"]
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the
@@ -305,14 +314,6 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
-# The lent-only receive (`wz-session-core`'s `rx-lent-only`): a record read in place that the lent
-# form cannot carry (a list of shared-memory slices, a key past the bounded buffer, a message with
-# a timestamp stack, none of which this engine's links carry) is a counted refusal, so the build
-# links no owned projection of a lent Push or Response. A SELECTOR, off by default and named by the
-# C library's final build beside `tx-lend-only`, for the reason that one is: unified into a build
-# that holds the tokio engine it would drop what that engine's sessions deliver through the
-# projection, which `wz-runtime-tokio` refuses to build.
-rx-lent-only = ["wz-session-core/rx-lent-only"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

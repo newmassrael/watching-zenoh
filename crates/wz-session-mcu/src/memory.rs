@@ -59,6 +59,9 @@ type Queues = BTreeMap<SocketAddr, VecDeque<Waiting>>;
 /// next message that does not join it into another.
 const TX_SLOTS: usize = 2;
 
+/// The bytes of an end's outbound storage: its slots, each of the default link bound.
+const TX_BYTES: usize = TX_SLOTS * DEFAULT_LINK_MTU;
+
 /// An end's outbound storage: [`TX_SLOTS`] slots of the default link bound, allocated with the end.
 /// Each slot is the whole frame the end advertises it carries (`link_mtu`), so no frame the session
 /// may build is refused for want of room.
@@ -66,11 +69,7 @@ struct MemoryTx(Vec<UnsafeCell<u8>>);
 
 impl MemoryTx {
     fn new() -> Self {
-        Self(
-            (0..TX_SLOTS * DEFAULT_LINK_MTU)
-                .map(|_| UnsafeCell::new(0))
-                .collect(),
-        )
+        Self((0..TX_BYTES).map(|_| UnsafeCell::new(0)).collect())
     }
 }
 
@@ -89,7 +88,7 @@ impl TxStore for MemoryTx {
             .as_ptr()
             .cast::<u8>()
             .cast_mut()
-            .wrapping_add(slot * DEFAULT_LINK_MTU)
+            .wrapping_add(slot.saturating_mul(DEFAULT_LINK_MTU))
     }
 }
 
@@ -167,13 +166,12 @@ impl MemoryNetwork {
     /// hold. Only [`Self::bind_ephemeral`] calls it, with the borrow it then
     /// claims under.
     fn next_unclaimed_port(&self, queues: &Queues, addr: IpAddr) -> Option<u16> {
-        for _ in 0..=u16::MAX - FIRST_EPHEMERAL_PORT {
+        const EPHEMERAL_SPAN: u16 = u16::MAX - FIRST_EPHEMERAL_PORT;
+        for _ in 0..=EPHEMERAL_SPAN {
             let port = self.next_ephemeral.get();
-            self.next_ephemeral.set(if port == u16::MAX {
-                FIRST_EPHEMERAL_PORT
-            } else {
-                port + 1
-            });
+            // The range ends at the last port and starts again at its first.
+            self.next_ephemeral
+                .set(port.checked_add(1).unwrap_or(FIRST_EPHEMERAL_PORT));
             if !queues.contains_key(&SocketAddr::new(addr, port)) {
                 return Some(port);
             }

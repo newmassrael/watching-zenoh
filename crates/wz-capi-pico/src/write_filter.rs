@@ -47,17 +47,19 @@
 
 use alloc::sync::Arc;
 
-use wz_capi_port::os::Mutex;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
-use crate::ffi::{LatchList, ReleaseLatch};
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
+use crate::matching::FilterListeners;
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
-use crate::result::{refusal_code, Door, ZResult};
+use crate::refusal::{refusal_code, Door};
+use crate::result::ZResult;
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -111,7 +113,8 @@ impl PicoSession {
 }
 
 /// A publisher's or querier's write filter, and the matching listeners declared on it.
-/// Dropping it retracts the listeners, then the filter, which releases the Interest it took.
+/// Dropping it retracts the listeners, then the filter, which releases the Interest it took. It
+/// lies in its entity's place, and does not move while a listener is on its list.
 ///
 /// A matching listener is the filter's: pico registers its callback on the entity's
 /// filter (`vendor/zenoh-pico/src/api/api.c` @
@@ -130,11 +133,10 @@ pub(crate) struct WriteFilter {
     plane: FilterPlane,
     keyexpr: KeyText,
     count_local: bool,
-    listeners: Mutex<Vec<MatchId>>,
-    /// The latches of the listeners' closures, which the filter's drop waits on: a listener goes
-    /// with its entity, and zenoh-pico's entity is gone only once no callback of its listeners is
-    /// running and their closures' drops have run.
-    released: LatchList,
+    /// The listeners declared on it and not undeclared yet, each linked through its own place,
+    /// which the list holds: a listener goes with its entity, and zenoh-pico's entity is gone only
+    /// once no callback of its listeners is running and their closures' drops have run.
+    listeners: FilterListeners,
 }
 
 impl WriteFilter {
@@ -170,33 +172,33 @@ impl WriteFilter {
             plane,
             keyexpr,
             count_local,
-            listeners: Mutex::new(Vec::new()),
-            released: LatchList::default(),
+            listeners: FilterListeners::default(),
         })
     }
 
     /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on
     /// the entity's filter): `sink` is told whether what the filter counts matches, now and
-    /// each time that changes. The listener is retracted with the filter, or before it by
-    /// its id. The engine is handed back with the id, for a handle that retracts it. `released`
-    /// is the latch of the closure behind `sink`, which the filter's drop waits on.
+    /// each time that changes. The caller puts the listener on the filter's list
+    /// ([`Self::listeners`]), which retracts it with the filter.
     ///
-    /// A listener the engine refuses is answered by its cause, with `sink` let go of: the filter
-    /// keeps neither its id nor its latch, so its drop retracts and waits on nothing for it.
-    pub(crate) fn declare_matching_listener(
-        &self,
-        sink: MatchingSink,
-        released: Arc<ReleaseLatch>,
-    ) -> Result<(Arc<Engine>, MatchId), Refusal> {
-        let id = self.shared.declare_matching_listener(
+    /// A listener the engine refuses is answered by its cause, with `sink` let go of.
+    pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> Result<MatchId, Refusal> {
+        self.shared.declare_matching_listener(
             self.plane,
             self.keyexpr.as_str(),
             sink,
             self.count_local,
-        )?;
-        self.listeners.lock().push(id);
-        self.released.keep(released);
-        Ok((self.shared.clone(), id))
+        )
+    }
+
+    /// The session the filter is declared in, where its listeners are declared too.
+    pub(crate) fn engine(&self) -> &Arc<Engine> {
+        &self.shared
+    }
+
+    /// The listeners declared on this filter that its drop retracts.
+    pub(crate) fn listeners(&self) -> &FilterListeners {
+        &self.listeners
     }
 
     /// pico `_z_write_filter_active`: `true` when nothing has said it matches,
@@ -242,19 +244,13 @@ impl WriteFilter {
 }
 
 /// Retracting on DROP reaches every path that releases the entity: `z_undeclare_*` and
-/// `z_*_drop` alike. Retracting a listener its handle already retracted does nothing. The drop
-/// returns once every listener's closure has run its `drop(context)`: a callback still running
-/// on another thread is waited for, as zenoh-pico's undeclare waits for it.
+/// `z_*_drop` alike. A listener its handle undeclared is off the list already. The drop returns
+/// once every listener's closure has run its `drop(context)`: a callback still running on
+/// another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
-        // Taken out first, so no lock is held while a listener goes: releasing its last
-        // `MatchingSink` runs the C `drop(context)`, which may re-enter the session.
-        let listeners = core::mem::take(self.listeners.get_mut());
-        for id in listeners {
-            self.shared.undeclare_matching_listener(id);
-        }
+        self.listeners.retract_all(Arc::as_ref(&self.shared));
         self.shared.undeclare_write_filter(self.id);
-        self.released.wait_all();
     }
 }
 

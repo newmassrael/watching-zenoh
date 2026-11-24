@@ -8,7 +8,7 @@
 use core::ptr::NonNull;
 
 /// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
-pub const ENTITY_KINDS: usize = 8;
+pub const ENTITY_KINDS: usize = 13;
 
 /// A kind of the session's own entities whose rows an ABI may hold a place of its own beside, one
 /// for each the session's limit of the kind admits.
@@ -31,6 +31,17 @@ pub enum EntityKind {
     /// A liveliness get the ABI holds pending until its last leg ends
     /// (`MAX_PENDING_LIVELINESS_GETS`).
     PendingLivelinessGet,
+    /// A matching listener of a publisher or a querier (`MAX_MATCHING_LISTENERS`).
+    MatchingListener,
+    /// A watch of what the peers declare and retract (`MAX_DECL_WATCHES`).
+    DeclWatch,
+    /// A listener told when a transport to a peer opens or closes
+    /// (`MAX_TRANSPORT_EVENTS_LISTENERS`).
+    TransportEventsListener,
+    /// An advanced publisher (`MAX_ADVANCED_PUBLISHERS`).
+    AdvancedPublisher,
+    /// An advanced subscriber, owned or background (`MAX_ADVANCED_SUBSCRIBERS`).
+    AdvancedSubscriber,
 }
 
 impl EntityKind {
@@ -44,6 +55,11 @@ impl EntityKind {
         Self::Querier,
         Self::PendingGet,
         Self::PendingLivelinessGet,
+        Self::MatchingListener,
+        Self::DeclWatch,
+        Self::TransportEventsListener,
+        Self::AdvancedPublisher,
+        Self::AdvancedSubscriber,
     ];
 }
 
@@ -97,4 +113,16 @@ pub trait PlaceLender {
     /// Give back `place`, closed or not, or hand it back untouched when it is no place this
     /// session lent. What the ABI kept at the place it lets go of first.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
+}
+
+/// An engine that keeps, in memory its session reserved at its open, the ring its advanced
+/// publishers' caches keep their samples in (`ADVANCED_CACHE_BYTES`): one span of bytes, zeroed at
+/// the open, lent to one caller at a time under a lock of its own, so a cache's put copies its
+/// sample into the session's memory and takes none of its own
+/// ([`crate::SessionEngine::cache_bytes`]). The engine reads none of what the caches write there.
+pub trait CacheBytes {
+    /// Call `with` with the ring's bytes, closed or not: the span is the session's memory and not
+    /// its state, and stands until the engine is let go. `with` runs under a lock no other
+    /// operation of the session takes, and calls into nothing that takes the bytes again.
+    fn with_cache_bytes(&self, with: &mut dyn FnMut(&mut [u8]));
 }

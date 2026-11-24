@@ -156,6 +156,32 @@ impl SessionState {
     }
 }
 
+impl wz_capi_port::KeyHolds for SharedSession {
+    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::release_keyexpr(self, mapping_id)
+    }
+
+    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::retain_keyexpr(self, mapping_id)
+    }
+}
+
+impl wz_capi_port::Tickers for SharedSession {
+    #[cfg(feature = "advanced")]
+    fn start_ticker(
+        &self,
+        period_ms: u64,
+        tick: wz_capi_port::Tick,
+    ) -> Result<wz_capi_port::TickerId, Refusal> {
+        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
+    }
+
+    #[cfg(feature = "advanced")]
+    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
+        SharedSession::stop_ticker(self, id);
+    }
+}
+
 impl SessionEngine for SharedSession {
     fn is_closed(&self) -> bool {
         SharedSession::is_closed(self)
@@ -332,13 +358,6 @@ impl SessionEngine for SharedSession {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
 
-    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::release_keyexpr(self, mapping_id)
-    }
-
-    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::retain_keyexpr(self, mapping_id)
-    }
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -538,20 +557,6 @@ impl SessionEngine for SharedSession {
         })
     }
 
-    #[cfg(feature = "advanced")]
-    fn start_ticker(
-        &self,
-        period_ms: u64,
-        tick: wz_capi_port::Tick,
-    ) -> Result<wz_capi_port::TickerId, Refusal> {
-        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
-    }
-
-    #[cfg(feature = "advanced")]
-    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
-        SharedSession::stop_ticker(self, id);
-    }
-
     #[cfg(feature = "liveliness")]
     fn undeclare_liveliness_token(&self, id: wz_capi_port::TokenId) {
         SharedSession::undeclare_liveliness_token(self, id);
@@ -682,17 +687,19 @@ impl SessionEngine for SharedSession {
     }
 
     #[cfg(feature = "queryable")]
-    #[allow(clippy::too_many_arguments)]
     fn declare_queryable_on_link_set(
         &self,
         keyexpr: &str,
         wire: WireKey,
         complete: bool,
-        allowed_origin: Locality,
-        links: LinkRestriction,
+        reach: wz_capi_port::DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Result<wz_capi_port::QblId, Refusal> {
+        let wz_capi_port::DeclarationReach {
+            allowed_origin,
+            links,
+        } = reach;
         self.declared(|| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
@@ -837,10 +844,11 @@ impl SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
-        // The registry mints a callback per face with the face's own session; the port's
-        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
+        // The registry mints a callback per face with the face's own session; each calls the one
+        // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
+        let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
             wire,
@@ -849,10 +857,17 @@ impl SharedSession {
             links,
             retraction,
             Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
-                sink(Arc::new(FaceHolder {
+                let holder = FaceHolder {
                     face: face.clone(),
                     closed: closed.clone(),
-                }))
+                };
+                let sink = Arc::clone(&sink);
+                Box::new(
+                    move |query: &dyn wz_session_core::query_sink::QueryView,
+                          out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                        sink.call(query, out, &holder);
+                    },
+                ) as Box<_>
             }),
         )
     }

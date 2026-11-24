@@ -49,7 +49,7 @@ use wz_session_core::decl_sink::{DeclSink, DeclView};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_slot::{SessionSlots, SlotDriver};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -133,14 +133,14 @@ static APP: SlotApp<Sinks> = SlotApp::new();
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
-        zid: zid_bytes(&[zid; 4]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
-        cookie: cookie_bytes(&[]),
+        cookie: cookie_bytes([]),
         tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,

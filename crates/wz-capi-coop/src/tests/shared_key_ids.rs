@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FilterPlane, FilteredPut, QueryCallback, QueryHolder, ReplyCallback, SessionEngine,
+    FilterPlane, FilteredPut, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
     SubscriberSink, WireKey,
 };
 use wz_runtime_posix::links::PosixLinks;
@@ -272,14 +272,13 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
             false,
             Locality::Any,
             None,
-            Arc::new(move |_: Arc<dyn QueryHolder>| {
-                let into = into.clone();
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     into.lock().unwrap().push(query.keyexpr().to_owned());
                     out.reply_keyed(query.keyexpr(), b"answer")
                         .expect("a reply on the query's own key");
-                }) as QueryCallback
-            }),
+                },
+            ),
         )
         .expect("the engine has queryables in this build");
     let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -531,12 +530,12 @@ fn reply_key_under(
             false,
             Locality::Any,
             None,
-            Arc::new(|_: Arc<dyn QueryHolder>| {
-                Box::new(|query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     out.reply_keyed(query.keyexpr(), b"answer")
                         .expect("a reply on the query's own key");
-                }) as QueryCallback
-            }),
+                },
+            ),
         )
         .expect("the engine has queryables in this build");
     router.send(super::Command::QueryById(9, 43, "/x"));

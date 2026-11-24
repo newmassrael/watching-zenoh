@@ -63,7 +63,7 @@ use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, OtherPeers, Sl
 
 use super::queued::{MatchFlips, Queued};
 #[cfg(feature = "query")]
-use super::LegSink;
+use super::{LegHold, LegSink};
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::{FilterPlane, MatchId};
@@ -101,7 +101,7 @@ type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Le
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
 #[cfg(feature = "query")]
-pub(super) type Gets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 /// A session that asks no query has no pending get on any face: its requester side is none, and
 /// the observer's fan and drains keep no path for gets.
 #[cfg(not(feature = "query"))]
@@ -139,10 +139,21 @@ impl FaceTables {
     #[inline(never)]
     fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
         let at = place.as_mut_ptr();
+        // A field added to the set and not written below would be read uninitialised. This names
+        // every field with no `..`, so adding one without naming it here (and so without writing
+        // it below) does not compile.
+        let _every_field_is_written = |set: &Self| {
+            let Self {
+                peer: _,
+                gets: _,
+                #[cfg(feature = "liveliness")]
+                    retracting: _,
+            } = set;
+        };
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
         // pointer to it, the peer's tables by `init_in`, which writes them whole (a
-        // `MaybeUninit<T>` has the layout of `T`). `every_field_is_written` names every field, so
-        // the set is whole when it is lent.
+        // `MaybeUninit<T>` has the layout of `T`). The list above names every field, so the set is
+        // whole when it is lent.
         let set = unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
             #[cfg(feature = "liveliness")]
@@ -152,19 +163,6 @@ impl FaceTables {
         };
         set.peer.limit_to(limits);
         set
-    }
-
-    /// A field added to [`FaceTables`] and not written by [`Self::rowless_in`] would be read
-    /// uninitialised. This destructures the set with no `..`, so adding a field without naming it
-    /// here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(set: Self) {
-        let Self {
-            peer: _,
-            gets: _,
-            #[cfg(feature = "liveliness")]
-                retracting: _,
-        } = set;
     }
 
     /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its
@@ -1367,11 +1365,12 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
+        let round = crate::round::Round::leaked(4);
         #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(crate::round::Round::leaked(1024, 4));
+        let delivery = RoundDelivery::new(round);
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
-            crate::round::Round::leaked(1024, 4),
+            round,
             alloc::sync::Arc::new(super::super::query::QueryPlane::holding(1)),
         );
         let registry = Registry::new(
