@@ -166,7 +166,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
-| `crates/wz-capi-coop/src/engine/queued.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
