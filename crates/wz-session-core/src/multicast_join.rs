@@ -176,8 +176,8 @@ pub fn encode_join_into<S: SceSink>(
             None
         },
         lease,
-        next_sn_reliable: base_r,
-        next_sn_best_effort: base_be,
+        next_sn_reliable: crate::sn::to_wire(base_r),
+        next_sn_best_effort: crate::sn::to_wire(base_be),
     };
     // R2417 — this node's protocol PATCH level rides a JOIN transport extension
     // whenever it can emit the chain-boundary markers that level promises, which
@@ -269,9 +269,12 @@ const QOS_EXT_BODY_BYTES: usize = <QosSns as BoundedWrite>::MAX_BYTES;
 fn qos_sns(
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
 ) -> ArraySink<QOS_EXT_BODY_BYTES> {
-    let sns: QosSns = conduits
-        .each_ref()
-        .map(|c| [Vle(c.next_reliable), Vle(c.next_best_effort)]);
+    let sns: QosSns = conduits.each_ref().map(|c| {
+        [
+            Vle(crate::sn::to_wire(c.next_reliable)),
+            Vle(crate::sn::to_wire(c.next_best_effort)),
+        ]
+    });
     ArraySink::written(&sns)
 }
 
@@ -665,30 +668,33 @@ mod tests {
     }
 
     /// The QoS body is written into an array the build proves holds its widest form: SNs at the
-    /// top of the 64-bit ring take nine bytes each and fill the array, SNs of 0 take one byte
-    /// each, and in both the bytes are those the codec's own VLE writes, reliable before
-    /// best-effort, priority by priority.
+    /// top of a 64-bit word take nine bytes each and fill the array, at the top of a 32-bit word
+    /// five, SNs of 0 take one byte each, and in each the bytes are those the codec's own VLE
+    /// writes, reliable before best-effort, priority by priority.
     #[cfg(feature = "transport-qos")]
     #[test]
     fn the_qos_body_holds_the_widest_sns_and_writes_what_the_vle_writes() {
         use sce_forge_runtime::codec::SliceSink;
+        let top = crate::sn::Sn::MAX;
         let widest = [crate::sn::TxSn {
-            mask: u64::MAX,
-            next_reliable: u64::MAX,
-            next_best_effort: u64::MAX - 1,
+            mask: top,
+            next_reliable: top,
+            next_best_effort: top - 1,
         }; crate::qos::Priority::NUM];
-        let fresh = [crate::sn::TxSn::new(u64::MAX); crate::qos::Priority::NUM];
-        for (conduits, len) in [
-            (widest, QOS_EXT_BODY_BYTES),
-            (fresh, crate::qos::Priority::NUM * 2),
-        ] {
+        let fresh = [crate::sn::TxSn::new(top); crate::qos::Priority::NUM];
+        let widest_len = if crate::sn::SN_RESOLUTION_HAS_64 {
+            QOS_EXT_BODY_BYTES
+        } else {
+            crate::qos::Priority::NUM * 2 * 5
+        };
+        for (conduits, len) in [(widest, widest_len), (fresh, crate::qos::Priority::NUM * 2)] {
             let body = qos_sns(&conduits);
             let mut expected = [0u8; QOS_EXT_BODY_BYTES];
             let mut sink = SliceSink::new(&mut expected);
             for c in &conduits {
-                sink.write_vle_u64(c.next_reliable)
+                sink.write_vle_u64(crate::sn::to_wire(c.next_reliable))
                     .expect("room for the SN");
-                sink.write_vle_u64(c.next_best_effort)
+                sink.write_vle_u64(crate::sn::to_wire(c.next_best_effort))
                     .expect("room for the SN");
             }
             assert_eq!(body.as_slice(), sink.into_written());

@@ -408,7 +408,10 @@ pub enum FragmentIngest {
     /// aborts the slot's chains before the index can be recycled).
     /// `sn_mask` is the peer's JOIN-advertised SN ring mask, which the
     /// reassembly continuation gate compares at.
-    Admitted { peer_idx: usize, sn_mask: u64 },
+    Admitted {
+        peer_idx: usize,
+        sn_mask: crate::sn::Sn,
+    },
     /// The fragment SN is stale / duplicated / outside the half-window.
     /// The fragment must be dropped AND the channel's in-progress
     /// reassembly chain aborted (pico clears the channel dbuf + state on
@@ -568,7 +571,7 @@ struct PeerSlot {
     /// `seq_num_res` ([`sn::mask_from_res`]; zenoh-pico
     /// `entry->_sn_res = _z_sn_max(msg->_seq_num_res)`). Valid iff
     /// `src.is_some()`.
-    sn_mask: u64,
+    sn_mask: crate::sn::Sn,
     /// Last-seen SN per `(priority, channel)` conduit, seeded one before the
     /// JOIN-advertised `next_sn` (§3.2 `init_rx_seq`) and advanced by each admitted
     /// frame. Valid iff `src.is_some()`. R311y227 — under `transport-qos` a qos
@@ -788,8 +791,8 @@ impl PeerSlot {
         let _ = qos_next_sns;
         self.rx_sn.seed_plain(
             self.sn_mask,
-            baseline.next_sn_reliable,
-            baseline.next_sn_best_effort,
+            sn::from_wire(baseline.next_sn_reliable),
+            sn::from_wire(baseline.next_sn_best_effort),
         );
         self.lease_ms = baseline.lease_ms;
     }
@@ -2027,7 +2030,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         // SN gate): any frame from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
         let mask = slot.sn_mask;
-        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
+        if !slot
+            .rx_sn
+            .admit(priority, mask, reliable, sn::from_wire(frame_sn))
+        {
             return FrameIngest::OutOfOrder;
         }
         FrameIngest::Admitted
@@ -2094,7 +2100,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         // SN gate): any fragment from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
         let mask = slot.sn_mask;
-        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
+        if !slot
+            .rx_sn
+            .admit(priority, mask, reliable, sn::from_wire(frame_sn))
+        {
             return FragmentIngest::OutOfOrder { peer_idx: idx };
         }
         FragmentIngest::Admitted {

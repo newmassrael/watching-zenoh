@@ -2255,9 +2255,9 @@ mod batch_walk_tests {
 
         // Two marked chains at consecutive sequence numbers: the first starts
         // at 0, the second at 1, so the member's SN gate admits both.
-        let chain_at = |first_sn: u64| {
+        let chain_at = |first_sn: sn::Sn| {
             let frame = crate::frame_encode::encode_frame_with_push(
-                first_sn,
+                sn::to_wire(first_sn),
                 crate::push_build::build_push_literal("demo/mc", b"restarted-chain-from-wire")
                     .expect("push fixture"),
                 true,

@@ -120,8 +120,8 @@ pub fn qos_next_sns(
     let mut inner = SceCursor::new(body);
     let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
     for p in pairs.iter_mut() {
-        p.reliable = inner.read_vle_u64().ok()?;
-        p.best_effort = inner.read_vle_u64().ok()?;
+        p.reliable = crate::sn::from_wire(inner.read_vle_u64().ok()?);
+        p.best_effort = crate::sn::from_wire(inner.read_vle_u64().ok()?);
     }
     Some(pairs)
 }
