@@ -527,6 +527,9 @@ transport-link-unixpipe,transport-link-ws|"
     # The comments a schema keeps (`wz_app_schema::proto_lex::Gap`, behind `docs`): the
     # tokenizer's tests of which comment trails a token and which leads the next.
     "wz-app-schema|hook|docs|"
+    # The crate as an image with no allocator links it (`-default` drops its default `alloc`): the
+    # message catalog's static tables alone, their test building a whole catalog as a constant.
+    "wz-app-schema|hook|-default|message_catalog_table::"
     # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
     # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
     "wz-app-frame|hook|message-payload|message_payload_tests::"
