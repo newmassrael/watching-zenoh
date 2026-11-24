@@ -76,7 +76,7 @@
     "put-encoded": {
       "allocs_per_round": null,
       "locked": false,
-      "debt": "debt-TBD"
+      "debt": "debt-c-abi-encoding-schema-heap"
     },
     "put-small": {
       "allocs_per_round": 4,
