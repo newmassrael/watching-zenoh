@@ -33,8 +33,8 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
         m = sce_forge_runtime::algorithm::proven::add::<u32>(m, 1);
         if col_star && keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs0, ce0) == 2 {
             let below0: u32 = sce_forge_runtime::algorithm::proven::sub::<u32>(m, 1);
-            if prev >> below0 & 1 == 1 {
-                prev = prev | 1u64 << m;
+            if sce_forge_runtime::algorithm::proven::shr::<u64, _>(prev, below0) & 1 == 1 {
+                prev = prev | sce_forge_runtime::algorithm::proven::shl::<u64, _>(1u64, m);
             }
         }
         if ce0 < cn {
@@ -59,9 +59,9 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
             let ce: u32 = keyexpr_chunk_end::keyexpr_chunk_end(c, cs);
             let ckind: u8 = keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs, ce);
             let jb: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(j, 1);
-            let up: bool = prev >> jb & 1 == 1;
-            let left: bool = cur >> j & 1 == 1;
-            let diag: bool = prev >> j & 1 == 1;
+            let up: bool = sce_forge_runtime::algorithm::proven::shr::<u64, _>(prev, jb) & 1 == 1;
+            let left: bool = sce_forge_runtime::algorithm::proven::shr::<u64, _>(cur, j) & 1 == 1;
+            let diag: bool = sce_forge_runtime::algorithm::proven::shr::<u64, _>(prev, j) & 1 == 1;
             let mut v: bool = false;
             if row_star && rkind == 2 {
                 v = up || ckind != 3 && left;
@@ -83,7 +83,7 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
                 }
             }
             if v {
-                cur = cur | 1u64 << jb;
+                cur = cur | sce_forge_runtime::algorithm::proven::shl::<u64, _>(1u64, jb);
             }
             j = jb;
             if ce < cn {
@@ -99,5 +99,5 @@ pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, i
             rmore = false;
         }
     }
-    return prev >> m & 1 == 1;
+    return sce_forge_runtime::algorithm::proven::shr::<u64, _>(prev, m) & 1 == 1;
 }

@@ -791,14 +791,15 @@ impl<'f> ExtChainRead for ReadChain<'f> {
     type Held = alloc::vec::Vec<crate::transport_profile::ExtEntryOwned>;
 
     fn entries(self) -> Self::Entries {
-        ReadEntries(self.list.iter())
+        ReadEntries(self.list.map(|list| list.iter()))
     }
 
     // Every entry was built as the decoder builds it before the message was handed out
     // (`read_control`), so none is refused here.
     fn held(self) -> Self::Held {
         self.list
-            .iter()
+            .into_iter()
+            .flat_map(|list| list.iter())
             .filter_map(|entry| crate::ext_chain::received_entry(&entry).ok())
             .collect()
     }
@@ -857,20 +858,20 @@ impl<'f> Iterator for ReadEntries<'f> {
     // the two reads of one message agree.
     #[cfg(feature = "session-slot")]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.find(|entry| {
+        self.0.as_mut()?.find(|entry| {
             crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
         })
     }
 
     #[cfg(not(feature = "session-slot"))]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+        self.0.as_mut()?.next()
     }
 }
 
 /// The extension chain of a handshake message read where it lies (`ControlRead`): the view its
 /// document read it as, walked again by a reader that takes every entry, and what the one walk of
-/// the read found for the readers every build links ([`ChainAnswers`]), which no reader walks it
+/// the read found for the readers every build links (`ChainAnswers`), which no reader walks it
 /// again for.
 #[cfg(all(
     feature = "alloc",
@@ -880,6 +881,7 @@ impl<'f> Iterator for ReadEntries<'f> {
 #[derive(Clone, Copy)]
 pub struct ReadChain<'a> {
     list: ReadList<'a>,
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     answers: ChainAnswers<'a>,
 }
 
@@ -891,7 +893,8 @@ pub struct ReadChain<'a> {
 impl ReadChain<'_> {
     /// The chain of a message that hands none to the judgement.
     const EMPTY: Self = Self {
-        list: ReadList::Empty(core::marker::PhantomData),
+        list: None,
+        #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
         answers: ChainAnswers::NONE,
     };
 }
@@ -902,7 +905,13 @@ impl ReadChain<'_> {
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 #[derive(Clone, Copy)]
 pub(crate) struct ChainAnswers<'a> {
@@ -922,7 +931,13 @@ pub(crate) struct ChainAnswers<'a> {
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 impl<'a> ChainAnswers<'a> {
     /// The answers of a chain with no entry.
@@ -937,12 +952,6 @@ impl<'a> ChainAnswers<'a> {
     };
 
     /// Take what `entry`, the next entry of the walk, answers that no entry before it did.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive"
-    ))]
     pub(crate) fn note(&mut self, entry: &wz_codecs::ext_entry::ExtEntryView<'a>) {
         #[cfg(feature = "codec-init-body")]
         {
@@ -962,101 +971,24 @@ impl<'a> ChainAnswers<'a> {
     }
 }
 
-/// The view of a [`ReadChain`]'s entries: an Init's or an Open's, or none.
+/// The view of a [`ReadChain`]'s entries: an Init's or an Open's chain, whose entries one walk
+/// reads, or none for a message that hands no chain to the judgement.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
     feature = "session-unicast"
 ))]
-#[derive(Clone, Copy)]
-enum ReadList<'a> {
-    /// An Init's chain.
-    #[cfg(feature = "codec-init-body")]
-    Init(
-        sce_forge_runtime::codec::ListView<
-            'a,
-            wz_codecs::transport_init::TransportInitExtensionsWalk,
-            0,
-        >,
-    ),
-    /// An Open's chain.
-    #[cfg(feature = "codec-open-body")]
-    Open(
-        sce_forge_runtime::codec::ListView<
-            'a,
-            wz_codecs::transport_open::TransportOpenExtensionsWalk,
-            0,
-        >,
-    ),
-    /// A message that hands no chain to the judgement.
-    Empty(core::marker::PhantomData<&'a ()>),
-}
+type ReadList<'a> =
+    Option<sce_forge_runtime::codec::ListView<'a, wz_codecs::ext_entry::ExtEntryWalk, 0>>;
 
+/// The walk of a [`ReadChain`]'s entries, or none for no chain.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
     feature = "session-unicast"
 ))]
-impl<'a> ReadList<'a> {
-    /// The entries, in the chain's order, each decoded as the walk reaches it.
-    fn iter(&self) -> ReadChainIter<'a> {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            Self::Init(list) => ReadChainIter::Init(list.iter()),
-            #[cfg(feature = "codec-open-body")]
-            Self::Open(list) => ReadChainIter::Open(list.iter()),
-            Self::Empty(_) => ReadChainIter::Done(core::marker::PhantomData),
-        }
-    }
-}
-
-/// The walk of a [`ReadChain`].
-#[cfg(all(
-    feature = "alloc",
-    feature = "codec-frame",
-    feature = "session-unicast"
-))]
-pub enum ReadChainIter<'a> {
-    /// An Init's.
-    #[cfg(feature = "codec-init-body")]
-    Init(
-        sce_forge_runtime::codec::ListIter<
-            'a,
-            wz_codecs::transport_init::TransportInitExtensionsWalk,
-            0,
-        >,
-    ),
-    /// An Open's.
-    #[cfg(feature = "codec-open-body")]
-    Open(
-        sce_forge_runtime::codec::ListIter<
-            'a,
-            wz_codecs::transport_open::TransportOpenExtensionsWalk,
-            0,
-        >,
-    ),
-    /// The walk of no chain, or of one walked to its end.
-    Done(core::marker::PhantomData<&'a ()>),
-}
-
-#[cfg(all(
-    feature = "alloc",
-    feature = "codec-frame",
-    feature = "session-unicast"
-))]
-impl<'a> Iterator for ReadChainIter<'a> {
-    type Item = wz_codecs::ext_entry::ExtEntryView<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            Self::Init(entries) => entries.next(),
-            #[cfg(feature = "codec-open-body")]
-            Self::Open(entries) => entries.next(),
-            Self::Done(_) => None,
-        }
-    }
-}
+type ReadChainIter<'a> =
+    Option<sce_forge_runtime::codec::ListIter<'a, wz_codecs::ext_entry::ExtEntryWalk, 0>>;
 
 impl ControlFacts<'_> {
     /// The establishment message these facts are of, if they are of one.
@@ -2257,12 +2189,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                     wire_const::T_MID_INIT,
                     crate::ext_view::walked(view.extensions.as_ref()),
                 )?;
-                let list = view
-                    .extensions
-                    .as_ref()
-                    .map_or(ReadList::Empty(core::marker::PhantomData), |list| {
-                        ReadList::Init(*list.inner())
-                    });
+                let list = view.extensions.as_ref().map(|list| *list.inner());
                 // A zid that is no zid is refused, after the chain as the decoder refuses it
                 // (`refuse_unnamed_zid`), and the one it is goes on in the facts.
                 let zid = crate::session_zid::SessionZid::new(view.body.zid.inner())
@@ -2293,12 +2220,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                     wire_const::T_MID_OPEN,
                     crate::ext_view::walked(view.extensions.as_ref()),
                 )?;
-                let list = view
-                    .extensions
-                    .as_ref()
-                    .map_or(ReadList::Empty(core::marker::PhantomData), |list| {
-                        ReadList::Open(*list.inner())
-                    });
+                let list = view.extensions.as_ref().map(|list| *list.inner());
                 (
                     ControlFacts::Open(OpenFacts {
                         is_ack: (view.header & wire_const::FLAG_T_OPEN_A) != 0,
