@@ -666,8 +666,6 @@ pub mod scout;
 #[cfg(feature = "segment-sender")]
 pub mod segment_sender;
 pub mod serde;
-// Totality debt TD-167 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session;
 mod session_ext;
 // The place a session's handle lies in, and what stays in it once the handle is let go of.
