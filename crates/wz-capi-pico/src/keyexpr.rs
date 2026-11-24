@@ -1135,8 +1135,16 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
             return Z_ERR_NULL;
         };
         // The text is the one part of a join with nothing on its left, so it is canonized, held
-        // to the bound and stored by the body the joins use, as a literal.
-        match store_canonized(keyexpr, core::ptr::null(), &[text.as_bytes()]) {
+        // to the bound and stored by the body the joins use, as a literal. pico copies the text and
+        // canonizes the copy (`vendor/zenoh-pico/src/api/api.c` @
+        // `z_keyexpr_canonize((char *)_z_string_data(&key->_val._inner._keyexpr),`), answering
+        // its canonize status.
+        match store_canonized(
+            keyexpr,
+            core::ptr::null(),
+            &[text.as_bytes()],
+            CanonRefusal::Status,
+        ) {
             Ok(written) => {
                 *len = written;
                 Z_OK
@@ -1269,9 +1277,14 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        store_canonized(key, left, &[head.as_bytes(), tail.as_bytes()])
-            .err()
-            .unwrap_or(Z_OK)
+        store_canonized(
+            key,
+            left,
+            &[head.as_bytes(), tail.as_bytes()],
+            CanonRefusal::Invalid,
+        )
+        .err()
+        .unwrap_or(Z_OK)
     })
 }
 
@@ -1296,8 +1309,9 @@ unsafe fn extended_from(
 /// canonized into a buffer of the bound and stored in `key` keeping `left`'s declaration
 /// ([`extended_from`]), a literal for a null `left`. The bound every key of this build is held to
 /// is held to the form and not to the text, as pico keeps only the form: a long text whose form is
-/// short is a key, and a form past the bound is refused with `Z_EINVAL`. The form's length on
-/// success; `key` is left as it was on a refusal. The join takes no allocation and no copy of its
+/// short is a key, and a form past the bound is refused with `Z_EINVAL`. A text no canonizing makes
+/// a key of is answered as `refusal` says. The form's length on success; `key` is left as it was
+/// on a refusal. The join takes no allocation and no copy of its
 /// text.
 ///
 /// # Safety
@@ -1307,6 +1321,7 @@ unsafe fn store_canonized(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
     parts: &[&[u8]],
+    refusal: CanonRefusal,
 ) -> Result<usize, ZResult> {
     let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
     let written = match wz_session_core::keyexpr_canon::canonize_parts_into(
@@ -1316,7 +1331,12 @@ unsafe fn store_canonized(
     ) {
         Ok(written) => written,
         Err(KeyexprCanonError::ExceedsCapacity) => return Err(Z_EINVAL),
-        Err(_) => return Err(Z_ERR_INVALID),
+        Err(err) => {
+            return Err(match refusal {
+                CanonRefusal::Status => pico_canon_status(&err),
+                CanonRefusal::Invalid => Z_EINVAL,
+            })
+        }
     };
     // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
     let Some(canon) = form
@@ -1327,6 +1347,19 @@ unsafe fn store_canonized(
     };
     store_owned_keyexpr(key, extended_from(left, canon)?);
     Ok(written)
+}
+
+/// How a door that canonizes a text answers one no canonizing makes a key of.
+#[derive(Clone, Copy)]
+enum CanonRefusal {
+    /// pico's canonize status for the cause ([`pico_canon_status`]), which its join and its
+    /// canonizing constructor answer (`vendor/zenoh-pico/src/session/keyexpr.c` @
+    /// `_Z_CLEAN_RETURN_IF_ERR(_z_keyexpr_canonize((char *)key->_keyexpr._slice.start, &key->_keyexpr._slice.len),`).
+    Status,
+    /// pico's `_Z_ERR_INVALID` (`Z_EINVAL`), the one refusal its concatenation has, which
+    /// canonizes nothing (`vendor/zenoh-pico/src/session/keyexpr.c` @
+    /// `_Z_ERROR_RETURN(_Z_ERR_INVALID);`).
+    Invalid,
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1348,9 +1381,14 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        store_canonized(key, left, &[l.as_bytes(), b"/".as_slice(), r.as_bytes()])
-            .err()
-            .unwrap_or(Z_OK)
+        store_canonized(
+            key,
+            left,
+            &[l.as_bytes(), b"/".as_slice(), r.as_bytes()],
+            CanonRefusal::Status,
+        )
+        .err()
+        .unwrap_or(Z_OK)
     })
 }
 
@@ -2161,14 +2199,29 @@ mod bound_tests {
         }
     }
 
-    /// The owned canonizing constructor refuses what the joins refuse, with their codes: a text
-    /// no canonizing can make a key of is `Z_ERR_INVALID`, the destination left null and no
-    /// length written back, and the key it does make names no declaration. Turned red by a
-    /// refusal mapped to another code, or by a length written back on a refusal.
+    /// Each text no canonizing makes a key of, with the status zenoh-pico's canonize answers for
+    /// it (`vendor/zenoh-pico/include/zenoh-pico/api/constants.h` @
+    /// `Z_KEYEXPR_CANON_EMPTY_CHUNK = -4,` to `Z_KEYEXPR_CANON_CONTAINS_UNBOUND_DOLLAR = -8`).
+    const REFUSED: [(&str, ZResult); 5] = [
+        ("home//temp", -4),
+        ("home/foo*bar", -5),
+        ("home/$$", -6),
+        ("home/foo#bar", -7),
+        ("home/foo$bar", -8),
+    ];
+
+    /// Every door that canonizes answers a text no canonizing makes a key of with zenoh-pico's
+    /// code: the owned canonizing constructor, the join and the in-place canonize with pico's
+    /// canonize status for the cause, as pico's do; the concatenation, which in pico canonizes
+    /// nothing and refuses only with `_Z_ERR_INVALID`, with that code (`Z_EINVAL`). Each leaves
+    /// its destination null. Turned red by a refusal of any cause folded onto one code, or by the
+    /// concatenation answering a canonize status pico's never answers.
     #[test]
-    fn the_owned_canonizing_constructor_refuses_as_the_joins_do() {
+    fn every_canon_refusal_answers_picos_code() {
         unsafe {
-            for text in ["demo/a?b", "demo/#", "demo//a"] {
+            let (rc, mut home) = owned("home");
+            assert_eq!(rc, Z_OK);
+            for (text, status) in REFUSED {
                 let mut len = text.len();
                 let mut key = z_owned_keyexpr_t::null_value();
                 assert_eq!(
@@ -2177,7 +2230,79 @@ mod bound_tests {
                         text.as_ptr() as *const c_char,
                         &mut len,
                     ),
-                    Z_ERR_INVALID,
+                    status,
+                    "autocanonize {text}"
+                );
+                assert!(
+                    !z_internal_keyexpr_check(&key),
+                    "{text}: nothing is left behind"
+                );
+
+                let mut bytes = text.as_bytes().to_vec();
+                let mut len = bytes.len();
+                assert_eq!(
+                    z_keyexpr_canonize(bytes.as_mut_ptr() as *mut c_char, &mut len),
+                    status,
+                    "canonize {text}"
+                );
+
+                let tail = text
+                    .strip_prefix("home")
+                    .expect("each text opens with home");
+                assert_eq!(
+                    z_keyexpr_concat(
+                        &mut key,
+                        z_keyexpr_loan(&home),
+                        tail.as_ptr() as *const c_char,
+                        tail.len(),
+                    ),
+                    Z_EINVAL,
+                    "concat {text}"
+                );
+                assert!(
+                    !z_internal_keyexpr_check(&key),
+                    "{text}: nothing is left behind"
+                );
+
+                let right = text
+                    .strip_prefix("home/")
+                    .expect("each text opens with home/");
+                let cright = alloc::ffi::CString::new(right).expect("no NUL");
+                let mut view = z_view_keyexpr_t {
+                    _start: core::ptr::null(),
+                    _len: 0,
+                    _pad: [0usize; 4],
+                };
+                z_view_keyexpr_from_str_unchecked(&mut view, cright.as_ptr());
+                assert_eq!(
+                    z_keyexpr_join(&mut key, z_keyexpr_loan(&home), z_view_keyexpr_loan(&view)),
+                    status,
+                    "join {text}"
+                );
+                assert!(
+                    !z_internal_keyexpr_check(&key),
+                    "{text}: nothing is left behind"
+                );
+            }
+            z_keyexpr_drop(z_keyexpr_move(&mut home));
+        }
+    }
+
+    /// The owned canonizing constructor writes no length back on a refusal, and the key it makes
+    /// names no declaration. Turned red by a length written back on a refusal.
+    #[test]
+    fn the_owned_canonizing_constructor_writes_back_only_what_it_made() {
+        unsafe {
+            for (text, status) in REFUSED {
+                let mut len = text.len();
+                let mut key = z_owned_keyexpr_t::null_value();
+                assert_eq!(
+                    z_keyexpr_from_substr_autocanonize(
+                        &mut key,
+                        text.as_ptr() as *const c_char,
+                        &mut len,
+                    ),
+                    status,
                     "{text}"
                 );
                 assert!(
