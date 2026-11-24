@@ -646,6 +646,15 @@ struct SessionLent {
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
+    /// How many rows each table of the engine's record of the declarations is lent, as the plan
+    /// laid them out.
+    entities: EntityRows,
+    /// The links the plan holds buffers for: the rows of the session's link admission.
+    #[cfg(feature = "listen")]
+    links: usize,
+    /// Whether the outbound slots the links share are fewer than the links.
+    #[cfg(feature = "listen")]
+    tx_pool_short: bool,
     /// The places of the publishes the session keeps for its other faces, the engine's.
     #[cfg(any(feature = "listen", feature = "group"))]
     handed: HandedTable,
@@ -703,22 +712,26 @@ impl SessionRows {
     }
 }
 
-/// Reserve the arena `plan` lays out in `memory` and lend from it every table of the session
-/// opened with `config` under `policy`. One lender lends each layer its plain tables from the
-/// rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
+/// Lay out the plan of the session opened with `config` under `policy` (`session_plan`, each
+/// link's cells `cell_bytes` large and the ABI's places `held`), reserve its arena in `memory`
+/// and lend from it every table of the session. One lender lends each layer its plain tables
+/// from the rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
 /// state's lane, declarations, keys and legs, and the ABI's places; it gives the tables after a
 /// refusal no rows and is asked once, after them all. The round's tables and the application's,
 /// which their makers lend, ask their own. What was lent before a refusal goes back with the
 /// arena. Out of line and generic over nothing: one body for every stack and source the open is
-/// made over.
+/// made over. The plan is made and read here, so the open's frame never holds or moves it: what
+/// the state is sized by is handed back with the tables.
 #[inline(never)]
 fn lend_session(
-    plan: &ArenaPlan,
+    cell_bytes: LinkCells<usize>,
+    held: &HeldPlaces,
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
-    let mut arena = SessionArena::reserve(plan, memory)?;
+    let plan = session_plan(config, cell_bytes, held)?;
+    let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     let TransportTables {
         links: link_tables,
@@ -829,6 +842,11 @@ fn lend_session(
         pending_gets,
         handle_place,
         places,
+        entities: plan.entities(),
+        #[cfg(feature = "listen")]
+        links: plan.links(),
+        #[cfg(feature = "listen")]
+        tx_pool_short: plan.tx_pool_short(),
         #[cfg(any(feature = "listen", feature = "group"))]
         handed,
         #[cfg(feature = "advanced-cache")]
@@ -2468,20 +2486,29 @@ type LinkHalves<C> = (
     SessionCore<CoopRuntime<C>, CoopTime<C>>,
 );
 
-/// The arena a session over `links` opens `config` with: the rows its limits size, a cell for
-/// each link's driver as large as the largest the links open, and a cell for each link's gates.
-/// The one plan an open reserves by.
-pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
-    links: &impl SessionLinks,
-    config: &CoopConfig<E>,
-) -> Result<ArenaPlan, ArenaRefused> {
-    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
-    plan.holding_cells(LinkCells {
+/// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
+/// each link's driver as large as the largest the links open, one for its gates, one for its
+/// actions and one for the two halves they hold.
+pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) -> LinkCells<usize> {
+    LinkCells {
         driver: links.link_cell_bytes(),
         gate: CellRc::<LinkGate<C>>::cell_bytes(),
         actions: CellRc::<McuActions<C>>::cell_bytes(),
         halves: CellRc::<LinkHalves<C>>::cell_bytes(),
-    })?;
+    }
+}
+
+/// The arena an open of `config` reserves: the rows its limits size, the cells `cells` sizes for
+/// each link and the ABI's places `held` names, after every other row. The one plan an open
+/// reserves by, laid out by `lend_session` in its own frame, where the plan stays while it is read.
+pub(crate) fn session_plan<E: EndpointList>(
+    config: &CoopConfig<E>,
+    cells: LinkCells<usize>,
+    held: &HeldPlaces,
+) -> Result<ArenaPlan, ArenaRefused> {
+    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
+    plan.holding_cells(cells)?;
+    plan.holding(held)?;
     Ok(plan)
 }
 
@@ -3786,9 +3813,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let mut plan = arena_plan::<C, _>(&links, &config).map_err(OpenError::Arena)?;
-        plan.holding(&held).map_err(OpenError::Arena)?;
-        let mut lent = lend_session(&plan, memory, &config, &policy).map_err(OpenError::Arena)?;
+        let mut lent = lend_session(link_cells::<C>(&links), &held, memory, &config, &policy)
+            .map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
@@ -3801,7 +3827,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(driver_cells) = lent.cells.driver {
             links.lend_cells(driver_cells);
         }
-        let entities = plan.entities();
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
@@ -3832,7 +3857,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )),
             transport: TransportState {
                 #[cfg(feature = "listen")]
-                tx_pool_short: plan.tx_pool_short(),
+                tx_pool_short: lent.tx_pool_short,
                 // A face for each the config admits beside the dial role's, each with its dial, and
                 // the waits a read makes at once, reserved here: none grows after.
                 links: LinkSupervisor::new(
@@ -3856,7 +3881,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::with_order(
                     &wire,
                     policy.link_tie_order(),
-                    plan.links(),
+                    lent.links,
                 )),
                 wire_zid: wire,
                 gate_cells: lent.cells.gate,
@@ -3875,7 +3900,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 watchers: Arc::new(FacePlane::with_room(face_rows)),
                 #[cfg(not(feature = "connectivity"))]
                 watchers: (),
-                entities,
+                entities: lent.entities,
                 keys: lent.keys,
                 #[cfg(feature = "shared-key-ids")]
                 key_ids: key_ids.at_open.ids,

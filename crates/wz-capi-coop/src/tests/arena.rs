@@ -174,12 +174,61 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
     assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
 }
 
+/// An open asked to hold the ABI's handle reserves the plan the open lays out with the handle's
+/// place, and one asked for none the plan without it: the places are laid out on the one plan the
+/// open reserves by. Turned red by an open that reserves a plan other than the one it lends from,
+/// or lays the places out apart from it.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
+    use crate::arena::{HeldPlaces, OpenStorage};
+
+    let layout = core::alloc::Layout::from_size_align(40, 8).expect("a layout");
+    let held = HeldPlaces::handle(layout);
+    let router = Router::start(CatchAll::None);
+    let holding = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        OpenStorage {
+            memory: &AllocatorMemory,
+            held,
+        },
+    )
+    .expect("the session opens");
+    let with_place = held_plan(&config(&router), &held)
+        .expect("the handle fits the plan")
+        .reserved_bytes()
+        .expect("within the address space");
+    let without = host_plan(&config(&router))
+        .expect("the build's limits lay an arena out")
+        .reserved_bytes()
+        .expect("within the address space");
+    assert_eq!(holding.arena_bytes(), with_place);
+    assert!(
+        with_place > without,
+        "the handle's place is a row of the plan"
+    );
+}
+
 /// The arena an open of `config` over the host's links the tests open with reserves, as the
-/// engine plans it: its links' cells and their gates' included.
+/// engine plans it: its links' cells and their gates' included, and no place of the ABI's.
 fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
-    crate::engine::arena_plan::<PosixClock, _>(
-        &PosixLinks::new(super::LOOPBACK, PosixTcpDial),
+    held_plan(config, &crate::arena::HeldPlaces::NONE)
+}
+
+/// `host_plan` with the ABI's places `held` laid out after every other row.
+fn held_plan(
+    config: &CoopConfig,
+    held: &crate::arena::HeldPlaces,
+) -> Result<ArenaPlan, ArenaRefused> {
+    crate::engine::session_plan(
         config,
+        crate::engine::link_cells::<PosixClock>(&PosixLinks::new(super::LOOPBACK, PosixTcpDial)),
+        held,
     )
 }
 
