@@ -360,6 +360,15 @@ fn a_value_that_does_not_fit_its_field_is_refused_and_changes_nothing() {
         );
     }
     assert_eq!(bytes(&p), Vec::<u8>::new());
+    // The refusal names the field, not the value, whose text would carry the formatter of every
+    // `f64` into the image.
+    assert_eq!(
+        p.set("ratio", Given::Real(-1e40)),
+        Err(Refusal::Range {
+            path: String::from("ratio"),
+            reason: String::from("the value is finite and past what a float holds"),
+        })
+    );
     // An infinity is a float's value, and is written.
     set(&mut p, "ratio", Given::Real(f64::INFINITY));
     assert_eq!(bytes(&p), [0x25, 0x00, 0x00, 0x80, 0x7F]);
