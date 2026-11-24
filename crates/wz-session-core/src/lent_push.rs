@@ -209,7 +209,11 @@ pub fn put_with_qos<'a>(
 /// stays the codec's, and it refuses what [`put_with_qos`] refuses, with the same
 /// `LengthOutOfRange` and before a byte is written. It is [`write_publication`]'s writer for a
 /// Put with no body field, which takes that writer's straight path.
+///
+/// Out of line: a send hands its writer to the link as a `dyn Fn`, whose vtable holds the
+/// closure twice (its call and its by-value shim), and each held this writer inlined.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+#[inline(never)]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
     mapping_id: crate::wire_id::ExprId,
@@ -423,7 +427,10 @@ impl<'m> BodyParts<'m> {
 /// chain. What the owned builders refuse is refused with `LengthOutOfRange` before a byte is
 /// written: a key past the protocol's `u16` length, a Put's payload past its `u32` length, and a
 /// field past its bound. The timestamp stack a publication starts rides after the QoS.
+///
+/// Out of line for the reason [`write_plain_put`] is.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+#[inline(never)]
 pub fn write_publication<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
     mapping_id: crate::wire_id::ExprId,
