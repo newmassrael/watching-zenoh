@@ -274,8 +274,7 @@ mod compile_time_assertions {
     #[cfg(not(feature = "alloc"))]
     fn _assert_eq<T: Eq>() {}
 
-    #[allow(dead_code)]
-    fn runtime_error_trait_bounds_compile() {
+    const _: fn() = || {
         _assert_send::<RuntimeError>();
         #[cfg(not(feature = "alloc"))]
         {
@@ -283,7 +282,7 @@ mod compile_time_assertions {
             _assert_clone::<RuntimeError>();
             _assert_eq::<RuntimeError>();
         }
-    }
+    };
 }
 
 #[cfg(all(test, feature = "alloc"))]

@@ -832,7 +832,7 @@ where
 struct FrameRead {
     next: MulticastRxNext,
     // Read by the walk of a datagram a transport keeps, which a build without reassembly has none of.
-    #[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
+    #[cfg(feature = "reassembly")]
     stopped_at: Option<usize>,
 }
 
@@ -845,7 +845,7 @@ struct FrameRead {
 /// `resume` is where in `bytes` the next record starts in a frame an earlier walk stopped in:
 /// its head was admitted then, so the SN gate is not asked again, and its records are read on
 /// from there. With `may_stop` (a transport that keeps the datagram) the walk ends before a
-/// record once `on_event` takes no other ([`FrameRead::stopped_at`]).
+/// record once `on_event` takes no other (`FrameRead::stopped_at`).
 ///
 /// A payload that stops decoding ends the walk where it fails, with the records before it
 /// already handed over: a multicast peer has no session to tell, so the datagram stays
@@ -881,6 +881,7 @@ where
 {
     let done = |next| FrameRead {
         next,
+        #[cfg(feature = "reassembly")]
         stopped_at: None,
     };
     let Some(Ok((head, payload_at))) = crate::inbound::parse_frame_in_place(bytes) else {
@@ -905,20 +906,24 @@ where
     }
     let records_at = resume.unwrap_or(payload_at).min(bytes.len());
     let mut records = crate::multicast_dispatch::MemberRecords::of(dispatcher, src, on_event);
-    let stopped_at = match crate::driver_loop::walk_lent_payload(
+    let walked = crate::driver_loop::walk_lent_payload(
         bytes.get(records_at..).unwrap_or_default(),
         reliable,
         sn,
         priority,
         may_stop,
         &mut records,
-    ) {
-        Ok((read, true)) => Some(records_at.saturating_add(read)),
-        _ => None,
-    };
+    );
+    // Only a datagram a transport keeps is walked on from where the walk stopped.
+    #[cfg(not(feature = "reassembly"))]
+    let _ = walked;
     FrameRead {
         next: MulticastRxNext::Done,
-        stopped_at,
+        #[cfg(feature = "reassembly")]
+        stopped_at: match walked {
+            Ok((read, true)) => Some(records_at.saturating_add(read)),
+            _ => None,
+        },
     }
 }
 

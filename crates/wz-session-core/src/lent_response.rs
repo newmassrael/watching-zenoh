@@ -327,8 +327,8 @@ type ErrEncoding<'a> = Option<(u32, Option<&'a [u8]>)>;
 pub struct ResponseWriter<'a> {
     parts: ReplyParts<'a>,
     responder: IdentityBody,
-    // Read only under `reply-source-info`, the feature that puts the extension on the wire.
-    #[cfg_attr(not(feature = "reply-source-info"), allow(dead_code))]
+    // Held only under `reply-source-info`, the feature that puts the extension on the wire.
+    #[cfg(feature = "reply-source-info")]
     source_info: IdentityBody,
 }
 
@@ -347,11 +347,11 @@ impl<'a> ResponseWriter<'a> {
             }
             None => IdentityBody::NONE,
         };
-        let source_info = Self::source_info_body(&parts);
         Ok(Self {
+            #[cfg(feature = "reply-source-info")]
+            source_info: Self::source_info_body(&parts),
             parts,
             responder,
-            source_info,
         })
     }
 
@@ -372,12 +372,6 @@ impl<'a> ResponseWriter<'a> {
             _ => IdentityBody::NONE,
         }
     }
-
-    #[cfg(not(feature = "reply-source-info"))]
-    fn source_info_body(_parts: &ReplyParts<'a>) -> IdentityBody {
-        IdentityBody::NONE
-    }
-
     /// Encode the `Response` into any sink, through the codec's own encoder. A transmit sink is
     /// written through [`Self::encode_tx`], which stores a plain reply in one window.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>

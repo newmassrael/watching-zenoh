@@ -683,8 +683,7 @@ mod compile_time_assertions {
     fn _assert_send<T: Send>() {}
     fn _assert_send_sync<T: Send + Sync>() {}
 
-    #[allow(dead_code)]
-    fn lwip_runtime_trait_bounds_compile() {
+    const _: fn() = || {
         _assert_send_sync::<CoopRuntime<NopClock>>();
         // CoopJoinHandle: trait-required Send (Sync is a happy
         // accident of the storage chain; not asserted here so a
@@ -692,15 +691,14 @@ mod compile_time_assertions {
         // valid against the trait contract).
         _assert_send::<CoopJoinHandle<()>>();
         _assert_send::<CoopJoinHandle<u64>>();
-    }
+    };
 
-    #[allow(dead_code)]
-    fn lwip_runtime_mutex_rwlock_bounds_compile() {
+    const _: fn() = || {
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u32>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u64>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u32>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u64>>();
-    }
+    };
 
     // R258 / R311av — generic-composition smoke fn. Validates
     // R: Runtime + T: TimeSource compose for production-shaped
@@ -708,7 +706,6 @@ mod compile_time_assertions {
     // exercises every trait method against generic R + T so a
     // wrong-bound regression at any concrete-impl swap surfaces
     // at the first build.
-    #[allow(dead_code)]
     fn runtime_and_time_compose_in_generic_code<R, T>(rt: &R, clock: &T)
     where
         R: Runtime,
@@ -744,12 +741,11 @@ mod compile_time_assertions {
     // Concrete instantiation so the generic above is actually
     // monomorphised at build time (otherwise dead code
     // elimination can let bound violations slip).
-    #[allow(dead_code)]
-    fn instantiate_compose_for_lwip() {
+    const _: fn() = || {
         let rt: CoopRuntime<NopClock> = CoopRuntime::new(NopClock);
         let clock = CoopTime::new(&rt);
         runtime_and_time_compose_in_generic_code(&rt, &clock);
-    }
+    };
 
     #[derive(Clone, Default)]
     struct NopClock;

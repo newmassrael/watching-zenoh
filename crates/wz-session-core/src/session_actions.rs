@@ -1628,14 +1628,38 @@ impl TxLimitsCache {
     /// The number a value computed NOW would be tagged with. Read under the capabilities'
     /// mutex, together with the capabilities.
     // Read by `negotiated_tx_limits`, which exists in a build with a sending codec only.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     pub(crate) fn current_tag(&self) -> u32 {
         self.writes.load(Ordering::Acquire).wrapping_add(1)
     }
 
     /// The kept `(batch budget, ring resolution)`, when it is for the current capabilities.
     // See `current_tag`.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     #[inline]
     pub(crate) fn get(&self) -> Option<(usize, u8)> {
         let packed = self.packed.load(Ordering::Acquire);
@@ -1652,7 +1676,19 @@ impl TxLimitsCache {
     /// Keep `(mtu, ring)` as computed from the capabilities the tag was read with. `mtu` over
     /// what 16 bits hold is not kept: the reader then asks the mutex every time, as it did.
     // See `current_tag`.
-    #[allow(dead_code)]
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     pub(crate) fn keep(&self, tag: u32, mtu: usize, ring: u8) {
         let Ok(mtu) = u16::try_from(mtu) else { return };
         let packed = (u64::from(tag) << 24) | (u64::from(mtu) << 8) | u64::from(ring);
@@ -4899,7 +4935,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.own_link().link_driver().tx_slot_claimable()
     }
 
-    #[allow(dead_code)]
+    // Read by the batching window and by the heap Push's claim check.
+    #[cfg(any(
+        feature = "transport-batching",
+        all(feature = "codec-push", feature = "alloc")
+    ))]
     fn own_link(&self) -> &LinkState<R> {
         &self.link
     }
@@ -16192,7 +16232,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // `reconstruct_outbound_keyexpr_shape_table` fine-grained unit test,
     // kept tokio-side per the test_fixtures dev-dep-cycle rationale) and a
     // future MCU resolver reach through the re-exported type.
-    #[allow(dead_code)]
     #[cfg(feature = "alloc")]
     pub fn reconstruct_outbound_keyexpr(
         &self,
