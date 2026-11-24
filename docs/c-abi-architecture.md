@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (15) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (14) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -265,7 +265,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 |---|---|---|---|---:|---|
 | TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
-| TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
@@ -293,11 +292,15 @@ in a `const`. `held_list::one_entry` and its fixed-capacity twin `lent_control::
 and `NamedKeyexpr` holds its body as a buffer within `NAMED_KEYEXPR_BYTES`, which
 `Bounded::widened` lends to the `ZBuf`'s u32 bound.
 The one QoS entry of a Push's outer chain (`lent_push::put_with_qos`) is `Bounded::one` too.
-TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen bytes by its
-constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: a zid that
-holds its bytes within those bounds lends them with no check. TD-063 (`multicast_join`) is the
-same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse.
+A `SessionZid` holds its bytes within one to sixteen, the bounds of the codec's zid field, and
+lends them through `Bounded::as_bytes` (`SessionZid::as_field`), so the Scout's zid
+(`scouting_host`) needs no check.
+TD-063 (`multicast_join`) still waits on the forge runtime: `encode_join` writes, over a
+`VecSink` that cannot refuse, a beacon whose QoS SN body is written through a `SliceSink` over a
+fixed array, a sink whose type refuses, and held for the `ZBuf` through `Bounded::new`. The pin
+has no sink over fixed storage whose capacity the build proves holds the widest write, and no
+constructor of a bounded byte field from such storage; with them, and the zid from
+`SessionZid::as_field`, the beacon is total.
 
 The transmit buffer names its refusal (`TxBuf::Error`, `CodecError` for every buffer today). A body
 a send hands its dispatch can refuse its own message (a key or a payload past its protocol bound),
