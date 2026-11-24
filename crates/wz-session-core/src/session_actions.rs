@@ -6244,7 +6244,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         encode_body: &P,
     ) -> bool
     where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
     {
         use crate::tx_buf::TxBuf;
         let Some(open) = batch.stage.lent.take() else {
@@ -12448,6 +12449,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let mut sink = crate::tx_buf::TxSink::new(buf);
                     encode_body(&mut sink)
                 };
+                // Fixed-memory step S4 — under `tx-lend-only` no frame is ever staged on
+                // the heap: the message joins the frame open in a slot the conduit's link
+                // lent, or opens one there, in one call, or is refused and counted. A
+                // message past the budget leaves as a chain of lent fragments (with
+                // fragmentation) or is refused as oversize (without it).
+                #[cfg(feature = "tx-lend-only")]
+                return self.open_frame_lent(batch, true, priority, reliable, &admit, encode_body);
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
                 // never sees, and never flushes, another priority's staged frame.
@@ -12459,8 +12467,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // the stage and returns).
                 // ARCHITECTURE section 9.1 -- the conduit index the frame's slot
                 // is recorded under on the link that lent it.
-                #[cfg(feature = "transport-tx-lend")]
+                #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
                 let idx = TxConduits::<R>::conduit_index(priority);
+                #[cfg(not(feature = "tx-lend-only"))]
                 loop {
                     // ARCHITECTURE section 9.1 -- the open frame is in a slot a
                     // link lent: append the message there, or, when it does not
@@ -12468,20 +12477,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // frame and open a fresh one below.
                     #[cfg(feature = "transport-tx-lend")]
                     if batch.stage.lent.is_some() {
-                        if self.append_lent_batch(batch, idx, priority, reliable, &encode_body) {
+                        if self.append_lent_batch(batch, idx, priority, reliable, encode_body) {
                             return Ok(UnicastPush::Pushed);
                         }
                         continue;
                     }
-                    // Fixed-memory step S4 — under `tx-lend-only` no frame is ever
-                    // staged on the heap, so what follows the lent arm above is
-                    // always an OPEN: the frame opens in a slot the conduit's link
-                    // lends, or the message is refused and counted. A message past
-                    // the budget leaves as a chain of lent fragments (with
-                    // fragmentation) or is refused as oversize (without it).
-                    #[cfg(feature = "tx-lend-only")]
-                    return self.open_frame_lent(batch, true, priority, &admit, encode_body);
-                    #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
                             return Ok(UnicastPush::Congested);
@@ -12593,7 +12593,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`zenoh-codec` `CurrentFrame`/`NewFrame`).
                     // Read the open frame's reliability once (its own R flag) —
                     // reused as the flush channel below (`prev` is the same bytes).
-                    #[cfg(not(feature = "tx-lend-only"))]
                     {
                         let stage = &mut batch.stage;
                         let open_channel = frame_wire_reliability(&stage.buf);
@@ -12711,7 +12710,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             #[cfg(feature = "tx-lend-only")]
             {
-                self.open_frame_lent(batch, false, priority, &admit, encode_body)
+                self.open_frame_lent(batch, false, priority, reliable, &admit, encode_body)
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -12868,16 +12867,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// The frame one message opens under `tx-lend-only`, from the room check to the answer:
-    /// `admit` asks the conduit's link for room and mints the SN once it has, and the frame is
-    /// written into a slot that link lends, kept open for the messages after it when the batch
-    /// window is open (`in_window`) or sent at once. A message past the budget leaves as a
-    /// chain of lent fragments, or is refused as oversize without fragmentation; no slot, or one
-    /// short of what the frame needs, is a refusal, as is a message its encoder refuses, whose
-    /// SN is given back. Nothing is staged on the heap, which this profile has no answer in.
+    /// The frame one message goes into under `tx-lend-only`, from the room check to the answer.
+    /// In the batch window (`in_window`) the message first joins the frame its conduit holds open
+    /// in a lent slot ([`Self::append_lent_batch`]), which needs no room check; a frame it does
+    /// not join is closed there and a fresh one opens. To open one, `admit` asks the conduit's
+    /// link for room and mints the SN once it has, and the frame is written into a slot that link
+    /// lends, kept open for the messages after it in the window or sent at once. A message past
+    /// the budget leaves as a chain of lent fragments, or is refused as oversize without
+    /// fragmentation; no slot, or one short of what the frame needs, is a refusal, as is a
+    /// message its encoder refuses, whose SN is given back. Nothing is staged on the heap, which
+    /// this profile has no answer in.
     ///
-    /// One body for the window's opening and for the frame sent whole: the two differ only in
-    /// the slot they write and what keeps it.
+    /// One body for the window's append, its opening and the frame sent whole: the last two differ
+    /// only in the slot they write and what keeps it.
     #[cfg(all(
         feature = "tx-lend-only",
         any(
@@ -12899,6 +12901,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         in_window: bool,
         priority: Priority,
+        reliable: bool,
         admit: &dyn AdmitFrame,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
@@ -12906,13 +12909,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // The open frame had its room when it opened; a message of the other reliability, or one
+        // that would carry the frame past the budget, closes it and opens the next below.
+        #[cfg(feature = "transport-batching")]
+        if in_window
+            && batch.stage.lent.is_some()
+            && self.append_lent_batch(
+                batch,
+                TxConduits::<R>::conduit_index(priority),
+                priority,
+                reliable,
+                encode_body,
+            )
+        {
+            return Ok(UnicastPush::Pushed);
+        }
         let Some(mut emit) = admit.admit() else {
             return Ok(UnicastPush::Congested);
         };
-        // A build without batching opens no window.
+        // A build without batching opens no window, and has no open frame to join.
         #[cfg(not(feature = "transport-batching"))]
         let in_window = {
-            let _ = in_window;
+            let _ = (in_window, reliable);
             false
         };
         // Every frame asks for the whole budget, as zenoh-pico's batch is the budget whatever it
