@@ -383,7 +383,7 @@ fn recording(script: &Arc<Script>, options: AdvancedSubscriberOptions) -> Record
         &engine(script),
         "demo/data",
         options,
-        move |s: Sample| d.lock().unwrap().push(s.payload[0]),
+        move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0]),
         move |miss| m.lock().unwrap().push(miss.nb()),
     )
     .expect("the subscriber declares on the scripted engine");

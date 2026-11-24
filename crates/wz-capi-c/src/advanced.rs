@@ -75,8 +75,6 @@ use wz_runtime_tokio::advanced_publisher::{
 use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
 };
-use wz_runtime_tokio::sample::Sample;
-use wz_runtime_tokio::sink::SampleView;
 
 use crate::abi::{
     z_closure_drop_callback_t, z_loaned_keyexpr_t, z_loaned_session_t, z_moved_bytes_t,
@@ -95,7 +93,7 @@ use crate::zid::{z_id_t, Z_ID_SIZE};
 use wz_capi_core::faces::SharedSession;
 use wz_capi_core::listeners::ListenerSet;
 use wz_ext_pubsub::advanced_publisher::AdvancedPublisherOn;
-use wz_ext_pubsub::advanced_subscriber::{EngineSubscriber, HostError};
+use wz_ext_pubsub::advanced_subscriber::{Delivery, EngineSubscriber, HostError};
 
 /// `true` when this build targets a zenoh-c compiled WITH
 /// `Z_FEATURE_SHARED_MEMORY`. The advanced PUBLISHER is one of the types that
@@ -1574,10 +1572,9 @@ unsafe fn declare_subscriber_state(
             &engine,
             ke.clone(),
             opts,
-            // The advanced subscriber hands an OWNED `Sample`; the existing marshal reads
-            // `&dyn SampleView`, which `Sample` implements — so the two planes share one
-            // marshal instead of growing a second.
-            move |sample: Sample| inner(&sample as &dyn SampleView),
+            // A delivery reads as `&dyn SampleView`, lent or held, so the two planes share one
+            // marshal.
+            move |sample: Delivery<'_>| inner(sample.view()),
             move |m: Miss| fire_miss(&miss, &m),
         )
     }
