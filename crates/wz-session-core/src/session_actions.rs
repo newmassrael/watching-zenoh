@@ -10435,6 +10435,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// transport message but an unknown one. A `Frame` read where its unit lies
     /// (`drive::dispatch_datagram`, under `codec-frame`) takes nothing else from
     /// it here: a Frame carries no handshake fact.
+    // Out of line: every receive path takes the stamp, and the clock read and lock it inlines
+    // were copied into each.
+    #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
