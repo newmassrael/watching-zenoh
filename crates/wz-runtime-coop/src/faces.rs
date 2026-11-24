@@ -783,6 +783,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
 
     /// Take back a read's wait, once made ([`IdleWait::wait`]): the buffer of its waits, which
     /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept.
+    #[inline(never)]
     pub fn waited(&mut self, wait: IdleWait) {
         match wait {
             // The larger of the two buffers stays here.
@@ -796,6 +797,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// Let go of every dial under way, whose connection is then not made, and of every port.
+    #[inline(never)]
     pub fn end_dials_and_ports(&mut self) {
         for face in &mut self.faces {
             let link = face.link_mut();
@@ -809,6 +811,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// End every face's link, whatever it is doing, telling an established peer so, after
     /// `each` is shown the face. The dial role's face stays, with no link and no redial; the
     /// others go.
+    #[inline(never)]
     pub fn end_faces(&mut self, mut each: impl FnMut(&mut F)) {
         for face in &mut self.faces {
             each(face);
