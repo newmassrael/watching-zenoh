@@ -73,6 +73,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "link-udp": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "liveliness-get": {
       "allocs_per_round": 17,
       "locked": false,
@@ -232,6 +237,11 @@
     "instance-key": {
       "families": [
         "instance-key"
+      ]
+    },
+    "link-udp": {
+      "families": [
+        "link-udp"
       ]
     },
     "liveliness": {

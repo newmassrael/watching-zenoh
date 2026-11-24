@@ -285,11 +285,12 @@ enum Round {
     InstanceKey,
     MessagePayload,
     SharedKeyIds,
+    LinkUdp,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 31] = [
+    const ALL: [Round; 32] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -321,6 +322,7 @@ impl Round {
         Round::InstanceKey,
         Round::MessagePayload,
         Round::SharedKeyIds,
+        Round::LinkUdp,
     ];
 
     /// The stage whose pair the round calls through.
@@ -328,6 +330,7 @@ impl Round {
         match self {
             Round::GroupReceive => Stage::Group,
             Round::SharedKeyIds => Stage::SharedKeyIds,
+            Round::LinkUdp => Stage::Udp,
             _ => Stage::Pipe,
         }
     }
@@ -352,6 +355,7 @@ impl Round {
             Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
             Round::MessagePayload => cfg!(feature = "message-payload"),
             Round::SharedKeyIds => cfg!(feature = "shared-key-ids"),
+            Round::LinkUdp => cfg!(all(feature = "link-udp", feature = "peer")),
             Round::InstanceKey => {
                 cfg!(all(
                     feature = "instance-key",
@@ -388,7 +392,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 35] = [
+const FAMILIES: [(&str, Round, Part); 36] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -444,6 +448,8 @@ const FAMILIES: [(&str, Round, Part); 35] = [
     // A put by a key's shared id and its reading by the listener that holds the dictionary, on
     // sessions opened with it.
     ("shared-key-ids", Round::SharedKeyIds, Part::All),
+    // A put over a unicast UDP link of the host's sockets and its delivery to the listener.
+    ("link-udp", Round::LinkUdp, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -1461,7 +1467,7 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
-            Round::GroupReceive | Round::SharedKeyIds => {
+            Round::GroupReceive | Round::SharedKeyIds | Round::LinkUdp => {
                 unreachable!("{round:?} runs on its own stage's pair")
             }
             Round::KeyexprDeclare => self.keyexpr_declare(),
@@ -2071,11 +2077,13 @@ enum Stage {
     /// Two sessions over the program's pipe that hold one dictionary of key ids and name their
     /// keys by it.
     SharedKeyIds,
+    /// Two sessions over the host's UDP sockets on the loopback.
+    Udp,
 }
 
 impl Stage {
     /// Every stage, in the order its pair is opened.
-    const ALL: [Stage; 3] = [Stage::Pipe, Stage::Group, Stage::SharedKeyIds];
+    const ALL: [Stage; 4] = [Stage::Pipe, Stage::Group, Stage::SharedKeyIds, Stage::Udp];
 
     /// The stage's pair, open; `None` in a build without the stage's capability, whose rounds are
     /// then all unbuilt.
@@ -2102,6 +2110,16 @@ impl Stage {
                     None
                 }
             }
+            Stage::Udp => {
+                #[cfg(all(feature = "link-udp", feature = "peer"))]
+                {
+                    Some(Open::Udp(UdpPair::open()))
+                }
+                #[cfg(not(all(feature = "link-udp", feature = "peer")))]
+                {
+                    None
+                }
+            }
         }
     }
 }
@@ -2113,6 +2131,8 @@ enum Open {
     Group(GroupPair),
     #[cfg(feature = "shared-key-ids")]
     SharedKeyIds(Pair),
+    #[cfg(all(feature = "link-udp", feature = "peer"))]
+    Udp(UdpPair),
 }
 
 impl Open {
@@ -2124,6 +2144,8 @@ impl Open {
             Open::Group(group) => group_put_and_hear(group),
             #[cfg(feature = "shared-key-ids")]
             Open::SharedKeyIds(pair) => pair_put_and_hear(pair),
+            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            Open::Udp(pair) => pair.put_and_hear(),
         }
     }
 
@@ -2141,12 +2163,17 @@ impl Open {
             }
             #[cfg(feature = "shared-key-ids")]
             Open::SharedKeyIds(pair) => pair.close(),
+            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            Open::Udp(pair) => pair.close(),
         }
     }
 }
 
 /// Whether every closure made with a context of `counts` was dropped within the bound.
-#[cfg(feature = "multicast-transport")]
+#[cfg(any(
+    feature = "multicast-transport",
+    all(feature = "link-udp", feature = "peer")
+))]
 fn closures_dropped(counts: &pipe_pair::Counts) -> bool {
     wait_for(WAIT_BOUND, || {
         counts.made.load(Ordering::SeqCst) == counts.dropped.load(Ordering::SeqCst)
@@ -2214,6 +2241,106 @@ unsafe fn pair_put_and_hear(pair: &Pair) {
         wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
         "a put did not cross within {WAIT_BOUND:?}"
     );
+}
+
+/// Two sessions over the host's UDP sockets on the loopback, the listening one's subscriber counting
+/// what it hears: a unicast UDP link carried by the system's sockets, where the pipe pair's links
+/// are the program's transport.
+#[cfg(all(feature = "link-udp", feature = "peer"))]
+struct UdpPair {
+    counts: std::sync::Arc<pipe_pair::Counts>,
+    listener: wz_capi_pico::z_owned_session_t,
+    subscriber: wz_capi_pico::z_owned_subscriber_t,
+    dialler: wz_capi_pico::z_owned_session_t,
+}
+
+#[cfg(all(feature = "link-udp", feature = "peer"))]
+impl UdpPair {
+    /// The listener on a free loopback port, its subscriber declared, and the dialler, opened
+    /// until a put of the dialler's is heard: the route is made before any round.
+    unsafe fn open() -> Self {
+        let endpoint = std::ffi::CString::new(format!(
+            "udp/127.0.0.1:{}",
+            wz_runtime_tokio_test_support::free_port()
+        ))
+        .expect("no NUL in an endpoint");
+        let counts = std::sync::Arc::new(pipe_pair::Counts::default());
+        let listener = Self::session(wz_capi_pico::Z_CONFIG_LISTEN_KEY, &endpoint);
+        let mut closure = pipe_pair::sample_closure(&counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_subscriber(&listener, DATA_KEY, &mut closure, &mut subscriber),
+            Z_OK,
+            "the listener over UDP declares its subscriber"
+        );
+        let dialler = Self::session(wz_capi_pico::Z_CONFIG_CONNECT_KEY, &endpoint);
+        let pair = Self {
+            counts,
+            listener,
+            subscriber,
+            dialler,
+        };
+        let deadline = std::time::Instant::now() + WAIT_BOUND;
+        let heard = pair.counts.heard.load(Ordering::SeqCst);
+        while pair.counts.heard.load(Ordering::SeqCst) == heard {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no put crossed the UDP link within {WAIT_BOUND:?}"
+            );
+            let mut bytes = payload();
+            let _ = put(&pair.dialler, &mut bytes);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pair
+    }
+
+    /// A session whose config states `endpoint` under `key` and nothing else.
+    unsafe fn session(key: u8, endpoint: &CStr) -> wz_capi_pico::z_owned_session_t {
+        use wz_capi_pico::{
+            z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
+            z_owned_session_t, zp_config_insert,
+        };
+        let mut config: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut config), Z_OK);
+        assert_eq!(
+            zp_config_insert(z_config_loan_mut(&mut config), key, endpoint.as_ptr()),
+            Z_OK
+        );
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut config), std::ptr::null()),
+            Z_OK,
+            "a session opens over UDP on {endpoint:?}"
+        );
+        session
+    }
+
+    /// Put from the dialler and wait for the listener to hear it.
+    unsafe fn put_and_hear(&self) {
+        let counts = &self.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(put(&self.dialler, &mut bytes), Z_OK, "a put is taken");
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put over UDP did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Close both sessions: whether every closure was dropped. The sockets are the system's, so
+    /// no transport of the program's is let go.
+    unsafe fn close(self) -> (bool, bool) {
+        let Self {
+            counts,
+            listener,
+            mut subscriber,
+            dialler,
+        } = self;
+        pipe_pair::close(dialler);
+        wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
+        pipe_pair::close(listener);
+        (closures_dropped(&counts), true)
+    }
 }
 
 /// One window of `round`: the warm-up and the counted rounds.
