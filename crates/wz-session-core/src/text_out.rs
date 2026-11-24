@@ -503,7 +503,7 @@ mod tests {
     /// alone, a run at either end, two runs of which the first or the longer wins), the
     /// unspecified, loopback and IPv4-mapped forms, and a scope.
     #[test]
-    fn an_address_is_written_as_the_formatter_writes_it() {
+    fn every_shape_of_an_address_is_written_as_the_formatter_writes_it() {
         use core::net::{Ipv6Addr, SocketAddrV6};
         let v6 = [
             Ipv6Addr::UNSPECIFIED,

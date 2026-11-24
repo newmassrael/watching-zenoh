@@ -8934,6 +8934,7 @@ mod tests {
     /// reason the number is trustworthy: a hand-written expected length would
     /// agree with a hand-written encoder and prove nothing about the wire.
     #[test]
+    #[cfg(feature = "codec-keep-alive")]
     fn every_measurable_message_reports_the_length_that_lands_on_the_next_one() {
         let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
         let mut cases: Vec<(&str, Vec<u8>)> = vec![
@@ -9162,6 +9163,7 @@ mod tests {
     /// The decode of the unit still hands the `Frame` the tail of the unit, since
     /// only the walk of its records says where they end; the walk cuts it there.
     #[test]
+    #[cfg(feature = "codec-keep-alive")]
     fn a_keepalive_behind_a_frame_is_a_message_of_its_own() {
         let records = oam_record(1);
         let mut unit = frame_wire(3, &records);
@@ -9217,6 +9219,7 @@ mod tests {
     /// lets every existing caller's `while let Ok(..)` loop pick up the second
     /// message without being rewritten.
     #[test]
+    #[cfg(feature = "codec-keep-alive")]
     fn a_stream_envelope_holding_two_messages_yields_both() {
         let mut body = vec![crate::wire_const::T_MID_KEEP_ALIVE];
         body.extend_from_slice(&frame_wire(7, &oam_record(9)));
