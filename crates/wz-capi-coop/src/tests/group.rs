@@ -822,7 +822,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,

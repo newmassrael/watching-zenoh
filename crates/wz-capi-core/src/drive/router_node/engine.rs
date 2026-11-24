@@ -160,6 +160,41 @@ fn plane_of(plane: FilterPlane) -> MatchPlane {
     }
 }
 
+impl wz_capi_port::KeyHolds for RouterState {
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
+    /// here and there is nothing to count.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+}
+
+impl wz_capi_port::Tickers for RouterState {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
+        // of its own, so a host with no thread left to give holds no more of them.
+        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
+            .ok_or(Refusal::TableFull)?;
+        let id = self.engine.local_id();
+        self.engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, job);
+        Ok(id)
+    }
+
+    fn stop_ticker(&self, id: TickerId) {
+        // Dropped outside the lock: the job's tick may be what called in.
+        let job = self
+            .engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        drop(job);
+    }
+}
+
 impl SessionEngine for RouterState {
     fn is_closed(&self) -> bool {
         RouterState::is_closed(self)
@@ -304,11 +339,6 @@ impl SessionEngine for RouterState {
         Err(Refusal::NotBuilt)
     }
 
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-
-    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
-    /// here and there is nothing to count.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -636,31 +666,6 @@ impl SessionEngine for RouterState {
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
         face.get_tokens(id, keyexpr, on_key, on_final);
         Ok(1)
-    }
-
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
-        // of its own, so a host with no thread left to give holds no more of them.
-        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
-            .ok_or(Refusal::TableFull)?;
-        let id = self.engine.local_id();
-        self.engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, job);
-        Ok(id)
-    }
-
-    fn stop_ticker(&self, id: TickerId) {
-        // Dropped outside the lock: the job's tick may be what called in.
-        let job = self
-            .engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-        drop(job);
     }
 }
 

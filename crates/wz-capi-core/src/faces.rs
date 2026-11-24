@@ -2389,7 +2389,7 @@ pub struct SharedSession {
     /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
     /// query replies and the batch calls).
     closed: Arc<std::sync::atomic::AtomicBool>,
-    /// The periodic jobs a C ABI started on the session ([`SessionEngine::start_ticker`]), each a
+    /// The periodic jobs a C ABI started on the session ([`wz_capi_port::Tickers::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
     /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
     /// starts one, so a build without it carries neither the table nor the task.
@@ -7769,13 +7769,13 @@ mod matching_aggregate_tests {
     #[test]
     fn a_periodic_job_runs_until_it_is_stopped() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use wz_capi_port::SessionEngine;
+        use wz_capi_port::Tickers;
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
         let runs = Arc::new(AtomicUsize::new(0));
         let count = runs.clone();
-        let id = SessionEngine::start_ticker(
+        let id = Tickers::start_ticker(
             &shared,
             10,
             Arc::new(move || {
@@ -7790,8 +7790,8 @@ mod matching_aggregate_tests {
             assert!(std::time::Instant::now() < deadline, "no third run in 5 s");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        SessionEngine::stop_ticker(&shared, id);
-        SessionEngine::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
         std::thread::sleep(std::time::Duration::from_millis(30));
         let after = runs.load(Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(80));

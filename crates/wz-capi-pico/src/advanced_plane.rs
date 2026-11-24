@@ -111,12 +111,8 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Option<Ticker> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start(
-            &crate::session::port_engine(&self.session.engine),
-            period_ms,
-            tick,
-        )
-        .ok()
+        // The engine as it is, named by its periodic jobs alone ([`wz_capi_port::Tickers`]).
+        Ticker::start(self.session.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no

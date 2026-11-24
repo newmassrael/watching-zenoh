@@ -51,13 +51,55 @@ pub enum RedeclareRefusal {
     Closed,
 }
 
+/// What a hold on a key expression declaration asks of its session ([`crate::KeyHold`]): the
+/// engine's own count of the declaration's holders. Apart from [`SessionEngine`], so a hold names
+/// its session by these two operations alone, and a build whose doors reach the engine as its own
+/// type makes no table of every operation of the session for it.
+pub trait KeyHolds: Send + Sync {
+    /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
+    fn release_keyexpr(&self, mapping_id: ExprId);
+
+    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
+    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
+    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
+    /// longer held takes none. Every engine states it: one that held a declaration and did not
+    /// count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, mapping_id: ExprId);
+}
+
+/// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the
+/// reason [`KeyHolds`] is.
+pub trait Tickers: Send + Sync {
+    /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
+    /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
+    /// period is raised to it, so a job cannot make the engine spin.
+    ///
+    /// The first run is one period after the call, and each next one a period after the previous
+    /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
+    /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
+    /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
+    /// session, so a tick is as late as the program is slow to step. Refused when the session's
+    /// table of jobs is full or the session is closed, and with [`Refusal::NotBuilt`] by an
+    /// engine with no periodic jobs in this build, which is the provided answer.
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        let _ = (period_ms, tick);
+        Err(Refusal::NotBuilt)
+    }
+
+    /// End the periodic job `id`. A tick already running is not interrupted, and none starts
+    /// after this returns. Ending one already ended, or one never started, does nothing.
+    fn stop_ticker(&self, id: TickerId) {
+        let _ = id;
+    }
+}
+
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
 ///
 /// Every method takes `&self`: an engine is shared between the C session handle and every entity
 /// declared on it (a publisher, a subscriber, a declared key expression each hold it), and the
 /// C program may call in from any thread. Releases run outside the engine's locks, so a C
 /// `drop(context)` reached from one may re-enter the session.
-pub trait SessionEngine: Send + Sync + 'static {
+pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Whether the session has been closed. Every operation after that answers as a closed
     /// session does: nothing is sent and nothing is declared.
     fn is_closed(&self) -> bool;
@@ -72,7 +114,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// The engine's own clock, in whole milliseconds since an epoch of its choosing: monotonic,
-    /// and the one its periodic jobs ([`Self::start_ticker`]) and its deadlines run on. A caller
+    /// and the one its periodic jobs ([`Tickers::start_ticker`]) and its deadlines run on. A caller
     /// that measures how long ago it last heard of something (a source's retention, say) reads it
     /// here and compares two readings of this one engine, never with another clock.
     fn now_ms(&self) -> u64;
@@ -278,16 +320,6 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// room left, or is closed; and with [`Refusal::NotBuilt`] by an engine that names every key
     /// whole and holds no declaration.
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Refusal>;
-
-    /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
-    fn release_keyexpr(&self, mapping_id: ExprId);
-
-    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
-    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
-    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
-    /// longer held takes none. Every engine states it: one that held a declaration and did not
-    /// count this would retract it before its last holder let go.
-    fn retain_keyexpr(&self, mapping_id: ExprId);
     /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
     /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
@@ -691,27 +723,5 @@ pub trait SessionEngine: Send + Sync + 'static {
     ) -> Result<usize, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg)
-    }
-
-    /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
-    /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
-    /// period is raised to it, so a job cannot make the engine spin.
-    ///
-    /// The first run is one period after the call, and each next one a period after the previous
-    /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
-    /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
-    /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
-    /// session, so a tick is as late as the program is slow to step. Refused when the session's
-    /// table of jobs is full or the session is closed, and with [`Refusal::NotBuilt`] by an
-    /// engine with no periodic jobs in this build, which is the provided answer.
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        let _ = (period_ms, tick);
-        Err(Refusal::NotBuilt)
-    }
-
-    /// End the periodic job `id`. A tick already running is not interrupted, and none starts
-    /// after this returns. Ending one already ended, or one never started, does nothing.
-    fn stop_ticker(&self, id: TickerId) {
-        let _ = id;
     }
 }

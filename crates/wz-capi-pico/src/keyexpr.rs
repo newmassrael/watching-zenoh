@@ -465,10 +465,12 @@ impl DeclaredKeyexpr {
     }
 }
 
-/// The session `shared` as a key's hold names it: weakly, through the engine's door for keys.
-fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine> {
-    // The engine's own type named, so the downgrade is of it and the coercion to the door's
-    // object follows it, on an engine of a concrete type and on the door's object alike.
+/// The session `shared` as a key's hold names it: weakly, by its count of a declaration's holders
+/// alone ([`wz_capi_port::KeyHolds`]), so a build that reaches its engine as its own type makes no
+/// table of every operation of the session for it.
+fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::KeyHolds> {
+    // The engine's own type named, so the downgrade is of it and the coercion to the hold's object
+    // follows it: an unsizing on an engine of a concrete type, an upcast on the port's object.
     Arc::<Engine>::downgrade(shared)
 }
 

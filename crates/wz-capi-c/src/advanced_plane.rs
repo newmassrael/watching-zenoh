@@ -215,7 +215,7 @@ impl AdvancedPublisherPlane for CPlane {
     ) -> Option<Ticker> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start(&self.engine, period_ms, tick).ok()
+        Ticker::start(self.engine.clone(), period_ms, tick).ok()
     }
 
     fn publish(

@@ -121,6 +121,28 @@ impl Script {
     }
 }
 
+impl wz_capi_port::KeyHolds for Script {
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+}
+
+impl wz_capi_port::Tickers for Script {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        if self.no_tickers.load(Ordering::SeqCst) {
+            return Err(Refusal::NotBuilt);
+        }
+        let id = self.take_id();
+        self.event(format!("start ticker {period_ms}"));
+        self.tickers.lock().unwrap().push((id, period_ms, tick));
+        Ok(id)
+    }
+    fn stop_ticker(&self, _id: TickerId) {
+        self.event("stop ticker");
+    }
+}
+
 impl SessionEngine for Script {
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
@@ -189,10 +211,6 @@ impl SessionEngine for Script {
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
         Err(Refusal::NotBuilt)
     }
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-
-    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         _plane: FilterPlane,
@@ -311,18 +329,6 @@ impl SessionEngine for Script {
             legs,
         });
         Ok(count)
-    }
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        if self.no_tickers.load(Ordering::SeqCst) {
-            return Err(Refusal::NotBuilt);
-        }
-        let id = self.take_id();
-        self.event(format!("start ticker {period_ms}"));
-        self.tickers.lock().unwrap().push((id, period_ms, tick));
-        Ok(id)
-    }
-    fn stop_ticker(&self, _id: TickerId) {
-        self.event("stop ticker");
     }
     fn declare_queryable_on_wire(
         &self,

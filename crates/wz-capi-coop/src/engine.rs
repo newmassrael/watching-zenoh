@@ -1533,7 +1533,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     pending_gets: Vec<PendingGet>,
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
-    /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
+    /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
     /// The session's round of deliveries, which every link's gate asks before it reads a record
@@ -5944,6 +5944,64 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
+// A key's hold and a periodic job's handle name the session by these alone, so the doors that
+// reach the engine as its own type make no table of all of its operations for them.
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
+    for CoopEngine<L, C>
+{
+    #[inline(never)]
+    fn release_keyexpr(&self, mapping_id: ExprId) {
+        let Some(mut core) = self.live() else {
+            return;
+        };
+        let core = &mut core.0;
+        let Some(handle) = tables(&core.registry).keyexpr_by_id(mapping_id) else {
+            return;
+        };
+        let place = core.prefix_retraction(Some(handle));
+        let retracted = tables_mut(&core.registry).undeclare_keyexpr(handle);
+        // The row went before the links are told: a send never finds the table borrowed.
+        core.retract_keyexpr(place, retracted);
+    }
+
+    #[inline(never)]
+    fn retain_keyexpr(&self, mapping_id: ExprId) {
+        let Some(core) = self.live() else {
+            return;
+        };
+        // One more hold of the row in the session's one table set; nothing goes on the wire.
+        let mut tables = tables_mut(&core.0.registry);
+        if let Some(handle) = tables.keyexpr_by_id(mapping_id) {
+            tables.retain_keyexpr(handle);
+        }
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Tickers
+    for CoopEngine<L, C>
+{
+    #[cfg(feature = "ticker")]
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Declined> {
+        let mut core = self.live().ok_or(Declined::Closed)?;
+        let id = self.next_local_id();
+        let now_ms = core.0.clock.now_us() / 1000;
+        // A table of the build's `MAX_TICKERS` rows, reserved at the open: a start past them is
+        // refused as a full table.
+        if core.0.tickers.start(id, period_ms, tick, now_ms) {
+            Ok(id)
+        } else {
+            Err(Declined::TableFull)
+        }
+    }
+
+    #[cfg(feature = "ticker")]
+    fn stop_ticker(&self, id: TickerId) {
+        if let Some(mut core) = self.live() {
+            core.0.tickers.stop(id);
+        }
+    }
+}
+
 // The operations a door of a C ABI calls on the session's tables are out of line: the engine is
 // one type per build, so each is one body the doors call, counted as the engine's, and not a
 // copy inside each door.
@@ -5967,27 +6025,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn next_entity_id(&self) -> Option<EntityId> {
         // The session's tables number every entity, open or closed: an id is taken under the lock.
         self.core.lock().0.take_entity_id()
-    }
-
-    #[cfg(feature = "ticker")]
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Declined> {
-        let mut core = self.live().ok_or(Declined::Closed)?;
-        let id = self.next_local_id();
-        let now_ms = core.0.clock.now_us() / 1000;
-        // A table of the build's `MAX_TICKERS` rows, reserved at the open: a start past them is
-        // refused as a full table.
-        if core.0.tickers.start(id, period_ms, tick, now_ms) {
-            Ok(id)
-        } else {
-            Err(Declined::TableFull)
-        }
-    }
-
-    #[cfg(feature = "ticker")]
-    fn stop_ticker(&self, id: TickerId) {
-        if let Some(mut core) = self.live() {
-            core.0.tickers.stop(id);
-        }
     }
 
     fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
@@ -6364,33 +6401,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             group.announce_keyexpr(id, keyexpr);
         }
         Ok(id)
-    }
-
-    #[inline(never)]
-    fn release_keyexpr(&self, mapping_id: ExprId) {
-        let Some(mut core) = self.live() else {
-            return;
-        };
-        let core = &mut core.0;
-        let Some(handle) = tables(&core.registry).keyexpr_by_id(mapping_id) else {
-            return;
-        };
-        let place = core.prefix_retraction(Some(handle));
-        let retracted = tables_mut(&core.registry).undeclare_keyexpr(handle);
-        // The row went before the links are told: a send never finds the table borrowed.
-        core.retract_keyexpr(place, retracted);
-    }
-
-    #[inline(never)]
-    fn retain_keyexpr(&self, mapping_id: ExprId) {
-        let Some(core) = self.live() else {
-            return;
-        };
-        // One more hold of the row in the session's one table set; nothing goes on the wire.
-        let mut tables = tables_mut(&core.0.registry);
-        if let Some(handle) = tables.keyexpr_by_id(mapping_id) {
-            tables.retain_keyexpr(handle);
-        }
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
