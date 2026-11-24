@@ -3690,15 +3690,14 @@ mod tests {
     /// declaration's rc (`_z_keyexpr_wire_declaration_rc_t`, a value pointer and a count
     /// pointer) and the key's `_z_string_t`, a `_z_slice_t` of a length, a start and a delete
     /// context of two pointers.
-    #[allow(dead_code)]
     #[repr(C)]
     struct PicoDeclaredKeyexpr {
-        declaration_val: *mut c_void,
-        declaration_cnt: *mut c_void,
-        len: usize,
-        start: *const u8,
-        deleter: *mut c_void,
-        context: *mut c_void,
+        _declaration_val: *mut c_void,
+        _declaration_cnt: *mut c_void,
+        _len: usize,
+        _start: *const u8,
+        _deleter: *mut c_void,
+        _context: *mut c_void,
     }
 
     /// A program reads `sample->payload` right after the declared key, which is that key's size
