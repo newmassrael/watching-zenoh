@@ -640,8 +640,6 @@ pub mod proto_file;
 pub mod pubsub;
 pub mod qos;
 #[cfg(feature = "query")]
-// Totality debt TD-170 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
