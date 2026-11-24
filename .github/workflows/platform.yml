@@ -1004,8 +1004,12 @@ jobs:
           # allocator (`src/os/no_std_host.rs`: the C library's heap, or the process heap on
           # Windows), whose tests are compiled in every test build of the library. A filter that
           # runs no test is not a pass, so the allocator's count is read from the harness's line.
+          # Its `std` build is the lock every C ABI crate holds with `std` (`std`'s where it lies in
+          # its own bytes, the in-place one on macOS), whose tests count what a first take
+          # allocates and read a panicked holder's lock as poisoned.
           sync=FAIL
-          (cd crates && cargo test -p wz-host-sync --lib) && sync=PASS
+          (cd crates && cargo test -p wz-host-sync --lib &&
+            cargo test -p wz-host-sync --lib --features std) && sync=PASS
           verdict "the host's locks, threads and clocks without std (wz-host-sync):" "$sync"
           [ "$sync" = PASS ] || overall=FAIL
           heap=FAIL

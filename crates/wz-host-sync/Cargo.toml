@@ -15,8 +15,9 @@
 # no thread holds it, so a value that is one can live in a `static` and in a value that moves; a
 # thread that must wait parks on one process-wide place, the only object that holds the system's
 # own lock. No `std`, nothing exported and nothing allocated: `spawn_fn` moves a thread's body into
-# a record of a static pool of `THREADS`. Also the typed forms the doors of the pico ABI's
-# additional features hold (`Mutex`, `Condvar`, `Instant`), in the shape of `std`'s.
+# a record of a static pool of `THREADS`. Also the typed forms (`Mutex`, `Condvar`, `RwLock`,
+# `Instant`), in the shape of `std`'s: the one lock every crate of a C ABI's graph holds for a value
+# it makes while a session is open, on every host, with `std` or without.
 
 [package]
 name = "wz-host-sync"
@@ -33,6 +34,14 @@ publish = false
 [lib]
 name = "wz_host_sync"
 path = "src/lib.rs"
+
+[features]
+# A build with `std`. Where `std`'s lock, condition variable and reader-writer lock lie in their own
+# bytes (a futex on Linux, Android and the BSDs that have one, Windows' slim lock and address wait)
+# the typed forms are `std`'s; elsewhere `std`'s are pthread objects it boxes the first time each
+# is taken (macOS, QNX), and the typed forms are the in-place ones (`src/in_place.rs`). Either way
+# taking one takes no memory, and a lock whose holder panicked reads as poisoned.
+std = []
 
 # The POSIX hosts' calls: the pthread mutex and condition variable the parking place is, the
 # threads, and `nanosleep`. No `std` feature: `libc` is the C library's own names.
