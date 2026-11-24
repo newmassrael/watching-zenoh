@@ -458,7 +458,10 @@ impl Parts<'_, '_> {
             .fold(0usize, |sum, part| sum.saturating_add(part.len()))
     }
 
-    /// The byte at `at`, `None` past the end.
+    /// The byte at `at`, `None` past the end. Out of line: the walk reads a byte at a dozen
+    /// places and a key is canonized where it is declared, not per message, so one call each
+    /// costs less than the walk over the parts written out at every place.
+    #[inline(never)]
     fn byte(&self, at: usize) -> Option<u8> {
         let mut at = at;
         for part in self.0 {
