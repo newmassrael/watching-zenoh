@@ -2069,8 +2069,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             source,
             policy,
             request.key_ids,
-            &wz_capi_coop::arena::AllocatorMemory,
-            crate::object_slot::held_places(SessionPlace::LAYOUT),
+            wz_capi_coop::arena::OpenStorage {
+                memory: &wz_capi_coop::arena::AllocatorMemory,
+                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+            },
         )
         .map(|engine| PicoDrive::App(engine.into_drive())),
         None => wz_capi_coop::CoopEngine::open_made_in(
@@ -2080,8 +2082,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             source,
             policy,
             request.key_ids,
-            &wz_capi_coop::arena::AllocatorMemory,
-            crate::object_slot::held_places(SessionPlace::LAYOUT),
+            wz_capi_coop::arena::OpenStorage {
+                memory: &wz_capi_coop::arena::AllocatorMemory,
+                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+            },
         )
         .map(|engine| PicoDrive::Host(engine.into_drive())),
     };
@@ -2093,8 +2097,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         source,
         policy,
         request.key_ids,
-        &wz_capi_coop::arena::AllocatorMemory,
-        crate::object_slot::held_places(SessionPlace::LAYOUT),
+        wz_capi_coop::arena::OpenStorage {
+            memory: &wz_capi_coop::arena::AllocatorMemory,
+            held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+        },
     )
     .map(wz_capi_coop::CoopEngine::into_drive);
     let drive = match opened {

@@ -287,6 +287,15 @@ pub struct HeldPlaces {
     entities: [Option<Layout>; ENTITY_KINDS],
 }
 
+/// Where an open's arena comes from and which places of the ABI's it holds beside the session's
+/// tables ([`CoopEngine::open_made_in`](crate::CoopEngine::open_made_in)).
+pub struct OpenStorage {
+    /// The memory the session's arena is reserved from.
+    pub memory: &'static dyn ArenaMemory,
+    /// The ABI's places the arena holds after every table.
+    pub held: HeldPlaces,
+}
+
 impl HeldPlaces {
     /// No place at all.
     pub const NONE: Self = Self {
