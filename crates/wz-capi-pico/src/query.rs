@@ -2327,7 +2327,13 @@ mod tests {
         let held: Box<dyn HeldQuery> = Box::new(NoHold);
         let payload = marshal.payload.try_clone().expect("room for the copy");
         let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let mut kept = marshal.deep_copy_deferred(held, payload, attachment);
+        let encoding = marshal
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()
+            .expect("room for the copy");
+        let mut kept = marshal.deep_copy_deferred(held, payload, attachment, encoding);
         drop(marshal);
         kept.bind();
         let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;

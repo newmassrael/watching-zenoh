@@ -39,12 +39,10 @@
 
 use core::ffi::{c_char, c_void, CStr};
 
-use crate::prelude::*;
-
 use wz_session_core::sample::{BoundedEncoding, EncodingHint, EncodingRef};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_owned_string_t};
-use crate::bytes::{store_owned_string, NoRoom};
+use crate::bytes::{store_owned_string, ByteBuf, NoRoom};
 use crate::ffi::guarded;
 use crate::object_slot::{Kind, Placed, Slot};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
@@ -78,7 +76,8 @@ pub use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 
 /// Behind a loaned encoding: the packed wire word and where the schema lies. The handle of an owned
-/// encoding points at the state of its [`HeldEncoding`], a sample's, a reply's or a query's at the
+/// encoding points at the state of its [`HeldEncoding`], or for an encoding of no schema at the
+/// state of its well-known constant ([`constant_of`]); a sample's, a reply's or a query's at the
 /// one its marshal holds.
 pub(crate) struct EncodingState {
     packed_id: u32,
@@ -93,15 +92,16 @@ enum Schema {
     /// state does ([`EncodingState::lent`]), or the room of the held encoding this state is part
     /// of, which never moves while it lives.
     Lent { start: *const u8, len: usize },
-    /// An encoding of the pool of encodings this state keeps: what a sample, a reply or a query
-    /// kept past its callback holds, whose message's bytes it may outlive.
-    Held(Placed<HeldEncoding>),
+    /// A copy of its own in a block of the payloads' area, where a kept value's other bytes lie:
+    /// what a sample, a reply or a query kept past its callback holds, whose message's bytes it may
+    /// outlive. It takes no encoding of the pool, whose count is the program's own encodings.
+    Kept(ByteBuf),
 }
 
 // SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
 // (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
-// as the holder's own borrow would be; a held one is an encoding of the pool this state alone holds,
-// and the pools are reached under the port's lock.
+// as the holder's own borrow would be; a kept one is a block of the payloads' area this state alone
+// holds, and the pools are reached under the port's lock.
 unsafe impl Send for Schema {}
 unsafe impl Sync for Schema {}
 
@@ -147,19 +147,22 @@ impl EncodingState {
                 packed_id: self.packed_id,
                 schema: Some(unsafe { core::slice::from_raw_parts(*start, *len) }),
             },
-            Schema::Held(held) => held.view(),
+            Schema::Kept(bytes) => EncodingRef {
+                packed_id: self.packed_id,
+                schema: Some(bytes.as_slice()),
+            },
         }
     }
 
     /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
-    /// callback holds. A schema is kept in an encoding of the pool of encodings, refused with
-    /// [`NoRoom`] when the pool has none free or the schema is longer than its room; an encoding of
-    /// no schema takes none.
+    /// callback holds. A schema is copied into a block of the payloads' area, as the kept value's
+    /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
+    /// encoding of no schema takes none.
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
         let view = self.view();
         let schema = match view.schema {
             None => Schema::Absent,
-            Some(_) => Schema::Held(hold(view).ok_or(NoRoom)?),
+            Some(schema) => Schema::Kept(ByteBuf::copy_of(schema)?),
         };
         Ok(Self {
             packed_id: view.packed_id,
@@ -240,13 +243,75 @@ impl core::fmt::Debug for HeldEncoding {
     }
 }
 
-/// `encoding` kept in a slot of the pool of encodings, held by value: what a publisher keeps of
-/// the encoding it was declared with, and a kept sample, reply or query of the one it carried.
-/// `None` when the schema is longer than the room a slot has or the pool has no slot free.
-pub(crate) fn hold(encoding: EncodingRef<'_>) -> Option<Placed<HeldEncoding>> {
+/// The state of the well-known constant `encoding` is, for an encoding of no schema whose id the
+/// table names: such an encoding is read from its constant and takes no slot, as zenoh-pico's
+/// encoding of no schema allocates nothing.
+fn constant_of(encoding: EncodingRef<'_>) -> Option<&'static EncodingState> {
+    if encoding.schema.is_some() || encoding.packed_id & 1 != 0 {
+        return None;
+    }
+    let accessor = CONSTANTS.get(usize::try_from(encoding.packed_id >> 1).ok()?)?;
+    // SAFETY: a constant's accessor hands out a `'static` view of a `'static` state.
+    unsafe { handle_ref::<z_loaned_encoding_t, EncodingState>(accessor()) }
+}
+
+/// Whether `state` is a well-known constant's, which no slot holds and nothing lets go.
+fn is_constant(state: &EncodingState) -> bool {
+    constant_of(state.view()).is_some_and(|constant| core::ptr::eq(constant, state))
+}
+
+/// An encoding a program moved into a call, held for as long as its holder holds it: its
+/// constant's state, or an encoding of the pool, which is let go with it.
+#[derive(Debug)]
+pub(crate) enum OwnedEncoding {
+    /// A well-known encoding of no schema, which takes no slot.
+    Constant(&'static ConstantState),
+    /// An encoding of the pool of encodings.
+    Held(Placed<HeldEncoding>),
+}
+
+/// A well-known constant's state, shown by what it reads.
+#[repr(transparent)]
+pub(crate) struct ConstantState(EncodingState);
+
+impl core::fmt::Debug for ConstantState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.0.view(), f)
+    }
+}
+
+// SAFETY: an owned encoding is a constant's state, which nothing writes, or an encoding of the pool
+// this value alone holds and reads, whose slot is given back under the port's lock from whichever
+// thread lets it go, as every object of the pools is; it is shared and sent as the bytes it reads.
+unsafe impl Send for OwnedEncoding {}
+unsafe impl Sync for OwnedEncoding {}
+
+impl OwnedEncoding {
+    /// The encoding, read where it lies.
+    pub(crate) fn view(&self) -> EncodingRef<'_> {
+        match self {
+            Self::Constant(constant) => constant.0.view(),
+            Self::Held(held) => held.view(),
+        }
+    }
+}
+
+/// `encoding` held by value: its constant when it has one, else kept in a slot of the pool of
+/// encodings. What a publisher keeps of the encoding it was declared with. `None` when the schema
+/// is longer than the room a slot has or the pool has no slot free.
+pub(crate) fn hold(encoding: EncodingRef<'_>) -> Option<OwnedEncoding> {
+    if let Some(constant) = constant_of(encoding) {
+        return Some(OwnedEncoding::Constant(as_constant(constant)));
+    }
     let held = HeldEncoding::place(encoding)?;
     // SAFETY: an encoding just placed, which nothing else holds.
-    unsafe { Placed::from_raw(held) }
+    unsafe { Placed::from_raw(held) }.map(OwnedEncoding::Held)
+}
+
+/// A constant's state as the transparent type an owned encoding holds it by.
+fn as_constant(state: &'static EncodingState) -> &'static ConstantState {
+    // SAFETY: `ConstantState` is a transparent wrapper of `EncodingState`.
+    unsafe { &*(state as *const EncodingState).cast::<ConstantState>() }
 }
 
 /// Owned encoding (pico `z_owned_encoding_t`, 40 B measured).
@@ -293,6 +358,10 @@ impl z_loaned_encoding_t {
 /// # Safety
 /// `h` must be a live handle [`store_encoding`] made.
 unsafe fn free_encoding(h: *mut c_void) {
+    // A constant's state is no slot's and is never let go.
+    if is_constant(&*h.cast::<EncodingState>()) {
+        return;
+    }
     crate::object_slot::release(h.cast::<HeldEncoding>());
 }
 
@@ -310,9 +379,9 @@ impl_handle_ownership7!(
     z_encoding_drop
 );
 
-/// Keep `encoding` in a slot of the pool of encodings and hand it to `dst`, which the caller left
-/// null: `Z_OK`, or `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with `dst` still null when the schema is longer
-/// than the room or the pool has no slot free.
+/// Hand `encoding` to `dst`, which the caller left null: its constant when it has one, else kept
+/// in a slot of the pool of encodings. `Z_OK`, or `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with `dst` still
+/// null when the schema is longer than the room or the pool has no slot free.
 ///
 /// # Safety
 /// `dst` is valid and writable.
@@ -320,16 +389,18 @@ pub(crate) unsafe fn store_encoding(
     dst: *mut z_owned_encoding_t,
     encoding: EncodingRef<'_>,
 ) -> ZResult {
-    match HeldEncoding::place(encoding) {
-        Some(held) => {
-            *dst = z_owned_encoding_t {
-                handle: held.cast(),
-                _pad: [core::ptr::null_mut(); 4],
-            };
-            Z_OK
-        }
-        None => Z_ERR_SYSTEM_OUT_OF_MEMORY,
-    }
+    let handle = match constant_of(encoding) {
+        Some(constant) => (constant as *const EncodingState).cast_mut().cast(),
+        None => match HeldEncoding::place(encoding) {
+            Some(held) => held.cast(),
+            None => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
+    };
+    *dst = z_owned_encoding_t {
+        handle,
+        _pad: [core::ptr::null_mut(); 4],
+    };
+    Z_OK
 }
 
 /// Read the encoding behind a loaned encoding, where its state keeps it.
@@ -345,7 +416,7 @@ pub(crate) unsafe fn encoding_view<'a>(ptr: *const z_loaned_encoding_t) -> Optio
 /// inside an options struct, so this takes the concrete type and the callers
 /// cast — keeping the unsafe cast at ONE place rather than at each option
 /// struct that carries an encoding slot.
-pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<Placed<HeldEncoding>> {
+pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<OwnedEncoding> {
     if moved.is_null() {
         return None;
     }
@@ -353,8 +424,14 @@ pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<Placed<He
     let handle = *slot;
     *slot = core::ptr::null_mut();
     // SAFETY: a moved encoding's handle is null or one `store_encoding` made, which the move hands
-    // over.
-    Placed::from_raw(handle.cast::<HeldEncoding>())
+    // over: a constant's state, or an encoding of the pool.
+    let state = handle.cast::<EncodingState>().as_ref()?;
+    if is_constant(state) {
+        return Some(OwnedEncoding::Constant(as_constant(
+            &*handle.cast::<EncodingState>(),
+        )));
+    }
+    Placed::from_raw(handle.cast::<HeldEncoding>()).map(OwnedEncoding::Held)
 }
 
 /// [`take_moved_encoding`] for a door whose options still keep the encoding as a hint of their
@@ -479,14 +556,9 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
     len: usize,
 ) -> ZResult {
     guarded(|| {
-        let state = match handle_ref::<z_loaned_encoding_t, EncodingState>(encoding as *const _) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        // A loan a program may write through is an owned encoding's (`z_encoding_loan_mut`), whose
-        // state is the first field of its held encoding, which the handle uniquely owns; pico's own
-        // setter mutates in place through a `z_loaned_*` pointer.
-        let held = state as *const EncodingState as *mut HeldEncoding;
+        if encoding.is_null() {
+            return Z_ERR_NULL;
+        }
         // pico copies the bytes it is handed and asks nothing of them
         // (`src/api/encoding.c`, `z_encoding_set_schema_from_substr` ->
         // `_z_string_copy_from_substr`), so a schema that is not UTF-8 is set; one longer than the
@@ -496,10 +568,41 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         } else {
             core::slice::from_raw_parts(schema.cast::<u8>(), len)
         };
-        match HeldEncoding::set_schema(held, bytes) {
-            Ok(()) => Z_OK,
-            Err(no_room) => no_room.code(),
+        // A loan a program may write through is its owned encoding itself (`z_encoding_loan_mut`
+        // reinterprets the owned struct), so the handle it holds is the owned encoding's.
+        let handle = (*encoding).handle;
+        let current = handle.cast::<EncodingState>().as_ref();
+        if let Some(state) = current.filter(|state| !is_constant(state)) {
+            // An encoding of the pool: its state is the first field of its held encoding, which the
+            // handle uniquely owns, and the schema is written into its own room.
+            let held = (state as *const EncodingState)
+                .cast_mut()
+                .cast::<HeldEncoding>();
+            return match HeldEncoding::set_schema(held, bytes) {
+                Ok(()) => Z_OK,
+                Err(no_room) => no_room.code(),
+            };
         }
+        // A constant, or the null encoding pico reads as the default (its setter writes a schema
+        // into one), takes the schema into an encoding of its own, written over the loan's handle;
+        // the constant it read is no slot's and nothing lets it go.
+        let packed_id = match current {
+            Some(state) => state.view().packed_id,
+            None => u32::from(ENCODING_ID_DEFAULT) << 1,
+        };
+        let has_schema = !bytes.is_empty();
+        let mut owned = z_owned_encoding_t::null_value();
+        let code = store_encoding(
+            &mut owned,
+            EncodingRef {
+                packed_id: (packed_id & !1) | u32::from(has_schema),
+                schema: has_schema.then_some(bytes),
+            },
+        );
+        if code == Z_OK {
+            (*encoding).handle = owned.handle;
+        }
+        code
     })
 }
 
@@ -561,59 +664,73 @@ macro_rules! encoding_constant {
     };
 }
 
-encoding_constant!(z_encoding_zenoh_bytes, 0);
-encoding_constant!(z_encoding_zenoh_string, 1);
-encoding_constant!(z_encoding_zenoh_serialized, 2);
-encoding_constant!(z_encoding_application_octet_stream, 3);
-encoding_constant!(z_encoding_text_plain, 4);
-encoding_constant!(z_encoding_application_json, 5);
-encoding_constant!(z_encoding_text_json, 6);
-encoding_constant!(z_encoding_application_cdr, 7);
-encoding_constant!(z_encoding_application_cbor, 8);
-encoding_constant!(z_encoding_application_yaml, 9);
-encoding_constant!(z_encoding_text_yaml, 10);
-encoding_constant!(z_encoding_text_json5, 11);
-encoding_constant!(z_encoding_application_python_serialized_object, 12);
-encoding_constant!(z_encoding_application_protobuf, 13);
-encoding_constant!(z_encoding_application_java_serialized_object, 14);
-encoding_constant!(z_encoding_application_openmetrics_text, 15);
-encoding_constant!(z_encoding_image_png, 16);
-encoding_constant!(z_encoding_image_jpeg, 17);
-encoding_constant!(z_encoding_image_gif, 18);
-encoding_constant!(z_encoding_image_bmp, 19);
-encoding_constant!(z_encoding_image_webp, 20);
-encoding_constant!(z_encoding_application_xml, 21);
-encoding_constant!(z_encoding_application_x_www_form_urlencoded, 22);
-encoding_constant!(z_encoding_text_html, 23);
-encoding_constant!(z_encoding_text_xml, 24);
-encoding_constant!(z_encoding_text_css, 25);
-encoding_constant!(z_encoding_text_javascript, 26);
-encoding_constant!(z_encoding_text_markdown, 27);
-encoding_constant!(z_encoding_text_csv, 28);
-encoding_constant!(z_encoding_application_sql, 29);
-encoding_constant!(z_encoding_application_coap_payload, 30);
-encoding_constant!(z_encoding_application_json_patch_json, 31);
-encoding_constant!(z_encoding_application_json_seq, 32);
-encoding_constant!(z_encoding_application_jsonpath, 33);
-encoding_constant!(z_encoding_application_jwt, 34);
-encoding_constant!(z_encoding_application_mp4, 35);
-encoding_constant!(z_encoding_application_soap_xml, 36);
-encoding_constant!(z_encoding_application_yang, 37);
-encoding_constant!(z_encoding_audio_aac, 38);
-encoding_constant!(z_encoding_audio_flac, 39);
-encoding_constant!(z_encoding_audio_mp4, 40);
-encoding_constant!(z_encoding_audio_ogg, 41);
-encoding_constant!(z_encoding_audio_vorbis, 42);
-encoding_constant!(z_encoding_video_h261, 43);
-encoding_constant!(z_encoding_video_h263, 44);
-encoding_constant!(z_encoding_video_h264, 45);
-encoding_constant!(z_encoding_video_h265, 46);
-encoding_constant!(z_encoding_video_h266, 47);
-encoding_constant!(z_encoding_video_mp4, 48);
-encoding_constant!(z_encoding_video_ogg, 49);
-encoding_constant!(z_encoding_video_raw, 50);
-encoding_constant!(z_encoding_video_vp8, 51);
-encoding_constant!(z_encoding_video_vp9, 52);
+/// Every well-known encoding's accessor, emitted with it, at the index of its wire id: what an
+/// encoding of no schema is read from instead of a slot of the pool of encodings
+/// ([`constant_of`]), as zenoh-pico's encoding of no schema holds no allocation.
+macro_rules! encoding_constants {
+    ($(($fname:ident, $id:expr)),* $(,)?) => {
+        $(encoding_constant!($fname, $id);)*
+
+        /// The accessors, in the order of their ids.
+        const CONSTANTS: &[extern "C" fn() -> *const z_loaned_encoding_t] = &[$($fname),*];
+    };
+}
+
+encoding_constants! {
+    (z_encoding_zenoh_bytes, 0),
+    (z_encoding_zenoh_string, 1),
+    (z_encoding_zenoh_serialized, 2),
+    (z_encoding_application_octet_stream, 3),
+    (z_encoding_text_plain, 4),
+    (z_encoding_application_json, 5),
+    (z_encoding_text_json, 6),
+    (z_encoding_application_cdr, 7),
+    (z_encoding_application_cbor, 8),
+    (z_encoding_application_yaml, 9),
+    (z_encoding_text_yaml, 10),
+    (z_encoding_text_json5, 11),
+    (z_encoding_application_python_serialized_object, 12),
+    (z_encoding_application_protobuf, 13),
+    (z_encoding_application_java_serialized_object, 14),
+    (z_encoding_application_openmetrics_text, 15),
+    (z_encoding_image_png, 16),
+    (z_encoding_image_jpeg, 17),
+    (z_encoding_image_gif, 18),
+    (z_encoding_image_bmp, 19),
+    (z_encoding_image_webp, 20),
+    (z_encoding_application_xml, 21),
+    (z_encoding_application_x_www_form_urlencoded, 22),
+    (z_encoding_text_html, 23),
+    (z_encoding_text_xml, 24),
+    (z_encoding_text_css, 25),
+    (z_encoding_text_javascript, 26),
+    (z_encoding_text_markdown, 27),
+    (z_encoding_text_csv, 28),
+    (z_encoding_application_sql, 29),
+    (z_encoding_application_coap_payload, 30),
+    (z_encoding_application_json_patch_json, 31),
+    (z_encoding_application_json_seq, 32),
+    (z_encoding_application_jsonpath, 33),
+    (z_encoding_application_jwt, 34),
+    (z_encoding_application_mp4, 35),
+    (z_encoding_application_soap_xml, 36),
+    (z_encoding_application_yang, 37),
+    (z_encoding_audio_aac, 38),
+    (z_encoding_audio_flac, 39),
+    (z_encoding_audio_mp4, 40),
+    (z_encoding_audio_ogg, 41),
+    (z_encoding_audio_vorbis, 42),
+    (z_encoding_video_h261, 43),
+    (z_encoding_video_h263, 44),
+    (z_encoding_video_h264, 45),
+    (z_encoding_video_h265, 46),
+    (z_encoding_video_h266, 47),
+    (z_encoding_video_mp4, 48),
+    (z_encoding_video_ogg, 49),
+    (z_encoding_video_raw, 50),
+    (z_encoding_video_vp8, 51),
+    (z_encoding_video_vp9, 52),
+}
 
 /// The encoding a default-constructed value means (pico
 /// `z_encoding_loan_default`, `src/api/encoding.c:266`) — literally upstream's
@@ -689,6 +806,7 @@ pub unsafe extern "C" fn z_encoding_take_from_loaned(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
 
     /// What `z_encoding_from_str` stores for `s`: its bytes, split as pico's
     /// `_z_encoding_convert_from_substr` splits them.
@@ -996,6 +1114,102 @@ mod tests {
                 "a refused schema leaves the one it had"
             );
             z_encoding_drop(z_encoding_move(&mut owned));
+        }
+    }
+
+    /// Each well-known accessor sits at the index of its own id, so an encoding of no schema is read
+    /// from the constant of its id.
+    #[test]
+    fn each_constant_sits_at_the_index_of_its_id() {
+        for (id, accessor) in CONSTANTS.iter().enumerate() {
+            // SAFETY: a `'static` view this module minted.
+            let read = unsafe { encoding_view(accessor()) }.expect("a constant is never absent");
+            assert_eq!(read.packed_id, (id as u32) << 1);
+        }
+        assert_eq!(CONSTANTS.len(), ENCODING_ID_TO_STR.len());
+    }
+
+    /// An encoding of no schema whose id the table names is its constant: it takes no slot, as
+    /// zenoh-pico's allocates nothing for one, and dropping it leaves the constant as it was.
+    #[test]
+    fn an_encoding_of_no_schema_is_its_constant_and_takes_no_slot() {
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: a live local and `'static` views.
+        unsafe {
+            assert_eq!(
+                z_encoding_from_str(&mut owned, c"text/plain".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                owned.handle,
+                (*z_encoding_text_plain()).handle,
+                "the owned encoding is the constant's state"
+            );
+            z_encoding_drop(z_encoding_move(&mut owned));
+            assert_eq!(
+                encoding_view(z_encoding_text_plain())
+                    .expect("still there")
+                    .packed_id,
+                4 << 1
+            );
+        }
+    }
+
+    /// zenoh-pico's own schema test: a schema set on the null encoding, which pico reads as the
+    /// default, and on an encoding of no schema, gives each a schema of its own
+    /// (`vendor/zenoh-pico/tests/z_api_encoding_test.c` @ `void test_with_schema(void) {`).
+    #[test]
+    fn a_schema_is_set_on_the_null_encoding_and_on_a_constant() {
+        let rendered_of = |owned: &z_owned_encoding_t| {
+            // SAFETY: a live owned encoding.
+            let read = unsafe { encoding_view(z_encoding_loan(owned)) }.expect("an encoding");
+            String::from_utf8(wz_session_core::encoding_hint::parts_to_bytes(
+                read.packed_id,
+                read.schema,
+            ))
+            .expect("text")
+        };
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: live locals.
+        unsafe {
+            z_internal_encoding_null(&mut owned);
+            assert_eq!(
+                z_encoding_set_schema_from_str(
+                    z_encoding_loan_mut(&mut owned),
+                    c"my_schema".as_ptr()
+                ),
+                Z_OK
+            );
+            assert_eq!(rendered_of(&owned), "zenoh/bytes;my_schema");
+            z_encoding_drop(z_encoding_move(&mut owned));
+
+            assert_eq!(
+                z_encoding_from_str(&mut owned, c"zenoh/string;".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                owned.handle,
+                (*z_encoding_zenoh_string()).handle,
+                "an empty schema is none, so the encoding is the constant"
+            );
+            assert_eq!(
+                z_encoding_set_schema_from_substr(
+                    z_encoding_loan_mut(&mut owned),
+                    c"my_schema".as_ptr(),
+                    3
+                ),
+                Z_OK
+            );
+            assert_eq!(rendered_of(&owned), "zenoh/string;my_");
+            assert_ne!(owned.handle, (*z_encoding_zenoh_string()).handle);
+            z_encoding_drop(z_encoding_move(&mut owned));
+            assert_eq!(
+                encoding_view(z_encoding_zenoh_string())
+                    .expect("the constant")
+                    .schema,
+                None,
+                "the constant the schema was set over is as it was"
+            );
         }
     }
 
