@@ -691,8 +691,7 @@ pub mod serde;
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session;
 mod session_ext;
-// The cooperative engine's session handle lies in a place of the session's arena.
-#[cfg(not(feature = "engine-tokio"))]
+// The place a session's handle lies in, and what stays in it once the handle is let go of.
 mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
