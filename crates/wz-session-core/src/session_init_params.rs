@@ -78,7 +78,9 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
     #[cfg(feature = "session-fixed-storage")]
     {
-        heapless::Vec::from_slice(src).ok()
+        let mut bytes = heapless::Vec::new();
+        crate::bounded::push_bytes(&mut bytes, src).ok()?;
+        Some(bytes)
     }
 }
 
@@ -88,6 +90,10 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
 /// form of [`SessionBytes`] names no capacity, so a capacity parameter could not be inferred from
 /// a slot of that form and every caller would have to spell it out.
 pub trait SessionBytesStore: Default {
+    /// Whether this storage holds a value of `len` bytes: the rule [`Self::refill`] keeps by,
+    /// which only the fixed form can answer `false`.
+    fn holds(len: usize) -> bool;
+
     /// Hold `src` in place of what was held: `false` when it does not fit, which only the fixed
     /// form can say.
     fn refill(&mut self, src: &[u8]) -> bool;
@@ -95,6 +101,10 @@ pub trait SessionBytesStore: Default {
 
 #[cfg(not(feature = "session-fixed-storage"))]
 impl SessionBytesStore for Vec<u8> {
+    fn holds(_len: usize) -> bool {
+        true
+    }
+
     fn refill(&mut self, src: &[u8]) -> bool {
         self.clear();
         self.extend_from_slice(src);
@@ -104,9 +114,13 @@ impl SessionBytesStore for Vec<u8> {
 
 #[cfg(feature = "session-fixed-storage")]
 impl<const N: usize> SessionBytesStore for heapless::Vec<u8, N> {
+    fn holds(len: usize) -> bool {
+        crate::bounded::append_end::<N>(0, len).is_some()
+    }
+
     fn refill(&mut self, src: &[u8]) -> bool {
         self.clear();
-        self.extend_from_slice(src).is_ok()
+        crate::bounded::push_bytes(self, src).is_ok()
     }
 }
 
@@ -117,6 +131,13 @@ pub fn store_session_bytes<B: SessionBytesStore>(slot: &mut Option<B>, src: &[u8
     if !slot.get_or_insert_with(B::default).refill(src) {
         *slot = None;
     }
+}
+
+/// Whether a session keeps a handshake cookie of `len` bytes, by the rule its cookie storage
+/// ([`SessionBytes`] of [`COOKIE_MAX`]) keeps by: the read that refuses a cookie the session
+/// would not keep (`inbound::read_control`) and the store that keeps it judge by one rule.
+pub fn keeps_cookie(len: usize) -> bool {
+    <SessionBytes<COOKIE_MAX> as SessionBytesStore>::holds(len)
 }
 
 /// A cookie for [`SessionInitParams::cookie`] from an array the caller wrote, written the
@@ -895,7 +916,10 @@ mod keep_alive_tests {
 
 #[cfg(test)]
 mod cookie_bound_tests {
-    use super::{session_bytes, store_session_bytes, SessionBytes, COOKIE_FIELD_MAX, COOKIE_MAX};
+    use super::{
+        keeps_cookie, session_bytes, store_session_bytes, SessionBytes, COOKIE_FIELD_MAX,
+        COOKIE_MAX,
+    };
 
     /// `COOKIE_FIELD_MAX` is the capacity the INIT body declares for its cookie, read from its
     /// source, so a codec that changed it would fail here and not leave the bound's ceiling a copy of
@@ -943,6 +967,23 @@ mod cookie_bound_tests {
         assert!(too_long.is_none());
         #[cfg(not(feature = "session-fixed-storage"))]
         assert_eq!(too_long.map(|b| b.len()), Some(9));
+    }
+
+    /// The read that refuses a cookie and the store that keeps it judge by one rule: a cookie of
+    /// the bound is kept, and one a byte longer is kept exactly when the store keeps it, which is
+    /// never on the fixed form. Turned red by a read that judges a cookie by a rule of its own.
+    #[test]
+    fn a_cookie_is_kept_by_the_rule_its_store_keeps_by() {
+        assert!(keeps_cookie(COOKIE_MAX));
+        let mut slot: Option<SessionBytes<COOKIE_MAX>> = None;
+        store_session_bytes(&mut slot, &[7u8; COOKIE_MAX]);
+        assert_eq!(slot.as_deref().map(<[u8]>::len), Some(COOKIE_MAX));
+        store_session_bytes(&mut slot, &[7u8; COOKIE_MAX + 1]);
+        assert_eq!(keeps_cookie(COOKIE_MAX + 1), slot.is_some());
+        #[cfg(feature = "session-fixed-storage")]
+        assert!(!keeps_cookie(COOKIE_MAX + 1));
+        #[cfg(not(feature = "session-fixed-storage"))]
+        assert!(keeps_cookie(COOKIE_MAX + 1));
     }
 
     /// A slot written in place holds what was written last, whatever it held before; one written

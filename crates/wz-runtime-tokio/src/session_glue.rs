@@ -4551,7 +4551,7 @@ mod rx_sn_gate_tests {
     use wz_session_wire_fixtures::craft_openack_wire;
 
     /// R2782 — driven through the initiator's own handshake, not a bare
-    /// parse. The seed is the ADMITTED OpenAck's (`admit_open_ack_in`), and an
+    /// parse. The seed is the ADMITTED OpenAck's (`admit_open_ack`), and an
     /// OpenAck is admitted only while the initiator awaits one -- after its
     /// OpenSyn is out -- so a parse alone no longer seeds anything, which is
     /// the fix: a replayed OpenAck after `Established` used to.

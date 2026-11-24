@@ -744,9 +744,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     // binding for both receives, and the buffer is idle after it as after any datagram let go of.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        let mut frame = None;
-        self.recv_with(&mut |datagram| frame = Some(RxFrame::new(datagram.to_vec())));
-        frame
+        crate::link_storage::copied_receive(self)
     }
 
     fn holds_input(&self) -> bool {

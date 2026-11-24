@@ -946,13 +946,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
         }
     }
     // The peer's chain is read once for every reader below: its patch level and its region
-    // identity off an Init in one walk (some for every Init), and, for the readers of a slice of
-    // owned entries that the extensions a build with an allocator negotiates take, the chain
-    // made owned once.
+    // identity off an Init as one walk answers them (some for every Init; a chain read where it
+    // lies answers what the walk of its read found), and, for the readers of a slice of owned
+    // entries that the extensions a build with an allocator negotiates take, the chain made owned
+    // once.
     #[cfg(feature = "codec-init-body")]
     let (peer_patch, peer_region) = match facts {
         crate::inbound::ControlFacts::Init(_) => {
-            let (patch, region) = crate::extregion::peer_patch_and_region_in(chain.entries());
+            let (patch, region) = chain.patch_and_region();
             (Some(patch), Some(region))
         }
         _ => (None, None),
@@ -1162,14 +1163,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // refused Open seeds no SN and adopts no lease.
     //
     // An OpenAck is admitted, its bound refused or taken and the rest of it taken in one hold of
-    // the facts (`admit_open_ack_in`); it is dropped silently, as any frame not admitted is, when
+    // the facts (`admit_open_ack`); it is dropped silently, as any frame not admitted is, when
     // none is awaited (R2782: a replay after `Established` was measured to reset the RX
     // baseline).
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { is_ack: false, .. }) =
         facts
     {
-        if !actions.admit_peer_remote_bound_in(chain.entries()) {
+        if !actions.admit_read_peer_remote_bound(chain.remote_bound()) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
@@ -1183,7 +1184,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     }) = facts
     {
         use crate::session_actions::OpenAckAdmission as A;
-        match actions.admit_open_ack_in(*lease, *initial_sn, chain.entries()) {
+        match actions.admit_open_ack(*lease, *initial_sn, chain.remote_bound()) {
             A::Taken => {}
             A::NotAwaited => return DriverLoopOutcome::SideEffectOnly,
             A::BoundRefused => {

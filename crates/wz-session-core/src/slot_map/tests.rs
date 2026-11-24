@@ -418,3 +418,30 @@ fn a_rows_rank_is_its_place_in_the_tables_walk() {
     assert_eq!(map.rank_of(retired), None);
     assert!(map.nth_live(2).is_none());
 }
+
+/// A table's slots name a row by its handle's bits with the rank the table's walk gives it, and
+/// count a row removed while pinned as the table does. Turned red by a rank read off the bits
+/// that is not the typed one, or by slots that count only the live rows.
+#[test]
+fn the_slots_rank_a_row_by_its_handles_bits_as_the_table_does() {
+    let mut map = Map::<4>::new();
+    let first = map.insert(1).unwrap();
+    let freed = map.insert(2).unwrap();
+    let last = map.insert(3).unwrap();
+    assert!(matches!(map.remove(freed), Some(Removal::Taken(2))));
+    assert_eq!(map.slots().len(), 2);
+    assert_eq!(map.slots().rank_of(first.to_bits()), Some(0));
+    assert_eq!(map.slots().rank_of(last.to_bits()), Some(1));
+    assert_eq!(map.slots().rank_of(freed.to_bits()), None);
+    assert_eq!(map.slots().nth_live(0), Some(first.to_bits()));
+    assert_eq!(map.slots().nth_live(1), Some(last.to_bits()));
+    assert_eq!(map.slots().nth_live(2), None);
+    let _pinned = map.pin(last).unwrap();
+    assert!(matches!(map.remove(last), Some(Removal::AfterCalls)));
+    assert_eq!(map.slots().len(), map.len(), "a retired row keeps its slot");
+    assert_eq!(map.slots().len(), 2);
+    assert_eq!(map.slots().rank_of(last.to_bits()), None);
+    assert_eq!(map.slots().nth_live(1), None);
+    assert!(Slots::NONE.is_empty());
+    assert_eq!(Slots::NONE.nth_live(0), None);
+}

@@ -1756,7 +1756,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             "keyexpr table",
         ),
         (
-            tables.write_filters,
+            tables.write_filters(),
             preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"),
             "write filter table",
         ),

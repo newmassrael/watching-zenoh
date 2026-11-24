@@ -144,7 +144,8 @@ unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
 fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
     let layout =
         core::alloc::Layout::from_size_align(bytes, core::mem::align_of::<BlockHead>()).ok()?;
-    crate::object_slot::try_heap_place(layout).map(|at| (at, bytes))
+    // SAFETY: a block is never of zero bytes: it has its head.
+    NonNull::new(unsafe { alloc::alloc::alloc(layout) }).map(|at| (at, bytes))
 }
 
 /// Give back a block [`take_block`] handed out.
@@ -714,7 +715,7 @@ impl SliceState {
             Some(start) if !start.is_null() => start,
             _ => NonNull::<u8>::dangling().as_ptr().cast_const(),
         };
-        Ok(crate::object_slot::boxed(SliceState {
+        Ok(Box::new(SliceState {
             backing,
             filled: len,
             self_view: z_loaned_slice_t {
@@ -746,7 +747,7 @@ impl StringState {
     /// the library's and holds no block.
     fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
         if bytes.is_empty() {
-            return Ok(crate::object_slot::boxed(StringState {
+            return Ok(Box::new(StringState {
                 backing: None,
                 filled: 0,
                 self_view: z_loaned_string_t {
@@ -763,7 +764,7 @@ impl StringState {
             block.write(bytes.len(), &[0]);
         }
         let start = block.span().0;
-        Ok(crate::object_slot::boxed(StringState {
+        Ok(Box::new(StringState {
             backing: Some(block),
             filled,
             self_view: z_loaned_string_t {
@@ -788,7 +789,7 @@ impl StringState {
             NoRoom
         })?;
         let view_start = block.span().0;
-        Ok(crate::object_slot::boxed(StringState {
+        Ok(Box::new(StringState {
             backing: Some(block),
             filled: len,
             self_view: z_loaned_string_t {
@@ -852,9 +853,9 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
 /// Box `buf`, in a kept allocation when this thread has one; `None` never.
 #[cfg(not(wz_process_pools))]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
-    // An uninitialised value boxed is the allocation alone: nothing is written into it.
-    let mut slot =
-        kept_box().unwrap_or_else(|| crate::object_slot::boxed(core::mem::MaybeUninit::uninit()));
+    // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
+    // is the same allocation, and the optimiser writes nothing into it.
+    let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
     slot.write(buf);
     Some(Box::into_raw(slot).cast::<ByteBuf>())
 }

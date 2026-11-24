@@ -230,7 +230,7 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(
-        plan.tables().write_filters,
+        plan.tables().write_filters(),
         7,
         "a write filter is a row of the session's one table set, a publisher's or a querier's"
     );

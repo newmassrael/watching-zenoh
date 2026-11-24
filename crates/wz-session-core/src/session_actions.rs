@@ -2181,7 +2181,7 @@ pub struct HandshakeFacts {
     /// window governs alone.
     ///
     /// R2782 — captured once the Open frame is ADMITTED
-    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack_in`; code spans,
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
     /// because a field doc's `Self` is this struct, which has neither), no
     /// longer at parse time: a replayed Open frame after `Established` used
     /// to rewrite it.
@@ -2329,7 +2329,7 @@ impl HandshakeFacts {
     }
 }
 
-/// What an OpenAck's admission answered (`SessionLinkActions::admit_open_ack_in`).
+/// What an OpenAck's admission answered (`SessionLinkActions::admit_open_ack`).
 #[cfg(feature = "codec-open-body")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenAckAdmission {
@@ -9094,16 +9094,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// @ `other_bound: match open_syn.ext_remote_bound {`). A refused value
     /// leaves the slot untouched.
     pub fn admit_peer_remote_bound(&self, extensions: &[ExtEntryOwned]) -> bool {
-        self.admit_peer_remote_bound_in(extensions)
+        self.admit_read_peer_remote_bound(crate::extbound::peer_remote_bound(extensions))
     }
 
-    /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRead`).
-    pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
+    /// [`Self::admit_peer_remote_bound`] over the bound as the walk of the chain answered it
+    /// (`crate::inbound::ExtChainRead::remote_bound`), held or read where its message lies.
+    pub fn admit_read_peer_remote_bound(
         &self,
-        extensions: impl IntoIterator<Item = E>,
+        bound: Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>,
     ) -> bool {
-        match crate::extbound::peer_remote_bound_in(extensions) {
+        match bound {
             Ok(bound) => {
                 self.fact_peer_remote_bound(|s| *s = bound);
                 true
@@ -10551,7 +10551,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// frame at `initial_sn` passes), on the ring the negotiated caps in `facts` give.
     ///
     /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
-    /// [`Self::admit_open_ack_in`], inside the hold in which they write the rest of what
+    /// [`Self::admit_open_ack`], inside the hold in which they write the rest of what
     /// an admitted Open takes, and by nothing at parse time.
     #[cfg(feature = "codec-open-body")]
     fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
@@ -10597,7 +10597,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2782 — the initiator's admission predicate for an OpenAck: one is
     /// awaited only between sending the OpenSyn and taking an OpenAck. A
-    /// question, so it only reads; `admit_open_ack_in` (crate-private, so a
+    /// question, so it only reads; `admit_open_ack` (crate-private, so a
     /// code span rather than a link) asks it again in the hold in which it
     /// takes the OpenAck.
     pub fn open_ack_awaited(&self) -> bool {
@@ -10717,13 +10717,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is awaited (`open_ack_awaited`'s question) or when its `0x7` REMOTE-BOUND is present and
     /// invalid (`admit_peer_remote_bound`'s refusal). Its bound is taken with the rest.
     #[cfg(feature = "codec-open-body")]
-    pub(crate) fn admit_open_ack_in<E: crate::ext_view::ExtEntryView>(
+    pub(crate) fn admit_open_ack(
         &self,
         lease: u64,
         initial_sn: u64,
-        extensions: impl IntoIterator<Item = E>,
+        bound: Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>,
     ) -> OpenAckAdmission {
-        let bound = crate::extbound::peer_remote_bound_in(extensions);
         self.with_facts(|f| {
             if !f.handshake.awaiting_open_ack {
                 return OpenAckAdmission::NotAwaited;
@@ -10946,7 +10945,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // R2782 — an OpenAck takes nothing at parse time. Its RX SN seed
             // and lease used to be applied here, on every OpenAck; they are
-            // now [`Self::admit_open_ack_in`]'s, applied only to the one OpenAck
+            // now [`Self::admit_open_ack`]'s, applied only to the one OpenAck
             // the initiator is awaiting.
             _ => {}
         }
