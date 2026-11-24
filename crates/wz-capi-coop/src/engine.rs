@@ -3559,7 +3559,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport
                 .links
                 .faces()
-                .iter()
                 .filter_map(|face| face.replay.next_turn_ms())
                 .min(),
             #[cfg(feature = "ticker")]
@@ -4211,7 +4210,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .transport
                 .links
                 .faces()
-                .iter()
                 .filter(|face| match &face.link {
                     Link::Up(wire) | Link::Opening { wire, .. } => wire.owes_write(),
                     _ => false,
@@ -4349,7 +4347,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .transport
                 .links
                 .faces()
-                .iter()
                 .all(|face| face.replay.finished())
         })
     }

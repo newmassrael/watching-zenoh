@@ -23,7 +23,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .transport
             .links
             .faces()
-            .iter()
             .filter(|face| face.id != DIAL_FACE && matches!(face.link, Link::Opening { .. }))
             .count();
         if pending >= self.config.accept_pending || self.faces_full() {
