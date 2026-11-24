@@ -281,22 +281,49 @@ enum QueryText<T: ?Sized> {
     /// The marshal's own, on the heap, in a library without the process pools.
     #[cfg(not(wz_process_pools))]
     Owned(Box<T>),
-    /// The marshal's own, in the block of the payloads' area the payload holds, where the pointer
-    /// reads it: a block stays where it lies while its holder moves.
+    /// The marshal's own, in the block of the payloads' area `copy` holds and gives back when it
+    /// drops, the text read from it in the form it was copied from.
     #[cfg(wz_process_pools)]
-    Pooled(*const T, crate::bytes::ByteBuf),
+    Pooled { copy: crate::bytes::ByteBuf },
 }
 
-impl<T: ?Sized> QueryText<T> {
+/// The forms a query's text takes: its key is UTF-8 and its parameters are bytes. A copy in the
+/// process pools holds only the bytes, read back in the form they were copied from.
+trait TextForm {
+    /// The text `bytes` are a copy of.
+    ///
+    /// # Safety
+    /// `bytes` are a copy of a text of this form.
+    #[cfg(wz_process_pools)]
+    unsafe fn of_copy(bytes: &[u8]) -> &Self;
+}
+
+impl TextForm for str {
+    #[cfg(wz_process_pools)]
+    unsafe fn of_copy(bytes: &[u8]) -> &str {
+        // SAFETY: the caller's: the bytes are a copy of a text's, so they are UTF-8 as it is.
+        unsafe { core::str::from_utf8_unchecked(bytes) }
+    }
+}
+
+impl TextForm for [u8] {
+    #[cfg(wz_process_pools)]
+    unsafe fn of_copy(bytes: &[u8]) -> &[u8] {
+        bytes
+    }
+}
+
+impl<T: ?Sized + TextForm> QueryText<T> {
     fn get(&self) -> &T {
         match self {
             // SAFETY: a lent text outlives the marshal that holds it (`QueryMarshal::new`).
             Self::Lent(text) => unsafe { &**text },
             #[cfg(not(wz_process_pools))]
             Self::Owned(text) => text,
-            // SAFETY: the text lies in the block the payload beside it holds, for as long as it.
+            // SAFETY: the block holds a copy of a text of this form (`pooled_text`,
+            // `pooled_bytes`).
             #[cfg(wz_process_pools)]
-            Self::Pooled(text, _) => unsafe { &**text },
+            Self::Pooled { copy } => unsafe { T::of_copy(copy.as_slice()) },
         }
     }
 }
@@ -305,10 +332,9 @@ impl<T: ?Sized> QueryText<T> {
 impl QueryText<str> {
     /// A copy of `text` of the marshal's own, in the payloads' area of the process pools.
     fn pooled_text(text: &str) -> Result<Self, crate::bytes::NoRoom> {
-        let block = crate::bytes::ByteBuf::copy_of(text.as_bytes())?;
-        // The bytes are a copy of a text's, so they are UTF-8 as it is.
-        let at = block.as_slice() as *const [u8] as *const str;
-        Ok(Self::Pooled(at, block))
+        Ok(Self::Pooled {
+            copy: crate::bytes::ByteBuf::copy_of(text.as_bytes())?,
+        })
     }
 }
 
@@ -316,9 +342,9 @@ impl QueryText<str> {
 impl QueryText<[u8]> {
     /// A copy of `bytes` of the marshal's own, in the payloads' area of the process pools.
     fn pooled_bytes(bytes: &[u8]) -> Result<Self, crate::bytes::NoRoom> {
-        let block = crate::bytes::ByteBuf::copy_of(bytes)?;
-        let at = block.as_slice() as *const [u8];
-        Ok(Self::Pooled(at, block))
+        Ok(Self::Pooled {
+            copy: crate::bytes::ByteBuf::copy_of(bytes)?,
+        })
     }
 }
 

@@ -880,7 +880,7 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
         None | Some((None, None)) => true,
         Some((lo, hi)) => match sample_sn {
             None => false,
-            Some(sn) => lo.is_none_or(|l| sn >= l) && hi.map_or(true, |h| sn <= h),
+            Some(sn) => lo.is_none_or(|l| sn >= l) && hi.is_none_or(|h| sn <= h),
         },
     }
 }

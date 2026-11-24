@@ -36,6 +36,9 @@ use wz_session_mcu::dial::McuActions;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(feature = "group")]
+use super::transport::TellGroups;
+
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
 pub(super) fn declare_token<C: ClockSource + 'static>(
