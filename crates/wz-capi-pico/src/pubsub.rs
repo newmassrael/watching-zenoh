@@ -491,7 +491,7 @@ unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_v
     };
     let parts = marshal.kept_parts().map_err(NoRoom::code)?;
     // What can be refused is taken above; the copy itself is written where it lies.
-    let owned = slot.fill_in_place(|at| at.write(marshal.copy_with(parts)));
+    let owned = slot.fill_in_place(|at: *mut SampleMarshal| at.write(marshal.copy_with(parts)));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
