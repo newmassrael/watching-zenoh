@@ -6,14 +6,14 @@
 //! sample put by a session that dialled it.
 //!
 //! zenoh-pico builds this link under `Z_FEATURE_LINK_WS` (default 0), and this crate's twin is
-//! `transport-link-ws`, off by default, so the file compiles only where that feature is on.
-//! The refusal in a build without it is the runtime's typed `Unsupported` at bind and dial,
-//! which `wz-runtime-tokio`'s `session_open` tests hold; it is not asserted here because a
-//! workspace build can turn the runtime's backend on through another crate.
+//! `transport-link-ws`, off by default and on either engine: the tokio engine's WebSocket link,
+//! or on the cooperative engine WebSocket links over the host's TCP beside its sockets. A
+//! cooperative build without it fails the open of a `ws/` endpoint (`ws_link_refused`).
 //!
-//! RED reproduction: drop `wz-runtime-tokio/transport-link-ws` from this crate's
-//! `transport-link-ws` feature and from `wz-capi-core`'s (the runtime backend is then compiled
-//! out in a `-p wz-capi-pico` build), and the listener's `z_open` fails at bind.
+//! RED reproduction: on the cooperative engine, open the session over its sockets' links alone
+//! (drop `coop_host::with_ws` from `open_on_coop` in `src/session.rs`), and the listener's
+//! `z_open` fails, its `ws/` locator refused as `Unsupported`; on the tokio engine, drop
+//! `wz-runtime-tokio/transport-link-ws` from `wz-capi-core`'s `transport-link-ws`.
 
 // One sample across each forwarded link; each file is also `cfg`'d on its link feature.
 #![cfg(feature = "peer")]

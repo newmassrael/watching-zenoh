@@ -592,12 +592,19 @@ type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
 type SocketLinks = SecuredLinks;
 
-/// The links a cooperative session opens over the host: its sockets', and its ttys' beside them
+/// The links a cooperative session opens over the host's network: its sockets', and WebSocket
+/// links over its TCP beside them where the build has them (`transport-link-ws`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-ws"))]
+type NetLinks = crate::coop_host::WithWs<SocketLinks>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-ws")))]
+type NetLinks = SocketLinks;
+
+/// The links a cooperative session opens over the host: its network's, and its ttys' beside them
 /// where the build has serial links (`transport-link-serial`).
 #[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-serial"))]
-pub(crate) type HostLinks = crate::coop_host::WithSerial<SocketLinks>;
+pub(crate) type HostLinks = crate::coop_host::WithSerial<NetLinks>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-serial")))]
-pub(crate) type HostLinks = SocketLinks;
+pub(crate) type HostLinks = NetLinks;
 
 /// The links a cooperative session opens over: the host's, or with `app-transport` whichever of
 /// the host's and the program's transport the config chose. One type either way, so the engine
@@ -2097,6 +2104,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
     let links = links.waited_by_owner();
+    // WebSocket links run over the host's TCP beside its sockets, waited for as those are, each
+    // listener answering as many opening requests at once as the session admits handshakes.
+    #[cfg(feature = "transport-link-ws")]
+    let links = crate::coop_host::with_ws(links, accept_pending).waited_by_owner();
     // The host's ttys are links beside its sockets, waited for as those are: a `serial/` locator
     // is dialled and listened on over them, any other over the sockets.
     #[cfg(feature = "transport-link-serial")]

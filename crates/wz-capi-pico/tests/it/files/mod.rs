@@ -61,4 +61,5 @@ mod teardown_drain;
 mod time_base_accept;
 mod tls_coop_roundtrip;
 mod unixpipe_listen_multiclient;
+mod ws_link_refused;
 mod ws_link_roundtrip;

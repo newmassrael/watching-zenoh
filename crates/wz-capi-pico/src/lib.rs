@@ -267,20 +267,27 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's WebSocket links run over the host's TCP (`wz-runtime-posix`'s `ws`),
+// which it opens on a POSIX host; Windows, and a Zephyr image, have no opener in
+// `src/coop_host.rs` yet and are refused by name rather than by the missing opener.
 #[cfg(all(
     feature = "transport-link-ws",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(unix)
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-ws` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-ws` on the cooperative engine opens WebSocket links over the \
+     host's TCP, which `wz-runtime-posix` opens on a POSIX host only, and a Zephyr image has no \
+     WebSocket link in src/coop_host.rs: drop the feature from this library, or give that file \
+     the target's opener"
 );
 #[cfg(all(
     feature = "engine-tokio",
@@ -297,8 +304,7 @@ compile_error!(
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
         feature = "transport-link-tls",
-        feature = "transport-link-unixpipe",
-        feature = "transport-link-ws"
+        feature = "transport-link-unixpipe"
     ))
 ))]
 compile_error!(
