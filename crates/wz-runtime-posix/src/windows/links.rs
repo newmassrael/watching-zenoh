@@ -58,18 +58,25 @@ mod tests {
             .open_initiator(Locator::tcp(SocketAddr::new(LOOPBACK, port)))
             .expect("a connection")
             .pump;
-        let wait = tcp.readiness().expect("a stream gives its owner a wait");
+        let on = tcp.input_wait().expect("a stream gives its owner a wait");
         assert!(
-            wait.handle().is_some(),
+            matches!(on, wz_runtime_coop::session_drive::WaitOn::Socket(_)),
             "the wait names its socket to the system"
         );
         // Nothing has been sent: the wait runs out.
-        wait.wait_readable(10);
+        wz_runtime_coop::session_drive::LinkWaits::wait(
+            &links.waits(),
+            &[wz_runtime_coop::session_drive::LinkWait::input(on)],
+            10,
+        );
 
         let udp = links
             .open_initiator(Locator::udp(SocketAddr::new(LOOPBACK, port)))
             .expect("a datagram socket")
             .pump;
-        assert!(udp.readiness().is_some(), "a datagram socket gives one too");
+        assert!(
+            udp.input_wait().is_some(),
+            "a datagram socket gives one too"
+        );
     }
 }

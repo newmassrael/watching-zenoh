@@ -19,11 +19,8 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-// The port a stack listens on is shared by its links; the tests share a channel's answer.
-#[cfg(all(
-    not(feature = "session-slot"),
-    any(feature = "udp-listen", all(test, feature = "alloc"))
-))]
+// The port a stack listens on is shared by its links.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
@@ -51,21 +48,15 @@ use crate::link_cells::CellRc;
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-use crate::session_drive::RxLease;
 use crate::session_drive::SessionDatagramLink;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::WaitOn;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{Dialled, LinkListener, OpenedLink, PendingDial, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkReadiness, LinkWritability};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::link_over;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -134,12 +125,8 @@ where
 {
     // A session that lent its links cells places each in one: past them the link is refused, as
     // one past the session's buffers is, and none is placed on the heap.
-    let driver = match cells {
-        Some(cells) => {
-            crate::link_cells::CellRc::place(cells, driver).map_err(|_| LinkOpenError::Exhausted)?
-        }
-        None => crate::link_cells::CellRc::boxed(driver),
-    };
+    let driver =
+        crate::link_cells::CellRc::in_cells(cells, driver).map_err(|_| LinkOpenError::Exhausted)?;
     Ok(OpenedLink {
         sink: driver.clone().into_sink(),
         pump: driver.into_link(),
@@ -314,31 +301,13 @@ where
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        either!(self, link => link.readiness())
+    fn input_wait(&self) -> Option<WaitOn> {
+        either!(self, link => link.input_wait())
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        either!(self, link => link.writability())
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn lend_rx(&self) -> Option<RxLease> {
-        either!(self, link => link.lend_rx())
-    }
-
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn land_rx(&self, lease: RxLease) {
-        either!(self, link => link.land_rx(lease))
+    fn room_wait(&self) -> Option<WaitOn> {
+        either!(self, link => link.room_wait())
     }
 }
 
@@ -492,7 +461,7 @@ where
         }
     }
 
-    /// Links whose owner waits for their input ([`SessionDatagramLink::readiness`]): what holds a
+    /// Links whose owner waits for their input ([`SessionDatagramLink::input_wait`]): what holds a
     /// session behind a lock and waits for it outside the lock. Each link whose socket can be
     /// waited on that way does not wait in its loop; one whose socket cannot still does.
     #[must_use]
@@ -588,6 +557,14 @@ where
     type Dial = IpDial<D::Stream, L::Stream>;
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
+
+    // The waits of the platform whose sockets these are: its streams, the secure channels over
+    // them and its groups name handles of the same platform as its datagram sockets do.
+    type Waits = U::Waits;
+
+    fn waits(&self) -> U::Waits {
+        U::Waits::default()
+    }
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
@@ -832,8 +809,8 @@ impl<U: DatagramSocket + 'static> LinkListener<HeapLink> for IpUdpListener<U> {
         .map(Some)
     }
 
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.port.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.port.input_wait()
     }
 }
 
@@ -866,8 +843,8 @@ impl<T: StreamSocket + 'static> LinkListener<HeapLink> for IpTlsListener<T> {
         .map(Some)
     }
 
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.listener.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.listener.input_wait()
     }
 }
 
@@ -896,8 +873,8 @@ impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
         heap_link(self.shape.cells.as_ref(), self.shape.stream(stream, rx, tx)).map(Some)
     }
 
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.listener.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.listener.input_wait()
     }
 }
 
@@ -1246,6 +1223,8 @@ mod tests {
 
     impl<const V6: bool> DatagramSocket for Datagrams<V6> {
         type Error = NoIpv6;
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        type Waits = crate::session_drive::NoWaits;
         const IPV6: bool = V6;
         fn bind(at: SocketAddr) -> Result<Self, NoIpv6> {
             if at.is_ipv6() && !V6 {
@@ -2333,6 +2312,8 @@ mod tests {
 
         impl DatagramSocket for Inbox {
             type Error = ();
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            type Waits = crate::session_drive::NoWaits;
             fn bind(_at: SocketAddr) -> Result<Self, ()> {
                 Ok(Self {
                     queued: Queue::default(),

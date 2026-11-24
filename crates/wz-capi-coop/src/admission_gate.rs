@@ -18,12 +18,10 @@
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
+use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
-
-use crate::prelude::*;
 
 /// Whether the engine has admitted a link: shared between the gate the link's task reads through
 /// and the engine's wire for that link, which opens it.
@@ -136,14 +134,14 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
         self.pump.lends_until_next_receive()
     }
 
-    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
-        self.pump.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.pump.input_wait()
     }
 
     // The gate holds back input only: what the session sends goes out whether or not the link
     // is admitted, so its room is the link's.
-    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
-        self.pump.writability()
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.pump.room_wait()
     }
 }
 

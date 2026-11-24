@@ -228,16 +228,10 @@ impl StreamSocket for ZephyrTcpSocket {
     // Any thread may `poll` a descriptor, so the session's owner waits for this stream outside its
     // lock, as it waits for a datagram socket.
     wz_runtime_coop::with_heap_link_seams! {
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            target_has_atomic = "ptr"
-        ))]
-        fn readiness(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
-            Some(self._close.readiness())
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self._close.wait_on()
         }
+
     }
 }
 
@@ -364,15 +358,9 @@ impl StreamListen for ZephyrTcpListener {
 
     // A listening descriptor polls readable while a connection is queued on it.
     wz_runtime_coop::with_heap_link_seams! {
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            target_has_atomic = "ptr"
-        ))]
-        fn readiness(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
-            Some(self._close.readiness())
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self._close.wait_on()
         }
+
     }
 }

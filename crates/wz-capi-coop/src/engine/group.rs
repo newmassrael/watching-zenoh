@@ -27,13 +27,11 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
-use alloc::sync::Arc;
-
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
+use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
@@ -190,12 +188,12 @@ impl GroupTransport for Watched {
         self.inner.wait_for_room(timeout_us)
     }
 
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        self.inner.writability()
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.inner.room_wait()
     }
 
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        self.inner.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.inner.input_wait()
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
@@ -264,8 +262,9 @@ pub(super) struct GroupJoining {
     pub(super) watchers: alloc::sync::Arc<FacePlane>,
 }
 
-/// One group of the session: its face, its task, its queue, its members and its stop.
-pub(super) struct GroupFace {
+/// One group of the session: its face, its task, its queue, its members and its stop, the group's
+/// socket waited on with `W`, the waits of the session's stack.
+pub(super) struct GroupFace<W> {
     id: FaceId,
     join: GroupJoin,
     /// The group's session; `None` once the session's end was read ([`Self::take_outcome`]).
@@ -280,12 +279,14 @@ pub(super) struct GroupFace {
     link: GroupLink<Watched>,
     /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
-    /// The group socket's wait for room, asked from outside its task; `None` for a stack that
-    /// gives none.
-    room: Option<Arc<dyn LinkWritability>>,
-    /// The group socket's wait for input, which a read waits on beside the session's links;
-    /// `None` for a stack that gives none, whose group is looked at on its tick.
-    input: Option<Arc<dyn LinkReadiness>>,
+    /// The waits of the session's stack, which the group's socket is waited on with.
+    waits: W,
+    /// What a wait for room on the group's socket waits on, asked from outside its task; `None`
+    /// for a stack that gives none.
+    room: Option<WaitOn>,
+    /// What a read waits on for the group socket's input, beside the session's links; `None` for
+    /// a stack that gives none, whose group is looked at on its tick.
+    input: Option<WaitOn>,
     /// When the group's session is next due with nothing arriving on it, as its last step said.
     due: GroupDue,
     members: Rc<RefCell<Vec<MulticastMember>>>,
@@ -318,17 +319,19 @@ pub(super) struct GroupFace {
     next_request: Cell<RequestId>,
 }
 
-impl GroupFace {
+impl<W: LinkWaits> GroupFace<W> {
     /// Join the group `joining` names, whose tables the registry holds already, its session
     /// spawned on `local`: each event of it goes through `dispatch`, with the sink the group's
     /// replies are queued on, after the members it admits and loses are noted. The task opens the
     /// transport as the session's link at its first step, which the caller runs. `Err` when the
     /// session's runtime has no cell for the task (its tables are reserved when the session
-    /// opens), the transport let go of with what the task was to be made of.
+    /// opens), the transport let go of with what the task was to be made of. The group's socket is
+    /// waited on with `waits`, those of the session's stack.
     pub(super) fn join<C, D>(
         local: &CoopLocalSet<C>,
         joining: GroupJoining,
         dispatch: D,
+        waits: W,
     ) -> Result<Self, SpawnRefusal>
     where
         C: ClockSource + 'static,
@@ -357,8 +360,8 @@ impl GroupFace {
         // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
         // the session's limits.
         let tx = GroupTxStage::with_limits(&params, &limits);
-        let room = transport.writability().map(Arc::from);
-        let input = transport.readiness().map(Arc::from);
+        let room = transport.room_wait();
+        let input = transport.input_wait();
         let due = GroupDue::default();
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
@@ -419,6 +422,7 @@ impl GroupFace {
             tx,
             link,
             pace,
+            waits,
             room,
             input,
             due,
@@ -501,10 +505,10 @@ impl GroupFace {
         true
     }
 
-    /// The group socket's wait for room, which a message of the session that finds the session
-    /// held asks as it asks a link's.
-    pub(super) fn room(&self) -> Option<&Arc<dyn LinkWritability>> {
-        self.room.as_ref()
+    /// What a wait for room on the group's socket waits on, which a message of the session that
+    /// finds the session held asks as it asks a link's.
+    pub(super) fn room(&self) -> Option<WaitOn> {
+        self.room
     }
 
     /// How many messages of `priority` the session put on the group were dropped for want of room.
@@ -662,13 +666,13 @@ impl GroupFace {
         self.took.replace(false)
     }
 
-    /// The wait for the group socket's next datagram, while the group's session runs and its stack
-    /// gives one.
-    pub(super) fn input(&self) -> Option<&Arc<dyn LinkReadiness>> {
+    /// What a read waits on for the group socket's next datagram, while the group's session runs
+    /// and its stack gives one.
+    pub(super) fn input(&self) -> Option<LinkWait> {
         if self.has_ended() {
             return None;
         }
-        self.input.as_ref()
+        self.input.map(LinkWait::input)
     }
 
     /// Whether the group's session runs over a stack that gives no wait for its input, so that it
@@ -975,7 +979,7 @@ impl GroupFace {
 /// A message of the session that waits for room on the group's stage writes what the group's
 /// socket takes, runs the session's tasks, waits on the group's socket, and spends the session's
 /// clock; a group whose session ended has nothing to wait for.
-impl GroupTxPace for GroupFace {
+impl<W: LinkWaits> GroupTxPace for GroupFace<W> {
     fn pass(&self) {
         self.write_staged();
         self.pace.pass();
@@ -986,8 +990,8 @@ impl GroupTxPace for GroupFace {
     }
 
     fn wait_writable(&self, wait_us: u64) -> bool {
-        match &self.room {
-            Some(room) => room.wait_writable(wait_us),
+        match self.room {
+            Some(room) => self.waits.wait_room(room, wait_us),
             None => true,
         }
     }

@@ -85,15 +85,15 @@ use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
-#[cfg(feature = "listen")]
-use wz_runtime_coop::session_drive::wait_any;
-use wz_runtime_coop::session_drive::LinkOpenError;
-#[cfg(any(feature = "time-base", feature = "listen"))]
-use wz_runtime_coop::session_drive::LinkReadiness;
+#[cfg(any(feature = "listen", feature = "time-base"))]
+use wz_runtime_coop::session_drive::LinkWait;
+#[cfg(feature = "time-base")]
+use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
-    router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
-    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    router_session_task_bytes, spawn_session_with_router, OpenedLink, PendingDial, PumpFields,
+    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
@@ -290,7 +290,7 @@ pub struct CoopConfig<E = Vec<String>> {
     /// The longest a read waits for its link to have something to read before it steps the
     /// session, in milliseconds; a read returns as soon as something is there. The wait is made
     /// with nothing of the session held, on a link whose network stack lets its owner wait
-    /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
+    /// (`SessionDatagramLink::input_wait`); a link whose stack does not waits in its own loop.
     pub idle_wait_ms: u32,
     /// The endpoints to listen on (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`; port 0 has the stack
     /// choose one, read back with `CoopEngine::listening`), which the session takes inbound links
@@ -319,10 +319,10 @@ pub struct CoopConfig<E = Vec<String>> {
     /// with [`OpenError::Group`]).
     pub groups: Vec<wz_capi_port::group::GroupJoin>,
     /// What tells a read that the session's clock moved on, for a clock the program moves (a time
-    /// base it supplies): a read that waits for its next dial waits on it, and one that waits on
-    /// its links waits on it beside them, so the program's word ends the wait. `None` for a clock
-    /// that moves by itself, whose waits the wall bounds. Always `None` in a build without
-    /// `time-base`, whose [`ClockMovesWord`] has no value.
+    /// base it supplies): the open has it wake a wake of the links' stack, which a read waits on
+    /// beside its links and in place of a sleep to its next dial, so the program's word ends the
+    /// wait. `None` for a clock that moves by itself, whose waits the wall bounds. Always `None`
+    /// in a build without `time-base`, whose [`ClockMovesWord`] has no value.
     pub clock_moves: Option<ClockMovesWord>,
     /// The session limits the ABI resolved for the session, which its tables are held to:
     /// `SessionLimits::defaults()` for an ABI that states none.
@@ -382,8 +382,9 @@ impl CoopConfig {
 /// ([`CoopConfig::clock_moves`]).
 #[cfg(feature = "time-base")]
 pub trait ClockMoves: Send + Sync {
-    /// A wait that is ready once the clock has moved on after this call.
-    fn moved(&self) -> Arc<dyn LinkReadiness>;
+    /// Wake `waker` at each word from now on, for as long as this is held; a later watch takes
+    /// the place of an earlier one. The open hands it the waker of its stack's wake.
+    fn watch(&self, waker: core::task::Waker);
 }
 
 /// What [`CoopConfig::clock_moves`] holds: the program's word that a clock it moves has moved on
@@ -398,34 +399,21 @@ pub type ClockMovesWord = Arc<dyn ClockMoves>;
 #[cfg(not(feature = "time-base"))]
 pub enum ClockMovesWord {}
 
-/// `wait`, ended also by the program's word that the clock moved on when `moves` gives one: a
-/// sleep becomes a wait on the word, and a wait on links waits on it too. With no word, or no
-/// wait, it is `wait` as it was.
+/// What a read of a session waits on beside its links for the program's word that the clock
+/// moved on (`moves`), and the longest it then waits of `most`: the stack's wake the word wakes
+/// (`wake`), for as long as the links' wait; with no wake the stack could make, a look, after
+/// which the step reads the clock again. A clock that moves by itself leaves the wait as it was.
 #[cfg(feature = "time-base")]
-fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
-    let Some(moves) = moves else {
-        return wait;
-    };
-    match wait {
-        IdleWait::None => IdleWait::None,
-        IdleWait::Sleep(ms) => IdleWait::Input(vec![moves.moved()], ms),
-        IdleWait::Input(mut waits, ms) => {
-            waits.push(moves.moved());
-            IdleWait::Input(waits, ms)
-        }
-        // Made only for a session whose clock moves by itself (`LinkSupervisor::idle_wait`): a
-        // read the link waits in cannot be ended by the word.
-        read @ IdleWait::Read(..) => read,
+fn clock_beside(
+    most: u32,
+    moves: Option<&ClockMovesWord>,
+    wake: Option<&StackWake>,
+) -> (u32, Option<LinkWait>) {
+    match (moves, wake) {
+        (None, _) => (most, None),
+        (Some(_), Some(wake)) => (most, Some(LinkWait::input(wake.on))),
+        (Some(_), None) => (most.min(1), None),
     }
-}
-
-/// `wait` as it was: a build without `time-base` has no word to end it with.
-#[cfg(not(feature = "time-base"))]
-fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
-    if let Some(word) = moves {
-        match *word {}
-    }
-    wait
 }
 
 /// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
@@ -466,7 +454,9 @@ pub struct EndpointRefusal {
 impl EndpointRefusal {
     /// The refusal of `endpoint` for `why`. A refusal is made after the open too (a dial again
     /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
-    /// longer than that is kept up to the last whole character that fits.
+    /// longer than that is kept up to the last whole character that fits. Out of line: every way
+    /// an endpoint is refused makes one.
+    #[inline(never)]
     pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
         let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
         while !endpoint.is_char_boundary(cut) {
@@ -727,7 +717,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
     /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
     /// all (`TxQueueConf::held_drop`).
-    rooms: Arc<LinkRooms>,
+    rooms: Arc<LinkRooms<L::Waits>>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
     /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
@@ -821,11 +811,9 @@ pub(crate) struct Takes {
     pub(crate) handed: core::sync::atomic::AtomicUsize,
     /// The turns a droppable publish spun on a held session before it tried the session again.
     pub(crate) spins: core::sync::atomic::AtomicUsize,
-    /// The reads whose wait was a wait on the readiness of the session's links and ports, which
+    /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
-    /// The reads whose wait was made in the read of the one link's buffer ([`IdleWait::Read`]).
-    pub(crate) owner_reads: core::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -833,8 +821,7 @@ impl Takes {
     /// Count the wait a read is about to make.
     fn wait(&self, wait: &IdleWait) {
         let counter = match wait {
-            IdleWait::Input(..) => &self.polls,
-            IdleWait::Read(..) => &self.owner_reads,
+            IdleWait::Input { .. } => &self.polls,
             IdleWait::None | IdleWait::Sleep(_) => return,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -910,12 +897,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_,
     }
 }
 
-/// The waits for room of the session's faces that are up, each with its face, kept outside
-/// [`Core`] so that a publish that finds the session held asks them with nothing of it held. Each
-/// wait belongs to its link's [`Wire`] or to its group; this holds it weakly, so a face that has
-/// gone drops out with it.
-#[derive(Default)]
-pub(crate) struct LinkRooms(Mutex<Vec<(FaceId, Weak<dyn LinkWritability>)>>);
+/// The waits of the session's stack (`W`, [`SessionLinks::waits`]), and what each face that is
+/// up names for a wait for its room, kept outside [`Core`] so that a publish that finds the
+/// session held asks them with nothing of it held, and a read waits with them with nothing of it
+/// held. A face's handle is a value, held from the face's coming up until its link is lost or the
+/// face goes; one asked after its link went is a hint, as every answer is.
+pub(crate) struct LinkRooms<W> {
+    waits: W,
+    rooms: Mutex<Vec<(FaceId, WaitOn)>>,
+}
 
 /// What a droppable publish that found the session held is told of the faces it would be sent
 /// to. Each face is a transport of its own, as each of zenoh's is: the publish is dropped on the
@@ -1037,12 +1027,37 @@ impl Drop for SendingOn<'_> {
     }
 }
 
-impl LinkRooms {
-    /// Hold the wait of `face` while it lives, letting go of the waits of faces that have gone.
-    pub(crate) fn hold(&self, face: FaceId, wait: &Arc<dyn LinkWritability>) {
-        let mut waits = lock(&self.0);
-        waits.retain(|(_, held)| held.strong_count() > 0);
-        waits.push((face, Arc::downgrade(wait)));
+impl<W: LinkWaits> LinkRooms<W> {
+    /// The rooms of a session over a stack whose waits are `waits`, with room for `faces` faces'
+    /// handles reserved, the most that are up at once: none grows after.
+    pub(crate) fn new(waits: W, faces: usize) -> Self {
+        Self {
+            waits,
+            rooms: Mutex::new(Vec::with_capacity(faces)),
+        }
+    }
+
+    /// The waits of the session's stack.
+    pub(crate) fn waits(&self) -> &W {
+        &self.waits
+    }
+
+    /// Hold `on`, what a wait for room on `face` waits on, in place of what the face named
+    /// before (the dial role's face, whose link is made again).
+    pub(crate) fn hold(&self, face: FaceId, on: WaitOn) {
+        let mut rooms = lock(&self.rooms);
+        rooms.retain(|(held, _)| *held != face);
+        rooms.push((face, on));
+    }
+
+    /// Let go of what `face` named: its link is lost, or the face has gone.
+    pub(crate) fn forget(&self, face: FaceId) {
+        lock(&self.rooms).retain(|(held, _)| *held != face);
+    }
+
+    /// Let go of what every face named: the faces' links are ended.
+    pub(crate) fn forget_all(&self) {
+        lock(&self.rooms).clear();
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
@@ -1069,17 +1084,14 @@ impl LinkRooms {
     /// deadline whatever the number of faces. The waits are taken out of the lock first: a wait
     /// blocks, and a face coming up must not wait behind it.
     pub(crate) fn within(&self, wait_us: u64) -> Room {
-        let waits: Vec<(FaceId, Arc<dyn LinkWritability>)> = lock(&self.0)
-            .iter()
-            .filter_map(|(face, wait)| Some((*face, wait.upgrade()?)))
-            .collect();
-        if waits.is_empty() {
+        let rooms: Vec<(FaceId, WaitOn)> = lock(&self.rooms).clone();
+        if rooms.is_empty() {
             return Room::Unasked;
         }
         let mut left_us = wait_us;
         let mut congested = Vec::new();
-        for (face, wait) in waits {
-            if !wait.wait_writable(left_us) {
+        for (face, on) in rooms {
+            if !self.waits.wait_room(on, left_us) {
                 congested.push(face);
                 left_us = 0;
             }
@@ -1296,7 +1308,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     tx_pool_short: bool,
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]).
-    rooms: Arc<LinkRooms>,
+    rooms: Arc<LinkRooms<L::Waits>>,
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
     watchers: Arc<FacePlane>,
@@ -1306,13 +1318,18 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
     links: LinkSupervisor<L, Face<C, L>>,
+    /// The wake of the links' stack that the program's word that the clock moved on wakes, which
+    /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
+    /// by itself, or a stack that makes no wake. Held for the session: a wait names it by value.
+    #[cfg(feature = "time-base")]
+    clock_wake: Option<StackWake>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
     /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
     /// copies went with the open.
     endpoints: EndpointTexts,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
-    groups: Vec<GroupFace>,
+    groups: Vec<GroupFace<L::Waits>>,
     /// The session's one entropy source, which every draw of the session goes through: its zid,
     /// the cookie key of each dial and, through each link's handshake binding (a handle on it,
     /// cloned per link), the cookie nonce and challenges of each handshake it accepts.
@@ -1497,6 +1514,8 @@ pub(crate) struct SubscriberRow {
 impl SubscriberRow {
     /// Subscriber `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
     /// handing what it hears to `sink`, the timestamp shown when `expose`.
+    // Out of line: measured smaller apart from the declaration that builds the row.
+    #[inline(never)]
     pub(crate) fn new(
         id: SubId,
         retraction: Option<RetractionKey>,
@@ -2426,12 +2445,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         // The link's actions go in its cell of the session's table, as its gates do below.
         let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
-        let actions: SessionHandle<C> = match &self.actions_cells {
-            Some(cells) => {
-                CellRc::place(cells, actions).map_err(|_| self.cells_exhausted(endpoint))?
-            }
-            None => CellRc::boxed(actions),
-        };
+        let actions: SessionHandle<C> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
+            .map_err(|_| self.cells_exhausted(endpoint))?;
         // The link has its place in the session's admission before the handshake runs, which asks
         // it once the remote's zid is known: a second link to a node the session holds is refused
         // there, with nothing declared over it by either end, and not closed after it came up.
@@ -2476,19 +2491,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(not(feature = "shared-key-ids"))]
         let _ = endpoint;
-        let readiness = pump.readiness().map(Arc::from);
-        let writability = pump.writability().map(Arc::from);
-        // One handle to the link, which its gates and a read's wait, lent its buffer, share: a
-        // stack whose pump is a shared handle already gives that one (`SessionLinks::share_pump`).
+        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
+        // already gives that one (`SessionLinks::share_pump`).
         let pump = L::share_pump(pump);
-        let ungated = pump.clone();
+        // What the session's read waits on for the link's input and its room, read off it before
+        // its gates take it.
+        let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
         let admitted = Admitted::default();
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it.
-        let room = crate::round::read_room::<
+        let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
             { caps::MAX_SUBSCRIPTIONS },
@@ -2503,21 +2518,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             RoundGate::new(
                 AdmissionGate::new(pump, actions.clone(), admitted.clone()),
                 self.lane.clone(),
-                room,
+                record_room,
             )
         };
         #[cfg(not(feature = "listen"))]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let gate: LinkGate<C> = unsafe { RoundGate::new(pump, self.lane.clone(), room) };
+        let gate: LinkGate<C> = unsafe { RoundGate::new(pump, self.lane.clone(), record_room) };
         // The gates go in the link's cell of the session's table, as the link's driver goes in
         // one of the stack's: a link past the cells is refused as one past the buffers is.
-        let link = match &self.gate_cells {
-            Some(cells) => {
-                CellRc::place(cells, gate).map_err(|_| self.cells_exhausted(endpoint))?
-            }
-            None => CellRc::boxed(gate),
-        }
-        .into_link();
+        let link = CellRc::in_cells(self.gate_cells.as_ref(), gate)
+            .map_err(|_| self.cells_exhausted(endpoint))?
+            .into_link();
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -2566,9 +2577,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             },
             task,
             link,
-            ungated,
-            readiness,
-            writability,
+            input_wait,
+            room_wait,
         ))
     }
 
@@ -2661,7 +2671,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
-    /// stack's buffers is.
+    /// stack's buffers is. Out of line: each part of a link a cell holds is refused by it.
+    #[cold]
+    #[inline(never)]
     fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> OpenError {
         OpenError::Unreachable(EndpointRefusal::new(
             self.endpoint_text(endpoint),
@@ -2771,10 +2783,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     self.router.abort_peer(&zid);
                 }
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
+                self.rooms.forget(id);
                 self.lose_link(id);
                 self.report_face(FaceEventKind::Down, snapshot);
-                if id != DIAL_FACE {
-                    self.remove_face(at);
+                if self.face_goes(at, id) {
                     return Ok(());
                 }
                 if redial_ms.is_none() {
@@ -2808,8 +2820,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.abort_link(at);
                 self.run_tasks();
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
-                if id != DIAL_FACE {
-                    self.remove_face(at);
+                if self.face_goes(at, id) {
                     return Ok(());
                 }
                 // The dial role's link reached a node another face holds or is bringing up:
@@ -2850,11 +2861,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Err(OpenError::EntropyUnavailable) => {
                         return Err(OpenError::EntropyUnavailable)
                     }
-                    Err(_) if id != DIAL_FACE => {
-                        self.remove_face(at);
-                        return Ok(());
+                    Err(last) => {
+                        if self.face_goes(at, id) {
+                            return Ok(());
+                        }
+                        self.dial_or_wait(next, last, redial_ms)?
                     }
-                    Err(last) => self.dial_or_wait(next, last, redial_ms)?,
                 }
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
@@ -2915,8 +2927,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "listen")]
         wire.admitted.grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
-        if let Some(wait) = wire.writability() {
-            self.rooms.hold(face.id, wait);
+        if let Some(on) = wire.room_wait() {
+            self.rooms.hold(face.id, on);
         }
         let actions = wire.actions.clone();
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
@@ -3037,7 +3049,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// and stepped once. [`OpenError::Group`] when the stack joins no such group or the session
     /// ended at its first step (its link did not open).
     #[cfg(feature = "group")]
-    fn join_group(&mut self, id: FaceId, join: GroupJoin) -> Result<GroupFace, OpenError> {
+    fn join_group(
+        &mut self,
+        id: FaceId,
+        join: GroupJoin,
+    ) -> Result<GroupFace<L::Waits>, OpenError> {
         let transport = self
             .links
             .links()
@@ -3064,7 +3080,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the round of deliveries has the
         // room one record of the group's batch can take (decision Q4), as a link is.
-        let room = crate::round::read_room::<
+        let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
             { caps::MAX_SUBSCRIPTIONS },
@@ -3075,7 +3091,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         // SAFETY: a group's transport is driven by the session's step alone, under its lock.
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
-            crate::round::takes_a_group_read(self.lane.clone(), room)
+            crate::round::takes_a_group_read(self.lane.clone(), record_room)
         });
         let face = GroupFace::join(
             &self.local,
@@ -3099,6 +3115,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 watchers: Arc::clone(&self.watchers),
             },
             dispatch,
+            self.rooms.waits().clone(),
         )
         .map_err(OpenError::NoTask)?;
         self.run_tasks();
@@ -3110,8 +3127,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         // A droppable publish that finds the session held asks the group's socket for room as it
         // asks a link's, and its wait goes with the face.
-        if let Some(wait) = face.room() {
-            self.rooms.hold(id, wait);
+        if let Some(on) = face.room() {
+            self.rooms.hold(id, on);
         }
         Ok(face)
     }
@@ -3230,6 +3247,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// Take the face at `at`, numbered `id`, out of the session when it is not the dial role's:
+    /// whether it went. What a face does whose link was lost or never came up; the dial role's
+    /// stays, to dial again. One body for each way a face's link ends.
+    #[inline(never)]
+    fn face_goes(&mut self, at: usize, id: FaceId) -> bool {
+        if id == DIAL_FACE {
+            return false;
+        }
+        self.remove_face(at);
+        true
+    }
+
     /// Take the face at `at` out of the session, with its tables. The dial role's face is never
     /// taken out.
     fn remove_face(&mut self, at: usize) {
@@ -3326,12 +3355,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self) {
         let round = Arc::clone(&self.lane);
-        let room = crate::round::ReadRoom {
+        let record_room = crate::round::ReadRoom {
             bytes: 0,
             callbacks: caps::MAX_LIVELINESS_SUBSCRIPTIONS.max(1),
         };
         // SAFETY: `Core` is reached under the session's lock alone.
-        let mut fits = || unsafe { round.has_room(room) };
+        let mut fits = || unsafe { round.has_room(record_room) };
         let done = self.registry.borrow_mut().retract_owed(&mut fits);
         round.owe(!done);
     }
@@ -3468,10 +3497,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         // What the read waits on is the driver's to make (`LinkSupervisor::idle_wait`): the input
         // of every link and port, and each group's after them, since a wait over several is made
-        // by the first and a link's names a group's socket to the platform beside its own. The one
-        // link waited on is read in place of the wait unless a sample lies in a datagram a link
-        // lent (`Round::lends_a_datagram`), which the lend would move, or the program moves
-        // the session's clock, whose word must end the wait and cannot end a read.
+        // by the first and a link's names a group's socket to the platform beside its own.
         let clock = &self.clock;
         #[cfg(test)]
         let clock_reads = &self.clock_reads;
@@ -3482,16 +3508,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 clock.now_us()
             })
         };
-        let (clock_moves, lane) = (&self.config.clock_moves, &self.lane);
-        let may_lend = || clock_moves.is_none() && !lane.lends_a_datagram();
         #[cfg(feature = "group")]
-        let others = self.groups.iter().filter_map(GroupFace::input).cloned();
+        let others = self.groups.iter().filter_map(GroupFace::input);
         #[cfg(not(feature = "group"))]
         let others = core::iter::empty();
-        let wait = self.links.idle_wait(most, &mut now_us, may_lend, others);
         // The bounds above are the clock's time read as the wall's, which a clock the program
         // moves is not: its word that the time moved on ends the wait as well.
-        ended_by_clock_moves(wait, self.config.clock_moves.as_ref())
+        #[cfg(feature = "time-base")]
+        let (most, beside) = clock_beside(
+            most,
+            self.config.clock_moves.as_ref(),
+            self.clock_wake.as_ref(),
+        );
+        #[cfg(not(feature = "time-base"))]
+        let beside = None;
+        self.links.idle_wait(most, &mut now_us, others, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
@@ -3528,6 +3559,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
         }
         self.links.end_faces(|face| face.replay.discard());
+        self.rooms.forget_all();
         self.registry.borrow_mut().remove_accepted_faces();
         self.run_tasks();
     }
@@ -3784,6 +3816,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .saturating_add(config.listen.count())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
+        #[cfg(feature = "time-base")]
+        let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
+            let wake = links.waits().wake()?;
+            moves.watch(wake.waker.clone());
+            Some(wake)
+        });
         let core = Core {
             local,
             endpoints,
@@ -3791,7 +3829,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             registry: Rc::new(RefCell::new(registry)),
             #[cfg(feature = "listen")]
             tx_pool_short: plan.tx_pool_short(),
-            rooms: Arc::new(LinkRooms::default()),
+            // A handle for each face that may be up at once, the dial role's and each group's
+            // among them.
+            rooms: Arc::new(LinkRooms::new(
+                links.waits(),
+                config
+                    .max_faces
+                    .saturating_add(1)
+                    .saturating_add(config.groups.len()),
+            )),
             #[cfg(feature = "connectivity")]
             watchers: Arc::new(FacePlane::default()),
             // A face for each the config admits beside the dial role's, each with its dial, and the
@@ -3806,6 +3852,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 config.max_faces.saturating_add(1),
                 wait_room,
             ),
+            #[cfg(feature = "time-base")]
+            clock_wake,
             #[cfg(feature = "group")]
             groups: Vec::new(),
             entropy,
@@ -3934,7 +3982,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // came first (a peer that listens and dials its own listener's peer).
             while !core.dial_settled() {
                 let mut wait = core.idle_wait();
-                wait.wait(sleep_ms);
+                wait.wait(core.rooms.waits(), sleep_ms);
                 core.links.waited(wait);
                 core.run_tasks();
                 let now_us = core.now_us();
@@ -3945,6 +3993,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
+    }
+
+    /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
+    /// most.
+    #[cfg(test)]
+    pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.core.lock().0.places.counts(kind)
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
@@ -3967,7 +4022,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The waits for room a publish that finds the session held asks. Compiled where its
     /// readers are: the group tests over the program's transport (`tests::group`).
     #[cfg(all(test, feature = "group", feature = "app-transport"))]
-    pub(crate) fn rooms(&self) -> &LinkRooms {
+    pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
@@ -4662,18 +4717,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_slots(
         &self,
         put: &Publication<'_>,
-        (mut stuck, deadline_us, mut left_us, mut waits): (
-            FaceId,
-            u64,
-            u64,
-            Vec<Arc<dyn LinkReadiness>>,
-        ),
+        (mut stuck, deadline_us, mut left_us, mut waits): (FaceId, u64, u64, Vec<LinkWait>),
         mut outcome: Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         loop {
             let waited = !waits.is_empty();
             if waited {
-                wait_any(
+                self.rooms.waits().wait(
                     &waits,
                     u32::try_from(left_us.div_ceil(1_000)).unwrap_or(u32::MAX),
                 );
@@ -6450,7 +6500,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    #[inline(never)]
     fn put_plain_filtered(
         &self,
         filter: FilterId,
@@ -6459,17 +6508,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        // One take of the session for the whole put, its filter's answer and its sends:
-        // zenoh-pico's put reads its filter's state and takes only its transmit lock
-        // (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
-        if Self::holds_back_in(core, filter) {
-            return FilteredPut::Suppressed;
-        }
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, params)
+        self.put_through_filter(filter, keyexpr, payload, Some((mapping_id, *params)))
     }
 
     fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
@@ -6496,30 +6535,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
         }
-        // A write that brings nothing of its own: the filter's answer and the plain form its row
-        // keeps, read under one take of the session.
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
-        if Self::holds_back_in(core, filter) {
-            return FilteredPut::Suppressed;
-        }
-        let Some((params, mapping_id)) = core
-            .filters
-            .iter()
-            .find(|entry| entry.id == filter)
-            .and_then(|entry| entry.plain.get())
-        else {
-            return FilteredPut::NotPlain;
-        };
-        // A link that names keys its own way is sent the general way, which names the key as
-        // its form says: no declared id goes to every link at once.
-        #[cfg(feature = "shared-key-ids")]
-        if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
-            return FilteredPut::NotPlain;
-        }
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
+        // A write that brings nothing of its own goes in the plain form its filter's row keeps.
+        self.put_through_filter(filter, keyexpr, payload, None)
     }
 
     /// Each group the session joined takes the step too, and is counted as a link is: a group's
@@ -7281,10 +7298,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
     }
-
-    fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
-        self.core.lock().0.places.counts(kind)
-    }
 }
 
 /// The keys the C ABI's objects hold, in the session's key arena, all through one body. A closed
@@ -7447,7 +7460,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(test)]
         self.takes.wait(&wait);
-        wait.wait(sleep_ms);
+        wait.wait(self.rooms.waits(), sleep_ms);
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         // One take of the session for the step: its links, what publishes handed to it, and
@@ -7503,6 +7516,48 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
+    /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
+    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
+    /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    #[inline(never)]
+    fn put_through_filter(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(ExprId, PlainPutParams)>,
+    ) -> FilteredPut {
+        let Some(core) = self.live() else {
+            return FilteredPut::Sent(Ok(0));
+        };
+        let core = &core.0;
+        if Self::holds_back_in(core, filter) {
+            return FilteredPut::Suppressed;
+        }
+        let (mapping_id, params) = match given {
+            Some(given) => given,
+            None => {
+                let Some((params, mapping_id)) = core
+                    .filters
+                    .iter()
+                    .find(|entry| entry.id == filter)
+                    .and_then(|entry| entry.plain.get())
+                else {
+                    return FilteredPut::NotPlain;
+                };
+                // A link that names keys its own way is sent the general way, which names the key
+                // as its form says: no declared id goes to every link at once.
+                #[cfg(feature = "shared-key-ids")]
+                if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+                    return FilteredPut::NotPlain;
+                }
+                (mapping_id, params)
+            }
+        };
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
+    }
+
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds
     /// as one of its `Arc`s, so the open makes nothing more for it.
     pub fn into_drive(self: Arc<Self>) -> CoopDrive<L, C> {
@@ -7626,70 +7681,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
     }
 }
 
-#[cfg(all(test, feature = "std", feature = "time-base"))]
+#[cfg(all(test, feature = "std", feature = "time-base", unix))]
 mod clock_moves_tests {
     use super::*;
-    use std::sync::{Condvar, Mutex as StdMutex};
+    use core::task::Waker;
+    use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
+    use wz_runtime_posix::net::PosixWaits;
 
-    /// A clock the test moves: a count of its moves and the word that it grew.
-    struct Moves {
-        count: StdMutex<u64>,
-        moved: Condvar,
-    }
+    /// A program's word as a test tells it: the waker the open watched with, woken by `tell`.
+    #[derive(Default)]
+    struct Word(StdMutex<Option<Waker>>);
 
-    /// A wait that ends once the count passes the one it was made at.
-    struct Since {
-        moves: Arc<Moves>,
-        seen: u64,
-    }
-
-    impl LinkReadiness for Since {
-        fn wait_readable(&self, timeout_ms: u32) {
-            let count = self.moves.count.lock().unwrap();
-            let bound = Duration::from_millis(timeout_ms.into());
-            let moved = &self.moves.moved;
-            let _ = moved.wait_timeout_while(count, bound, |count| *count == self.seen);
+    impl Word {
+        fn tell(&self) {
+            if let Some(waker) = self.0.lock().unwrap().as_ref() {
+                waker.wake_by_ref();
+            }
         }
     }
-
-    struct Word(Arc<Moves>);
 
     impl ClockMoves for Word {
-        fn moved(&self) -> Arc<dyn LinkReadiness> {
-            let seen = *self.0.count.lock().unwrap();
-            Arc::new(Since {
-                moves: self.0.clone(),
-                seen,
-            })
+        fn watch(&self, waker: Waker) {
+            *self.0.lock().unwrap() = Some(waker);
         }
     }
 
-    fn word() -> (Arc<Moves>, Arc<dyn ClockMoves>) {
-        let moves = Arc::new(Moves {
-            count: StdMutex::new(0),
-            moved: Condvar::new(),
-        });
-        let word: Arc<dyn ClockMoves> = Arc::new(Word(moves.clone()));
-        (moves, word)
-    }
-
-    /// A read waiting five seconds for its next dial is let go by the program's word that the
-    /// clock moved on, long before its bound of the wall clock.
+    /// A read on a moved clock that sleeps five seconds to its next dial waits on the stack's
+    /// wake in place of the sleep, and the program's word, told from another thread, ends it long
+    /// before its bound. Turned red by a sleep the word cannot end, or a wake the word does not
+    /// wake.
     #[test]
     fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
-        let (moves, word) = word();
-        let mut wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
-        // The wait stays on the thread that made it, as a session's read does (its lent receive
-        // lease is no value of another thread's); the word comes from another, as a program's does.
+        let word = Arc::new(Word::default());
+        let moves: ClockMovesWord = word.clone();
+        let wake = PosixWaits.wake().expect("the host makes a wake");
+        moves.watch(wake.waker.clone());
+        let (most, beside) = clock_beside(5_000, Some(&moves), Some(&wake));
+        let mut wait = IdleWait::Input {
+            on: beside.into_iter().collect(),
+            ms: most,
+        };
         let telling = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
-            *moves.count.lock().unwrap() += 1;
-            moves.moved.notify_all();
+            word.tell();
         });
         let started = Instant::now();
-        // The word made the sleep a wait on input, so the sleep is never called.
-        wait.wait(|ms| std::thread::sleep(Duration::from_millis(u64::from(ms))));
+        wait.wait(&PosixWaits, |_| panic!("the word made the sleep a wait"));
         let took = started.elapsed();
         telling.join().expect("the thread that tells the word");
         assert!(
@@ -7698,23 +7736,23 @@ mod clock_moves_tests {
         );
     }
 
-    /// A wait on links waits on the word beside them; no wait stays none; and a clock that moves
-    /// by itself leaves every wait as it was.
+    /// A moved clock's word joins a read's wait as the stack's wake, for the whole bound; a stack
+    /// that makes no wake bounds the wait at a look; a clock that moves by itself leaves the wait
+    /// as it was. Turned red by a word left out of the wait, or one with no wake that waits on.
     #[test]
-    fn the_word_joins_a_wait_and_makes_none_where_there_was_none() {
-        let (_moves, word) = word();
-        match ended_by_clock_moves(IdleWait::Input(Vec::new(), 9), Some(&word)) {
-            IdleWait::Input(waits, 9) => assert_eq!(waits.len(), 1),
-            _ => panic!("a wait on links keeps its bound and gains the word"),
-        }
-        assert!(matches!(
-            ended_by_clock_moves(IdleWait::None, Some(&word)),
-            IdleWait::None
-        ));
-        assert!(matches!(
-            ended_by_clock_moves(IdleWait::Sleep(7), None),
-            IdleWait::Sleep(7)
-        ));
+    fn the_word_joins_a_wait_as_the_stacks_wake_or_bounds_it_at_a_look() {
+        let moves: ClockMovesWord = Arc::new(Word::default());
+        let wake = PosixWaits.wake().expect("the host makes a wake");
+        assert_eq!(
+            clock_beside(9, Some(&moves), Some(&wake)),
+            (9, Some(LinkWait::input(wake.on)))
+        );
+        assert_eq!(clock_beside(9, Some(&moves), None), (1, None), "no wake");
+        assert_eq!(
+            clock_beside(7, None, Some(&wake)),
+            (7, None),
+            "CONTROL: a clock that moves by itself"
+        );
     }
 }
 

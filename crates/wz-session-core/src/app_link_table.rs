@@ -2457,8 +2457,21 @@ mod tests {
         assert_eq!(table.queued_bytes(stream), 4);
     }
 
+    /// A link of no bound takes every byte, in a build whose storage grows; a fixed build
+    /// (`bounded-heapless`) sizes a link's storage by `APP_LINK_QUEUE_BYTES` when the session opens,
+    /// so no bound is a value its limit refuses to select, and no such link is opened. Turned red by
+    /// a fixed build that lets a session state no bound, whose receive queue would grow after open.
     #[test]
-    fn a_link_with_no_bound_takes_every_byte() {
+    fn a_link_with_no_bound_takes_every_byte_where_storage_grows() {
+        let mut limits = crate::limits::SessionLimits::defaults();
+        let unbounded = limits.select_app_link_queue_bytes(Quota::UNBOUNDED);
+        if crate::bounded::ENFORCES_CAPACITY {
+            assert!(unbounded.is_err(), "a fixed build holds no unbounded link");
+            return;
+        }
+        if <crate::limits::AppLinkQueueBytes as crate::limit_binding::LimitSpec>::HELD == 1 {
+            assert!(unbounded.is_ok(), "a growable build may state no bound");
+        }
         let mut table = AppLinkTable::new();
         let handle = open_stream_under(&mut table, Quota::UNBOUNDED);
         for _ in 0..4 {

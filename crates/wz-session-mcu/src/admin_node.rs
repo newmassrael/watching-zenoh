@@ -91,8 +91,9 @@ where
     acceptor: Option<(CoopLocalJoinHandle<DriverOutcome>, SessionHandle<C>)>,
     admin_key: String,
     config_key: String,
-    /// The sessions the admin declarations have been sent on, by identity.
-    declared: Vec<*const McuActions<C>>,
+    /// The sessions the admin declarations have been sent on, each held while it is listed: a
+    /// held session's place is not given to another, so one made after it is never taken for it.
+    declared: Vec<SessionHandle<C>>,
 }
 
 /// The declaration ids the node uses on each session; ids are per session.
@@ -224,8 +225,12 @@ where
             .map_or(true, |(handle, _)| handle.is_finished())
         {
             // Let go of the ended session (and its socket) before binding
-            // the port again. A bind that fails is retried next tick.
-            self.acceptor = None;
+            // the port again, its listing among the declared sessions too,
+            // which holds it. A bind that fails is retried next tick.
+            if let Some((_, ended)) = self.acceptor.take() {
+                self.declared
+                    .retain(|done| CellRc::as_ptr(done) != CellRc::as_ptr(&ended));
+            }
             self.acceptor = self.listen();
         }
         self.manager.tick(now_ms);
@@ -280,15 +285,19 @@ where
             .map(|(_, actions)| actions)
             .chain(self.manager.sessions().map(|(_, s)| s.actions()))
             .collect();
-        self.declared
-            .retain(|done| live.iter().any(|a| CellRc::as_ptr(a) == *done));
+        self.declared.retain(|done| {
+            live.iter()
+                .any(|a| CellRc::as_ptr(a) == CellRc::as_ptr(done))
+        });
         for actions in live {
-            let key = CellRc::as_ptr(actions);
             if actions.is_established()
-                && !self.declared.contains(&key)
+                && !self
+                    .declared
+                    .iter()
+                    .any(|done| CellRc::as_ptr(done) == CellRc::as_ptr(actions))
                 && declare_admin(actions, &self.admin_key, &self.config_key)
             {
-                self.declared.push(key);
+                self.declared.push(actions.clone());
             }
         }
     }
