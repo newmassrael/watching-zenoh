@@ -1742,6 +1742,8 @@ enum CoopSession {}
 
 impl SessionParts for CoopSession {
     type Registry = Rc<RefCell<Registry>>;
+    type Callbacks = CoopRows;
+    type Storage = Lent;
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
     type Watchers = Arc<FacePlane>;
@@ -1772,6 +1774,14 @@ impl SessionParts for CoopSession {
     type LocalRequests = LocalRequests;
     #[cfg(not(feature = "local-queryable"))]
     type LocalRequests = ();
+
+    fn tables(registry: &Self::Registry) -> core::cell::Ref<'_, CoopTables> {
+        tables(registry)
+    }
+
+    fn tables_mut(registry: &Self::Registry) -> core::cell::RefMut<'_, CoopTables> {
+        tables_mut(registry)
+    }
 }
 
 /// One face of the session: the link it holds, and where the telling of the session's
@@ -2561,28 +2571,6 @@ impl RuntimeTables {
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
-    /// The session's next entity id, taken: what a declaration and an Interest of the session are
-    /// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed
-    /// out, which refuses the declaration rather than wrap onto a live id.
-    // Out of line: the declarations that number an entity of their own take the id through it.
-    #[inline(never)]
-    fn take_entity_id(&self) -> Option<EntityId> {
-        tables_mut(&self.session.registry).take_entity_id()
-    }
-
-    /// The form an entity the ABI declares with `wire` takes in the session's tables: named by the
-    /// key expression declaration `wire` names, which the entity's row holds for as long as it
-    /// stands, and with its key named in its retraction when `names_key`.
-    // Out of line: the three declarations of an entity on a key ask it, each a copy inlined.
-    #[inline(never)]
-    fn key_form(
-        &self,
-        wire: &WireKey,
-        names_key: bool,
-    ) -> wz_session_core::session_tables::KeyForm {
-        tables(&self.session.registry).key_form(wire.mapping_id, names_key)
-    }
-
     /// The dial role's face, which the session holds for its whole life.
     fn dial(&self) -> &Face<C, L> {
         &self.transport.links.faces()[0]
@@ -5997,7 +5985,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
             if group.owes_keyexpr_ask() {
-                if let Some(interest_id) = core.take_entity_id() {
+                if let Some(interest_id) = core.session.take_entity_id() {
                     group.ask_keyexprs(u64::from(interest_id));
                 }
             }
@@ -6347,7 +6335,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn next_entity_id(&self) -> Option<EntityId> {
         // The session's tables number every entity, open or closed: an id is taken under the lock.
-        self.core.lock().0.take_entity_id()
+        self.core.lock().0.session.take_entity_id()
     }
 
     fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
@@ -6605,7 +6593,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = tables(&core.session.registry)
             .next_entity_id()
             .ok_or(Declined::NoEntityId)?;
-        let form = core.key_form(&wire, retraction.is_some());
+        let form = core.session.key_form(wire.mapping_id, retraction.is_some());
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
         let row = SubscriberRow::new(id, retraction, wire, sink, exposed_by(&core.policy));
@@ -6934,7 +6922,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides: a filter that finds none left is
             // refused, its row given back.
-            let Some(taken) = core.take_entity_id() else {
+            let Some(taken) = core.session.take_entity_id() else {
                 let _ = unwatch_filter(&mut tables_mut(&core.session.registry), watching.handle);
                 return Err(Declined::NoEntityId);
             };
@@ -6950,7 +6938,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .iter()
             .any(|group| group.declarations().asks_for_filters())
         {
-            if let Some(interest_id) = spent.or_else(|| core.take_entity_id().map(u64::from)) {
+            if let Some(interest_id) =
+                spent.or_else(|| core.session.take_entity_id().map(u64::from))
+            {
                 for group in &core.transport.groups {
                     group.ask_filter(id, interest_id, plane, keyexpr, wire);
                 }
@@ -7105,7 +7095,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = tables(&core.session.registry)
             .next_entity_id()
             .ok_or(Declined::NoEntityId)?;
-        let form = core.key_form(&wire, retraction.is_some());
+        let form = core.session.key_form(wire.mapping_id, retraction.is_some());
         let row = QueryableRow::new(id, retraction, wire, sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
@@ -7677,7 +7667,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The token is a row of the session's tables, which takes its id: a full table, a key the
         // session cannot hold or no id left refuses it before anything is registered or sent. It
         // holds the key expression declaration its key is named by for as long as it stands.
-        let form = core.key_form(&wire, retraction.is_some());
+        let form = core.session.key_form(wire.mapping_id, retraction.is_some());
         let declared = tables_mut(&core.session.registry).declare_token(keyexpr, form)?;
         let id = declared.id;
         core.announce_token(declared.handle);

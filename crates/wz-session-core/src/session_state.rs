@@ -14,17 +14,25 @@
 //! What every engine keeps alike (the key arena, the count of the session's own requests, where the
 //! matching listeners were last read) is this crate's.
 
-use core::cell::Cell;
+use core::cell::{Cell, Ref, RefMut};
 
+use crate::bounded::Storage;
 use crate::key_arena::KeySpace;
-use crate::wire_id::RequestId;
+use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
+use crate::wire_id::{EntityId, ExprId, RequestId};
 
 /// The parts of a session's state an engine keeps in types of its own: each is `()` where the
-/// engine's build leaves the part out.
+/// engine's build leaves the part out. The registry is the one part the state reads itself: it
+/// keeps the session's tables ([`Self::tables`]), which the session's own declarations are
+/// numbered and named by.
 pub trait SessionParts {
     /// What the application holds and what the peers declared. It is the session's, so it outlives
     /// each link: a new link is dispatched to the same registry.
     type Registry;
+    /// The callbacks the rows of the session's tables hold.
+    type Callbacks: RowCallbacks;
+    /// Where the session's tables keep their rows.
+    type Storage: Storage;
     /// Where a face coming up or going is reported.
     type Watchers;
     /// How many rows each table of the session's own declarations was lent: what a write filter of
@@ -43,6 +51,43 @@ pub trait SessionParts {
     type KeyIds;
     /// The ids of the session's gets of its own queryables ([`LocalRequests`]).
     type LocalRequests;
+
+    /// The session's tables, where `registry` keeps them, to read.
+    fn tables(registry: &Self::Registry) -> Ref<'_, SessionTables<Self::Callbacks, Self::Storage>>;
+
+    /// [`Self::tables`], to write.
+    fn tables_mut(
+        registry: &Self::Registry,
+    ) -> RefMut<'_, SessionTables<Self::Callbacks, Self::Storage>>;
+}
+
+impl<P: SessionParts> SessionState<P> {
+    /// The session's tables, to read.
+    pub fn tables(&self) -> Ref<'_, SessionTables<P::Callbacks, P::Storage>> {
+        P::tables(&self.registry)
+    }
+
+    /// The session's tables, to write.
+    pub fn tables_mut(&self) -> RefMut<'_, SessionTables<P::Callbacks, P::Storage>> {
+        P::tables_mut(&self.registry)
+    }
+
+    /// The session's next entity id, taken: what a declaration and an Interest of the session are
+    /// numbered by, from 1; `None` once every one has been handed out, which refuses the
+    /// declaration rather than wrap onto a live id.
+    // Out of line: every declaration that numbers an entity of its own takes the id through it.
+    #[inline(never)]
+    pub fn take_entity_id(&self) -> Option<EntityId> {
+        self.tables_mut().take_entity_id()
+    }
+
+    /// The form an entity's key whose wire names the declaration `mapping_id` (`0` for none) takes
+    /// in the session's tables ([`SessionTables::key_form`]).
+    // Out of line: each declaration of an entity on a key asks it, each a copy inlined.
+    #[inline(never)]
+    pub fn key_form(&self, mapping_id: ExprId, names_key: bool) -> KeyForm {
+        self.tables().key_form(mapping_id, names_key)
+    }
 }
 
 /// The session's part of an engine's state: the tables of what it declared and asked, over every
@@ -113,6 +158,120 @@ impl MatchingRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bounded::{Arena, Profile, ARENA_ALIGN};
+    use crate::limits::SessionLimits;
+    use crate::session_tables::Absent;
+    use core::cell::RefCell;
+    use core::ptr::NonNull;
+
+    /// Rows that hold no callback, of no optional kind.
+    enum NoCallbacks {}
+
+    impl RowCallbacks for NoCallbacks {
+        type Subscriber = ();
+        type Queryable = ();
+        type LivelinessSubscriber = ();
+        type Matching = ();
+        type Reply = ();
+        type QueryablePresence = Absent;
+        type LivelinessPresence = Absent;
+        type FilterPresence = Absent;
+        type GetPresence = Absent;
+    }
+
+    type Tables = SessionTables<NoCallbacks, Profile>;
+
+    /// The parts of an engine whose registry is its tables alone and which keeps no other part.
+    enum TablesOnly {}
+
+    impl SessionParts for TablesOnly {
+        type Registry = RefCell<Tables>;
+        type Callbacks = NoCallbacks;
+        type Storage = Profile;
+        type Watchers = ();
+        type Entities = ();
+        type Queryables = ();
+        type PendingGets = ();
+        type Gets = ();
+        type Lane = ();
+        type KeyIds = ();
+        type LocalRequests = LocalRequests;
+
+        fn tables(registry: &Self::Registry) -> Ref<'_, Tables> {
+            registry.borrow()
+        }
+
+        fn tables_mut(registry: &Self::Registry) -> RefMut<'_, Tables> {
+            registry.borrow_mut()
+        }
+    }
+
+    /// One block of an arena's memory, aligned as an arena's spans start.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct Block {
+        _bytes: [u8; ARENA_ALIGN],
+    }
+
+    /// A key arena of `bytes` bytes of blocks, lent from an arena over memory the test process
+    /// leaks, so it outlives every key.
+    fn keys(bytes: usize) -> KeySpace {
+        let span = KeySpace::span_bytes(bytes).unwrap();
+        let blocks = span.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] =
+            std::vec![Block { _bytes: [0; ARENA_ALIGN] }; blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `span`
+        // bytes, and is leaked, so nothing else uses it and it outlives every key.
+        let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), span) };
+        arena
+            .lend_keys(bytes, SessionLimits::defaults().max_keyexpr_bytes_held())
+            .unwrap()
+    }
+
+    fn state() -> SessionState<TablesOnly> {
+        SessionState {
+            registry: RefCell::new(Tables::new()),
+            watchers: (),
+            entities: (),
+            keys: keys(64),
+            key_ids: (),
+            local_requests: LocalRequests::default(),
+            matching: MatchingRead::default(),
+            plane: (),
+            pending_gets: (),
+            gets: (),
+            lane: (),
+        }
+    }
+
+    /// The state numbers the session's entities by the ids its tables hand out, each once.
+    #[test]
+    fn the_state_takes_each_entity_id_from_its_tables_once() {
+        let state = state();
+        assert_eq!(state.take_entity_id(), Some(1));
+        assert_eq!(state.take_entity_id(), Some(2));
+        assert_eq!(
+            state.tables().next_entity_id(),
+            Some(3),
+            "the tables moved past the ids the state took"
+        );
+    }
+
+    /// The state names an entity's key by the declaration of its tables the wire names, and by
+    /// none for a wire that names none.
+    #[test]
+    fn the_state_names_a_key_by_the_declaration_its_tables_hold() {
+        let state = state();
+        let declared = state.tables_mut().declare_keyexpr("demo/").unwrap();
+        assert_eq!(
+            state.key_form(declared.id, true),
+            KeyForm {
+                prefix: Some(declared.handle),
+                names_key: true
+            }
+        );
+        assert_eq!(state.key_form(0, false), KeyForm::default());
+    }
 
     /// A session's own request ids count from 0 and wrap past the last.
     #[test]
