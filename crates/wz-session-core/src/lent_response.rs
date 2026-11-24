@@ -427,13 +427,10 @@ impl<'a> ResponseWriter<'a> {
     /// generic variant walk and writes it a byte at a time through a trait object; the bytes of
     /// the window are the same (`Self::encode_generic` is the reference the tests hold this
     /// path to), and the time of the two on the kit is in `docs/query-answer-path.md`.
-    pub fn encode_tx<B: crate::tx_buf::TxBuf + ?Sized>(
+    pub fn encode_tx<B: crate::tx_buf::TxBuf<Error = CodecError> + ?Sized>(
         &self,
         sink: &mut crate::tx_buf::TxSink<'_, B>,
-    ) -> Result<(), CodecError>
-    where
-        CodecError: From<B::Error>,
-    {
+    ) -> Result<(), CodecError> {
         if GENERIC_REACHABLE && !self.is_direct() {
             return self.encode_generic(sink);
         }
