@@ -50,7 +50,8 @@ fn machine(
     global_pending_queries: usize,
     max_history_depth: usize,
 ) -> State {
-    let state = State::new(on_sample, miss_handlers).with_retransmission(retransmission);
+    let state =
+        State::new(owned_samples(on_sample), miss_handlers).with_retransmission(retransmission);
     #[cfg(feature = "advanced-history")]
     let state = state.with_history(global_pending_queries, max_history_depth);
     #[cfg(not(feature = "advanced-history"))]
@@ -808,4 +809,48 @@ fn handle_late_timestamped_publisher_opens_one_slot_per_zid() {
     assert_eq!(state.timestamped[&zid].pending_queries, 0);
     assert!(state.handle_late_timestamped_publisher(zid.clone(), NOW));
     assert_eq!(state.timestamped[&zid].pending_queries, 1);
+}
+
+/// What the machine hands its callback, recorded as whether it was lent and its payload byte.
+#[cfg(feature = "advanced-recovery")]
+fn lent_recording(record: Arc<Mutex<Vec<(bool, u8)>>>) -> Box<dyn FnMut(Delivery<'_>) + Send> {
+    Box::new(move |delivery: Delivery<'_>| {
+        let lent = matches!(delivery, Delivery::Lent(_));
+        let byte = delivery.view().payload()[0];
+        record.lock().unwrap().push((lent, byte));
+    })
+}
+
+/// A live sample the machine delivers as it arrives is handed on as the view the session lent,
+/// so nothing of it is copied: an unsequenced one and the first of a sequenced source alike.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_live_sample_delivered_as_it_arrives_is_lent_not_copied() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default());
+    let plain = Sample::new_put("demo/data", vec![0xA0]);
+    assert!(state.handle_live(&plain, NOW).is_none());
+    assert!(state.handle_live(&sequenced(0, 0xA1), NOW).is_none());
+    assert!(state.handle_live(&sequenced(1, 0xA2), NOW).is_none());
+    assert_eq!(
+        *record.lock().unwrap(),
+        vec![(true, 0xA0), (true, 0xA1), (true, 0xA2)]
+    );
+}
+
+/// A live sample the machine must keep past the call (a history get is in flight) is copied
+/// once into its buffer and handed over owned when the buffer drains.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn a_sample_the_machine_held_is_handed_on_owned() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default())
+        .with_history(1, usize::MAX);
+    assert!(state.handle_live(&sequenced(0, 0xB0), NOW).is_none());
+    assert!(
+        record.lock().unwrap().is_empty(),
+        "held while the history get is in flight"
+    );
+    state.finish_history();
+    assert_eq!(*record.lock().unwrap(), vec![(false, 0xB0)]);
 }
