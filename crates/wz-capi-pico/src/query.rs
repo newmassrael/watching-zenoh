@@ -448,15 +448,13 @@ impl QueryMarshal {
         held: Box<dyn HeldQuery>,
         payload: crate::bytes::ByteBuf,
         attachment: crate::bytes::ByteBuf,
+        encoding: Option<crate::encoding::EncodingState>,
     ) -> Self {
         Self {
             keyexpr: QueryText::Owned(Box::from(self.keyexpr.get())),
             parameters: QueryText::Owned(Box::from(self.parameters.get())),
             anyke: self.anyke,
-            encoding: self
-                .encoding
-                .as_ref()
-                .map(crate::encoding::EncodingState::kept),
+            encoding,
             source_info: self.source_info,
             payload,
             attachment,
@@ -749,11 +747,21 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
         (Ok(payload), Ok(attachment)) => (payload, attachment),
         (Err(no_room), _) | (_, Err(no_room)) => return Err(no_room.code()),
     };
+    // The encoding's schema is kept in a slot of the pool of encodings before the hold too.
+    let encoding = match marshal
+        .encoding
+        .as_ref()
+        .map(crate::encoding::EncodingState::kept)
+        .transpose()
+    {
+        Ok(encoding) => encoding,
+        Err(no_room) => return Err(no_room.code()),
+    };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
     let held = holder.hold_query(marshal);
-    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment));
+    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment, encoding));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -1575,7 +1583,9 @@ pub unsafe extern "C" fn z_query_reply(
         } else {
             let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
             let meta = ReplyMetaOwned {
-                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
+                encoding: crate::encoding::take_moved_encoding_copy(
+                    (*options).encoding as *mut c_void,
+                ),
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 express: (*options).is_express,
@@ -1700,7 +1710,7 @@ pub unsafe extern "C" fn z_query_reply_err(
         let encoding = if options.is_null() {
             None
         } else {
-            crate::encoding::take_moved_encoding((*options).encoding)
+            crate::encoding::take_moved_encoding_copy((*options).encoding)
         };
         let buf = match buf {
             Ok(Some(buf)) => buf,
@@ -2270,7 +2280,13 @@ mod tests {
         );
         let payload = marshal.payload.try_clone().expect("room for the copy");
         let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment);
+        let encoding = marshal
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()
+            .expect("room for the copy");
+        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment, encoding);
         drop(marshal);
         assert_ne!(kept.payload.as_slice().as_ptr(), view.payload.as_ptr());
         assert_eq!(kept.payload.as_slice(), b"in place");

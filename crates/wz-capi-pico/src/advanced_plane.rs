@@ -146,9 +146,14 @@ impl AdvancedPublisherPlane for PicoPlane {
         // `PublishOptions` the composite folds its own knobs into: those reach the
         // publisher as the options of each put, and the publisher's declared QoS
         // is what it sends with (`PlainPublisher::publish`).
-        let publisher =
-            PlainPublisher::declare(&self.session, keyexpr, None, self.declared.clone())
-                .map_err(|code| Self::refusal("publisher", code))?;
+        // The composite keeps its declared QoS for each publisher it declares, so the encoding is
+        // kept again in a slot of its own for this one.
+        let declared = self
+            .declared
+            .try_clone()
+            .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
+        let publisher = PlainPublisher::declare(&self.session, keyexpr, None, declared)
+            .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.entity_id(),
             handle: publisher,

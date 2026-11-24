@@ -3,7 +3,7 @@
 
 //! The place of an object a program holds through this ABI and no session holds for it: a session,
 //! a publisher, a subscriber, a queryable, a liveliness token, an owned sample, reply or query, a
-//! payload, a config, and a hello the program keeps.
+//! payload, an encoding, a config, and a hello the program keeps.
 //!
 //! Each such object is placed with [`Slot::take`] and [`Slot::fill`] (or [`Slot::fill_in_place`]),
 //! and let go with [`release`], or held by value as a [`Placed`]; a session of the cooperative
@@ -59,6 +59,8 @@ pub(crate) enum Kind {
     Querier = 12,
     /// A key expression the program holds declared (`z_declare_keyexpr`).
     Keyexpr = 13,
+    /// An encoding the program holds (`z_owned_encoding_t`), its schema in the slot.
+    Encoding = 14,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -396,6 +398,12 @@ impl<T> core::ops::Deref for Placed<T> {
     fn deref(&self) -> &T {
         // SAFETY: the object is live and this holds it alone (`Self::from_raw`).
         unsafe { self.object.as_ref() }
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for Placed<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
     }
 }
 

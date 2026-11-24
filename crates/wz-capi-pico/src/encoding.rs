@@ -41,12 +41,13 @@ use core::ffi::{c_char, c_void, CStr};
 
 use crate::prelude::*;
 
-use wz_session_core::sample::EncodingHint;
+use wz_session_core::sample::{BoundedEncoding, EncodingHint, EncodingRef};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_owned_string_t};
-use crate::bytes::store_owned_string;
+use crate::bytes::{store_owned_string, NoRoom};
 use crate::ffi::guarded;
-use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use crate::object_slot::{Kind, Placed, Slot};
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 
 /// pico's `ENCODING_VALUES_ID_TO_STR` (`src/api/encoding.c:89`), 53 entries,
 /// index = encoding id.
@@ -76,8 +77,9 @@ pub use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 /// same SSOT as the table it indexes.
 use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 
-/// Behind a `z_owned_encoding_t`, and behind the loaned encoding a sample, a reply or a query
-/// hands out: the packed wire word and where the schema lies.
+/// Behind a loaned encoding: the packed wire word and where the schema lies. The handle of an owned
+/// encoding points at the state of its [`HeldEncoding`], a sample's, a reply's or a query's at the
+/// one its marshal holds.
 pub(crate) struct EncodingState {
     packed_id: u32,
     schema: Schema,
@@ -87,58 +89,23 @@ pub(crate) struct EncodingState {
 enum Schema {
     /// The encoding carries none.
     Absent,
-    /// Bytes of the encoding's own: one a program built or kept.
-    Owned(Vec<u8>),
-    /// Bytes a received message holds, read where they lie for as long as the marshal that holds
-    /// this state does ([`EncodingState::lent`]).
+    /// Bytes another holds: a received message's, read for as long as the marshal that holds this
+    /// state does ([`EncodingState::lent`]), or the room of the held encoding this state is part
+    /// of, which never moves while it lives.
     Lent { start: *const u8, len: usize },
+    /// An encoding of the pool of encodings this state keeps: what a sample, a reply or a query
+    /// kept past its callback holds, whose message's bytes it may outlive.
+    Held(Placed<HeldEncoding>),
 }
 
-// SAFETY: a lent schema is its message's, valid and unchanged for as long as the state lives
+// SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
 // (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
-// as the message's own borrow would be; an owned one is a `Vec`.
+// as the holder's own borrow would be; a held one is an encoding of the pool this state alone holds,
+// and the pools are reached under the port's lock.
 unsafe impl Send for Schema {}
 unsafe impl Sync for Schema {}
 
-/// An encoding as its readers see it: the packed wire word and the schema's bytes, wherever the
-/// state keeps them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EncodingView<'a> {
-    pub(crate) packed_id: u32,
-    pub(crate) schema: Option<&'a [u8]>,
-}
-
-impl EncodingView<'_> {
-    /// The hint of these parts, its schema a copy: what an encoding a program keeps holds.
-    pub(crate) fn to_hint(self) -> EncodingHint {
-        EncodingHint {
-            packed_id: self.packed_id,
-            schema: self.schema.map(<[u8]>::to_vec),
-        }
-    }
-
-    /// Render as pico's `_z_encoding_convert_into_string` does: the id's table
-    /// entry, then `;schema` when a schema is present, the schema copied as the
-    /// bytes it is (UTF-8 or not). An id past the table renders as the empty
-    /// prefix, which is pico's behaviour too (its bounds check leaves `prefix`
-    /// NULL and `prefix_len` 0).
-    pub(crate) fn to_bytes(self) -> Vec<u8> {
-        wz_session_core::encoding_hint::parts_to_bytes(self.packed_id, self.schema)
-    }
-}
-
 impl EncodingState {
-    /// The state of an encoding of its own.
-    pub(crate) fn owned(hint: EncodingHint) -> Self {
-        Self {
-            packed_id: hint.packed_id,
-            schema: match hint.schema {
-                Some(schema) => Schema::Owned(schema),
-                None => Schema::Absent,
-            },
-        }
-    }
-
     /// A well-known encoding: its id, no schema.
     const fn constant(id: u16) -> Self {
         Self {
@@ -168,55 +135,118 @@ impl EncodingState {
     }
 
     /// The encoding as its readers see it.
-    pub(crate) fn view(&self) -> EncodingView<'_> {
-        let schema = match &self.schema {
-            Schema::Absent => None,
-            Schema::Owned(schema) => Some(schema.as_slice()),
+    pub(crate) fn view(&self) -> EncodingRef<'_> {
+        match &self.schema {
+            Schema::Absent => EncodingRef {
+                packed_id: self.packed_id,
+                schema: None,
+            },
             // SAFETY: a lent schema outlives the state that holds it (`Self::lent`), and a slice's
             // start is never null.
-            Schema::Lent { start, len } => {
-                Some(unsafe { core::slice::from_raw_parts(*start, *len) })
-            }
-        };
-        EncodingView {
-            packed_id: self.packed_id,
-            schema,
+            Schema::Lent { start, len } => EncodingRef {
+                packed_id: self.packed_id,
+                schema: Some(unsafe { core::slice::from_raw_parts(*start, *len) }),
+            },
+            Schema::Held(held) => held.view(),
         }
     }
 
     /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
-    /// callback holds, whose message's bytes it may outlive.
-    pub(crate) fn kept(&self) -> Self {
-        Self::owned(self.view().to_hint())
+    /// callback holds. A schema is kept in an encoding of the pool of encodings, refused with
+    /// [`NoRoom`] when the pool has none free or the schema is longer than its room; an encoding of
+    /// no schema takes none.
+    pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
+        let view = self.view();
+        let schema = match view.schema {
+            None => Schema::Absent,
+            Some(_) => Schema::Held(hold(view).ok_or(NoRoom)?),
+        };
+        Ok(Self {
+            packed_id: view.packed_id,
+            schema,
+        })
+    }
+}
+
+/// An encoding a program holds (`z_owned_encoding_t`), in a slot of the pool of encodings
+/// (`HELD_ENCODINGS`): its state first, which the handle points at, and the room of its schema,
+/// [`MAX_ENCODING_SCHEMA_BYTES`](wz_session_core::caps::MAX_ENCODING_SCHEMA_BYTES) bytes, which
+/// the state reads. The slot never moves while the encoding lives, so the state's read of its own
+/// room stays valid, as zenoh-pico's encoding holds its schema in a string of its own.
+#[repr(C)]
+pub(crate) struct HeldEncoding {
+    state: EncodingState,
+    kept: BoundedEncoding,
+}
+
+impl HeldEncoding {
+    /// The encoding, read where it lies in its slot.
+    pub(crate) fn view(&self) -> EncodingRef<'_> {
+        self.kept.view()
     }
 
-    /// The encoding as a hint, the schema moved out of an owned state rather than copied.
-    fn into_hint(self) -> EncodingHint {
-        let packed_id = self.packed_id;
-        match self.schema {
-            Schema::Owned(schema) => EncodingHint {
-                packed_id,
-                schema: Some(schema),
-            },
-            schema => {
-                let state = Self { packed_id, schema };
-                state.view().to_hint()
-            }
-        }
+    /// `encoding` kept in a slot of the pool of encodings; `None` when its schema is longer than
+    /// the room a slot has or the pool has no slot free, which every door that makes one answers
+    /// with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as zenoh-pico answers a schema its heap cannot copy.
+    fn place(encoding: EncodingRef<'_>) -> Option<*mut HeldEncoding> {
+        let kept = BoundedEncoding::of(encoding).ok()?;
+        let slot = Slot::<HeldEncoding>::take(Kind::Encoding)?;
+        // SAFETY: `write_at` writes both fields of the slot it is handed.
+        Some(unsafe { slot.fill_in_place(|at| Self::write_at(at, kept)) })
+    }
+
+    /// Write `kept` at `at` and the state that reads it there.
+    ///
+    /// # Safety
+    /// `at` is the place of a `HeldEncoding` that holds none and does not move while it is held.
+    unsafe fn write_at(at: *mut HeldEncoding, kept: BoundedEncoding) {
+        core::ptr::addr_of_mut!((*at).kept).write(kept);
+        Self::read_own_room(at);
+    }
+
+    /// Point the state at `at` at the room beside it, as it now holds.
+    ///
+    /// # Safety
+    /// `at` is a `HeldEncoding` whose room is written, at a place that does not move while it is
+    /// held.
+    unsafe fn read_own_room(at: *mut HeldEncoding) {
+        let view = (*at).kept.view();
+        // SAFETY: the caller's: the room lies in the same slot as the state and outlives it.
+        core::ptr::addr_of_mut!((*at).state)
+            .write(EncodingState::lent(view.packed_id, view.schema));
     }
 
     /// Replace the schema with `bytes`, the flag of the wire word following it; empty bytes take
-    /// the schema away.
-    fn set_schema(&mut self, bytes: &[u8]) {
-        let id = self.packed_id >> 1;
+    /// the schema away. Refused, the encoding left as it was, when `bytes` is longer than the room.
+    ///
+    /// # Safety
+    /// `at` is a live `HeldEncoding` nothing else reads while this runs.
+    unsafe fn set_schema(at: *mut HeldEncoding, bytes: &[u8]) -> Result<(), NoRoom> {
         let has_schema = !bytes.is_empty();
-        self.packed_id = (id << 1) | u32::from(has_schema);
-        self.schema = if has_schema {
-            Schema::Owned(bytes.to_vec())
-        } else {
-            Schema::Absent
-        };
+        let kept = BoundedEncoding::of(EncodingRef {
+            packed_id: ((*at).kept.view().packed_id & !1) | u32::from(has_schema),
+            schema: has_schema.then_some(bytes),
+        })
+        .map_err(|_| NoRoom)?;
+        (*at).kept = kept;
+        Self::read_own_room(at);
+        Ok(())
     }
+}
+
+impl core::fmt::Debug for HeldEncoding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.view(), f)
+    }
+}
+
+/// `encoding` kept in a slot of the pool of encodings, held by value: what a publisher keeps of
+/// the encoding it was declared with, and a kept sample, reply or query of the one it carried.
+/// `None` when the schema is longer than the room a slot has or the pool has no slot free.
+pub(crate) fn hold(encoding: EncodingRef<'_>) -> Option<Placed<HeldEncoding>> {
+    let held = HeldEncoding::place(encoding)?;
+    // SAFETY: an encoding just placed, which nothing else holds.
+    unsafe { Placed::from_raw(held) }
 }
 
 /// Owned encoding (pico `z_owned_encoding_t`, 40 B measured).
@@ -261,9 +291,9 @@ impl z_loaned_encoding_t {
 }
 
 /// # Safety
-/// `h` must be a live `Box::into_raw::<EncodingState>` pointer.
+/// `h` must be a live handle [`store_encoding`] made.
 unsafe fn free_encoding(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut EncodingState));
+    crate::object_slot::release(h.cast::<HeldEncoding>());
 }
 
 impl_handle_ownership7!(
@@ -280,39 +310,57 @@ impl_handle_ownership7!(
     z_encoding_drop
 );
 
-/// Store a hint into a caller-provided owned encoding slot.
-pub(crate) unsafe fn store_encoding(dst: *mut z_owned_encoding_t, hint: EncodingHint) {
-    *dst = z_owned_encoding_t {
-        handle: Box::into_raw(Box::new(EncodingState::owned(hint))) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 4],
-    };
+/// Keep `encoding` in a slot of the pool of encodings and hand it to `dst`, which the caller left
+/// null: `Z_OK`, or `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with `dst` still null when the schema is longer
+/// than the room or the pool has no slot free.
+///
+/// # Safety
+/// `dst` is valid and writable.
+pub(crate) unsafe fn store_encoding(
+    dst: *mut z_owned_encoding_t,
+    encoding: EncodingRef<'_>,
+) -> ZResult {
+    match HeldEncoding::place(encoding) {
+        Some(held) => {
+            *dst = z_owned_encoding_t {
+                handle: held.cast(),
+                _pad: [core::ptr::null_mut(); 4],
+            };
+            Z_OK
+        }
+        None => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+    }
 }
 
 /// Read the encoding behind a loaned encoding, where its state keeps it.
-pub(crate) unsafe fn encoding_view<'a>(
-    ptr: *const z_loaned_encoding_t,
-) -> Option<EncodingView<'a>> {
+pub(crate) unsafe fn encoding_view<'a>(ptr: *const z_loaned_encoding_t) -> Option<EncodingRef<'a>> {
     handle_ref::<z_loaned_encoding_t, EncodingState>(ptr).map(EncodingState::view)
 }
 
-/// Consume a moved encoding, returning its hint and nulling the source so the
-/// caller's value cannot be released twice.
+/// Consume a moved encoding, handing back the encoding itself and nulling the source so the
+/// caller's value cannot be released twice: a put sends it from its own slot, and a publisher keeps
+/// it, with nothing copied.
 ///
 /// The moved pointer is typed `*mut c_void` at the call sites that receive it
 /// inside an options struct, so this takes the concrete type and the callers
 /// cast — keeping the unsafe cast at ONE place rather than at each option
 /// struct that carries an encoding slot.
-pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<EncodingHint> {
+pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<Placed<HeldEncoding>> {
     if moved.is_null() {
         return None;
     }
     let slot = moved as *mut *mut c_void;
     let handle = *slot;
-    if handle.is_null() {
-        return None;
-    }
     *slot = core::ptr::null_mut();
-    Some(Box::from_raw(handle as *mut EncodingState).into_hint())
+    // SAFETY: a moved encoding's handle is null or one `store_encoding` made, which the move hands
+    // over.
+    Placed::from_raw(handle.cast::<HeldEncoding>())
+}
+
+/// [`take_moved_encoding`] for a door whose options still keep the encoding as a hint of their
+/// own: the schema is copied out and the encoding let go.
+pub(crate) unsafe fn take_moved_encoding_copy(moved: *mut c_void) -> Option<EncodingHint> {
+    take_moved_encoding(moved).map(|held| held.view().to_hint())
 }
 
 // --- exports ---------------------------------------------------------------
@@ -338,9 +386,8 @@ pub unsafe extern "C" fn z_encoding_from_str(
         let bytes = CStr::from_ptr(s).to_bytes();
         store_encoding(
             encoding,
-            wz_session_core::encoding_hint::hint_from_bytes(bytes),
-        );
-        Z_OK
+            wz_session_core::encoding_hint::ref_from_bytes(bytes),
+        )
     })
 }
 
@@ -363,9 +410,8 @@ pub unsafe extern "C" fn z_encoding_from_substr(
         let bytes = core::slice::from_raw_parts(s.cast::<u8>(), len);
         store_encoding(
             encoding,
-            wz_session_core::encoding_hint::hint_from_bytes(bytes),
-        );
-        Z_OK
+            wz_session_core::encoding_hint::ref_from_bytes(bytes),
+        )
     })
 }
 
@@ -385,7 +431,9 @@ pub unsafe extern "C" fn z_encoding_to_string(
             return Z_ERR_NULL;
         }
         let rendered = match encoding_view(encoding) {
-            Some(view) => view.to_bytes(),
+            Some(view) => {
+                wz_session_core::encoding_hint::parts_to_bytes(view.packed_id, view.schema)
+            }
             None => ENCODING_ID_TO_STR
                 .get(usize::from(ENCODING_ID_DEFAULT))
                 .copied()
@@ -435,20 +483,23 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        // `handle_ref` hands back a shared reference; the state behind it is
-        // uniquely owned by this handle, and pico's own setter mutates in
-        // place through a `z_loaned_*` pointer.
-        let state = state as *const EncodingState as *mut EncodingState;
+        // A loan a program may write through is an owned encoding's (`z_encoding_loan_mut`), whose
+        // state is the first field of its held encoding, which the handle uniquely owns; pico's own
+        // setter mutates in place through a `z_loaned_*` pointer.
+        let held = state as *const EncodingState as *mut HeldEncoding;
         // pico copies the bytes it is handed and asks nothing of them
         // (`src/api/encoding.c`, `z_encoding_set_schema_from_substr` ->
-        // `_z_string_copy_from_substr`), so a schema that is not UTF-8 is set.
+        // `_z_string_copy_from_substr`), so a schema that is not UTF-8 is set; one longer than the
+        // room is refused as pico refuses a copy its heap cannot hold, the encoding left as it was.
         let bytes: &[u8] = if schema.is_null() || len == 0 {
             &[]
         } else {
             core::slice::from_raw_parts(schema.cast::<u8>(), len)
         };
-        (*state).set_schema(bytes);
-        Z_OK
+        match HeldEncoding::set_schema(held, bytes) {
+            Ok(()) => Z_OK,
+            Err(no_room) => no_room.code(),
+        }
     })
 }
 
@@ -575,9 +626,9 @@ pub extern "C" fn z_encoding_loan_default() -> *const z_loaned_encoding_t {
 /// Duplicate an encoding into a fresh owned one (pico `z_encoding_clone`).
 ///
 /// A DEEP copy, unlike the sibling zenoh-c ABI's handle copy. It has to be: the
-/// source may be one of the `'static` constants above OR a heap
-/// `EncodingState` a program built with [`z_encoding_from_str`], and
-/// [`z_encoding_drop`] frees its handle. Copying the hint makes those two
+/// source may be one of the `'static` constants above OR an encoding of the
+/// pool a program built with [`z_encoding_from_str`], and
+/// [`z_encoding_drop`] gives its slot back. Copying the hint makes those two
 /// sources indistinguishable to the caller, which is what upstream's
 /// `_z_encoding_copy` does.
 ///
@@ -595,10 +646,7 @@ pub unsafe extern "C" fn z_encoding_clone(
         }
         *dst = z_owned_encoding_t::null_value();
         match encoding_view(this_) {
-            Some(view) => {
-                store_encoding(dst, view.to_hint());
-                Z_OK
-            }
+            Some(view) => store_encoding(dst, view),
             // A null / spent source clones to a null destination, which is the
             // shape `z_internal_encoding_check` reports as absent. Upstream
             // copies an empty encoding here rather than failing.
@@ -739,7 +787,10 @@ mod tests {
         let mut dst = z_owned_encoding_t::null_value();
         // SAFETY: live locals.
         unsafe {
-            store_encoding(&mut src, parsed("text/plain;utf8"));
+            assert_eq!(
+                store_encoding(&mut src, parsed("text/plain;utf8").view()),
+                Z_OK
+            );
             // Dirty every pad slot so an under-wide clear is visible.
             src._pad = [1usize as *mut c_void; 4];
             let loaned = z_encoding_loan_mut(&mut src);
@@ -801,7 +852,10 @@ mod tests {
         let mut owned = z_owned_encoding_t::null_value();
         // SAFETY: live locals.
         unsafe {
-            store_encoding(&mut owned, parsed("text/plain"));
+            assert_eq!(
+                store_encoding(&mut owned, parsed("text/plain").view()),
+                Z_OK
+            );
             assert_eq!(
                 z_encoding_set_schema_from_substr(
                     z_encoding_loan_mut(&mut owned),
@@ -814,19 +868,22 @@ mod tests {
             assert_eq!(hint.schema, Some(raw));
             let mut want = b"text/plain;".to_vec();
             want.extend_from_slice(raw);
-            assert_eq!(hint.to_bytes(), want);
+            assert_eq!(
+                wz_session_core::encoding_hint::parts_to_bytes(hint.packed_id, hint.schema),
+                want
+            );
             z_encoding_drop(z_encoding_move(&mut owned));
         }
     }
 
     /// A received encoding's schema is read where the message holds it, not copied; a kept copy
-    /// owns its bytes and reads the same after the message is gone; a schema set on the received
-    /// encoding is the encoding's own; one with no schema reads as none.
+    /// holds it in an encoding of its own and reads the same after the message is gone; one with
+    /// no schema reads as none and keeps nothing.
     #[test]
     fn a_received_schema_is_read_where_it_lies_and_kept_as_a_copy() {
         let message = b"utf8".to_vec();
         // SAFETY: the state is dropped before `message`.
-        let mut received = unsafe { EncodingState::lent((4 << 1) | 1, Some(message.as_slice())) };
+        let received = unsafe { EncodingState::lent((4 << 1) | 1, Some(message.as_slice())) };
         let view = received.view();
         assert_eq!(view.packed_id, (4 << 1) | 1);
         assert_eq!(
@@ -834,41 +891,130 @@ mod tests {
             Some(message.as_ptr()),
             "the schema is the message's own bytes"
         );
-        assert_eq!(view.to_bytes(), b"text/plain;utf8".to_vec());
+        assert_eq!(
+            wz_session_core::encoding_hint::parts_to_bytes(view.packed_id, view.schema),
+            b"text/plain;utf8".to_vec()
+        );
 
-        let kept = received.kept();
+        let kept = received.kept().expect("room for the kept encoding");
         let kept_schema = kept.view().schema.expect("kept");
         assert_ne!(
             kept_schema.as_ptr(),
             message.as_ptr(),
-            "a kept copy owns its bytes"
+            "a kept copy holds its own bytes"
         );
         assert_eq!(kept_schema, b"utf8");
-
-        received.set_schema(b"other");
-        let set = received.view().schema.expect("set");
-        assert_ne!(
-            set.as_ptr(),
-            message.as_ptr(),
-            "a set schema is the state's own"
-        );
-        assert_eq!(set, b"other");
-        received.set_schema(&[]);
-        assert_eq!(
-            received.view(),
-            EncodingView {
-                packed_id: 4 << 1,
-                schema: None
-            }
-        );
         drop(received);
         drop(message);
-        assert_eq!(kept.view().to_bytes(), b"text/plain;utf8".to_vec());
-        assert_eq!(kept.into_hint(), parsed("text/plain;utf8"));
+        assert_eq!(kept.view().to_hint(), parsed("text/plain;utf8"));
 
         // SAFETY: a state of no schema borrows nothing.
         let bare = unsafe { EncodingState::lent(4 << 1, None) };
         assert_eq!(bare.view().schema, None);
+        let bare_kept = bare.kept().expect("an encoding of no schema keeps nothing");
+        assert!(matches!(bare_kept.schema, Schema::Absent));
+    }
+
+    /// An owned encoding reads its schema from the room of its own slot, and a schema set on it is
+    /// written into that room; an empty one takes the schema and its flag away.
+    #[test]
+    fn an_owned_encoding_reads_and_sets_its_schema_in_its_own_room() {
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: live locals.
+        unsafe {
+            assert_eq!(
+                z_encoding_from_str(&mut owned, c"text/plain;utf8".as_ptr()),
+                Z_OK
+            );
+            let held = owned.handle.cast::<HeldEncoding>();
+            let room = core::ptr::addr_of!((*held).kept) as usize;
+            let room = room..room + core::mem::size_of::<BoundedEncoding>();
+            let read = encoding_view(z_encoding_loan(&owned)).expect("made");
+            let at = read.schema.expect("a schema").as_ptr() as usize;
+            assert!(
+                room.contains(&at),
+                "the schema lies in the encoding's own room"
+            );
+            assert_eq!(
+                z_encoding_set_schema_from_str(z_encoding_loan_mut(&mut owned), c"other".as_ptr()),
+                Z_OK
+            );
+            let set = encoding_view(z_encoding_loan(&owned)).expect("set");
+            assert_eq!(set.schema, Some(&b"other"[..]));
+            assert!(room.contains(&(set.schema.expect("set").as_ptr() as usize)));
+            assert_eq!(
+                z_encoding_set_schema_from_substr(
+                    z_encoding_loan_mut(&mut owned),
+                    core::ptr::null(),
+                    0
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                encoding_view(z_encoding_loan(&owned)).expect("cleared"),
+                EncodingRef {
+                    packed_id: 4 << 1,
+                    schema: None
+                }
+            );
+            z_encoding_drop(z_encoding_move(&mut owned));
+        }
+    }
+
+    /// A schema one byte past the room an encoding has is refused where it is made, with pico's
+    /// code for a copy its heap cannot hold, the output left null; set on an encoding that holds
+    /// one, it is refused and the encoding keeps its schema.
+    #[test]
+    fn a_schema_past_the_room_is_refused_and_leaves_its_target_as_it_was() {
+        let mut label = b"text/plain;".to_vec();
+        let past_room = label.len() + wz_session_core::caps::MAX_ENCODING_SCHEMA_BYTES + 1;
+        label.resize(past_room, b's');
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: live locals.
+        unsafe {
+            assert_eq!(
+                z_encoding_from_substr(&mut owned, label.as_ptr().cast(), label.len()),
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            );
+            assert!(!z_internal_encoding_check(&owned), "refused, left null");
+            assert_eq!(
+                z_encoding_from_str(&mut owned, c"text/plain;utf8".as_ptr()),
+                Z_OK
+            );
+            let past = &label[b"text/plain;".len()..];
+            assert_eq!(
+                z_encoding_set_schema_from_substr(
+                    z_encoding_loan_mut(&mut owned),
+                    past.as_ptr().cast(),
+                    past.len()
+                ),
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            );
+            assert_eq!(
+                encoding_view(z_encoding_loan(&owned)).expect("kept").schema,
+                Some(&b"utf8"[..]),
+                "a refused schema leaves the one it had"
+            );
+            z_encoding_drop(z_encoding_move(&mut owned));
+        }
+    }
+
+    /// An owned encoding lies in a slot of the pool of encodings, not on the heap, in a library
+    /// with the process pools.
+    #[cfg(wz_process_pools)]
+    #[test]
+    fn an_owned_encoding_lies_in_the_pool_of_encodings() {
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: a live local.
+        unsafe {
+            assert_eq!(
+                z_encoding_from_str(&mut owned, c"text/plain;utf8".as_ptr()),
+                Z_OK
+            );
+            let place = core::ptr::NonNull::new(owned.handle.cast::<u8>()).expect("made");
+            assert!(crate::process_pool::lies_in_pools(place));
+            z_encoding_drop(z_encoding_move(&mut owned));
+        }
     }
 
     /// Round trip through the rendering, for the shapes the attachment
