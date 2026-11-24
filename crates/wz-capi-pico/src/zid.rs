@@ -375,9 +375,11 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// "public API only" export policy would miss.
 #[no_mangle]
 pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
-    let trailing_zeros = id.id.iter().rev().take_while(|&&byte| byte == 0).count();
+    // The bytes read as one little-endian number, whose leading zero bytes are the id's trailing
+    // ones: a count of its leading zero bits rather than a walk over the sixteen bytes.
+    let trailing_zeros = u128::from_le_bytes(id.id).leading_zeros() >> 3;
     // At most the id's sixteen bytes, so the length fits a byte.
-    Z_ID_SIZE.saturating_sub(trailing_zeros) as u8
+    Z_ID_SIZE.saturating_sub(trailing_zeros as usize) as u8
 }
 
 /// Build an owned zid closure from a callback + drop + context (pico
@@ -443,6 +445,13 @@ mod tests {
             assert_eq!(_z_id_len(id), 5, "a zero INSIDE the id is not stripped");
             id.id[15] = 7;
             assert_eq!(_z_id_len(id), 16);
+
+            // The last nonzero byte counts whichever of its bits is set.
+            let mut id = z_id_t::empty();
+            id.id[7] = 0x80;
+            assert_eq!(_z_id_len(id), 8);
+            id.id[7] = 0x01;
+            assert_eq!(_z_id_len(id), 8);
         }
     }
 

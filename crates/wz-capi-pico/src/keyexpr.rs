@@ -208,6 +208,9 @@ impl Clone for WireDeclaration {
 }
 
 impl Drop for WireDeclaration {
+    // Out of line, as `KeyText`'s drop is: every drop of a declared key reaches it, and each copy
+    // inlined would carry the session's upgrade and the release of the hold.
+    #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the hold is taken here, once, and the field is not read again.
         let hold = unsafe { ManuallyDrop::take(&mut self.hold) };

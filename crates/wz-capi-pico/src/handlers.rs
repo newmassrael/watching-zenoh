@@ -580,8 +580,12 @@ unsafe fn close(slot: *mut c_void) -> ZResult {
 
 /// Release the channel and every element it still holds.
 ///
+/// Out of line: a collection's free is its clear and then the release of the collection, so the
+/// free door calls this body rather than holding a copy of it beside the clear door's.
+///
 /// # Safety
 /// `slot` must be null or an initialised collection no other thread is using.
+#[inline(never)]
 unsafe fn clear(slot: *mut c_void, free_f: z_element_free_f) {
     if slot.is_null() {
         return;
