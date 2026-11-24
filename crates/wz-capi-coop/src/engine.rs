@@ -270,7 +270,6 @@ use {
     get::{EndedLegs, GetKind, GetPlane, LegRows},
     wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
-    wz_session_core::bounded::CapacityFull,
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
@@ -1608,6 +1607,7 @@ enum CoopSession {}
 
 impl SessionParts for CoopSession {
     type Registry = Rc<RefCell<Registry>>;
+    type Faces = Registry;
     type Callbacks = CoopRows;
     type Storage = Lent;
     /// Where a face coming up or going down is reported (`connectivity`).
@@ -1647,6 +1647,14 @@ impl SessionParts for CoopSession {
 
     fn tables_mut(registry: &Self::Registry) -> core::cell::RefMut<'_, CoopTables> {
         tables_mut(registry)
+    }
+
+    fn faces(registry: &Self::Registry) -> core::cell::Ref<'_, Registry> {
+        registry.borrow()
+    }
+
+    fn faces_mut(registry: &Self::Registry) -> core::cell::RefMut<'_, Registry> {
+        registry.borrow_mut()
     }
 }
 
@@ -2474,21 +2482,6 @@ impl RuntimeTables {
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
-    /// Note leg `pending` the session's, for its cancellation, its link's loss and the close to
-    /// find: `false` past the rows, which a leg registered in a table of pending gets never
-    /// reaches, as the rows are one for each row of those tables; its entry is dropped then, which
-    /// says its end, and the leg is over.
-    #[cfg(feature = "query")]
-    fn note_pending(&mut self, pending: PendingGet) -> bool {
-        match self.session.pending_gets.push(pending) {
-            Ok(()) => true,
-            Err(CapacityFull(pending)) => {
-                pending.unregister(&mut self.session.registry.borrow_mut());
-                false
-            }
-        }
-    }
-
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
     /// now and not after the wait of the next read. The link is the same whichever end opened
@@ -3280,10 +3273,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// What a lost link takes with it: every subscriber and queryable its peer declared, so a
-    /// matching status or a write filter that counted on one reads the session as it now is.
-    /// zenoh-pico drops a peer's targets from every write filter when its connection drops
-    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`).
+    /// What a lost link of face `id` takes with it: what its peer was told, and what the session
+    /// holds of it (`SessionState::lose_face`).
     /// Out of line: a lost face and a group that ended each take what the peer declared.
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
@@ -3297,28 +3288,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         {
             face.replay.discard();
         }
-        let mut registry = self.session.registry.borrow_mut();
-        registry.flush_declarations_on_link_loss(id);
-        // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
-        #[cfg(feature = "liveliness")]
-        registry.lose_tokens(id);
-        // The gets asked of the face went with its link: the peer that owed their Finals is gone,
-        // so each pending entry is dropped, which ends its leg (`get`).
-        #[cfg(feature = "query")]
-        {
-            let mut at = 0;
-            while at < self.session.pending_gets.len() {
-                if self.session.pending_gets[at].face == id {
-                    self.session
-                        .pending_gets
-                        .remove(at)
-                        .unregister(&mut registry);
-                } else {
-                    at += 1;
-                }
-            }
-        }
-        drop(registry);
+        self.session.lose_face(id);
         #[cfg(feature = "liveliness")]
         self.retract_owed();
     }
@@ -3341,24 +3311,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let mut fits = || unsafe { round.has_room(record_room) };
         let done = self.session.registry.borrow_mut().retract_owed(&mut fits);
         round.owe(!done);
-    }
-
-    /// When the earliest pending get is due: a query's or a liveliness snapshot's, on any face.
-    #[cfg(feature = "query")]
-    fn next_get_deadline_ms(&self) -> Option<u64> {
-        let registry = self.session.registry.borrow();
-        registry
-            .all_gets()
-            .flat_map(|gets| {
-                let due = gets.replies.next_deadline_ms();
-                #[cfg(feature = "liveliness-get")]
-                let due = [due, gets.liveliness_gets.next_deadline_ms()]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                due
-            })
-            .min()
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -3409,7 +3361,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
-            self.next_get_deadline_ms(),
+            self.session.next_get_deadline_ms(),
             self.transport
                 .links
                 .faces()
@@ -6783,7 +6735,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            if !core.note_pending(PendingGet {
+            if !core.session.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
@@ -6893,7 +6845,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            if !core.note_pending(PendingGet {
+            if !core.session.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
@@ -6948,7 +6900,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     // A leg no table holds is let go of with no lock held.
                     drop(guard);
                     self.end_leg_now(leg_id);
-                } else if !core.note_pending(PendingGet {
+                } else if !core.session.note_pending(PendingGet {
                     face: LOCAL_FACE,
                     leg: leg_id,
                     kind: GetKind::Query(rid),
@@ -7075,7 +7027,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            if !core.note_pending(PendingGet {
+            if !core.session.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Liveliness(interest_id),
@@ -7413,7 +7365,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         {
             let mut registry = core.session.registry.borrow_mut();
             while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut registry);
+                pending.unregister(&mut *registry);
             }
         }
         // The session's tokens end with its link: the rows of its tables go, each with its hold of the
@@ -7588,7 +7540,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller
                     .iter()
                     .position(|pending| pending.fan == Some(key))?;
                 let pending = core.session.pending_gets.remove(at);
-                pending.unregister(&mut core.session.registry.borrow_mut());
+                pending.unregister(&mut *core.session.registry.borrow_mut());
                 Some(pending.leg)
             });
             let Some(leg) = leg else {
@@ -7786,7 +7738,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
             let core = self.core.dropping();
             let mut registry = core.session.registry.borrow_mut();
             while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut registry);
+                pending.unregister(&mut *registry);
             }
             drop(registry);
             self.gets.let_go();
