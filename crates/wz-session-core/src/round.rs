@@ -78,7 +78,7 @@ pub trait RoundCall: Sized {
 /// A call of a subscriber's callback, which a sample is handed to.
 pub trait SampleCall: RoundCall {
     /// Hand `sample` to the row's callback.
-    fn hand(&self, sample: &dyn SampleView);
+    fn hand(&self, sample: &SampleRef<'_>);
 }
 
 /// A call of a liveliness subscriber's callback, which a token's appearance or retraction is
@@ -201,7 +201,7 @@ impl RoundCall for Infallible {
 }
 
 impl SampleCall for Infallible {
-    fn hand(&self, _sample: &dyn SampleView) {
+    fn hand(&self, _sample: &SampleRef<'_>) {
         match *self {}
     }
 }
@@ -835,6 +835,30 @@ impl<C: RoundCalls> Table<C> {
             timestamp,
             source_info: sample.source_info.cloned(),
         }))
+    }
+
+    /// The sample a record of `head` and `rest` holds, read where its parts lie: what each of its
+    /// subscribers' callbacks is handed. It answers no hint: nothing is built on the heap for a
+    /// record of the round.
+    fn sample(&self, head: &Head, rest: Option<&Rest>) -> SampleRef<'_> {
+        let mut sample = SampleRef::new(
+            self.text(head.key),
+            self.bytes(head.payload),
+            head.kind,
+            head.reliability,
+        );
+        sample.qos = head.qos;
+        if let Some(rest) = rest {
+            sample.attachment = rest.attachment.map(|span| self.bytes(span));
+            sample.encoding = rest
+                .encoding
+                .map(|(id, schema)| (id, schema.map(|span| self.bytes(span))));
+            sample.timestamp = rest
+                .timestamp
+                .map(|(time, zid)| (time.get(), self.bytes(zid)));
+            sample.source_info = rest.source_info.as_ref();
+        }
+        sample
     }
 
     /// The callbacks `entry` owes.
@@ -2263,11 +2287,7 @@ impl<C: RoundCalls> Round<C> {
             let owed = table.owed(entry);
             match &entry.what {
                 Held::Sample { head, rest } => {
-                    let sample = RoundSample {
-                        head: *head,
-                        rest: rest.as_ref(),
-                        table,
-                    };
+                    let sample = table.sample(head, rest.as_ref());
                     for call in owed.iter().filter_map(Owed::subscriber) {
                         call.hand(&sample);
                     }
@@ -2421,55 +2441,6 @@ impl<C: RoundCalls> Drop for Emptied<'_, C> {
         unsafe { (*self.0.table.get()).end_calls(&self.0.released) };
         self.0.lends.store(false, Ordering::Release);
         self.0.state.store(EMPTY, Ordering::Release);
-    }
-}
-
-/// A sample of the round, read where its parts lie: what each of its subscribers' callbacks is
-/// handed.
-struct RoundSample<'t, C: RoundCalls> {
-    head: Head,
-    rest: Option<&'t Rest>,
-    table: &'t Table<C>,
-}
-
-impl<C: RoundCalls> SampleView for RoundSample<'_, C> {
-    fn keyexpr(&self) -> &str {
-        self.table.text(self.head.key)
-    }
-
-    fn payload(&self) -> &[u8] {
-        self.table.bytes(self.head.payload)
-    }
-
-    fn kind(&self) -> SampleKind {
-        self.head.kind
-    }
-
-    fn reliability(&self) -> Reliability {
-        self.head.reliability
-    }
-
-    fn qos(&self) -> Option<QosLevel> {
-        self.head.qos
-    }
-
-    fn attachment(&self) -> Option<&[u8]> {
-        let span = self.rest?.attachment?;
-        Some(self.table.bytes(span))
-    }
-
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.rest?.source_info.as_ref()
-    }
-
-    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
-        let (time, zid) = self.rest?.timestamp?;
-        Some((time.get(), self.table.bytes(zid)))
-    }
-
-    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
-        let (id, schema) = self.rest?.encoding?;
-        Some((id, schema.map(|span| self.table.bytes(span))))
     }
 }
 

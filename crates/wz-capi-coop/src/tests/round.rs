@@ -185,7 +185,8 @@ impl SampleView for Whole<'_> {
 
 /// A sample with every part, each lying in the datagram a link lends, is handed to its subscriber
 /// with every part as it was offered, its payload read where it lies; the round is empty once it
-/// is handed. Turned red by a part the round drops, or reads anywhere but where it lies.
+/// is handed, answering no owned hint. Turned red by a part the round drops or reads anywhere but
+/// where it lies, or by a hint it answers.
 #[test]
 fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
     type Seen = (
@@ -230,6 +231,10 @@ fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
             }
             if view.source_info() != Some(&source) {
                 rest.push("source info".to_owned());
+            }
+            // Nothing is built on the heap for a record of the round: it answers no owned hint.
+            if view.timestamp().is_some() || view.encoding().is_some() {
+                rest.push("a hint".to_owned());
             }
         }))
     };
@@ -965,8 +970,9 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
     unsafe { round.offer_sample(third.call(), &sample, true) };
     unsafe { round.offer_sample(first.call(), &sample, false) };
     let mut captured = unsafe { round.captured() };
+    let handed = wz_session_core::sink::SampleRef::of(&sample);
     for call in captured.iter() {
-        call.hand(&sample);
+        call.hand(&handed);
     }
     let tags: Vec<u8> = seen.lock().unwrap().iter().map(|(t, _, _)| *t).collect();
     assert_eq!(tags, [3, 1], "each call, in the order offered");

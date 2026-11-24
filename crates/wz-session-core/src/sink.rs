@@ -507,6 +507,20 @@ pub trait SampleDelivery<Row, Id> {
     /// view is borrowed for the call.
     fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView, turn: FanOut);
 
+    /// Deliver one matched sample the dispatch holds as the session's own [`SampleRef`]; the
+    /// default is [`Self::deliver`]. A context that keeps the sample's parts (the session's round
+    /// of deliveries) overrides it to read them as fields rather than through the view.
+    #[cfg(feature = "storage-profile")]
+    fn deliver_ref(
+        &mut self,
+        id: Id,
+        row: RowAccess<'_, Row>,
+        sample: &SampleRef<'_>,
+        turn: FanOut,
+    ) {
+        self.deliver(id, row, sample, turn);
+    }
+
     /// Deliver one matched plain `Put` of a received frame ([`PlainSample`]); the default is
     /// [`Self::deliver`]. A context that overrides it to gather a frame's samples also overrides
     /// [`Self::end_plain_frame`].
@@ -1018,6 +1032,38 @@ mod tests {
         assert!(
             cells.timestamp.get().is_some() && cells.encoding.get().is_some(),
             "built once asked"
+        );
+    }
+
+    /// A context that keeps no parts of a sample is handed the session's sample through its view,
+    /// at the turn it was given. Turned red by a default `deliver_ref` that hands nothing on.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_sessions_sample_reaches_a_context_that_reads_views() {
+        struct Keys(std::vec::Vec<(std::string::String, bool)>);
+        impl SampleDelivery<u8, u32> for Keys {
+            fn deliver(
+                &mut self,
+                _id: u32,
+                _row: RowAccess<'_, u8>,
+                sample: &dyn SampleView,
+                turn: FanOut,
+            ) {
+                self.0
+                    .push((std::string::String::from(sample.keyexpr()), turn.is_first()));
+            }
+        }
+        let mut keys = Keys(std::vec::Vec::new());
+        let mut row = 0u8;
+        let sample = SampleRef::new("demo/ref", b"p", SampleKind::Put, Reliability::Reliable);
+        keys.deliver_ref(7, RowAccess::Held(&mut row), &sample, FanOut::begin());
+        keys.deliver_ref(7, RowAccess::Held(&mut row), &sample, FanOut::later());
+        assert_eq!(
+            keys.0,
+            [
+                (std::string::String::from("demo/ref"), true),
+                (std::string::String::from("demo/ref"), false)
+            ]
         );
     }
 
