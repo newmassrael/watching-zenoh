@@ -554,7 +554,15 @@ pub(crate) unsafe fn hold_entity<T, K>(object: *const T) -> crate::ffi::HeldIn {
 ///
 /// # Safety
 /// As [`count_in_entity`].
-#[cfg(any(test, feature = "advanced"))]
+#[cfg(any(
+    feature = "advanced",
+    all(
+        test,
+        not(feature = "engine-tokio"),
+        feature = "peer",
+        feature = "query"
+    )
+))]
 pub(crate) unsafe fn keep_entity<T, K>(object: *const T) -> crate::ffi::KeptIn {
     // SAFETY: the caller's.
     unsafe { count_of::<T, K>(object) }.keep()

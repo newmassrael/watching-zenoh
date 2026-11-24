@@ -113,7 +113,15 @@ impl CountIn {
     /// Keep the owner's place until the hold is dropped, for what lies in it and is reached apart
     /// from the owner after it let go: the place stands, and the owner's close does not wait for
     /// it, as it is no closure.
-    #[cfg(any(test, feature = "advanced"))]
+    #[cfg(any(
+        feature = "advanced",
+        all(
+            test,
+            not(feature = "engine-tokio"),
+            feature = "peer",
+            feature = "query"
+        )
+    ))]
     pub(crate) fn keep(self) -> KeptIn {
         self.open().count_one(true);
         KeptIn(self)
@@ -134,10 +142,26 @@ impl CountIn {
 
 /// One keep of an owner's place ([`CountIn::keep`]): dropped, it tells the count, and the last of
 /// the holds and keeps let go of after the owner let go of its place gives the place back.
-#[cfg(any(test, feature = "advanced"))]
+#[cfg(any(
+    feature = "advanced",
+    all(
+        test,
+        not(feature = "engine-tokio"),
+        feature = "peer",
+        feature = "query"
+    )
+))]
 pub(crate) struct KeptIn(CountIn);
 
-#[cfg(any(test, feature = "advanced"))]
+#[cfg(any(
+    feature = "advanced",
+    all(
+        test,
+        not(feature = "engine-tokio"),
+        feature = "peer",
+        feature = "query"
+    )
+))]
 impl Drop for KeptIn {
     fn drop(&mut self) {
         self.0.let_go(true);

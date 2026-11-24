@@ -770,8 +770,8 @@ unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
     let place = place.cast::<SessionPlace>();
     // SAFETY: the caller's: nothing reads what lies beside the handle again, and it is read out
     // once, here, while the hold it carries keeps the place standing.
-    let SessionTail { open, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
-    drop(open);
+    // The count of open closures owns nothing; the hold on the engine is what is let go of.
+    let SessionTail { open: _, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
     drop(core::mem::ManuallyDrop::into_inner(arena));
 }
 
