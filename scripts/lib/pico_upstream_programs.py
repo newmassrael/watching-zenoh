@@ -939,7 +939,7 @@ def reference_library(host, features: list[str], scratch: pathlib.Path) -> Libra
     label = "zenoh-pico (control)"
     if host.name == "windows":
         def one(pattern: str) -> pathlib.Path:
-            hits = [x for x in build.rglob(pattern) if "CMakeFiles" not in x.parts]
+            hits = [x for x in build.rglob(pattern) if "CMakeFiles" not in x.relative_to(build).parts]
             if len(hits) != 1:
                 raise Refusal(f"the reference build left {len(hits)} {pattern} under {build}, not one")
             return hits[0]
