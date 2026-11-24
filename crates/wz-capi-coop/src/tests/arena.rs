@@ -1152,6 +1152,46 @@ fn the_plan_holds_the_queries_its_limit_resolves() {
     assert_eq!(at_one.held_queries(), 1);
 }
 
+/// The Finals held for those queries and the requests a dispatch refused lie in rows of the
+/// arena, one of each for each query the session holds at once, as its limit resolves it. Turned
+/// red by rows sized by the build's ceiling, or by a plan that lays out none.
+#[cfg(feature = "queryable")]
+#[test]
+fn the_plan_lends_a_row_of_held_and_refused_finals_for_each_query_held() {
+    let lowered = lowered(|l| l.select_max_pending_finals(Quota::at_most(3)));
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    let finals: Vec<_> = plan
+        .rows()
+        .iter()
+        .filter(|row| row.part.ends_with(" finals"))
+        .map(|row| (row.part, row.count, row.entry_bytes))
+        .collect();
+    assert_eq!(
+        finals,
+        [
+            (
+                "held finals",
+                3,
+                core::mem::size_of::<crate::engine::FinalHold>()
+            ),
+            (
+                "refused finals",
+                3,
+                core::mem::size_of::<crate::engine::RefusedFinal>()
+            ),
+        ]
+    );
+}
+
+/// A build without queryables holds no query, so its plan lays out no row of Finals.
+#[cfg(not(feature = "queryable"))]
+#[test]
+fn a_build_without_queryables_lays_out_no_row_of_finals() {
+    let plan =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert!(plan.rows().iter().all(|row| !row.part.ends_with(" finals")));
+}
+
 /// A config that states more faces than the session's `MAX_FACES`, or a listener more handshakes
 /// than its `MAX_ACCEPT_PENDING`, is refused by the limit's name before any memory is asked, as is
 /// one past the build's value; a session that only dials is not held to the handshakes' bound, as
