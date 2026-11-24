@@ -1346,8 +1346,8 @@ mod link_stamps {
                 outcomes.push(outcome);
             }
         };
-        timers.fire_due(&mut engine, &actions, expiry - 1, &mut sink);
-        let holds = holds_in(|| timers.fire_due(&mut engine, &actions, expiry, &mut sink));
+        timers.fire_due(&mut engine, &*actions, expiry - 1, &mut sink);
+        let holds = holds_in(|| timers.fire_due(&mut engine, &*actions, expiry, &mut sink));
         assert_eq!(
             outcomes,
             [LeaseCheckOutcome::Expired],
