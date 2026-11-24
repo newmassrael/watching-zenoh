@@ -4155,15 +4155,6 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     }
 }
 
-/// A build that answers no peer's Interest keeps none to reconcile (`ignore_subscriber_interest`),
-/// so a caller that reconciles after each dispatch is written once for both builds.
-#[cfg(all(feature = "declare-subscriber", not(feature = "interest-answer")))]
-impl<P: Storage> SubscriberPeer<P> {
-    /// Nothing to stage: no interest of the peer is kept.
-    #[inline]
-    pub fn reconcile<L: LocalSubscribers + ?Sized>(&mut self, _subs: &L) {}
-}
-
 /// The session's own subscribers, as the paths that deliver to them and answer for them read
 /// them: the subscriptions and their patterns, the count that moves when one comes or goes, and
 /// the sinks a sample on a key reaches (`docs/c-abi-l3-tables.md`, section 6). Implemented by the
