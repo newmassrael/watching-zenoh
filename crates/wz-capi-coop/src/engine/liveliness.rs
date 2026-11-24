@@ -197,6 +197,10 @@ impl RowCallback for LivelinessRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A call of a liveliness subscriber's callback the session began under its lock and a delivery
@@ -228,7 +232,8 @@ impl LivelinessCall {
     }
 
     /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
-    /// which the caller lets go of (`SessionTables::release_liveliness_subscriber`).
+    /// which the session's walk of its tables then lets go of
+    /// (`SessionTables::release_drained_liveliness_subscriber`).
     pub(crate) fn end(self) -> Option<LivelinessSubscriberHandle> {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held

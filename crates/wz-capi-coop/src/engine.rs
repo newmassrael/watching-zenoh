@@ -54,7 +54,7 @@ use crate::arena::{
     EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, OpenStorage,
     PlaceTables, SessionArena, SessionRows, TransportTables,
 };
-use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
+use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
@@ -1080,6 +1080,9 @@ pub(crate) struct Takes {
     /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
+    /// The walks of the tables for rows whose last call ended, made only when a call said one
+    /// may wait.
+    pub(crate) walks: core::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -1525,6 +1528,10 @@ impl RowCallback for MatchingCall {
     fn retire(&self) -> bool {
         true
     }
+
+    fn drained(&self) -> bool {
+        true
+    }
 }
 
 /// The id the port names a write filter or a matching listener by: the bits of its row's handle,
@@ -1936,6 +1943,10 @@ impl RowCallback for SubscriberRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A call of a subscriber's callback the session began under its lock and a delivery makes after
@@ -1967,7 +1978,8 @@ impl SubscriberCall {
     }
 
     /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
-    /// which the caller lets go of (`SessionTables::release_subscriber`).
+    /// which the session's walk of its tables then lets go of
+    /// (`SessionTables::release_drained_subscriber`).
     pub(crate) fn end(self) -> Option<SubscriberHandle> {
         // SAFETY: the row lies where the call began (the tables never move a row, asserted above)
         // and keeps its slot until its last call ended, which this one is not yet; a call ends with
@@ -5516,45 +5528,50 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.end_leg_now(leg);
     }
 
-    /// Let go of each subscriber row whose last call ended after it was undeclared: taken out of
-    /// its table under the session's lock and dropped after it, one at a time, so a C program's
-    /// `drop` never runs under the lock.
+    /// Let go of each row whose last call ended after it was undeclared, when a call said one may
+    /// wait ([`Round::take_marked`]): a walk of each table whose calls the round ends takes them out
+    /// one at a time under the session's lock (`SessionTables::release_drained_subscriber` and its
+    /// kin) and drops each after it, so a C program's `drop` never runs under the lock.
     fn let_go_of_released(&self) {
-        while let Some(releasing) = self.samples.take_released() {
-            match releasing.handle() {
-                LetGo::Subscriber(handle) => {
-                    let row = {
-                        let guard = self.core.lock();
-                        let mut tables = tables_mut(&guard.0.registry);
-                        tables
-                            .release_subscriber(handle)
-                            .map(|row| row.into_callback())
-                    };
-                    drop(row);
-                }
-                #[cfg(feature = "liveliness")]
-                LetGo::LivelinessSubscriber(handle) => {
-                    let row = {
-                        let guard = self.core.lock();
-                        let mut tables = tables_mut(&guard.0.registry);
-                        tables
-                            .release_liveliness_subscriber(handle)
-                            .map(|row| row.into_callback())
-                    };
-                    drop(row);
-                }
-                #[cfg(feature = "queryable")]
-                LetGo::Queryable(handle) => {
-                    let row = {
-                        let guard = self.core.lock();
-                        let mut tables = tables_mut(&guard.0.registry);
-                        tables
-                            .release_queryable(handle)
-                            .map(|row| row.into_callback())
-                    };
-                    drop(row);
-                }
-            }
+        if !self.samples.take_marked() {
+            return;
+        }
+        #[cfg(test)]
+        self.takes.walks.fetch_add(1, Ordering::Relaxed);
+        self.let_go_of_drained(|tables, cursor| {
+            tables
+                .release_drained_subscriber(cursor)
+                .map(|row| row.into_callback())
+        });
+        #[cfg(feature = "liveliness")]
+        self.let_go_of_drained(|tables, cursor| {
+            tables
+                .release_drained_liveliness_subscriber(cursor)
+                .map(|row| row.into_callback())
+        });
+        #[cfg(feature = "queryable")]
+        self.let_go_of_drained(|tables, cursor| {
+            tables
+                .release_drained_queryable(cursor)
+                .map(|row| row.into_callback())
+        });
+    }
+
+    /// Walk one table with `take`, which takes out the next row at or after its cursor whose last
+    /// call ended: each row is taken under the session's lock, its drop counted as under way from
+    /// there, and dropped after the lock.
+    fn let_go_of_drained<R>(&self, mut take: impl FnMut(&mut CoopTables, &mut usize) -> Option<R>) {
+        let mut cursor = 0;
+        loop {
+            let taken = {
+                let guard = self.core.lock();
+                let mut tables = tables_mut(&guard.0.registry);
+                take(&mut tables, &mut cursor).map(|row| (row, self.samples.releasing()))
+            };
+            let Some((row, releasing)) = taken else {
+                break;
+            };
+            drop(row);
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
         }

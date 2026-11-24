@@ -318,13 +318,13 @@ impl Core {
         }
     }
 
-    /// The next live slot at or after `cursor`, the cursor moved past it.
+    /// The next slot at or after `cursor` whose state is `state`, the cursor moved past it.
     #[inline(never)]
-    fn next_live(meta: &[Meta], cursor: &mut usize) -> Option<(usize, u16)> {
+    fn next_in(meta: &[Meta], cursor: &mut usize, state: State) -> Option<(usize, u16)> {
         while let Some(slot) = meta.get(*cursor) {
             let at = *cursor;
             *cursor = at.saturating_add(1);
-            if slot.state == State::Live {
+            if slot.state == state {
                 return Some((at, slot.generation));
             }
         }
@@ -520,7 +520,19 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// The next live row at or after `cursor`, the cursor moved past it, so a caller can walk the
     /// table while it changes it.
     pub fn next_from(&self, cursor: &mut usize) -> Option<(Handle<K>, &T)> {
-        while let Some((at, generation)) = Core::next_live(&self.meta, cursor) {
+        self.next_in(cursor, State::Live)
+    }
+
+    /// The next retired row at or after `cursor`, the cursor moved past it: one removed while
+    /// pinned, which keeps its slot until its last pin is given back. What a walk that finds the
+    /// rows whose last call ended reads, so no list of them is kept beside the table.
+    pub fn next_retired_from(&self, cursor: &mut usize) -> Option<(Handle<K>, &T)> {
+        self.next_in(cursor, State::Retired)
+    }
+
+    /// The next row at or after `cursor` whose slot is in `state`, the cursor moved past it.
+    fn next_in(&self, cursor: &mut usize, state: State) -> Option<(Handle<K>, &T)> {
+        while let Some((at, generation)) = Core::next_in(&self.meta, cursor, state) {
             if let (Some(handle), Some(Some(row))) = (Handle::at(at, generation), self.rows.get(at))
             {
                 return Some((handle, row));

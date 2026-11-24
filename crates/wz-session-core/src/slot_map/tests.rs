@@ -153,6 +153,37 @@ fn a_cursor_walks_the_live_rows_while_the_table_changes() {
     assert!(map.is_empty());
 }
 
+/// A walk of the retired rows finds a row removed while pinned, and no live one; once its last pin
+/// is given back it is found no more. The CONTROL is the live walk, which never finds it.
+#[test]
+fn a_cursor_walks_the_retired_rows_alone() {
+    let mut map = Map::<4>::new();
+    let live = map.insert(1).unwrap();
+    let held = map.insert(2).unwrap();
+    let _pinned = map.pin(held).unwrap();
+    assert!(matches!(map.remove(held), Some(Removal::AfterCalls)));
+    let mut cursor = 0;
+    assert_eq!(map.next_retired_from(&mut cursor), Some((held, &2)));
+    assert_eq!(
+        map.next_retired_from(&mut cursor),
+        None,
+        "the live row is not"
+    );
+    let mut cursor = 0;
+    assert_eq!(
+        map.next_from(&mut cursor),
+        Some((live, &1)),
+        "CONTROL: the live walk"
+    );
+    assert_eq!(map.next_from(&mut cursor), None);
+    assert_eq!(map.release(held), Some(2));
+    assert_eq!(
+        map.next_retired_from(&mut 0),
+        None,
+        "given back, it is gone"
+    );
+}
+
 #[test]
 fn iter_mut_changes_the_live_rows_only() {
     let mut map = Map::<4>::new();

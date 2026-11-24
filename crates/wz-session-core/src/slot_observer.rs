@@ -2218,6 +2218,9 @@ mod tests {
         fn retire(&self) -> bool {
             true
         }
+        fn drained(&self) -> bool {
+            true
+        }
     }
 
     /// The callbacks of a table set whose queryables a context asks: boxed closures for the

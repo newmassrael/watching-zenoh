@@ -26,6 +26,9 @@ macro_rules! called_while_held {
             fn retire(&self) -> bool {
                 true
             }
+            fn drained(&self) -> bool {
+                true
+            }
         }
     )*};
 }
@@ -247,6 +250,84 @@ fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() 
     assert!(tables.release_subscriber(sub.handle).is_some());
     assert!(!tables.subscribers().holds_slot(sub.handle));
     assert!(tables.subscribers().is_empty());
+}
+
+/// A walk of the tables takes out each row undeclared while a call of it ran once its last call
+/// ended, each once, of every kind a call of which may outlive the tables' hold; a live row is
+/// never taken. The CONTROL is the walk while the calls still run, which takes nothing.
+#[test]
+fn a_walk_lets_go_of_the_rows_whose_last_call_ended() {
+    let mut tables = latched_tables();
+    let kept = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let gone = tables
+        .declare_subscriber("g", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    let qbl = tables
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), latched(3))
+        .unwrap();
+    let live = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), latched(4))
+        .unwrap();
+    let calls = (
+        tables.begin_subscriber(kept.handle).unwrap(),
+        tables.begin_subscriber(gone.handle).unwrap(),
+        tables.begin_queryable(qbl.handle).unwrap(),
+        tables.begin_liveliness_subscriber(live.handle).unwrap(),
+    );
+    assert!(tables
+        .undeclare_subscriber(gone.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(tables
+        .undeclare_queryable(qbl.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(tables
+        .undeclare_liveliness_subscriber(live.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(
+        tables.release_drained_subscriber(&mut 0).is_none(),
+        "CONTROL: its call still runs"
+    );
+    assert!(tables.release_drained_queryable(&mut 0).is_none());
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_none());
+    assert!(
+        !ended::<CClosure<u32>>(calls.0),
+        "a live row's call marks nothing"
+    );
+    assert!(ended::<CClosure<u32>>(calls.1));
+    assert!(ended::<CClosure<u32>>(calls.2));
+    assert!(ended::<CClosure<u32>>(calls.3));
+    let mut cursor = 0;
+    assert!(tables.release_drained_subscriber(&mut cursor).is_some());
+    assert!(
+        tables.release_drained_subscriber(&mut cursor).is_none(),
+        "each once"
+    );
+    assert!(!tables.subscribers().holds_slot(gone.handle));
+    assert!(
+        tables.subscribers().contains(kept.handle),
+        "the live row is not taken"
+    );
+    assert!(tables.release_drained_subscriber(&mut 0).is_none());
+    assert!(tables.release_drained_queryable(&mut 0).is_some());
+    assert!(!tables.queryables().holds_slot(qbl.handle));
+    assert!(tables.release_drained_queryable(&mut 0).is_none());
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_some());
+    assert!(!tables.liveliness_subscribers().holds_slot(live.handle));
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_none());
 }
 
 #[test]
@@ -1225,6 +1306,9 @@ impl RowCallback for Counted {
     }
     fn retire(&self) -> bool {
         self.1.retire()
+    }
+    fn drained(&self) -> bool {
+        self.1.drained()
     }
 }
 

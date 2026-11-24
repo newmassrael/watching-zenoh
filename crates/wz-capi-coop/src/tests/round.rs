@@ -26,7 +26,7 @@ use wz_session_core::session_tables::SubscriberHandle;
 use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use crate::engine::{SubscriberCall, SubscriberRow};
-use crate::round::{LetGo, ReadRoom, Round, RoundCounts, RoundGate};
+use crate::round::{ReadRoom, Round, RoundCounts, RoundGate};
 #[cfg(feature = "query")]
 use {
     crate::engine::LegId,
@@ -75,6 +75,12 @@ impl Row {
     /// Undeclare it: whether no call of it runs.
     fn retire(&self) -> bool {
         self.row.retire()
+    }
+
+    /// Whether it is undeclared and no call of it runs: the mark the session's walk of its tables
+    /// lets it go by.
+    fn drained(&self) -> bool {
+        self.row.drained()
     }
 }
 
@@ -666,12 +672,12 @@ fn a_round_let_go_of_ends_the_calls_its_records_owe() {
     unsafe { round.seal() };
     assert!(!first.retire(), "CONTROL: the waiting record owes a call");
     unsafe { round.let_go() };
-    assert_eq!(
-        round.take_released().map(|row| row.handle()),
-        Some(LetGo::Subscriber(first.handle)),
+    assert!(
+        round.take_marked(),
         "the undeclared row's last call ended with the round's tables"
     );
-    assert_eq!(round.take_released().map(|row| row.handle()), None);
+    assert!(first.drained(), "and its latch is the mark a walk reads");
+    assert!(!round.take_marked(), "asking clears the mark");
     assert!(second.retire(), "the declared row's call ended too");
     assert!(!round.deliver(), "nothing is left to hand");
     assert!(seen.lock().unwrap().is_empty(), "and nothing was handed");
@@ -729,19 +735,33 @@ fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(!gone.retire(), "a call of it waits");
-    assert_eq!(
-        round.take_released().map(|row| row.handle()),
-        None,
-        "not before the call ends"
-    );
+    assert!(!round.take_marked(), "not before the call ends");
+    assert!(!gone.drained());
     assert!(round.deliver());
     let tags: Vec<u8> = seen.lock().unwrap().iter().map(|(t, _, _)| *t).collect();
     assert_eq!(tags, [2], "CONTROL: the declared row alone is handed it");
-    assert_eq!(
-        round.take_released().map(|row| row.handle()),
-        Some(LetGo::Subscriber(gone.handle))
+    assert!(round.take_marked(), "the delivery ended its last call");
+    assert!(gone.drained());
+    assert!(!kept.drained(), "the declared row is no walk's to take");
+    assert!(!round.take_marked());
+}
+
+/// A row the session took out of its tables is a drop under way until what the round handed for
+/// it is dropped, which an undeclaration that waits for its row reads; each drop is counted on its
+/// own. The CONTROL is the round before any was taken.
+#[test]
+fn a_rows_drop_is_under_way_until_its_count_is_given_back() {
+    let round = round(4);
+    assert!(round.released_settled(), "CONTROL: no drop under way");
+    let (one, two) = (round.releasing(), round.releasing());
+    assert!(!round.released_settled());
+    drop(one);
+    assert!(
+        !round.released_settled(),
+        "the other drop is still under way"
     );
-    assert_eq!(round.take_released().map(|row| row.handle()), None);
+    drop(two);
+    assert!(round.released_settled());
 }
 
 /// A call the round refuses (sealed, or no room) is ended at once, so the row it was begun on is
@@ -762,11 +782,7 @@ fn a_refused_call_is_ended_at_once() {
     unsafe { round.offer_sample(refused.call(), &filled(4, 2), true) };
     assert_eq!(round.counts().dropped, 1);
     assert!(refused.retire(), "the refused call ended");
-    assert_eq!(
-        round.take_released().map(|row| row.handle()),
-        None,
-        "and let nothing wait"
-    );
+    assert!(!round.take_marked(), "and let nothing wait");
     assert!(!held.retire(), "CONTROL: the held call still runs");
 }
 
@@ -981,11 +997,7 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
         round.end_call(call);
     }
     assert!(third.retire() && first.retire(), "every call ended");
-    assert_eq!(
-        round.take_released().map(|row| row.handle()),
-        None,
-        "and no row waits"
-    );
+    assert!(!round.take_marked(), "and no row waits");
     unsafe { round.seal() };
     assert!(!round.deliver(), "nothing was held");
     let held = noting(4, &seen);

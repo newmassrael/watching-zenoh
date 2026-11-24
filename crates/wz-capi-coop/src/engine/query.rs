@@ -195,6 +195,10 @@ impl RowCallback for QueryableRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A call of a queryable's callback the session began under its lock as a query arrived, and the
