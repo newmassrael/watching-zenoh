@@ -45,22 +45,23 @@ pub fn zint_len(v: u64) -> usize {
 
 /// Write the VLE encoding of `v` into `out`, returning the byte count.
 ///
-/// `out` must be at least [`VLE_LEN`] long; every caller in this workspace
-/// stacks exactly that.
+/// `out` must be at least [`VLE_LEN`] long.
 pub fn encode_zint(out: &mut [u8], v: u64) -> usize {
     let mut lv = v;
     let mut len = 0usize;
-    // While bits above the low 7 remain, emit a continuation byte.
-    while lv >> 7 != 0 {
-        out[len] = (lv as u8) | 0x80; // the flag overwrites the cast's eighth bit
+    loop {
+        // The value and the ninth rung end the encoding in ONE condition: a loop that also left
+        // on the count alone (or on an index past a nine-byte buffer) has a constant trip count,
+        // and the optimizer unrolls it over every rung in each body that holds it.
+        let more = (lv > 0x7f) & (len < VLE_LEN - 1);
+        // The ninth byte keeps all eight bits and never takes the flag.
+        out[len] = (lv as u8) | (u8::from(more) << 7);
         len += 1;
+        if !more {
+            return len;
+        }
         lv >>= 7;
     }
-    if len != VLE_LEN {
-        out[len] = (lv & 0xff) as u8;
-        len += 1;
-    }
-    len
 }
 
 /// Read a VLE value from `input`, returning `(value, bytes_consumed)` or `None`
@@ -117,17 +118,46 @@ mod tests {
     /// by a continuation byte that toggles the flag instead of setting it.
     #[test]
     fn zint_writes_the_bytes_pico_writes() {
-        let cases: [(u64, &[u8]); 5] = [
+        let cases: [(u64, &[u8]); 9] = [
+            (0, &[0x00]),
             (0x7f, &[0x7f]),
             (0x80, &[0x80, 0x01]),
             (0xff, &[0xff, 0x01]),
             (300, &[0xac, 0x02]),
+            (
+                (1 << 56) - 1,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            ),
+            (
+                1 << 56,
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+            ),
+            (
+                1 << 63,
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80],
+            ),
             (u64::MAX, &[0xff; VLE_LEN]),
         ];
         for (v, want) in cases {
             let mut buf = [0u8; VLE_LEN];
             let n = encode_zint(&mut buf, v);
             assert_eq!(&buf[..n], want, "the encoding of {v:#x}");
+        }
+    }
+
+    /// An encoding is written into the first bytes of a buffer longer than it, and the bytes
+    /// after it are left as they were: no tenth byte, even when the ninth has its high bit set.
+    /// Turned red by an encoder whose ninth rung keeps the continuation flag.
+    #[test]
+    fn an_encoding_writes_no_byte_past_its_length() {
+        for v in [0, 0x7f, 0x80, (1 << 56) - 1, 1 << 56, 1 << 63, u64::MAX] {
+            let mut buf = [0xAAu8; VLE_LEN + 1];
+            let n = encode_zint(&mut buf, v);
+            assert_eq!(n, zint_len(v), "length of {v:#x}");
+            assert!(
+                buf[n..].iter().all(|&b| b == 0xAA),
+                "a byte past the encoding of {v:#x} was written"
+            );
         }
     }
 
