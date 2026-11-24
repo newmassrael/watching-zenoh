@@ -770,6 +770,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/foreign_version.rs` | S10 | |
 | `crates/wz-session-core/src/fragment_pacing.rs` | S1 | |
 | `crates/wz-session-core/src/frame_encode.rs` | S1 | |
+| `crates/wz-session-core/src/get_plane.rs` | S2 | |
+| `crates/wz-session-core/src/get_plane/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/group_membership.rs` | S1 | |
 | `crates/wz-session-core/src/group_view.rs` | S1 | |
 | `crates/wz-session-core/src/handshake_encode.rs` | S1 | |

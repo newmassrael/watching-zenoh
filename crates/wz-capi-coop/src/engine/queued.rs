@@ -1,90 +1,19 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A queue the deliveries drain, behind its lock, with whether it holds anything read without the
-//! lock. Every delivery looks at each queue (the matching changes, the queries, the ends of the
-//! gets) and almost always finds it empty: the word answers that with no lock taken, and the lock
-//! is taken only for what is there.
+//! The changes of the session's matching statuses, queued for the deliveries behind the session
+//! core's queue ([`Queued`]): whether it holds anything is read without its lock, so a delivery
+//! that finds nothing, which almost every one does, takes no lock for it.
 
-use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
-
-use wz_capi_port::os::{Mutex, MutexGuard};
 use wz_capi_port::MatchId;
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
+use wz_session_core::plane_lock::{Pending, Queued};
 
-/// What a queue tells its word: whether it holds anything.
-pub(super) trait Pending {
-    fn is_pending(&self) -> bool;
-}
+use super::CoopLocks;
 
-/// A queue behind its lock, and its word ([`Self::is_pending`]).
-pub(super) struct Queued<T: Pending> {
-    queue: Mutex<T>,
-    /// Whether the queue holds anything, as its last holder left it.
-    pending: AtomicBool,
-}
-
-impl<T: Pending> Queued<T> {
-    pub(super) fn new(queue: T) -> Self {
-        let pending = queue.is_pending();
-        Self {
-            queue: Mutex::new(queue),
-            pending: AtomicBool::new(pending),
-        }
-    }
-
-    /// The queue, held until the guard drops, which leaves its word as the queue is then.
-    pub(super) fn lock(&self) -> QueuedGuard<'_, T> {
-        QueuedGuard {
-            queue: self.queue.lock(),
-            pending: &self.pending,
-        }
-    }
-
-    /// Whether the queue holds anything, read without its lock: what its last holder left. A
-    /// reader that finds it clear just before another thread queues something misses it as one
-    /// that took the lock just before would have; what a thread queues is read by that thread's
-    /// own delivery after it.
-    pub(super) fn is_pending(&self) -> bool {
-        self.pending.load(Ordering::Acquire)
-    }
-}
-
-/// A [`Queued`] held.
-pub(super) struct QueuedGuard<'a, T: Pending> {
-    queue: MutexGuard<'a, T>,
-    pending: &'a AtomicBool,
-}
-
-impl<T: Pending> Deref for QueuedGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.queue
-    }
-}
-
-impl<T: Pending> DerefMut for QueuedGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.queue
-    }
-}
-
-impl<T: Pending> Drop for QueuedGuard<'_, T> {
-    fn drop(&mut self) {
-        // The lock is let go after this body, when the fields are dropped.
-        self.pending
-            .store(self.queue.is_pending(), Ordering::Release);
-    }
-}
-
-impl<T> Pending for alloc::collections::VecDeque<T> {
-    fn is_pending(&self) -> bool {
-        !self.is_empty()
-    }
-}
+/// The matching changes behind their lock ([`MatchFlips`]).
+pub(super) type MatchQueue = Queued<CoopLocks, MatchFlips>;
 
 /// The changes of the session's matching statuses its lock found, handed to their listeners after
 /// it, in the order they were found. A listener holds one row at most: a change and the change
@@ -168,22 +97,18 @@ impl MatchFlips {
     }
 }
 
-impl Queued<MatchFlips> {
-    /// This thread's turn to hand the matching changes out, or `None` when none is owed or
-    /// another thread's turn is running, which hands out what this one queued too.
-    pub(super) fn begin_handing(&self) -> Option<HandingTurn<'_>> {
-        (self.is_pending() && self.lock().begin()).then_some(HandingTurn {
-            queue: self,
-            over: false,
-        })
-    }
+/// This thread's turn to hand the matching changes in `queue` out, or `None` when none is owed or
+/// another thread's turn is running, which hands out what this one queued too.
+pub(super) fn begin_handing(queue: &MatchQueue) -> Option<HandingTurn<'_>> {
+    (queue.is_pending() && queue.with(MatchFlips::begin))
+        .then_some(HandingTurn { queue, over: false })
 }
 
-/// One thread's turn of handing the matching changes out ([`Queued::begin_handing`]): it ends
+/// One thread's turn of handing the matching changes out ([`begin_handing`]): it ends
 /// when no change is left, or, should the thread unwind out of a callback, when it is dropped, so
 /// the next thread that queues a change hands it.
 pub(super) struct HandingTurn<'a> {
-    queue: &'a Queued<MatchFlips>,
+    queue: &'a MatchQueue,
     /// Whether the turn ended with no change left ([`MatchFlips::next_or_end`]).
     over: bool,
 }
@@ -192,7 +117,7 @@ impl HandingTurn<'_> {
     /// The change to hand next, taken under the queue's lock alone and released before the
     /// caller hands it; `None` ends the turn.
     pub(super) fn next(&mut self) -> Option<(MatchId, bool)> {
-        let next = self.queue.lock().next_or_end();
+        let next = self.queue.with(MatchFlips::next_or_end);
         self.over = next.is_none();
         next
     }
@@ -202,7 +127,7 @@ impl Drop for HandingTurn<'_> {
     fn drop(&mut self) {
         // A turn that ended itself is another thread's to begin again, and is not ended twice.
         if !self.over {
-            self.queue.lock().end();
+            self.queue.with(MatchFlips::end);
         }
     }
 }
@@ -216,24 +141,6 @@ impl Pending for MatchFlips {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::collections::VecDeque;
-
-    /// The word follows the queue as each holder leaves it: set by what is queued, cleared once the
-    /// last of it is taken, and read with no lock.
-    #[test]
-    fn the_word_says_what_the_last_holder_left() {
-        let queue = Queued::new(VecDeque::<u8>::new());
-        assert!(!queue.is_pending(), "a new queue holds nothing");
-        queue.lock().push_back(1);
-        queue.lock().push_back(2);
-        assert!(queue.is_pending());
-        assert_eq!(queue.lock().pop_front(), Some(1));
-        assert!(queue.is_pending(), "one is left");
-        assert_eq!(queue.lock().pop_front(), Some(2));
-        assert!(!queue.is_pending(), "the last was taken");
-        assert_eq!(queue.lock().pop_front(), None);
-        assert!(!queue.is_pending());
-    }
 
     /// The changes of matching statuses are handed in the order they were found; a change and the
     /// change back before the first was handed leave the listener where it stood and are handed as
