@@ -4104,7 +4104,7 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> MatchingSink {
         let ordered = Ordered::new(callback, notifier);
-        Arc::new(move |matching| ordered.deliver(MatchingStatus { matching }))
+        MatchingSink::shared(move |matching| ordered.deliver(MatchingStatus { matching }))
     }
 
     /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a

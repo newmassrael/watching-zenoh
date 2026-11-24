@@ -91,15 +91,39 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
 /// back before the first was handed leave the listener where it stood, so the second takes the
 /// first's row away rather than a row of its own, and the table needs a row for each listener the
 /// build admits and no more.
+///
+/// One thread hands them out at a time ([`Self::begin`]): a listener's callback is taken out of its
+/// row for its call, and only the thread that took it puts it back, so two calls of one callback
+/// never overlap and a change is never handed to a row whose callback is out.
 pub(crate) struct MatchFlips {
     flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
+    /// Whether a thread is handing the changes out.
+    handing: bool,
 }
 
 impl MatchFlips {
     pub(crate) fn new() -> Self {
         Self {
             flips: BoundedVec::new_static(),
+            handing: false,
         }
+    }
+
+    /// Whether this caller hands the changes out: `false` when another thread is, which hands
+    /// out what this one queued too ([`Self::next_or_end`]).
+    pub(crate) fn begin(&mut self) -> bool {
+        !core::mem::replace(&mut self.handing, true)
+    }
+
+    /// The change found first, for the thread that began ([`Self::begin`]); when none is owed,
+    /// that thread's turn ends here, under the same lock a change is queued under, so no change
+    /// queued meanwhile is left with no thread to hand it.
+    pub(crate) fn next_or_end(&mut self) -> Option<(MatchId, bool)> {
+        let next = self.next();
+        if next.is_none() {
+            self.handing = false;
+        }
+        next
     }
 
     /// The status of `listener` changed to `matching`. A change back takes the waiting row away;

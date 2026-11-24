@@ -1808,7 +1808,7 @@ fn deliver_matching_flip(
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
             let _guard = MatchingDeliveryGuard::enter();
-            sink(now);
+            sink.call(now);
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -7727,7 +7727,8 @@ mod matching_aggregate_tests {
             .expect("a session with ids left declares");
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
-        let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
+        let sink: MatchingSink =
+            MatchingSink::shared(move |matching| log.lock().unwrap().push(matching));
         shared.declare_plane_matching_listener(
             FilterPlane::Subscribers,
             "wz/local/a".to_owned(),
@@ -8436,7 +8437,7 @@ mod matching_aggregate_tests {
     fn the_verdict_is_the_or_across_faces() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8461,7 +8462,7 @@ mod matching_aggregate_tests {
     fn a_purge_after_an_ordinary_false_is_silent() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
@@ -8493,7 +8494,7 @@ mod matching_aggregate_tests {
             let inflight = inflight.clone();
             let overlaps = overlaps.clone();
             let log = observed.clone();
-            Arc::new(move |now| {
+            MatchingSink::shared(move |now| {
                 if inflight.fetch_add(1, Ordering::SeqCst) != 0 {
                     overlaps.fetch_add(1, Ordering::SeqCst);
                 }
