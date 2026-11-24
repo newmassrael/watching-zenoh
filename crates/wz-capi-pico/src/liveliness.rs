@@ -553,15 +553,16 @@ pub unsafe extern "C" fn z_liveliness_get(
             return Z_ERR_NULL;
         }
         // Adopt the closure FIRST and null the source (consume-on-all-paths).
-        let closure = crate::get::adopt_reply_closure(callback);
+        let mut closure = crate::get::adopt_reply_closure(callback);
 
         // A closed session issues no get; the closure adopted above runs its drop.
         let handle = match crate::session::open_session_handle(zs) {
             Ok(handle) => handle,
             Err(code) => return code,
         };
-        // The session's close waits for this get's closure to finish and be dropped.
-        handle.keep_background(closure.release_latch());
+        // The session's close waits for this get's closure to finish and be dropped, and the place
+        // of its handle stands until then.
+        crate::session::count_in_session(zs, &mut closure);
         let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
             Ok(k) => k,
             Err(code) => return code,
@@ -594,7 +595,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // does (`src/net/liveliness.c:341` registers it before `_z_send_n_msg`), an already
         // cancelled token answering `Z_ERR_CANCELLED` with no Interest sent.
         let engine = engine_of(handle);
-        crate::get::fan_get(closure, gate, token, |fan, leg| {
+        crate::get::fan_get(Arc::new(closure), gate, token, |fan, leg| {
             engine.liveliness_get_on_wire(
                 &asked.query_keyexpr,
                 &WireKey::literal(),

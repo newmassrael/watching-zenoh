@@ -329,6 +329,14 @@ pub trait TextBacking: Sized + Clone + core::ops::Deref<Target = str> + AsRef<st
 pub trait KeyBacking: Clone + fmt::Debug + Deref<Target = str> + AsRef<str> {
     /// The key's text.
     fn as_str(&self) -> &str;
+
+    /// The key of the session's key arena this is, when the policy keeps its keys there: what a
+    /// holder that reads the key past the call may hold a count of
+    /// ([`KeyRef::hold_apart`](crate::key_arena::KeyRef::hold_apart)). `None`, the provided
+    /// answer, for a key that is its own text.
+    fn held(&self) -> Option<&crate::key_arena::KeyRef> {
+        None
+    }
 }
 
 /// Why a table kept no key ([`KeyMaker::key`]). Nothing was taken.

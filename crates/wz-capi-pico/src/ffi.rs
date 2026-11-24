@@ -56,7 +56,93 @@ pub(crate) struct CClosure<C> {
     pub(crate) context: SendPtr,
     pub(crate) call: C,
     pub(crate) drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
-    released: Arc<ReleaseLatch>,
+    released: Released,
+}
+
+/// What a closure tells when its `drop(context)` has run: a latch of its own, which an owner keeps
+/// to wait on, or the count of open closures of the owner it was adopted under
+/// ([`OpenClosures`]), which takes no memory of its own.
+enum Released {
+    /// A latch of the closure's own ([`CClosure::new`]).
+    Latch(Arc<ReleaseLatch>),
+    /// The owner it is counted in, none while it is counted in none
+    /// ([`CClosure::uncounted`], [`CClosure::count_in`]). Its closures are the gets' and the
+    /// queryables', so it exists where they do.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    Counted(Option<HeldIn>),
+}
+
+/// The owner a closure is counted in: the count of the closures it answers for, which lies in the
+/// owner's place, and how that place is given back. The place goes back once its owner has let go
+/// of it ([`OpenClosures::retire`]) and no closure counted in it is held, by whichever of the two
+/// comes last, so a closure let go of after its owner (an undeclare or a close made from inside the
+/// closure's own callback, which cannot wait for it) still finds its count, and nothing is
+/// allocated for any closure.
+#[cfg(any(feature = "query", feature = "queryable"))]
+#[derive(Clone, Copy)]
+pub(crate) struct CountIn {
+    open: core::ptr::NonNull<OpenClosures>,
+    place: core::ptr::NonNull<core::ffi::c_void>,
+    give_back: unsafe fn(core::ptr::NonNull<core::ffi::c_void>),
+}
+
+// SAFETY: the count it names is a lock, and the place is given back once, by the one thread the
+// count tells it is last (`CountIn::new`); a closure is dropped on whatever thread lets go of it.
+#[cfg(any(feature = "query", feature = "queryable"))]
+unsafe impl Send for CountIn {}
+// SAFETY: as `Send`: a shared `CountIn` reads nothing but through the count's lock.
+#[cfg(any(feature = "query", feature = "queryable"))]
+unsafe impl Sync for CountIn {}
+
+#[cfg(any(feature = "query", feature = "queryable"))]
+impl CountIn {
+    /// The owner whose closures `open` counts, its place `place`, given back by
+    /// `give_back(place)`.
+    ///
+    /// # Safety
+    /// `open` lies in `place` and stands until `give_back(place)` runs. The owner calls
+    /// [`OpenClosures::retire`] once and, when it answers `true`, gives the place back itself;
+    /// otherwise the place is the last closure's to give back, and nothing else gives it back.
+    pub(crate) unsafe fn new(
+        open: &OpenClosures,
+        place: core::ptr::NonNull<core::ffi::c_void>,
+        give_back: unsafe fn(core::ptr::NonNull<core::ffi::c_void>),
+    ) -> Self {
+        Self {
+            open: core::ptr::NonNull::from(open),
+            place,
+            give_back,
+        }
+    }
+
+    /// The count, which stands while a closure counted in it is held (`Self::new`).
+    fn open(&self) -> &OpenClosures {
+        // SAFETY: the count stands until the place is given back, which waits for this closure.
+        unsafe { self.open.as_ref() }
+    }
+
+    /// Hold one open in this owner until the hold is dropped: a closure's, or a background
+    /// entity's place, which the owner's close waits for as it waits for a closure.
+    pub(crate) fn hold(self) -> HeldIn {
+        self.open().open_one();
+        HeldIn(self)
+    }
+}
+
+/// One held open in an owner's count ([`CountIn::hold`]): dropped, it tells the count, and the
+/// last one let go of after the owner let go of its place gives the place back.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) struct HeldIn(CountIn);
+
+#[cfg(any(feature = "query", feature = "queryable"))]
+impl Drop for HeldIn {
+    fn drop(&mut self) {
+        if self.0.open().close_one() {
+            // SAFETY: the owner let go of its place and this was the last hold counted in it, so
+            // the place is this drop's to give back, once (`CountIn::new`).
+            unsafe { (self.0.give_back)(self.0.place) };
+        }
+    }
 }
 
 impl<C> CClosure<C> {
@@ -72,15 +158,52 @@ impl<C> CClosure<C> {
             context: SendPtr(context),
             call,
             drop,
-            released: Arc::new(ReleaseLatch::default()),
+            released: Released::Latch(Arc::new(ReleaseLatch::default())),
+        }
+    }
+
+    /// Adopt a moved C closure's fields, as [`Self::new`] does, with no latch: counted in no owner
+    /// until [`Self::count_in`], so a closure dropped before it (a call refused before its session
+    /// is read) runs its `drop(context)` and tells nobody.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    pub(crate) fn uncounted(
+        context: *mut core::ffi::c_void,
+        call: C,
+        drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+    ) -> Self {
+        Self {
+            context: SendPtr(context),
+            call,
+            drop,
+            released: Released::Counted(None),
+        }
+    }
+
+    /// Count this closure in `owner` until its `drop(context)` has run, so the owner waits for it
+    /// ([`OpenClosures::wait_none`]) and its place stands until then. A closure made with a latch
+    /// of its own, or counted already, is left as it is.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    pub(crate) fn count_in(&mut self, owner: CountIn) {
+        if let Released::Counted(counted @ None) = &mut self.released {
+            *counted = Some(owner.hold());
         }
     }
 
     /// The latch that opens once this closure's `drop(context)` has run. An entity that owns the
     /// closure takes it before the closure moves into the engine, and waits on it after the
-    /// engine let go, which is how an undeclare returns only when the callback is finished.
+    /// engine let go, which is how an undeclare returns only when the callback is finished. A
+    /// closure an owner counts ([`Self::count_in`]) is waited on through the count, and its latch
+    /// is open from the start.
     pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
-        self.released.clone()
+        match &self.released {
+            Released::Latch(latch) => latch.clone(),
+            #[cfg(any(feature = "query", feature = "queryable"))]
+            Released::Counted(_) => {
+                let latch = Arc::new(ReleaseLatch::default());
+                latch.open();
+                latch
+            }
+        }
     }
 }
 
@@ -94,7 +217,80 @@ impl<C> Drop for CClosure<C> {
                 dropfn(ctx);
             });
         }
-        self.released.open();
+        match &mut self.released {
+            Released::Latch(latch) => latch.open(),
+            // The hold is let go of after the drop above has run, and may give back the place the
+            // count lies in.
+            #[cfg(any(feature = "query", feature = "queryable"))]
+            Released::Counted(held) => drop(held.take()),
+        }
+    }
+}
+
+/// How many closures an owner answers for are still held: counted up as each is adopted under the
+/// owner ([`CClosure::count_in`]) and down as each runs its `drop(context)`, so the owner waits
+/// until none is open, as zenoh-pico's close waits for the callbacks in flight
+/// (`_z_sync_group_wait`), with no latch and no allocation for each closure. It lies inline in
+/// the owner's place, which stands until the owner has let go of it and no closure is held
+/// (`CountIn`), so a closure let go of after its owner stopped waiting (a close made from
+/// inside a callback) still has its count to tell.
+#[derive(Default)]
+pub(crate) struct OpenClosures {
+    state: Mutex<Open>,
+    none_open: Condvar,
+}
+
+/// The closures an owner's count holds, and whether the owner has let go of its place.
+#[derive(Default)]
+struct Open {
+    held: usize,
+    retired: bool,
+}
+
+impl OpenClosures {
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    fn open_one(&self) {
+        let mut state = self.state.lock();
+        debug_assert!(
+            !state.retired,
+            "a closure is counted in an owner still held"
+        );
+        state.held = state.held.saturating_add(1);
+    }
+
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    /// One closure let go of: `true` when it was the last one held and the owner has let go of
+    /// its place, which this closure then gives back.
+    fn close_one(&self) -> bool {
+        let mut state = self.state.lock();
+        state.held = state.held.saturating_sub(1);
+        if state.held != 0 {
+            return false;
+        }
+        self.none_open.notify_all();
+        state.retired
+    }
+
+    /// The owner lets go of its place: `true` when no closure counted here is held, so the owner
+    /// gives the place back now; otherwise the last closure let go of gives it back.
+    pub(crate) fn retire(&self) -> bool {
+        let mut state = self.state.lock();
+        debug_assert!(!state.retired, "an owner lets go of its place once");
+        state.retired = true;
+        state.held == 0
+    }
+
+    /// Block until no closure counted here is held, unless this thread is inside one of the
+    /// program's callbacks: that callback holds a closure, so waiting would wait for itself, as
+    /// [`ReleaseLatch::wait`] says.
+    pub(crate) fn wait_none(&self) {
+        if InCallback::here() {
+            return;
+        }
+        let mut state = self.state.lock();
+        while state.held != 0 {
+            state = self.none_open.wait(state);
+        }
     }
 }
 
@@ -310,5 +506,142 @@ mod tests {
         assert!(callback_table::here(), "the outer callback still runs");
         drop(outer);
         assert!(!callback_table::here());
+    }
+}
+
+#[cfg(all(test, any(feature = "query", feature = "queryable")))]
+mod closure_tests {
+    //! A closure counted in an owner is open there from its count to its drop, and the owner's
+    //! place goes back with the last of the owner and its closures.
+    use super::*;
+    use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The C drop the closures of these tests run: counts how often it ran.
+    unsafe extern "C" fn counted_drop(context: *mut core::ffi::c_void) {
+        // SAFETY: each test hands the address of its own counter, which outlives the closure.
+        unsafe { (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst) };
+    }
+
+    type Closure = CClosure<Option<unsafe extern "C" fn()>>;
+
+    fn closure(dropped: &AtomicUsize) -> Closure {
+        Closure::uncounted(
+            core::ptr::from_ref(dropped).cast_mut().cast(),
+            None,
+            Some(counted_drop),
+        )
+    }
+
+    /// An owner's place: its count, and how often the place was given back.
+    #[derive(Default)]
+    struct Owner {
+        open: OpenClosures,
+        given_back: AtomicUsize,
+    }
+
+    /// Give an [`Owner`]'s place back: count it.
+    unsafe fn give_back_owner(place: NonNull<core::ffi::c_void>) {
+        // SAFETY: every place of these tests is an `Owner` that outlives its closures.
+        unsafe { place.cast::<Owner>().as_ref() }
+            .given_back
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn owner_of(owner: &Owner) -> CountIn {
+        // SAFETY: the owner outlives every closure of the test, and no test gives its place back
+        // other than as the count tells.
+        unsafe { CountIn::new(&owner.open, NonNull::from(owner).cast(), give_back_owner) }
+    }
+
+    fn held(owner: &Owner) -> usize {
+        owner.open.state.lock().held
+    }
+
+    /// An owner's count is open while a closure counted in it is held and none once its drop ran;
+    /// a closure counted twice counts once, and one counted in no owner tells none.
+    #[test]
+    fn a_counted_closure_is_open_until_its_drop_ran() {
+        let dropped = AtomicUsize::new(0);
+        let owner = Owner::default();
+        let mut first = closure(&dropped);
+        first.count_in(owner_of(&owner));
+        first.count_in(owner_of(&owner));
+        let mut second = closure(&dropped);
+        second.count_in(owner_of(&owner));
+        assert_eq!(held(&owner), 2, "each closure counts once");
+        drop(closure(&dropped));
+        assert_eq!(held(&owner), 2, "a closure counted nowhere tells no owner");
+        drop(first);
+        drop(second);
+        assert_eq!(held(&owner), 0);
+        owner.open.wait_none();
+        assert_eq!(dropped.load(Ordering::SeqCst), 3, "every drop ran");
+        assert_eq!(
+            owner.given_back.load(Ordering::SeqCst),
+            0,
+            "an owner still held keeps its place"
+        );
+    }
+
+    /// An owner that lets go of its place while closures are held leaves the place to the last of
+    /// them, which gives it back once.
+    #[test]
+    fn the_last_closure_gives_back_the_place_its_owner_let_go_of() {
+        let dropped = AtomicUsize::new(0);
+        let owner = Owner::default();
+        let mut first = closure(&dropped);
+        first.count_in(owner_of(&owner));
+        let mut second = closure(&dropped);
+        second.count_in(owner_of(&owner));
+        assert!(!owner.open.retire(), "two closures are held");
+        drop(first);
+        assert_eq!(owner.given_back.load(Ordering::SeqCst), 0, "one still held");
+        drop(second);
+        assert_eq!(
+            owner.given_back.load(Ordering::SeqCst),
+            1,
+            "the last closure gave the place back"
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    }
+
+    /// An owner that lets go of its place with no closure held gives it back itself: no closure
+    /// let go of before does.
+    #[test]
+    fn an_owner_with_no_closure_held_gives_its_place_back_itself() {
+        let dropped = AtomicUsize::new(0);
+        let owner = Owner::default();
+        let mut only = closure(&dropped);
+        only.count_in(owner_of(&owner));
+        drop(only);
+        assert!(owner.open.retire(), "none is held");
+        assert_eq!(
+            owner.given_back.load(Ordering::SeqCst),
+            0,
+            "the closure, let go of before its owner, gave nothing back"
+        );
+    }
+
+    /// A wait returns once the last closure counted is let go of on another thread.
+    #[test]
+    fn a_wait_returns_when_the_last_closure_goes() {
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        let owner = std::sync::Arc::new(Owner::default());
+        let mut held_closure = closure(&DROPPED);
+        held_closure.count_in(owner_of(&owner));
+        let kept = std::sync::Arc::clone(&owner);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(held_closure);
+            drop(kept);
+        });
+        owner.open.wait_none();
+        assert_eq!(
+            DROPPED.load(Ordering::SeqCst),
+            1,
+            "the wait outlasted the drop"
+        );
+        release.join().expect("the releasing thread ends");
     }
 }

@@ -56,6 +56,8 @@ use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::{
     KeyexprHandle, RowCallbacks, SessionTables, SubscriberHandle,
@@ -148,7 +150,7 @@ use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
-    query::{CoopHolder, Onward, QueryPlane, QueryableCall, QueryableRow},
+    query::{CoopHolder, Onward, QueryPlane, QueryableRow},
     wz_capi_port::{QblId, QueryableSink},
     wz_session_core::query::QueryResponder,
     wz_session_core::query_sink::ReplyError,
@@ -163,6 +165,8 @@ use wz_session_core::reply_stage::ReplyStage;
 
 #[cfg(feature = "queryable")]
 mod query;
+#[cfg(feature = "queryable")]
+pub(crate) use query::QueryableCall;
 
 #[cfg(feature = "group")]
 mod group;
@@ -241,7 +245,7 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
-pub(crate) use get::{Ended, LegSink};
+pub(crate) use get::{Ended, LegHold, LegSink};
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
@@ -431,6 +435,7 @@ pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
 /// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
 /// handed can put in it (`round::holding_a_read`).
+#[cfg(not(feature = "rx-lent-only"))]
 pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     crate::round::holding_a_read::<
         { caps::PICO_UNICAST_BATCH_BYTES },
@@ -439,6 +444,14 @@ pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
         { caps::MAX_SUBSCRIPTIONS },
         { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >(config.limits)
+}
+
+/// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
+/// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, in a
+/// build that keeps no delivery area to lengthen (`rx-lent-only`).
+#[cfg(feature = "rx-lent-only")]
+pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
+    config.limits
 }
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
@@ -668,9 +681,9 @@ struct OpenDecided {
 }
 
 /// What the open lent the engine apart from the session's state ([`CoopEngine::core_of`]): the
-/// place of the ABI's handle, the places of the publishes kept for the session's other faces, which
-/// a publish reaches with the session held by another, and the ring of the advanced publishers'
-/// caches, which the engine locks apart from the state.
+/// place of the ABI's handle, the places of the publishes kept for the session's other faces,
+/// which a publish reaches with the session held by another, and the ring of the advanced
+/// publishers' caches, which the engine locks apart from the state.
 struct LentApart {
     handle_place: Option<HandlePlace>,
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -696,6 +709,9 @@ struct SessionLent {
     registry: Registry,
     #[cfg(feature = "query")]
     ended: EndedLegs,
+    /// The rows the gets that consolidate hold their replies in (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: HeldReplies<u64, Lent>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
     /// The places of the publishes the session keeps for its other faces, the engine's.
@@ -711,6 +727,7 @@ struct SessionLent {
 /// (`SessionRows::lent_from`): the delivery lane's area, the engine's record of the session's own
 /// declarations, the key arena, and the ends of its legs.
 struct StateTables {
+    #[cfg(not(feature = "rx-lent-only"))]
     lane: LentByteCells,
     filters: FilterRows,
     interests: InterestRows,
@@ -728,6 +745,7 @@ impl SessionRows {
     fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
         let entities = self.entities();
         StateTables {
+            #[cfg(not(feature = "rx-lent-only"))]
             lane: lend.byte_cells(self.lane_bytes(), 1),
             filters: lend.table(entities.filters().unwrap_or(usize::MAX)),
             interests: lend.table(entities.interests().unwrap_or(usize::MAX)),
@@ -769,6 +787,7 @@ fn lend_session(
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
     let StateTables {
+        #[cfg(not(feature = "rx-lent-only"))]
         lane,
         filters,
         interests,
@@ -786,22 +805,34 @@ fn lend_session(
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    #[cfg(not(feature = "rx-lent-only"))]
+    let claimed = plan.claim_lane_and_handle(lane, handle)?;
+    #[cfg(feature = "rx-lent-only")]
+    let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
         .map(|cells| CacheSpan::claimed(cells, plan.session().cache_bytes()))
         .transpose()?;
     let ClaimedPlaces {
+        #[cfg(not(feature = "rx-lent-only"))]
         lane_area,
+        #[cfg(not(feature = "rx-lent-only"))]
         lane_bytes,
         handle: handle_place,
-    } = plan.claim_lane_and_handle(lane, handle)?;
+    } = claimed;
     let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
+    // The rows the gets that consolidate hold their replies in, lent beside the round's.
+    #[cfg(feature = "query")]
+    let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
+        .map_err(ArenaRefused::Lend)?;
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
-    let mut samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
+    #[cfg(not(feature = "rx-lent-only"))]
+    let round_rows = unsafe { round_rows.writing_into(lane_area, lane_bytes) };
+    let mut samples = Round::shared_over(round_rows);
     // The round is not shared yet: it reads the keys a peer's aliases keep in the session's key
     // arena where they lie.
     if let Some(round) = Arc::get_mut(&mut samples) {
@@ -845,6 +876,8 @@ fn lend_session(
         registry,
         #[cfg(feature = "query")]
         ended: EndedLegs::over(legs),
+        #[cfg(feature = "query")]
+        held_replies,
         handle_place,
         places,
         #[cfg(any(feature = "listen", feature = "group"))]
@@ -2030,6 +2063,16 @@ impl
         row: RowAccess<'_, LivelinessRow>,
         sample: LivelinessSample<'_>,
     ) {
+        Self::tell_held(cx, id, row, sample, None);
+    }
+
+    fn tell_held(
+        cx: &mut RoundDelivery,
+        id: LivelinessSubscriberHandle,
+        row: RowAccess<'_, LivelinessRow>,
+        sample: LivelinessSample<'_>,
+        held: Option<&KeyRef>,
+    ) {
         // As a subscriber's sample: the row is read where it lies, and one past the most calls
         // its latch counts is handed nothing.
         let Some(call) = RowCallback::begin(row.row()) else {
@@ -2039,7 +2082,7 @@ impl
         // holds, as the round's writer must.
         unsafe {
             cx.round
-                .offer_liveliness(LivelinessCall::new(call, id), &sample)
+                .offer_liveliness(LivelinessCall::new(call, id), &sample, held)
         };
     }
 }
@@ -2056,7 +2099,7 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // The callback is the program's and never runs under the session's lock: the query is
         // held for it with a call begun on its row, read where it lies, and the replies it makes
         // go out through a responder of the plane's own.
-        cx.plane.arrive(id, row.row(), query);
+        cx.plane.arrive(&cx.round, id, row.row(), query);
     }
 }
 
@@ -2658,15 +2701,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             })
     }
 
-    /// The faces whose links are up, which is what a get is asked of.
+    /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:
+    /// how a get walks the faces it asks one at a time, taking the session's lock for each and
+    /// keeping no list of them. A face that comes up during the walk with a greater id is asked
+    /// too, and one that goes is not.
     #[cfg(feature = "query")]
-    fn up_faces(&self) -> Vec<FaceId> {
+    fn next_up_face(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
         self.links
             .faces()
             .iter()
             .filter(|face| matches!(face.link, Link::Up(_)))
             .map(|face| face.id)
-            .collect()
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
+    }
+
+    /// The group of the least id past `after` (any, for none) the session asks queries of
+    /// (`GroupDeclarations::asks_queries`), when `remote`: how a get walks its groups as it walks
+    /// its faces ([`Self::next_up_face`]).
+    #[cfg(all(feature = "query", feature = "group"))]
+    fn next_group_to_ask(&self, remote: bool, after: Option<FaceId>) -> Option<FaceId> {
+        if !remote {
+            return None;
+        }
+        self.groups
+            .iter()
+            .filter(|group| group.declarations().asks_queries())
+            .map(GroupFace::id)
+            .filter(|id| match after {
+                Some(after) => *id > after,
+                None => true,
+            })
+            .min()
     }
 
     /// The actions of face `id` while its link is up.
@@ -2840,6 +2912,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let admitted = Admitted::default();
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it.
+        #[cfg(not(feature = "rx-lent-only"))]
         let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
@@ -2849,6 +2922,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             usize::from(self.config.batch_size),
             &resolve_limits(&self.config),
         );
+        #[cfg(feature = "rx-lent-only")]
+        let record_room = crate::round::read_room::<
+            { caps::MAX_SUBSCRIPTIONS },
+            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        >(&resolve_limits(&self.config));
         #[cfg(feature = "listen")]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let gate: LinkGate<C> = unsafe {
@@ -3421,6 +3499,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the round of deliveries has the
         // room one record of the group's batch can take (decision Q4), as a link is.
+        #[cfg(not(feature = "rx-lent-only"))]
         let record_room = crate::round::read_room::<
             { caps::PICO_FRAG_MAX_BYTES },
             { caps::MAX_KEYEXPR_BYTES },
@@ -3430,6 +3509,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             usize::from(params.batch_size),
             &resolve_limits(&self.config),
         );
+        #[cfg(feature = "rx-lent-only")]
+        let record_room = crate::round::read_room::<
+            { caps::MAX_SUBSCRIPTIONS },
+            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        >(&resolve_limits(&self.config));
         // SAFETY: a group's transport is driven by the session's step alone, under its lock.
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
             crate::round::takes_a_group_read(self.lane.clone(), record_room)
@@ -3702,6 +3786,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn retract_owed(&mut self) {
         let round = Arc::clone(&self.lane);
         let record_room = crate::round::ReadRoom {
+            #[cfg(not(feature = "rx-lent-only"))]
             bytes: 0,
             // A token's record owes a callback to each liveliness subscriber the session admits.
             callbacks: crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
@@ -4186,7 +4271,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
-            gets: Arc::new(GetPlane::new(lent.ended)),
+            gets: Arc::new(GetPlane::new(lent.ended, lent.held_replies)),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: lent.samples,
@@ -4236,47 +4321,56 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(any(feature = "listen", feature = "group"))]
         let handed_at_most = core.config.tx_queue.sizes;
         let arena_bytes = core.arena.bytes();
-        Arc::new_cyclic(|this| Self {
-            core: CoreLock::new(core),
-            rooms,
-            wait_before_drop_us,
-            held_drop,
-            sending_on: AtomicU64::new(NOT_SENDING),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            handed: Mutex::new(handed),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            owed: AtomicBool::new(false),
-            input_held: AtomicBool::new(false),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            handed_at_most,
-            #[cfg(feature = "transport-stats")]
-            unsent_drops: AtomicU64::new(0),
-            samples,
-            matching: Arc::new(Queued::new(MatchFlips::new())),
+        Arc::new_cyclic(|this| {
+            // The round hands the queries it holds to their queryables through the engine, which
+            // sends what they answer.
             #[cfg(feature = "queryable")]
-            plane,
-            #[cfg(feature = "query")]
-            gets,
-            #[cfg(feature = "connectivity")]
-            faces,
-            #[cfg(any(
-                feature = "remote-declaration-watch",
-                feature = "declarations-synced-event"
-            ))]
-            decl_watches,
-            zid: wire,
-            closed: AtomicBool::new(false),
-            #[cfg(any(feature = "query", feature = "ticker"))]
-            next_local: AtomicU64::new(1),
-            reader: Mutex::new(None),
-            deliveries: Deliveries::new(),
-            arena_bytes,
-            handle_place,
-            #[cfg(feature = "advanced-cache")]
-            cache: Mutex::new(cache),
-            #[cfg(test)]
-            takes: Takes::default(),
-            this: this.clone(),
+            {
+                let answering: Weak<dyn crate::round::AnswersQueries> = this.clone();
+                samples.answer_queries_with(answering);
+            }
+            Self {
+                core: CoreLock::new(core),
+                rooms,
+                wait_before_drop_us,
+                held_drop,
+                sending_on: AtomicU64::new(NOT_SENDING),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                handed: Mutex::new(handed),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                owed: AtomicBool::new(false),
+                input_held: AtomicBool::new(false),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                handed_at_most,
+                #[cfg(feature = "transport-stats")]
+                unsent_drops: AtomicU64::new(0),
+                samples,
+                matching: Arc::new(Queued::new(MatchFlips::new())),
+                #[cfg(feature = "queryable")]
+                plane,
+                #[cfg(feature = "query")]
+                gets,
+                #[cfg(feature = "connectivity")]
+                faces,
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                decl_watches,
+                zid: wire,
+                closed: AtomicBool::new(false),
+                #[cfg(any(feature = "query", feature = "ticker"))]
+                next_local: AtomicU64::new(1),
+                reader: Mutex::new(None),
+                deliveries: Deliveries::new(),
+                arena_bytes,
+                handle_place,
+                #[cfg(feature = "advanced-cache")]
+                cache: Mutex::new(cache),
+                #[cfg(test)]
+                takes: Takes::default(),
+                this: this.clone(),
+            }
         })
     }
 
@@ -4843,9 +4937,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         handed || asked
     }
 
-    /// Hand each query the session queued to its queryable's callback, and send what it answered.
-    /// Whether one was handed.
-    #[cfg(feature = "queryable")]
+    /// Hand each get of the session's own it queued for a queryable whose callback the asking
+    /// thread was inside of to that callback, and send what it answered. Whether one was handed.
+    /// A link's queries are handed out with the round.
+    #[cfg(feature = "local-queryable")]
     fn hand_queries(&self) -> bool {
         let mut handed = false;
         while self.plane.queries.is_pending() {
@@ -4893,7 +4988,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// End `call`, with no lock of the session held: when it was the last call of a queryable
     /// undeclared meanwhile, its row is taken out of the tables under the session's lock and
     /// dropped after it, so a C program's `drop` never runs under the lock.
-    #[cfg(feature = "queryable")]
+    #[cfg(feature = "local-queryable")]
     fn end_query_call(&self, call: QueryableCall) {
         let Some(handle) = call.end() else {
             return;
@@ -4916,7 +5011,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// End each call of the queries no callback was handed yet, which go unanswered: what the
     /// session's close does before it lets go of its rows, as a row a call of which is owed is let
     /// go of only once the call ends.
-    #[cfg(feature = "queryable")]
+    #[cfg(feature = "local-queryable")]
     fn discard_queries(&self) {
         loop {
             let next = self.plane.queries.lock().pop_front();
@@ -4928,8 +5023,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// A build with no queryable is handed no query.
-    #[cfg(not(feature = "queryable"))]
+    /// A build whose session asks none of its own queryables queues no query: a link's are handed
+    /// out with the round.
+    #[cfg(not(feature = "local-queryable"))]
     fn hand_queries(&self) -> bool {
         false
     }
@@ -5426,6 +5522,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     };
                     drop(row);
                 }
+                #[cfg(feature = "queryable")]
+                LetGo::Queryable(handle) => {
+                    let row = {
+                        let guard = self.core.lock();
+                        let mut tables = tables_mut(&guard.0.registry);
+                        tables
+                            .release_queryable(handle)
+                            .map(|row| row.into_callback())
+                    };
+                    drop(row);
+                }
             }
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
@@ -5460,7 +5567,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_queryable_release(&self, handle: QueryableHandle) {
         self.wait_until_let_go(
             |tables| tables.queryables().holds_slot(handle),
-            || self.plane.let_go_settled(),
+            // A query the round held ended its call there, and a get of the session's own here.
+            || self.plane.let_go_settled() && self.samples.released_settled(),
         );
     }
 
@@ -5843,7 +5951,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return;
         };
         let core = &guard.0;
-        for face in core.up_faces() {
+        let mut asked = None;
+        while let Some(face) = core.next_up_face(true, asked) {
+            asked = Some(face);
             if let Some(actions) = core.up_actions(face) {
                 actions
                     .next_outbound_interest_id
@@ -7020,29 +7130,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         } else {
             None
         };
-        let (faces, expose) = {
+        let expose = {
             let guard = self.live().ok_or(Declined::Closed)?;
             // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
             // states none, applied to every leg's callback, after its replies are consolidated.
-            let expose = opts.expose_timestamp_by(&guard.0.policy);
-            let faces = if opts.allowed_destination.allows_remote() {
-                guard.0.up_faces()
-            } else {
-                Vec::new()
-            };
-            (faces, expose)
+            opts.expose_timestamp_by(&guard.0.policy)
         };
+        let remote = opts.allowed_destination.allows_remote();
         let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
-        for face in faces {
-            let leg_id = self.next_local_id();
+        // The faces whose links are up, each asked once in the order of their ids: the walk keeps
+        // the last face it asked and takes the session's lock for each, holding no list of them.
+        let mut asked = None;
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_up_face(remote, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(actions) = core.up_actions(face).cloned() else {
                 continue;
             };
@@ -7069,9 +7181,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             // The leg's callback, shared by the entry's sink and the table of callbacks.
             let callback = Arc::new(leg());
-            let sink = ConsolidatingSink::new(
+            let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
                 get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegHold::new(leg_id, &self.gets),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
@@ -7138,23 +7251,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // before its Final is not taken off the count, there as here: the leg ends at its
         // deadline.
         #[cfg(feature = "group")]
-        let groups: Vec<FaceId> = match self.live() {
-            Some(guard) if opts.allowed_destination.allows_remote() => guard
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.declarations().asks_queries())
-                .map(GroupFace::id)
-                .collect(),
-            _ => Vec::new(),
-        };
+        let mut asked = None;
         #[cfg(feature = "group")]
-        for face in groups {
-            let leg_id = self.next_local_id();
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_group_to_ask(remote, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(group) = core.groups.iter().find(|group| group.id() == face) else {
                 continue;
             };
@@ -7183,9 +7291,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 None => continue,
             }
             let callback = Arc::new(leg());
-            let sink = ConsolidatingSink::new(
+            let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
                 get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegHold::new(leg_id, &self.gets),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
             let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
@@ -7240,9 +7349,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld += 1;
             } else {
                 let callback = Arc::new(leg());
-                let sink = ConsolidatingSink::new(
+                let sink = ConsolidatingSink::with_hold(
                     opts.resolved_consolidation(),
                     get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                    get::LegHold::new(leg_id, &self.gets),
                 );
                 let registered = core.registry.borrow_mut().local.replies.register_sink(
                     rid,
@@ -7290,7 +7400,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<usize, Declined> {
         // One leg for each face whose link is up; a session with no link up reaches nobody, and
         // the snapshot is over at once. A closed session asks nothing.
-        let faces = self.live().ok_or(Declined::Closed)?.0.up_faces();
+        if self.live().is_none() {
+            return Err(Declined::Closed);
+        }
         // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
         // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
         // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
@@ -7299,12 +7411,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             set => set,
         };
         let mut issued = 0;
-        for face in faces {
-            let leg_id = self.next_local_id();
+        // The faces whose links are up, each asked once, as a query's are.
+        let mut asked = None;
+        loop {
             let Some(mut guard) = self.live() else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
+            let Some(face) = core.next_up_face(true, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let leg_id = self.next_local_id();
             let Some(actions) = core.up_actions(face).cloned() else {
                 continue;
             };
@@ -7770,7 +7888,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.let_go_of_released();
         // The queries no callback will now answer go first: each holds a call of its queryable's
         // row, which the row's undeclaration below would wait for.
-        #[cfg(feature = "queryable")]
+        #[cfg(feature = "local-queryable")]
         self.discard_queries();
         self.let_go_of_rows();
     }
@@ -8010,6 +8128,15 @@ pub trait ComposedLinks {
 impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G> {
     type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G>;
     type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
+}
+
+#[cfg(feature = "queryable")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> crate::round::AnswersQueries
+    for CoopEngine<L, C>
+{
+    fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
+        self.run_queryable(call, query, generation);
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {

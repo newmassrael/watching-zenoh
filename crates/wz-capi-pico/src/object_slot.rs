@@ -257,7 +257,7 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
         #[cfg(feature = "queryable")]
         Kind::Queryable => Some((
             EntityKind::Queryable,
-            InSession::<crate::query::QueryableState>::LAYOUT,
+            InSession::<crate::query::QueryablePlace>::LAYOUT,
         )),
         #[cfg(feature = "liveliness")]
         Kind::LivelinessToken => Some((
@@ -272,7 +272,7 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
         #[cfg(feature = "query")]
         Kind::Querier => Some((
             EntityKind::Querier,
-            InSession::<crate::querier::QuerierState>::LAYOUT,
+            InSession::<Answering<crate::querier::QuerierState>>::LAYOUT,
         )),
         _ => None,
     }
@@ -322,6 +322,135 @@ pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::H
         wz_capi_coop::arena::HeldPlaces::handle(handle),
         |held, (entity, layout)| held.with_entity(entity, layout),
     )
+}
+
+/// An entity's object, the count of the program's closures it answers for (a querier's gets, a
+/// queryable's closure), and what those closures keep in the place past the object (`K`: a
+/// queryable's C closure, which its row calls), inline in the entity's place. The handle of the
+/// object is the place itself, the object first, so a handle read as a `T` reads the object. The
+/// owner's release lets go of the object and leaves the place, with the count and what is kept in
+/// it, to the last closure still held ([`retire_entity`]), so a closure let go of after its owner
+/// (an undeclare made from inside its own callback) finds both standing, and no closure takes
+/// memory of its own.
+///
+/// Its holders are the entities whose closures are counted so, so it exists where they do.
+#[cfg(any(feature = "query", feature = "queryable"))]
+#[repr(C)]
+pub(crate) struct Answering<T, K = ()> {
+    value: core::mem::ManuallyDrop<T>,
+    open: crate::ffi::OpenClosures,
+    #[cfg(feature = "queryable")]
+    kept: core::mem::ManuallyDrop<K>,
+    // Only a queryable's closure keeps something in its place.
+    #[cfg(not(feature = "queryable"))]
+    kept: core::marker::PhantomData<K>,
+}
+
+#[cfg(feature = "queryable")]
+impl<T, K> Answering<T, K> {
+    /// `value`, keeping `kept` for its closures, with none counted yet.
+    pub(crate) fn keeping(value: T, kept: K) -> Self {
+        Self {
+            value: core::mem::ManuallyDrop::new(value),
+            open: crate::ffi::OpenClosures::default(),
+            kept: core::mem::ManuallyDrop::new(kept),
+        }
+    }
+}
+
+#[cfg(feature = "query")]
+impl<T> Answering<T> {
+    /// `value`, with nothing kept for its closures and none counted yet.
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            value: core::mem::ManuallyDrop::new(value),
+            open: crate::ffi::OpenClosures::default(),
+            #[cfg(feature = "queryable")]
+            kept: core::mem::ManuallyDrop::new(()),
+            #[cfg(not(feature = "queryable"))]
+            kept: core::marker::PhantomData,
+        }
+    }
+}
+
+/// The count of the closures the entity whose object is at `object` answers for, which its owner
+/// waits on before letting go of it ([`retire_entity`]).
+///
+/// # Safety
+/// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`].
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) unsafe fn closures_of<'a, T, K>(object: *const T) -> &'a crate::ffi::OpenClosures {
+    // SAFETY: the caller's: the count stands while the place does.
+    unsafe { &(*object.cast::<Answering<T, K>>()).open }
+}
+
+/// Where the entity whose object is at `object` keeps what its closures read past the object.
+///
+/// # Safety
+/// As [`closures_of`]; what is kept there is read and taken out only as the entity's closures
+/// say.
+#[cfg(feature = "queryable")]
+pub(crate) unsafe fn kept_at<T, K>(object: *const T) -> *mut K {
+    let at = object.cast::<Answering<T, K>>().cast_mut();
+    // SAFETY: the caller's: the place holds an `Answering<T, K>`; a `ManuallyDrop<K>` is a `K`.
+    unsafe { core::ptr::addr_of_mut!((*at).kept).cast::<K>() }
+}
+
+/// Count `closure` in the entity whose object is at `object`: the owner's release waits for its
+/// `drop(context)`, and the entity's place stands until it has run.
+///
+/// # Safety
+/// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`],
+/// whose owner has not let go of it.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) unsafe fn count_in_entity<T, K, C>(
+    object: *const T,
+    closure: &mut crate::ffi::CClosure<C>,
+) {
+    let at = object.cast::<Answering<T, K>>();
+    // SAFETY: the caller's: the place holds an `Answering<T, K>`, whose count stands until the
+    // place goes back, which only `give_back_answering` does, called by whichever of the owner's
+    // release and the last closure counted goes last.
+    let owner = unsafe {
+        crate::ffi::CountIn::new(
+            &(*at).open,
+            NonNull::new_unchecked(at.cast_mut().cast()),
+            give_back_answering::<T, K>,
+        )
+    };
+    closure.count_in(owner);
+}
+
+/// Let go of an entity's object for its owner: drop the object, and give its place back now when
+/// no closure counted in it is held, or leave that to the last one let go of. The owner waits for
+/// those closures first ([`closures_of`]) where the entity's contract says it does; one that does
+/// not (an owner inside a callback, a background declaration) leaves the place to them.
+///
+/// # Safety
+/// `object` is a live handle [`Slot::take_entity`] placed and filled for an [`Answering<T, K>`],
+/// let go of once, here, and not used again.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) unsafe fn retire_entity<T, K>(object: *mut T) {
+    let at = object.cast::<Answering<T, K>>();
+    // SAFETY: the caller's: the place holds an `Answering<T, K>` its owner lets go of once, here;
+    // the object alone is dropped, as a closure may still read what is kept beside it.
+    unsafe {
+        core::mem::ManuallyDrop::drop(&mut (*at).value);
+        if (*at).open.retire() {
+            release_entity(at);
+        }
+    }
+}
+
+/// Give back the place of an entity whose owner and closures are all gone.
+///
+/// # Safety
+/// `place` is an [`Answering<T, K>`]'s place whose object was dropped by [`retire_entity`], what
+/// it kept taken out by its closures, and in which no closure is counted; called once.
+#[cfg(any(feature = "query", feature = "queryable"))]
+unsafe fn give_back_answering<T, K>(place: NonNull<core::ffi::c_void>) {
+    // SAFETY: the caller's: its count is all that is left to drop, and the place goes back once.
+    unsafe { release_entity(place.cast::<Answering<T, K>>().as_ptr()) };
 }
 
 /// Drop the object at `object` and give its place back.
@@ -588,6 +717,77 @@ mod tests {
             z_session_drop(z_session_move(&mut one));
             z_session_drop(z_session_move(&mut other));
         }
+    }
+
+    /// An entity its owner lets go of from inside a callback, while a closure counted in it is
+    /// held, has its object dropped at once and its place left to that closure, whose drop gives it
+    /// back; one let go of with no closure held gives its place back at once. Turned red by a
+    /// release that gives the place back under a closure still counted in it, or never.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer", feature = "query"))]
+    #[test]
+    fn an_entitys_place_goes_back_with_the_last_of_its_owner_and_closures() {
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        unsafe extern "C" fn no_drop(_context: *mut core::ffi::c_void) {}
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many querier places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<crate::session::Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Querier)).collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+        assert!(places > 0, "the session's limit admits queriers");
+
+        let drops = core::cell::Cell::new(0);
+        let object = Slot::take_entity(&engine, Kind::Querier)
+            .expect("a querier's place")
+            .fill(Answering::new(Counted(&drops)))
+            .cast::<Counted<'_>>();
+        let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
+            core::ptr::null_mut(),
+            None,
+            Some(no_drop),
+        );
+        // SAFETY: `object` was filled for an `Answering` just above, and its owner holds it.
+        unsafe { count_in_entity::<_, (), _>(object, &mut closure) };
+        {
+            // An owner inside a callback does not wait for the closures it counts.
+            let _inside = crate::ffi::InCallback::enter();
+            // SAFETY: as above; the owner lets go of `object` once, here.
+            unsafe {
+                closures_of::<_, ()>(object).wait_none();
+                retire_entity::<_, ()>(object);
+            }
+        }
+        assert_eq!(drops.get(), 1, "the owner's release drops the object");
+        assert_eq!(
+            free(&engine),
+            places - 1,
+            "the closure still holds the place"
+        );
+        drop(closure);
+        assert_eq!(free(&engine), places, "the closure's drop gave it back");
+
+        let object = Slot::take_entity(&engine, Kind::Querier)
+            .expect("a querier's place")
+            .fill(Answering::new(Counted(&drops)))
+            .cast::<Counted<'_>>();
+        // SAFETY: as above, with no closure counted.
+        unsafe { retire_entity::<_, ()>(object) };
+        assert_eq!(drops.get(), 2);
+        assert_eq!(free(&engine), places, "the owner gave it back itself");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for

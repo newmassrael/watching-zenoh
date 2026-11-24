@@ -315,7 +315,7 @@ impl Plan {
         // reserve where the doors are.
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
         {
-            plan = plan.with::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
+            plan = plan.with::<crate::session::SessionPlace>(Kind::Session, objects.sessions);
         }
         // An entity of the cooperative engine lies in its own session's arena, as many as the
         // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
@@ -328,7 +328,7 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         {
-            plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+            plan = plan.with::<crate::query::QueryablePlace>(Kind::Queryable, objects.queryables);
         }
         #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         {
@@ -358,7 +358,10 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "query"))]
         {
-            plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
+            plan = plan.with::<crate::object_slot::Answering<crate::querier::QuerierState>>(
+                Kind::Querier,
+                objects.queriers,
+            );
         }
         plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
         plan = plan.with::<crate::encoding::HeldEncoding>(Kind::Encoding, objects.encodings);
@@ -1560,7 +1563,7 @@ mod tests {
         row(
             "session",
             Kind::Session,
-            core::mem::size_of::<crate::session::PicoSessionHandle>(),
+            core::mem::size_of::<crate::session::SessionPlace>(),
         );
         row(
             "publisher",
@@ -1576,7 +1579,7 @@ mod tests {
         row(
             "queryable",
             Kind::Queryable,
-            core::mem::size_of::<crate::query::QueryableState>(),
+            core::mem::size_of::<crate::query::QueryablePlace>(),
         );
         #[cfg(feature = "liveliness")]
         {
@@ -1628,7 +1631,7 @@ mod tests {
         row(
             "querier",
             Kind::Querier,
-            core::mem::size_of::<crate::querier::QuerierState>(),
+            core::mem::size_of::<crate::object_slot::Answering<crate::querier::QuerierState>>(),
         );
         row(
             "keyexpr",

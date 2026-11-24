@@ -49,7 +49,8 @@
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
-//!   state's tables (`SessionRows::lane_bytes`);
+//!   state's tables (`SessionRows::lane_bytes`); none in a build that reads every record where it
+//!   lies (`rx-lent-only`);
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
 //!   each reliability a peer has a chain open in, and one for the rejoined message the round
@@ -135,12 +136,14 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-#[cfg(feature = "query")]
-use crate::engine::LegSink;
 use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(feature = "query")]
+use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReplies;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,9 +182,9 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The delivery lane's flag and its area, and the round's records, the callbacks they owe and
-/// its keys.
-const LANE_ROWS: usize = 5;
+/// The delivery lane's flag and its area, none in a build that keeps no area (`rx-lent-only`), and
+/// the round's records, the callbacks they owe and its keys.
+const LANE_ROWS: usize = 3 + 2 * cfg!(not(feature = "rx-lent-only")) as usize;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -192,9 +195,9 @@ const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) 
 /// The application's tables apart from the session's one table set: liveliness tokens
 /// (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
-/// nothing holds no table of gets.
-const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
+/// a build that asks (`query`): one that asks nothing holds no table of gets.
+const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -415,7 +418,7 @@ impl GetTables {
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
 #[cfg(feature = "query")]
-type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -647,7 +650,9 @@ impl TransportRows {
 /// its faces' peers write and are owed, and the key arena every keyed row keeps its key in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRows {
-    /// The bytes of the session's round of deliveries (`crate::round`).
+    /// The bytes of the session's round of deliveries (`crate::round`); none in a build that keeps
+    /// no area for it (`rx-lent-only`).
+    #[cfg(not(feature = "rx-lent-only"))]
     lane_bytes: usize,
     /// The rows of the round's tables.
     round: RoundRowCounts,
@@ -665,11 +670,16 @@ pub struct SessionRows {
     /// (`ADVANCED_CACHE_BYTES`), none for no ring.
     #[cfg(feature = "advanced-cache")]
     cache_bytes: usize,
+    /// The replies the gets that consolidate hold to their Finals, a row each, shared by every get
+    /// of the session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: usize,
 }
 
 impl SessionRows {
     /// The bytes of the delivery lane's area (`DELIVERY_LANE_BYTES`): one table of one buffer,
     /// claimed for the session's life (`ArenaPlan::claim_lane_and_handle`).
+    #[cfg(not(feature = "rx-lent-only"))]
     pub fn lane_bytes(&self) -> usize {
         self.lane_bytes
     }
@@ -696,6 +706,13 @@ impl SessionRows {
     #[cfg(feature = "advanced-cache")]
     pub fn cache_bytes(&self) -> usize {
         self.cache_bytes
+    }
+
+    /// How many replies the gets that consolidate hold to their Finals at once, of every get of the
+    /// session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    pub fn held_replies(&self) -> usize {
+        self.held_replies
     }
 }
 
@@ -840,11 +857,14 @@ impl ArenaPlan {
                 )
                 .min(links);
         }
-        plan.session.lane_bytes = plan.lent(
-            "DELIVERY_LANE_BYTES",
-            Quota::at_most(limits.delivery_lane_bytes()),
-            caps::DELIVERY_LANE_BYTES,
-        );
+        #[cfg(not(feature = "rx-lent-only"))]
+        {
+            plan.session.lane_bytes = plan.lent(
+                "DELIVERY_LANE_BYTES",
+                Quota::at_most(limits.delivery_lane_bytes()),
+                caps::DELIVERY_LANE_BYTES,
+            );
+        }
         plan.session.round = RoundRowCounts {
             records: plan.lent(
                 "DELIVERY_LANE_EVENTS",
@@ -929,6 +949,7 @@ impl ArenaPlan {
             );
         }
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
+        #[cfg(not(feature = "rx-lent-only"))]
         plan.put_table(
             ["delivery lane flag", "delivery lane"],
             "DELIVERY_LANE_BYTES",
@@ -1068,6 +1089,20 @@ impl ArenaPlan {
                 core::mem::size_of::<crate::engine::Ended>(),
             );
         }
+        // The replies the gets that consolidate hold to their Finals: one table of rows shared by
+        // every get, tagged with its leg (`engine::get::LegHold`).
+        #[cfg(feature = "query")]
+        {
+            plan.session.held_replies = plan.lent(
+                "MAX_PENDING_REPLIES",
+                limits.max_pending_replies(),
+                caps::MAX_PENDING_REPLIES,
+            );
+            let held = plan.sized(HeldReplies::<u64, Lent>::arena_bytes(
+                plan.session.held_replies,
+            ));
+            plan.put("held replies", "MAX_PENDING_REPLIES", 1, held);
+        }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
         plan.session.peers = FacePeers {
@@ -1178,6 +1213,7 @@ impl ArenaPlan {
     /// one. The claims are never given back: what holds a buffer holds it until the session is
     /// let go, and a buffer dropped then would write its cell's flag into an arena given back
     /// before it. Refused as an arena with no room for a table lent no buffer.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) fn claim_lane_and_handle(
         &self,
         lane: LentByteCells,
@@ -1198,6 +1234,28 @@ impl ArenaPlan {
             }),
             (None, _) | (_, Some(None)) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
                 asked: Some(self.session.lane_bytes.max(self.places.handle_bytes)),
+                left: 0,
+            })),
+        }
+    }
+
+    /// The one buffer of `handle`, a table of one buffer the plan's lender lent whole
+    /// ([`PlaceTables::handle`]), claimed for the session's life as `claim_lane_and_handle`
+    /// claims it, in a build that keeps no delivery area
+    /// (`rx-lent-only`): the handle's place when the plan holds one. Refused as an arena with no
+    /// room for a table lent no buffer.
+    #[cfg(feature = "rx-lent-only")]
+    pub(crate) fn claim_handle(
+        &self,
+        handle: Option<LentByteCells>,
+    ) -> Result<ClaimedPlaces, ArenaRefused> {
+        match handle.map(claimed) {
+            None => Ok(ClaimedPlaces { handle: None }),
+            Some(Some((base, bytes))) => Ok(ClaimedPlaces {
+                handle: Some(HandlePlace { base, bytes }),
+            }),
+            Some(None) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
+                asked: Some(self.places.handle_bytes),
                 left: 0,
             })),
         }
@@ -1940,8 +1998,10 @@ impl EntityPlaces {
 /// (`ArenaPlan::claim_lane_and_handle`).
 pub(crate) struct ClaimedPlaces {
     /// Where the delivery lane's area starts.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) lane_area: NonNull<u8>,
     /// The bytes of the lane's area.
+    #[cfg(not(feature = "rx-lent-only"))]
     pub(crate) lane_bytes: usize,
     /// The place of the ABI's handle, `None` for a plan with no place.
     pub(crate) handle: Option<HandlePlace>,

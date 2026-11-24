@@ -132,6 +132,18 @@ pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     crate::encoding::split_value_body(bytes)
 }
 
+/// [`decode_query_value_ext_in`] with the encoding read where it lies too: its packed id, its
+/// schema's bytes and the payload, all ranges of the chain for as long as `'c`
+/// ([`crate::encoding::split_value_body_parts`]).
+pub fn decode_query_value_ext_parts_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+) -> Option<(u32, Option<&'c [u8]>, &'c [u8])> {
+    let bytes =
+        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
+            .plain_zbuf_in()?;
+    crate::encoding::split_value_body_parts(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +227,35 @@ mod tests {
         assert_eq!(got_enc.packed_id, 0x0B);
         assert_eq!(got_enc.schema.as_deref(), Some(&b"json"[..]));
         assert_eq!(got_payload, b"payload-bytes");
+    }
+
+    /// The parts are the hint's fields read where the value lies: the schema is
+    /// a range of the entry's own bytes, as the payload is, so a reader that
+    /// keeps them holds no copy; a value without a schema has none to hand.
+    #[test]
+    fn the_value_parts_lie_in_the_entry() {
+        let enc = EncodingHint {
+            packed_id: 0x0B,
+            schema: Some(b"json".to_vec()),
+        };
+        let chain = [encode_query_value_ext::<Wire>(&enc, b"payload-bytes").unwrap()];
+        let (packed_id, schema, payload) =
+            decode_query_value_ext_parts_in(&chain[..]).expect("schema-encoding value ext decodes");
+        assert_eq!(packed_id, 0x0B);
+        assert_eq!(schema, Some(&b"json"[..]));
+        assert_eq!(payload, b"payload-bytes");
+        let body = match &chain[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => z.value.as_bytes().as_ptr_range(),
+            _ => panic!("expected ExtZbuf body"),
+        };
+        let schema = schema.unwrap().as_ptr_range();
+        assert!(body.start <= schema.start && schema.end <= body.end);
+
+        let plain = [encode_query_value_ext::<Wire>(&default_encoding(), b"hi").unwrap()];
+        assert_eq!(
+            decode_query_value_ext_parts_in(&plain[..]),
+            Some((0, None, &b"hi"[..]))
+        );
     }
 
     /// An empty payload (a value that is encoding-only) round-trips: the

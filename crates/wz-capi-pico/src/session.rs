@@ -715,8 +715,8 @@ pub(crate) struct PicoSessionHandle {
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
     /// The release latches of the closures the program declared with no handle to undeclare them
-    /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
-    /// undeclare waits on its own.
+    /// by (`z_declare_background_*`). A close waits on them, as an undeclare waits on its own; the
+    /// gets the session issued are counted beside the handle instead ([`SessionTail`]).
     background: crate::ffi::LatchList,
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
@@ -803,9 +803,109 @@ pub(crate) unsafe fn open_session_handle<'a>(
     Ok(handle)
 }
 
-/// The place a cooperative session's handle lies in, a span of the session's arena.
+/// The place a session's handle lies in, and what stays in it once the handle is let go of: a span
+/// of the session's arena on the cooperative engine, the session's object slot on the tokio engine.
+pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle, SessionTail>;
+
+/// What stays in the place of a session's handle after the handle is let go of, until the last
+/// closure the session answers for (each get it issued) is let go of too: the count of those
+/// closures, which its close waits on and which a closure let go of after the handle (a close or a
+/// drop made from inside its own callback) still tells, and on the cooperative engine a hold on the
+/// session's engine, whose arena the place lies in. Whichever of the handle and those closures goes
+/// last gives the place back (`give_back_session_place`), so no closure takes memory of its own.
+pub(crate) struct SessionTail {
+    open: crate::ffi::OpenClosures,
+    #[cfg(not(feature = "engine-tokio"))]
+    arena: core::mem::ManuallyDrop<alloc::sync::Arc<Engine>>,
+}
+
+impl SessionTail {
+    /// What stays beside `handle` in its place: no closure counted yet.
+    fn of(handle: &PicoSessionHandle) -> Self {
+        #[cfg(feature = "engine-tokio")]
+        let _ = handle;
+        Self {
+            open: crate::ffi::OpenClosures::default(),
+            #[cfg(not(feature = "engine-tokio"))]
+            arena: core::mem::ManuallyDrop::new(engine_of(handle)),
+        }
+    }
+}
+
+/// What stays beside the handle of the session `zs` names.
+///
+/// # Safety
+/// `zs` names a session [`open_session_handle`] read, whose place still stands.
+unsafe fn session_tail<'a>(zs: *const z_loaned_session_t) -> &'a SessionTail {
+    // SAFETY: the caller's: `_val` is the place `z_open` filled, and it stands.
+    unsafe { (*((*zs)._val as *const SessionPlace)).beside() }
+}
+
+/// The count of the session `zs` names, to count what its close waits for in: a closure, or a
+/// background entity's place, either of which keeps the place of the session's handle standing
+/// until it is let go of.
+///
+/// # Safety
+/// `zs` names a session [`open_session_handle`] read, whose handle is not let go of before what is
+/// counted is.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) unsafe fn session_count(zs: *const z_loaned_session_t) -> crate::ffi::CountIn {
+    // SAFETY: the caller's: the session's place stands, as its handle is held.
+    let tail = unsafe { session_tail(zs) };
+    // SAFETY: the count lies in the place `_val` names, which goes back only through
+    // `give_back_session_place`, called by whichever of the handle's release and the last
+    // hold counted goes last.
+    unsafe {
+        crate::ffi::CountIn::new(
+            &tail.open,
+            core::ptr::NonNull::new_unchecked((*zs)._val),
+            give_back_session_place,
+        )
+    }
+}
+
+/// Count `closure` in the session `zs` names: its close waits for the closure's `drop(context)`,
+/// and the place of the session's handle stands until it has run.
+///
+/// # Safety
+/// As [`session_count`].
+#[cfg(feature = "query")]
+pub(crate) unsafe fn count_in_session<C>(
+    zs: *const z_loaned_session_t,
+    closure: &mut crate::ffi::CClosure<C>,
+) {
+    // SAFETY: the caller's.
+    closure.count_in(unsafe { session_count(zs) });
+}
+
+/// Give back the place of a session's handle once neither the handle nor a closure counted in the
+/// session is left: let go of what stays beside the handle, and with it the hold on the engine,
+/// which may be the session's last and give back the arena the place lies in.
+///
+/// # Safety
+/// `place` is a [`SessionPlace`] whose handle was taken out and in which no closure is counted;
+/// called once.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle>;
+unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
+    let place = place.cast::<SessionPlace>();
+    // SAFETY: the caller's: nothing reads what lies beside the handle again, and it is read out
+    // once, here, while the hold it carries keeps the place standing.
+    let SessionTail { open, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
+    drop(open);
+    drop(core::mem::ManuallyDrop::into_inner(arena));
+}
+
+/// Give back the session's object slot once neither the handle nor a closure counted in the
+/// session is left, dropping what stays beside the handle.
+///
+/// # Safety
+/// As the cooperative engine's twin; the place is the slot `z_open` filled.
+#[cfg(feature = "engine-tokio")]
+unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
+    // SAFETY: the caller's: the slot holds a `SessionPlace` whose handle is taken out, and it is
+    // let go of once.
+    unsafe { crate::object_slot::release(place.cast::<SessionPlace>().as_ptr()) };
+}
 
 #[cfg(not(feature = "engine-tokio"))]
 const _: () = assert!(
@@ -813,43 +913,34 @@ const _: () = assert!(
     "the handle's place starts where a span of the arena does"
 );
 
-/// The handle at `val`, a place [`z_open`] filled.
+/// The handle at `val`, while its place still holds it: a copy of the owned session kept past
+/// `z_session_drop`, while the place stands, finds it vacant.
 ///
 /// # Safety
 /// `val` is the `_val` of an owned session [`z_open`] made, whose memory still stands.
-#[cfg(feature = "engine-tokio")]
-unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
-    Some(&*(val as *const PicoSessionHandle))
-}
-
-/// The handle at `val`, while its place still holds it: a copy of the owned session kept past
-/// `z_session_drop` finds the place vacant.
-///
-/// # Safety
-/// As the tokio engine's twin.
-#[cfg(not(feature = "engine-tokio"))]
 unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
     (*(val as *const SessionPlace)).held()
 }
 
-/// Let go of the handle at `val`, which closes its session.
-///
-/// # Safety
-/// `val` is the `_val` of an owned session [`z_open`] made, given up by its owner.
-#[cfg(feature = "engine-tokio")]
-unsafe fn release_handle(val: *mut c_void) {
-    crate::object_slot::release(val as *mut PicoSessionHandle);
-}
-
 /// Let go of the handle at `val`, which closes its session. The handle is moved out of its place
-/// before it is dropped: its drive may hold the session's last hold, whose drop gives back the
-/// arena the place lies in. A place already vacant (a copy dropped twice) lets go of nothing.
+/// before it is dropped, and the place goes back with the last of the handle and the closures
+/// counted in the session ([`SessionTail`]). A place already vacant (a copy dropped twice while
+/// the place stands) lets go of nothing.
 ///
 /// # Safety
-/// As the tokio engine's twin, and the session's memory still stands.
-#[cfg(not(feature = "engine-tokio"))]
+/// `val` is the `_val` of an owned session [`z_open`] made, given up by its owner, and the
+/// session's memory still stands.
 unsafe fn release_handle(val: *mut c_void) {
-    drop(SessionPlace::take(val as *mut SessionPlace));
+    let place = val as *mut SessionPlace;
+    let Some(handle) = SessionPlace::take(place) else {
+        return;
+    };
+    drop(handle);
+    // The place stands until it is given back, which only this retire or the last closure counted
+    // in the session does.
+    if (*place).beside().open.retire() {
+        give_back_session_place(core::ptr::NonNull::new_unchecked(val));
+    }
 }
 
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
@@ -1389,7 +1480,7 @@ mod open_config_tests {
 struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
     #[cfg(feature = "engine-tokio")]
-    slot: crate::object_slot::Slot<PicoSessionHandle>,
+    slot: crate::object_slot::Slot<SessionPlace>,
     /// The locators dialled and the one listened on, as the tokio engine holds them.
     #[cfg(feature = "engine-tokio")]
     connect: Vec<String>,
@@ -1675,8 +1766,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let handle = PicoSessionHandle::new(drive, ext);
             #[cfg(feature = "session-memory")]
             let handle = handle.with_memory(memory);
+            let beside = SessionTail::of(&handle);
             *zs = z_owned_session_t {
-                _val: slot.fill(handle) as *mut c_void,
+                _val: slot.fill(SessionPlace::holding(handle, beside)) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
@@ -2129,10 +2221,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
     debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
+    let beside = SessionTail::of(&handle);
     *zs = z_owned_session_t {
         // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
-        // to this handle alone, and it stands while the engine the handle holds does.
-        _val: SessionPlace::fill(place.as_ptr(), handle) as *mut c_void,
+        // to this handle alone, and it stands while the engine the tail beside it holds does.
+        _val: SessionPlace::fill(place.as_ptr(), handle, beside) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     // The multi-threaded arm's read task starts with the open unless the options say not to. A
@@ -2269,6 +2362,7 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         // The close let go of every closure the session held; a callback still running on a
         // dispatch thread finishes before this returns, and then the drops have run.
         handle.wait_background();
+        session_tail(zs).open.wait_none();
         Z_OK
     })
 }
@@ -3762,6 +3856,47 @@ mod session_place_tests {
             z_session_drop(z_session_move(&mut copy));
             assert!(copy._val.is_null(), "dropping the copy lets go of nothing");
             drop(engine);
+        }
+    }
+
+    /// A closure counted in a session outlives the session's drop: the place of its handle, and the
+    /// engine whose arena it lies in, stand until the closure is let go of, whose drop then gives
+    /// them back. Turned red by a count kept in the handle, which goes with the drop.
+    #[cfg(feature = "query")]
+    #[test]
+    fn a_closure_counted_in_a_session_keeps_its_place_past_the_drop() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn counted_drop(context: *mut c_void) {
+            // SAFETY: the test hands the address of its own counter, which outlives the closure.
+            unsafe { (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst) };
+        }
+
+        let dropped = AtomicUsize::new(0);
+        // SAFETY: every pointer is to a live owned value of this frame.
+        unsafe {
+            let mut session = listening_on_loopback();
+            let engine = alloc::sync::Arc::downgrade(&engine_of(
+                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
+            ));
+            let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
+                core::ptr::from_ref(&dropped).cast_mut().cast(),
+                None,
+                Some(counted_drop),
+            );
+            count_in_session(z_session_loan(&session), &mut closure);
+            z_session_drop(z_session_move(&mut session));
+            assert!(
+                engine.upgrade().is_some(),
+                "the closure keeps the session's place"
+            );
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(closure);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert!(
+                engine.upgrade().is_none(),
+                "the last closure gave the place back"
+            );
         }
     }
 

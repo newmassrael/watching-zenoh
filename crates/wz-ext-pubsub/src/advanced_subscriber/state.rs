@@ -753,7 +753,7 @@ fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut d
         return;
     }
     for (time, sample) in core::mem::take(&mut state.pending_samples) {
-        let ts = wz_session_core::sample::TimestampHint::new(time, &zid)
+        let ts = wz_session_core::sample::TimestampHint::new(time, zid)
             .expect("a timestamp's zid is at most sixteen bytes");
         let newer = match &state.last_delivered {
             Some(last) => wz_session_core::sample::timestamp_strictly_newer(&ts, last),

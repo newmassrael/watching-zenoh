@@ -87,7 +87,9 @@ pub enum Consolidated {
     Held,
     /// Older than what its key already had: dropped.
     Stale,
-    /// Not held for want of room: dropped, and the caller counts it.
+    /// Not held for want of room: handed on at once, unconsolidated, and counted by the hold. A
+    /// get past its room may so deliver two replies of one key, where an unbounded hold would
+    /// deliver the latest; it loses none.
     Refused(HoldRefused),
 }
 
@@ -124,7 +126,12 @@ pub fn consolidate<H: ReplyHold + ?Sized>(
             forward(reply);
             Consolidated::Forwarded
         }
-        Err(why) => Consolidated::Refused(why),
+        // Under `Latest` a reply with no room is handed on now rather than lost: the hold is a
+        // fixed room, and a reply it cannot keep is still the get's answer.
+        Err(why) => {
+            forward(reply);
+            Consolidated::Refused(why)
+        }
     }
 }
 
@@ -648,8 +655,12 @@ mod tests {
             );
         }
         assert_eq!(
-            apply(&mut hold, 1, latest, &put(last, b"x", 1)).0,
-            Consolidated::Refused(HoldRefused::Full)
+            apply(&mut hold, 1, latest, &put(last, b"x", 1)),
+            (
+                Consolidated::Refused(HoldRefused::Full),
+                std::vec![b"x".to_vec()]
+            ),
+            "a reply with no room is handed on at once, not lost"
         );
         assert_eq!(hold.refused(), 1);
         let (done, forwarded) = apply(
@@ -667,9 +678,12 @@ mod tests {
             payload: &big,
             time: Some(1),
         };
+        let (done, forwarded) = apply(&mut hold, 1, latest, &too_large);
+        assert_eq!(done, Consolidated::Refused(HoldRefused::TooLarge));
         assert_eq!(
-            apply(&mut hold, 1, latest, &too_large).0,
-            Consolidated::Refused(HoldRefused::TooLarge)
+            forwarded.len(),
+            1,
+            "a reply past a row is handed on at once"
         );
         assert!(hold.is_empty(), "a row half written is let go of");
         assert_eq!(hold.refused(), 3);
