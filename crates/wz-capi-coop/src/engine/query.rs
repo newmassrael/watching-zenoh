@@ -335,6 +335,92 @@ pub(super) type Asked = wz_session_core::query_plane::Asked<CoopCalls>;
 #[cfg(feature = "local-queryable")]
 const _: () = assert!(core::mem::size_of::<QueryableCall>() <= core::mem::size_of::<usize>());
 
+/// The session's own get as each of its queryables is shown it: the get's own key and options,
+/// read where they lie. What it shows is what the loopback body the wire builder makes of the same
+/// options carries (`QueryOptions::loopback_query`): the parameters and the attachment when not
+/// empty, and the value when its payload is not empty or its encoding is not the default one.
+#[cfg(feature = "local-queryable")]
+pub(super) struct OwnGet<'a> {
+    keyexpr: &'a str,
+    opts: &'a QueryOptionsOf<'a>,
+    /// The parameters as the get sends them (`QueryOptionsOf::sent_parameters`): the options' own
+    /// bytes, copied only for a get that appends the reply-keyexpr-any flag to stated ones.
+    parameters: Option<alloc::borrow::Cow<'a, [u8]>>,
+    /// The value's encoding as the view hands it to a queryable of the session: the one the get
+    /// states, else the default one when it carries a value. A view hands an encoding out as a
+    /// hint, so a lent one is copied for the session's own queryables.
+    encoding: Option<EncodingHint>,
+    carries_value: bool,
+    rid: wz_session_core::wire_id::RequestId,
+    qos: QosLevel,
+}
+
+#[cfg(feature = "local-queryable")]
+impl<'a> OwnGet<'a> {
+    pub(super) fn of(
+        keyexpr: &'a str,
+        opts: &'a QueryOptionsOf<'a>,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Self {
+        let payload = opts.payload.as_deref().unwrap_or_default();
+        let stated = opts.encoding.as_ref().map(|encoding| encoding.view());
+        let names_one = |encoding: wz_session_core::sample::EncodingRef<'_>| {
+            encoding.packed_id >> 1 != 0 || encoding.schema.is_some()
+        };
+        let carries_value = !payload.is_empty() || stated.is_some_and(names_one);
+        Self {
+            keyexpr,
+            opts,
+            parameters: opts.sent_parameters(),
+            encoding: carries_value.then(|| {
+                stated
+                    .map(|encoding| encoding.to_hint())
+                    .unwrap_or_default()
+            }),
+            carries_value,
+            rid,
+            qos: opts.qos.unwrap_or(QosLevel::DEFAULT),
+        }
+    }
+}
+
+#[cfg(feature = "local-queryable")]
+impl QueryView for OwnGet<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.parameters
+            .as_deref()
+            .filter(|parameters| !parameters.is_empty())
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.opts
+            .attachment
+            .as_deref()
+            .filter(|attachment| !attachment.is_empty())
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.opts.source_info.as_ref()
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.carries_value
+            .then(|| self.opts.payload.as_deref().unwrap_or_default())
+    }
+    fn encoding(&self) -> Option<&EncodingHint> {
+        self.encoding.as_ref()
+    }
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.rid
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+    fn qos(&self) -> QosLevel {
+        self.qos
+    }
+}
+
 /// A plane that holds the Finals of at most `rows` queries at once, in rows lent from an arena
 /// the test leaks.
 #[cfg(test)]
