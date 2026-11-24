@@ -3137,6 +3137,30 @@ impl LinkPriorityRange {
 #[cfg(feature = "transport-multilink")]
 pub struct PubkeyBound(());
 
+/// One door per time stamp the link keeps: the stamp, lent to `f` for the length of the call. A
+/// caller names the stamp and not the lock that guards it, so where the stamps are kept is the
+/// link's own business. `f` runs with the lock held: it must not open another door or take
+/// another lock.
+macro_rules! link_stamp_doors {
+    ($( $door:ident => $field:ident, )*) => {
+        impl<R: SessionRuntime> LinkState<R> {
+            $(
+                #[doc = concat!("The link's `", stringify!($field), "`, lent to `f` under its lock.")]
+                #[inline]
+                pub fn $door<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
+                    R::with_mutex_mut(&self.$field, f)
+                }
+            )*
+        }
+    };
+}
+
+link_stamp_doors! {
+    fact_established_at => established_at,
+    fact_last_inbound_at => last_inbound_at,
+    fact_last_outbound_at => last_outbound_at,
+}
+
 impl<R: SessionRuntime> LinkState<R> {
     /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
     /// `&dyn BoxedLinkDriver` write seam. `R::LinkSink` is opaque in
@@ -6460,7 +6484,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
 
-    /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
+    /// R311kw — the one wire-emit seam: stamp [`LinkState::fact_last_outbound_at`]
     /// and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
     /// batch flush) so the keepalive emitter's idle window sees EVERY
@@ -6621,7 +6645,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !driver.carries_apart(reliability)
             && (priority == Priority::Control || !driver.reports_wire_writes())
         {
-            R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
+            link.fact_last_outbound_at(|slot| *slot = Some(now));
         }
 
         // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
@@ -10940,9 +10964,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
         let now = self.clock.now_monotonic_ms();
-        R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
-            *slot = Some(now);
-        });
+        self.link.fact_last_inbound_at(|slot| *slot = Some(now));
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.
@@ -16498,7 +16520,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// do not surface a PoisonError equivalent — the trait normalises
     /// the AP side to match.
     pub fn is_established(&self) -> bool {
-        R::with_mutex_mut(&self.link.established_at, |slot| slot.is_some())
+        self.link.fact_established_at(|slot| slot.is_some())
     }
 
     /// R311kx — the governing lease window in milliseconds:
@@ -18305,8 +18327,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
             self.release_handshake_answer();
-            R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
-            R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
+            self.link.fact_last_inbound_at(|slot| *slot = None);
+            self.link.fact_established_at(|slot| *slot = None);
             // The liveness duties belong to the transport that was
             // established: the replacement link's Established entry starts
             // its own, and none runs over the re-dial window.
@@ -18330,7 +18352,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
-            R::with_mutex_mut(&self.link.last_outbound_at, |slot| *slot = None);
+            self.link.fact_last_outbound_at(|slot| *slot = None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
             // one way, so the last link's outcome became the next link's
@@ -19593,7 +19615,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // subtract stays on one scale. Read outside the slot closure.
         let now = a.clock.now_monotonic_ms();
         // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
-        R::with_mutex_mut(&self.link().established_at, |slot| *slot = Some(now));
+        self.link().fact_established_at(|slot| *slot = Some(now));
         // The establishment is over, so no step of it is answered again.
         #[cfg(all(
             any(feature = "codec-init-body", feature = "codec-open-body"),

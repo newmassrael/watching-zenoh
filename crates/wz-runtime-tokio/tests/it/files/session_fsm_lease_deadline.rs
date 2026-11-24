@@ -64,11 +64,11 @@ fn r77_not_monitored_pre_established() {
     let (actions, mut engine) = fresh_setup();
     // Do NOT drive to Established — both slots stay None.
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "keepalive slot starts empty"
     );
     assert!(
-        actions.link.established_at.lock().unwrap().is_none(),
+        actions.link.fact_established_at(|slot| *slot).is_none(),
         "established slot empty pre-Established"
     );
     assert!(
@@ -108,7 +108,7 @@ fn lease_is_not_checked_once_established_is_left() {
             .load(core::sync::atomic::Ordering::SeqCst),
         "Established entry starts the lease monitor"
     );
-    let established = actions.link.established_at.lock().unwrap().unwrap();
+    let established = actions.link.fact_established_at(|slot| *slot).unwrap();
 
     engine.process_event(E::SessionClose);
     assert_eq!(engine.get_current_state(), S::Closing);
@@ -120,7 +120,7 @@ fn lease_is_not_checked_once_established_is_left() {
         "the exit from Established stops the lease monitor"
     );
     assert!(
-        actions.link.established_at.lock().unwrap().is_some(),
+        actions.link.fact_established_at(|slot| *slot).is_some(),
         "the established stamp outlives the state, so it cannot be the gate"
     );
     assert_eq!(
@@ -148,14 +148,12 @@ fn r84_within_lease_via_established_baseline_alone() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "no peer KeepAlive yet — only established_at populated"
     );
     let established = actions
         .link
-        .established_at
-        .lock()
-        .unwrap()
+        .fact_established_at(|slot| *slot)
         .expect("Established.onentry populated established_at via R84 hook");
 
     // 1ms after Established entry, well within 10s lease.
@@ -176,7 +174,7 @@ fn r84_within_lease_via_established_baseline_alone() {
 fn r84_expired_via_established_baseline_alone() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
-    let established = actions.link.established_at.lock().unwrap().unwrap();
+    let established = actions.link.fact_established_at(|slot| *slot).unwrap();
 
     // 20s after Established entry, past the 10s fixture lease.
     let now = established + 20 * 1000;
@@ -207,7 +205,7 @@ fn r84_expired_via_established_baseline_alone() {
 fn r84_keepalive_wins_over_stale_established_via_max() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
-    let established = actions.link.established_at.lock().unwrap().unwrap();
+    let established = actions.link.fact_established_at(|slot| *slot).unwrap();
 
     // KeepAlive arrived 5s after Established. 6s after Established
     // (1s after KeepAlive) is well within 10s lease counted from
@@ -225,7 +223,9 @@ fn r84_keepalive_wins_over_stale_established_via_max() {
     // Counted from keepalive (recent): 1s < 10s ⇒ WithinLease.
     // max() picks keepalive ⇒ WithinLease (correct R84 semantics).
     let keepalive = established + 11 * 1000;
-    *actions.link.last_inbound_at.lock().unwrap() = Some(keepalive);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(keepalive));
     let now = established + 12 * 1000;
 
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -246,7 +246,9 @@ fn r77_within_lease_when_stamp_recent() {
     drive_to_established(&mut engine);
     // Fixture lease_ms = 10_000 ⇒ 10s window (R311ku: always ms).
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(stamp));
     let pre_state = engine.get_current_state();
 
     let now = stamp + 1;
@@ -275,7 +277,9 @@ fn r77_expired_drives_established_to_closing() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(stamp));
 
     let now = stamp + 20 * 1000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -317,7 +321,9 @@ fn r77_expired_at_exact_lease_boundary() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(stamp));
 
     let now = stamp + 10_000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -337,7 +343,9 @@ fn r311kv_shorter_peer_lease_governs_deadline() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(stamp));
     // Peer advertised 2s in its OPEN; local window is the fixture 10s.
     actions.fact_peer_open_lease_ms(|slot| *slot = Some(2_000));
 
@@ -360,7 +368,9 @@ fn r311kv_local_cap_bounds_longer_peer_lease() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.link.last_inbound_at.lock().unwrap() = Some(stamp);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(stamp));
     actions.fact_peer_open_lease_ms(|slot| *slot = Some(60_000));
 
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
@@ -388,7 +398,7 @@ fn r311la_data_frame_resets_lease_window() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "no inbound yet"
     );
     // Minimal reliable FRAME: header (T_MID_FRAME 0x05 | R 0x20) + VLE
@@ -398,9 +408,7 @@ fn r311la_data_frame_resets_lease_window() {
         .expect("minimal frame parses");
     let stamp = actions
         .link
-        .last_inbound_at
-        .lock()
-        .unwrap()
+        .fact_last_inbound_at(|slot| *slot)
         .expect("data frame stamps the RX-activity slot");
 
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 9_999);
@@ -423,7 +431,7 @@ fn r311la_unknown_mid_does_not_stamp() {
         .handle_inbound(&[0x1F])
         .expect("unknown MID parses to InboundFrame::Unknown");
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "Unknown must not count as RX activity (pico decode-success scope)"
     );
 }

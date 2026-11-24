@@ -96,11 +96,9 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into();
     let actions = new_session_actions(outbound, params, TokioTime::new());
-    *actions
+    actions
         .link
-        .established_at
-        .lock()
-        .expect("established_at poisoned in fixture") = Some(actions.clock.now_monotonic_ms());
+        .fact_established_at(|slot| *slot = Some(actions.clock.now_monotonic_ms()));
     let session = TokioSession::new(
         actions,
         Arc::new(wz_runtime_tokio::sync::PlainMutex::new(

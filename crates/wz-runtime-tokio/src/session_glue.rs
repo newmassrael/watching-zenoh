@@ -7737,8 +7737,8 @@ mod reconnect_tx_tests {
             .expect("declare keyexpr");
 
         // Stamp the handshake-scoped slots the open path would populate.
-        TokioRuntime::with_mutex_mut(&actions.link.established_at, |slot| *slot = Some(42));
-        TokioRuntime::with_mutex_mut(&actions.link.last_inbound_at, |slot| *slot = Some(43));
+        actions.link.fact_established_at(|slot| *slot = Some(42));
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(43));
         actions.fact_inbound_cookie(|slot| *slot = Some(vec![1, 2]));
         actions.fact_inbound_peer_zid(|slot| *slot = Some([9; 4].into()));
         actions
@@ -7781,10 +7781,7 @@ mod reconnect_tx_tests {
             None,
             "the replaced transport's close reason must not be read as the new one's"
         );
-        assert!(TokioRuntime::with_mutex_mut(
-            &actions.link.last_inbound_at,
-            |slot| slot.is_none()
-        ));
+        assert!(actions.link.fact_last_inbound_at(|slot| slot.is_none()));
         assert!(actions.fact_inbound_cookie(|slot| slot.is_none()));
         assert!(actions.fact_inbound_peer_zid(|slot| slot.is_none()));
         // Session-scoped survivors.

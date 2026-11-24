@@ -306,7 +306,9 @@ async fn a_lease_on_a_program_time_base_expires_only_when_that_time_passes_it() 
     let clock = TokioTime::on_time_base(hold.time());
     let (actions, mut engine) = session_on(clock, 20);
     drive_to_established(&mut engine);
-    *actions.link.last_inbound_at.lock().unwrap() = Some(actions.clock.now_monotonic_ms());
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(actions.clock.now_monotonic_ms()));
 
     let outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = outcomes.clone();

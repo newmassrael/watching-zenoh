@@ -158,10 +158,10 @@ async fn a_late_init_ack_keeps_out_of_the_lease_only_under_ignore() {
         engine.process_event(E::InitAckReceived);
         engine.process_event(E::OpenAckReceived);
         assert_eq!(engine.get_current_state(), S::Established);
-        *actions.link.last_inbound_at.lock().unwrap() = None;
+        actions.link.fact_last_inbound_at(|slot| *slot = None);
 
         let outcome = deliver(&actions, &mut engine, craft_initack_wire(&[0x22; 8])).await;
-        let stamped = actions.link.last_inbound_at.lock().unwrap().is_some();
+        let stamped = actions.link.fact_last_inbound_at(|slot| *slot).is_some();
         assert_eq!(engine.get_current_state(), S::Established, "{value:?}");
         match value {
             HandshakeStrayMessage::Fail => {

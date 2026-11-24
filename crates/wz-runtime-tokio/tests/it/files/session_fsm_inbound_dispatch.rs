@@ -327,7 +327,7 @@ fn handle_inbound_keepalive_updates_last_inbound_at() {
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "slot starts empty"
     );
 
@@ -342,9 +342,7 @@ fn handle_inbound_keepalive_updates_last_inbound_at() {
 
     let stamp = actions
         .link
-        .last_inbound_at
-        .lock()
-        .unwrap()
+        .fact_last_inbound_at(|slot| *slot)
         .expect("KeepAlive must populate the timestamp slot");
     assert!(
         stamp >= pre && stamp <= post,
@@ -388,7 +386,9 @@ fn handle_inbound_stamps_rx_activity_for_a_non_keepalive_frame() {
     // with an equal value" are distinguishable. The old seed was the clock's
     // own reading, which made them the same number.
     const SENTINEL: u64 = u64::MAX;
-    *actions.link.last_inbound_at.lock().unwrap() = Some(SENTINEL);
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(SENTINEL));
 
     // Drive an InitAck wire through handle_inbound (R68a path).
     let cookie = vec![0xAB, 0xCD];
@@ -399,9 +399,7 @@ fn handle_inbound_stamps_rx_activity_for_a_non_keepalive_frame() {
 
     let after = actions
         .link
-        .last_inbound_at
-        .lock()
-        .unwrap()
+        .fact_last_inbound_at(|slot| *slot)
         .expect("the slot stays populated");
     assert_ne!(
         after, SENTINEL,

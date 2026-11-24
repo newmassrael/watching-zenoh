@@ -53,7 +53,7 @@ fn fresh_setup() -> (
 fn last_outbound_at_starts_empty() {
     let (actions, _engine) = fresh_setup();
     assert!(
-        actions.link.last_outbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_outbound_at(|slot| *slot).is_none(),
         "no TX has happened at construction"
     );
 }
@@ -68,7 +68,7 @@ fn close_emit_stamps_last_outbound_at() {
     let (actions, _engine) = fresh_setup();
     actions.send_close_with_reason(CloseReason::Generic);
     assert!(
-        actions.link.last_outbound_at.lock().unwrap().is_some(),
+        actions.link.fact_last_outbound_at(|slot| *slot).is_some(),
         "CLOSE emit must stamp the outbound slot (pico sets _transmitted on every t_msg send)"
     );
 }
@@ -84,7 +84,7 @@ fn handshake_emit_stamps_last_outbound_at() {
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
     assert!(
-        actions.link.last_outbound_at.lock().unwrap().is_some(),
+        actions.link.fact_last_outbound_at(|slot| *slot).is_some(),
         "InitSyn emit must stamp the outbound slot"
     );
 }
@@ -364,7 +364,7 @@ mod keepalive_emitter {
         let (_driver, actions, _engine) = queued_setup(None);
         actions.send_close_with_reason(CloseReason::Generic);
         assert!(
-            actions.link.last_outbound_at.lock().unwrap().is_none(),
+            actions.link.fact_last_outbound_at(|slot| *slot).is_none(),
             "a frame still in the writer's queue has not spoken on the line"
         );
     }
@@ -460,7 +460,9 @@ mod keepalive_emitter {
         // Past the 10_000/3 interval from establishment, with a control frame on
         // the streams at that very instant.
         let idle_check = actions.clock.now_monotonic_ms() + 4_000;
-        *actions.link.last_outbound_at.lock().unwrap() = Some(idle_check);
+        actions
+            .link
+            .fact_last_outbound_at(|slot| *slot = Some(idle_check));
         assert_eq!(
             check_keepalive_deadline(&actions, idle_check),
             KeepAliveCheckOutcome::Emitted
@@ -471,7 +473,7 @@ mod keepalive_emitter {
             "the companion's keepalive alone, on the companion"
         );
         assert_eq!(
-            *actions.link.last_outbound_at.lock().unwrap(),
+            actions.link.fact_last_outbound_at(|slot| *slot),
             Some(idle_check),
             "the companion's keepalive is not the link's line speaking"
         );
@@ -510,9 +512,7 @@ mod keepalive_emitter {
         let (receiver_actions, _engine2) = fresh_setup();
         assert!(receiver_actions
             .link
-            .last_inbound_at
-            .lock()
-            .unwrap()
+            .fact_last_inbound_at(|slot| *slot)
             .is_none());
         receiver_actions
             .handle_inbound(&wire)
@@ -520,9 +520,7 @@ mod keepalive_emitter {
         assert!(
             receiver_actions
                 .link
-                .last_inbound_at
-                .lock()
-                .unwrap()
+                .fact_last_inbound_at(|slot| *slot)
                 .is_some(),
             "inbound KeepAlive resets the receiver's lease window"
         );

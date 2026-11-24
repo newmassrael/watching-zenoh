@@ -102,7 +102,7 @@ async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
     drive_to_sent_init_syn(&mut engine);
     let pre_state = engine.get_current_state();
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_none(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
         "keepalive slot empty before Rx"
     );
 
@@ -119,7 +119,7 @@ async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
         "KeepAlive must not advance FSM"
     );
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_some(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_some(),
         "KeepAlive must populate lease-timestamp slot via handle_inbound"
     );
 }
@@ -400,9 +400,7 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
         drive_to_established(&mut engine);
         let established = actions
             .link
-            .established_at
-            .lock()
-            .unwrap()
+            .fact_established_at(|slot| *slot)
             .expect("the establishment is stamped");
 
         assert_eq!(
@@ -464,9 +462,7 @@ fn watched_session(
     drive_to_established(&mut engine);
     let established = actions
         .link
-        .established_at
-        .lock()
-        .unwrap()
+        .fact_established_at(|slot| *slot)
         .expect("the establishment is stamped");
     actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
     Some((actions, engine, established))

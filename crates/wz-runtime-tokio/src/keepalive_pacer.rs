@@ -58,13 +58,13 @@
 
 use std::sync::{Arc, Weak};
 
-use wz_runtime_core::{Runtime, TimeSource};
+use wz_runtime_core::TimeSource;
 use wz_session_core::capacity::LatenessWindows;
 use wz_session_core::drive::keepalive_wake_deadline;
 use wz_session_core::lease::KeepAliveCheckOutcome;
 
 use crate::emission_cost::check_keepalive_timed;
-use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::runtime_impl::TokioTime;
 use crate::runtime_pool::WzRuntime;
 use crate::session_glue::SessionLinkActions;
 
@@ -92,7 +92,7 @@ pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: To
 }
 
 fn established_at(actions: &SessionLinkActions) -> Option<u64> {
-    TokioRuntime::with_mutex_mut(&actions.link.established_at, |slot| *slot)
+    actions.link.fact_established_at(|slot| *slot)
 }
 
 /// How long the pacer sleeps next, or `None` when this establishment is over.

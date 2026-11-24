@@ -203,7 +203,9 @@ async fn r76b_link_lost_event_drives_loop_to_terminated() {
 async fn r76b_lease_branch_fires_with_silent_peer() {
     let (actions, mut engine) = fresh_setup_with_lease_ms(20);
     drive_to_established(&mut engine);
-    *actions.link.last_inbound_at.lock().unwrap() = Some(actions.clock.now_monotonic_ms());
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(actions.clock.now_monotonic_ms()));
 
     let mut driver = HangingDriver;
     let clock = TokioTime::new();
@@ -283,7 +285,7 @@ async fn r85_unlimited_iters_terminates_on_finite_event_sequence() {
     // Lost arm fired — this proves both events were processed by the
     // unlimited loop, not just the last one.
     assert!(
-        actions.link.last_inbound_at.lock().unwrap().is_some(),
+        actions.link.fact_last_inbound_at(|slot| *slot).is_some(),
         "KeepAlive iteration ran before the Lost iteration"
     );
 }
@@ -507,7 +509,9 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
 async fn r83_observer_fires_on_lease_branch() {
     let (actions, mut engine) = fresh_setup_with_lease_ms(20);
     drive_to_established(&mut engine);
-    *actions.link.last_inbound_at.lock().unwrap() = Some(actions.clock.now_monotonic_ms());
+    actions
+        .link
+        .fact_last_inbound_at(|slot| *slot = Some(actions.clock.now_monotonic_ms()));
 
     let mut driver = HangingDriver;
     let lease_outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> = Arc::new(Mutex::new(Vec::new()));
