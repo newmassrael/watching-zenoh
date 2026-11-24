@@ -104,8 +104,8 @@ struct Joined {
     transport: Weak<AppTransport>,
 }
 
-/// One member's stack: it joins [`GROUP`] and refuses anything else, and hands what its session
-/// sends on the group to every other member, from [`source`].
+/// One member's stack: it joins [`GROUP`], with whatever keys follow it, and refuses anything
+/// else, and hands what its session sends on the group to every other member, from [`source`].
 struct MemberStack {
     network: Arc<Network>,
     member: u8,
@@ -115,7 +115,7 @@ struct MemberStack {
 
 impl AppPort for MemberStack {
     fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
-        if kind != AppLinkKind::Group || locator != GROUP {
+        if kind != AppLinkKind::Group || !locator.starts_with(GROUP) {
             return ProgramOpen::Refused;
         }
         let transport = self.transport.lock().unwrap().clone();
@@ -332,18 +332,21 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
+/// [`GROUP`] with keys after it, `len` bytes in all.
+fn padded(len: usize) -> String {
+    format!("{GROUP};ttl={}", "1".repeat(len - GROUP.len() - 5))
+}
+
 /// A group whose endpoint is one byte past `MAX_GROUP_ENDPOINT_LEN` is refused by that name before
 /// the stack is asked to join it: a member's link is reported by the endpoint in a row of that
 /// length, and this engine holds no row on the heap. The CONTROL is an endpoint of the bound, which
-/// reaches the stack (this one joins only [`GROUP`], so it refuses it for its own reason). Turned
-/// red by a join that asks the stack before it measures the endpoint.
+/// is joined. Turned red by a join that asks the stack before it measures the endpoint.
 #[test]
 fn a_group_endpoint_past_its_row_is_refused_before_the_stack_is_asked() {
     use crate::Refusal;
     use wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN;
 
     let network = Arc::new(Network::default());
-    let padded = |len: usize| format!("{GROUP};ttl={}", "1".repeat(len - GROUP.len() - 5));
     let past = padded(MAX_GROUP_ENDPOINT_LEN + 1);
     assert_eq!(past.len(), MAX_GROUP_ENDPOINT_LEN + 1);
     match open_member(&network, 1, member_config(1, &past)) {
@@ -358,11 +361,42 @@ fn a_group_endpoint_past_its_row_is_refused_before_the_stack_is_asked() {
 
     let at_bound = padded(MAX_GROUP_ENDPOINT_LEN);
     assert_eq!(at_bound.len(), MAX_GROUP_ENDPOINT_LEN);
-    match open_member(&network, 1, member_config(1, &at_bound)) {
-        Err(OpenError::Group(why)) => assert_ne!(why.why, Refusal::GroupEndpointTooLong, "{why}"),
-        Err(other) => panic!("refused as {other:?}"),
-        Ok(_) => panic!("opened over a stack that joins only GROUP"),
-    }
+    let member =
+        open_member(&network, 1, member_config(1, &at_bound)).expect("an endpoint of the bound");
+    assert_eq!(network.joins_of(1), 1, "the stack was asked once");
+    SessionDrive::close(&*member);
+}
+
+/// Walking the faces of a session whose group was joined by the longest endpoint its rows hold
+/// allocates nothing: the other member's row is written in place, its endpoint whole. Turned red
+/// by a walk that builds a member's snapshot, which allocates.
+#[cfg(feature = "connectivity")]
+#[test]
+fn walking_a_groups_members_a_row_at_a_time_allocates_nothing() {
+    use wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN;
+
+    let network = Arc::new(Network::default());
+    let endpoint = padded(MAX_GROUP_ENDPOINT_LEN);
+    let first = open_member(&network, 1, member_config(1, &endpoint)).expect("the first joins");
+    let second = open_member(&network, 2, member_config(2, &endpoint)).expect("the second joins");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+
+    let mut rows = 0;
+    let allocations = super::redial_heap::counted(|| {
+        while let Some(row) = SessionEngine::face_link_at(&*first, rows) {
+            core::hint::black_box(&row);
+            rows += 1;
+        }
+    });
+    assert_eq!(rows, 1, "the other member, one link");
+    assert_eq!(allocations, 0, "the walk allocates nothing");
+    let row = SessionEngine::face_link_at(&*first, 0).expect("the member's row");
+    assert_eq!(row.group_endpoint.as_deref(), Some(endpoint.as_str()));
+    assert!(row.is_multicast);
+    SessionDrive::close(&*second);
+    SessionDrive::close(&*first);
 }
 
 /// A session told to join a group past its task cells is refused for want of a task cell, as its

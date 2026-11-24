@@ -3800,8 +3800,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The row at cursor `at` of the links of the faces that stand, in the order
-    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends are written
-    /// into the row with nothing allocated. A group's members are read off their snapshots.
+    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends and a group
+    /// member's are written into the row with nothing allocated.
     #[cfg(feature = "connectivity")]
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         let mut at = at;
@@ -3819,11 +3819,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             at -= links;
         }
         #[cfg(feature = "group")]
-        for member in self.groups.iter().flat_map(GroupFace::member_snapshots) {
-            if at < member.links.len() {
-                return FaceLinkRow::of_snapshot(&member, at);
+        for group in &self.groups {
+            let rows = group.member_rows();
+            if at < rows {
+                return group.member_row(at);
             }
-            at -= member.links.len();
+            at -= rows;
         }
         None
     }

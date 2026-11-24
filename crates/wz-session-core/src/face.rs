@@ -399,6 +399,52 @@ impl FaceLinkRow {
     }
 }
 
+#[cfg(feature = "session-multicast")]
+impl FaceLinkRow {
+    /// `member` of a group as its row, the transport [`FaceSnapshot::of_group_member`] reports
+    /// and its one link: from the group's locator `src` to the address the member's datagrams come
+    /// from, labelled by the `endpoint` the group was joined by. Every text that fits its row is
+    /// held there, so an engine that admits only those reads its members with nothing allocated.
+    /// `None` for a member whose JOIN named a role this node does not know.
+    pub fn of_group_member(
+        member: &crate::multicast_dispatch::MulticastMember,
+        src: &str,
+        endpoint: &str,
+        is_shm: bool,
+    ) -> Option<Self> {
+        let whatami = member.whatami?.to_wire();
+        let mut zid = [0u8; 16];
+        for (into, byte) in zid.iter_mut().zip(member.peer.as_slice()) {
+            *into = *byte;
+        }
+        Some(Self {
+            zid,
+            whatami,
+            is_qos: false,
+            is_multicast: true,
+            is_shm,
+            link: 0,
+            src: RowText::of(src),
+            dst: udp_row(member.locator),
+            kind: Some(LinkKind::Udp),
+            mtu: 0,
+            group_endpoint: Some(GroupRowText::of(endpoint)),
+        })
+    }
+}
+
+/// `udp/<at>`, the locator a group member's end is reported by, written into its row.
+#[cfg(feature = "session-multicast")]
+fn udp_row(at: core::net::SocketAddr) -> RowText {
+    use core::fmt::Write;
+    let mut inline = heapless::String::<{ crate::caps::MAX_LOCATOR_LEN }>::new();
+    if write!(inline, "udp/{at}").is_ok() {
+        RowText::Inline(inline)
+    } else {
+        RowText::Spilled(alloc::format!("udp/{at}"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaceEventKind {
     /// The face reached Established.
@@ -661,6 +707,53 @@ mod tests {
     /// A member of a UDP group is a multicast transport of its own, of its zid and role, with one
     /// UDP link to the address its datagrams come from, over the group; a member whose role this
     /// node does not know is no transport it can report.
+    /// A group member's row read in place is the row of its snapshot, every text held in the row,
+    /// the longest endpoint of its bound too. Turned red by a row that reports another end, kind or
+    /// label than the snapshot, or that spills a text that fits.
+    #[cfg(feature = "session-multicast")]
+    #[test]
+    fn a_group_members_row_is_the_row_of_its_snapshot_held_in_place() {
+        use crate::multicast_dispatch::MulticastMember;
+        use crate::multicast_peer_lost::MulticastPeerId;
+        let member = MulticastMember {
+            peer: MulticastPeerId::from_wire(&[0x0a, 0x0b]),
+            whatami: Some(crate::WhatAmI::Peer),
+            locator: core::net::SocketAddr::from(([192, 0, 2, 9], 7447)),
+        };
+        let group = "udp/239.1.2.3:7447";
+        let endpoint = "e".repeat(crate::caps::MAX_GROUP_ENDPOINT_LEN);
+        let face = FaceSnapshot::of_group_member(
+            &member,
+            GroupMemberLink::udp(group, &member, group, &endpoint),
+            true,
+        )
+        .expect("a member of a known role");
+        let snapshot = FaceLinkRow::of_snapshot(&face, 0).expect("its link");
+        let row = FaceLinkRow::of_group_member(&member, group, &endpoint, true).expect("its row");
+        assert_eq!(
+            (row.zid, row.whatami, row.is_multicast, row.is_shm, row.link),
+            (
+                snapshot.zid,
+                snapshot.whatami,
+                snapshot.is_multicast,
+                snapshot.is_shm,
+                0
+            )
+        );
+        assert_eq!((row.kind, row.mtu), (snapshot.kind, snapshot.mtu));
+        assert_eq!(row.src.as_str(), snapshot.src.as_str());
+        assert_eq!(row.dst.as_str(), "udp/192.0.2.9:7447");
+        assert_eq!(row.dst.as_str(), snapshot.dst.as_str());
+        let held = row.group_endpoint.expect("the group's endpoint");
+        assert_eq!(held.as_str(), endpoint);
+        assert!(row.src.is_inline() && row.dst.is_inline() && held.is_inline());
+        let unknown = MulticastMember {
+            whatami: None,
+            ..member
+        };
+        assert!(FaceLinkRow::of_group_member(&unknown, group, &endpoint, true).is_none());
+    }
+
     #[cfg(feature = "session-multicast")]
     #[test]
     fn a_group_member_is_a_multicast_transport_with_one_link_over_the_group() {
