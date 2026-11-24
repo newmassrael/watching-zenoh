@@ -542,6 +542,16 @@ impl FieldsMemory {
         self.stats
     }
 
+    /// Give up the walk of the container the rows were read again from: the
+    /// container a live handle follows has ended and the capture's next one
+    /// begins. The walk is otherwise kept only while the bytes handed over digest
+    /// as the container it walked, and two containers of one capture can begin
+    /// with the same headers; this makes the next call walk the next container
+    /// from its first packet whatever its bytes are.
+    pub fn forget_container(&mut self) {
+        self.walk.reread = None;
+    }
+
     /// Whether the exchange pairing this memory keeps across front trims has
     /// grown past what the lists hold.
     ///
@@ -1385,6 +1395,15 @@ pub trait RowCoordinates {
         self.held_seq_ranges()
             .map(|ranges| ranges.iter().map(|(first, last)| last - first + 1).sum())
     }
+    /// The number the first packet of the container the document is handed
+    /// takes in the rows' numbering: `0` for a dissection read from one
+    /// container from its first packet, and for a live handle that went on into a
+    /// later container of its capture the number that container began at. A row
+    /// whose packet comes before it was in an earlier container and is not read
+    /// again.
+    fn container_first_packet(&self) -> usize {
+        0
+    }
 }
 
 /// The position, in a list whose oldest held message has produced-index
@@ -1989,6 +2008,11 @@ fn document_selected<W: DocOut>(
     // stopped and a checkpoint of it every chunk of packets, walks only the packets
     // after it, and reads a packet a row names from the chunk that holds it: the
     // packets the rows of THIS call name, wherever in the container they are.
+    //
+    // A handle that went on into a later container of its capture numbers its
+    // packets across containers, and `capture` is the container it follows now:
+    // its first packet is `first_packet` in the rows' numbering.
+    let first_packet = coordinates.map_or(0, |c| c.container_first_packet());
     let reread = if tracking {
         // Held only while it reads this container: a walk that begins again
         // dropped it above if it did not.
@@ -1996,14 +2020,14 @@ fn document_selected<W: DocOut>(
         let readable = kept.advance(capture);
         if readable {
             kept.fingerprint = container_fingerprint(capture, kept.cursor.consumed());
-            kept.prune_before(oldest_held_packet(d));
+            kept.prune_before(oldest_held_packet(d).saturating_sub(first_packet));
         }
         *reread_slot = readable.then_some(kept);
         reread_slot
             .as_ref()
-            .map(|kept| Reread::indexed(capture, kept))
+            .map(|kept| Reread::indexed(capture, kept, first_packet))
     } else {
-        Reread::of(capture)
+        Reread::of(capture, first_packet)
     };
     for (i, flow) in d.flows().iter().enumerate() {
         let mut own = None;
@@ -8088,6 +8112,11 @@ fn walk_agrees(walked: &str, framed: &str) -> bool {
 /// well as the first one does.
 struct Reread<'a> {
     packets: RereadPackets<'a>,
+    /// The number the container's first packet takes in the rows' numbering:
+    /// `0` but for a live handle that went on into a later container of its
+    /// capture ([`RowCoordinates::container_first_packet`]). A packet before it is
+    /// in an earlier container, which this one cannot read again.
+    first_packet: usize,
 }
 
 enum RereadPackets<'a> {
@@ -8116,7 +8145,7 @@ struct RereadPacket<'a> {
 
 impl<'a> Reread<'a> {
     /// The whole container, read once.
-    fn of(capture: &'a [u8]) -> Option<Self> {
+    fn of(capture: &'a [u8], first_packet: usize) -> Option<Self> {
         let mut frames = Vec::new();
         let mut cursor = crate::CaptureCursor::new();
         let walk = cursor.walk(capture, |event| {
@@ -8137,6 +8166,7 @@ impl<'a> Reread<'a> {
             // parse always answered.
             Ok(crate::CaptureWalk::Halted { .. }) if cursor.consumed() > 0 => Some(Self {
                 packets: RereadPackets::All(frames),
+                first_packet,
             }),
             Ok(crate::CaptureWalk::Halted { .. }) => None,
             // Fewer than four bytes: the format is not known and nothing was
@@ -8152,23 +8182,27 @@ impl<'a> Reread<'a> {
     /// The packets of `capture`, read from the checkpoints `resume` holds as the
     /// rows ask for them. `resume` has walked `capture` to its end
     /// ([`RereadResume::advance`]).
-    fn indexed(capture: &'a [u8], resume: &'a RereadResume) -> Self {
+    fn indexed(capture: &'a [u8], resume: &'a RereadResume, first_packet: usize) -> Self {
         Self {
             packets: RereadPackets::Chunked {
                 capture,
                 resume,
                 loaded: core::cell::RefCell::new(Vec::new()),
             },
+            first_packet,
         }
     }
 
-    fn packet(&self, index: usize) -> Option<RereadPacket<'a>> {
+    fn packet(&self, number: usize) -> Option<RereadPacket<'a>> {
         // By the packet's own number and not by position: the number is the
         // coordinate a row names, and the two agree only while nothing in the
-        // container is skipped.
+        // container is skipped. The container counts its own packets from 0, and
+        // what a row names is that count plus `first_packet`.
+        let index = number.checked_sub(self.first_packet)?;
+        let first_packet = self.first_packet;
         let found = |frame: &crate::CapturedFrame<'a>| RereadPacket {
             link_type: frame.link_type,
-            index: frame.index,
+            index: first_packet + frame.index,
             data: frame.data,
         };
         match &self.packets {
@@ -14175,6 +14209,41 @@ mod tests {
             json.contains("\"shown\":0"),
             "and show nothing rather than inventing rows: {json}"
         );
+    }
+
+    /// A LATER CONTAINER OF ONE CAPTURE IS READ AGAIN BY THE NUMBERS ITS PACKETS
+    /// TOOK. A live handle that went on into a capture's next container numbers
+    /// its packets on from the first container's; the second read finds a packet
+    /// by that number whether it walks the whole container or its checkpoints,
+    /// and finds none for a number from an earlier container.
+    #[test]
+    fn a_later_container_is_reread_by_the_numbers_its_packets_took() {
+        let packets: Vec<Vec<u8>> = (0..3u16)
+            .map(|i| {
+                udp_packet(
+                    [10, 0, 0, 1],
+                    43210 + i,
+                    [10, 0, 0, 2],
+                    7447,
+                    &[wz_session_core::wire_const::T_MID_KEEP_ALIVE],
+                )
+            })
+            .collect();
+        let rows: Vec<(u32, u32, &[u8])> = packets.iter().map(|p| (0, 0, p.as_slice())).collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        let mut kept = RereadResume::new();
+        assert!(kept.advance(&file), "the container walks to its end");
+        let whole = Reread::of(&file, 7).expect("the container reads");
+        let chunked = Reread::indexed(&file, &kept, 7);
+        for reread in [&whole, &chunked] {
+            assert!(reread.packet(6).is_none(), "6 was an earlier container's");
+            for (i, packet) in packets.iter().enumerate() {
+                let found = reread.packet(7 + i).expect("a packet of this container");
+                assert_eq!(found.index, 7 + i);
+                assert_eq!(found.data, packet.as_slice());
+            }
+            assert!(reread.packet(10).is_none(), "the container holds three");
+        }
     }
 
     /// R311y855 — THE WALK IS CHECKED AGAINST THE SESSION, AND A DISAGREEMENT

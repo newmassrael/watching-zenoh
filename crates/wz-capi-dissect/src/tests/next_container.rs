@@ -3,7 +3,7 @@
 
 //! `wz_dissect_live_follow_next` across the boundary: one capture written as two
 //! containers, read by one handle, says what the capture read as one container
-//! says, and a handle that moved on reads no container again.
+//! says, and a handle that moved on reads the container it follows now again.
 //!
 //! The walk that numbers on and names sections apart is held in `wz-capture`
 //! (`CaptureCursor::next_container`); what this file holds is the door, and
@@ -83,6 +83,14 @@ fn follow_next(handle: *mut live::LiveDissection, bytes: &[u8]) -> (c_int, u64) 
     (rc, first_packet)
 }
 
+/// The datagram flows of a field document: from its `datagram_flows` key to
+/// the `capture_reread` key the document writes after them.
+fn datagram_flows_of(doc: &str) -> &str {
+    let from = doc.find("\"datagram_flows\":").expect("datagram flows");
+    let to = doc.find("\"capture_reread\":").expect("the reread verdict");
+    &doc[from..to]
+}
+
 /// `wz_dissect_live_session_table` the way C calls it.
 fn session_table_of(handle: *const live::LiveDissection) -> String {
     let mut out: *mut c_char = core::ptr::null_mut();
@@ -157,12 +165,13 @@ fn a_capture_read_as_two_containers_says_what_it_says_read_as_one() {
     unsafe { wz_dissect_live_close(two) };
 }
 
-/// A HANDLE THAT MOVED ON READS NO CONTAINER AGAIN AND IS LENT NONE: its packet
-/// numbers count across containers, so the field document ignores the
-/// container it is handed and says so, and lending one is refused. A handle
-/// that read one container still reads it again.
+/// A HANDLE THAT MOVED ON READS THE CONTAINER IT FOLLOWS NOW AGAIN AND IS LENT
+/// NONE: its packet numbers count across containers, and the field document
+/// finds the next container's packets by them, so every datagram row of the
+/// capture, all of them in the second container, comes out as a handle that
+/// read the capture as one container writes it. Lending one is refused.
 #[test]
-fn a_moved_handle_reads_no_container_again_and_is_lent_none() {
+fn a_moved_handle_rereads_the_container_it_follows_and_is_lent_none() {
     let packets = session_packets();
     let whole = container(&packets, 0, packets.len());
     let first = container(&packets, 0, 4);
@@ -170,10 +179,10 @@ fn a_moved_handle_reads_no_container_again_and_is_lent_none() {
 
     let one = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
     assert_eq!(follow(one, &whole), WZ_DISSECT_OK);
-    let doc = live_fields(one, &whole);
+    let whole_doc = live_fields(one, &whole);
     assert!(
-        doc.contains("\"capture_reread\":true"),
-        "a handle on its first container reads it again: {doc}"
+        whole_doc.contains("\"capture_reread\":true"),
+        "a handle on its first container reads it again: {whole_doc}"
     );
     unsafe { wz_dissect_live_close(one) };
 
@@ -182,8 +191,18 @@ fn a_moved_handle_reads_no_container_again_and_is_lent_none() {
     assert_eq!(follow_next(two, &second).0, WZ_DISSECT_OK);
     let doc = live_fields(two, &second);
     assert!(
-        doc.contains("\"capture_reread\":false"),
-        "a moved handle reads no container again: {doc}"
+        doc.contains("\"capture_reread\":true"),
+        "a moved handle reads the container it follows again: {doc}"
+    );
+    let datagrams = datagram_flows_of(&doc);
+    assert!(
+        datagrams.contains("\"messages\":[{"),
+        "the second container's datagram keep-alives are rows: {doc}"
+    );
+    assert_eq!(
+        datagrams,
+        datagram_flows_of(&whole_doc),
+        "the datagram rows, packet numbers and frame offsets included"
     );
     assert_eq!(
         unsafe { wz_dissect_live_follow_lent(two, second.as_ptr(), second.len()) },

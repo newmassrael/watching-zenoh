@@ -7310,14 +7310,27 @@ int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
  * per container would have needed the container on every record, and the
  * record's layout is fixed.
  *
- * WHAT A MOVED HANDLE NO LONGER DOES. Its packet numbers are not positions in
- * any one container, so it reads no container again: the field documents a
- * moved handle writes (wz_dissect_live_fields_where, _fields_since,
- * _fields_since_window, _row_facts_since) ignore the container passed to them,
- * write `"capture_reread":false`, carry no datagram row and leave
- * `frame_offset` and `l2` null. Pass NULL and 0. For the same reason it is not
- * lent a container: wz_dissect_live_follow_lent on a moved handle is
- * WZ_DISSECT_ERR_INVALID_ARG.
+ * WHAT THE FIELD DOCUMENTS READ AGAIN. The field documents of a moved handle
+ * (wz_dissect_live_fields_where, _fields_since, _fields_since_window,
+ * _row_facts_since) take the container the handle follows NOW, the one this door
+ * was last handed, and read its packets again by the numbers they took, so a row
+ * of that container carries `first_byte.frame_offset` and `l2` and a datagram
+ * row is walked, under `"capture_reread":true`, as on the first container. A
+ * row whose packet was in an EARLIER container is still written, from what the
+ * handle holds, with `frame_offset` and `l2` null, and a datagram row whose
+ * packet was there is left out: those bytes are not handed in again. Pass the
+ * previous container no longer.
+ *
+ * WHY A MOVED HANDLE IS LENT NO CONTAINER. wz_dissect_live_follow_lent on a
+ * moved handle is WZ_DISSECT_ERR_INVALID_ARG. A lent container is read by the
+ * place each message's bytes were logged at, and that place is one byte offset
+ * with no container beside it: a TCP run keeps the offset in the word that
+ * otherwise names its own kept bytes, told apart by one flag bit, and a datagram
+ * or scouting unit logs the offset alone. A flow holds one lent container, and
+ * the places it keeps rise with the stream. Lending a second container would
+ * need every one of those records to say which container it is in, which is a
+ * wider record for every run of every capture, lent or not. A moved handle
+ * copies what it keeps instead, as wz_dissect_live_follow does.
  *
  * WHEN THE PREVIOUS CONTAINER MAY BE RELEASED. A handle that copied its
  * containers (wz_dissect_live_open, wz_dissect_live_open_with,
@@ -7328,7 +7341,7 @@ int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
  * promise those doors ask still holds: keep it until the handle is closed. The
  * containers after it are copied.
  *
- * A SE`UENCE OF CLOSED FILES is read the same way, as one capture: follow the
+ * A SEQUENCE OF CLOSED FILES is read the same way, as one capture: follow the
  * first, follow_next each one after it, then wz_dissect_live_end once the last
  * has been read. Do not open the first with wz_dissect_pcap_replay when more
  * follow: that door ends the handle at the end of its file, which spends the
@@ -9478,8 +9491,9 @@ int wz_dissect_pcap_replay_lent(const unsigned char *bytes, size_t len,
 /* `len` is how much of the lent container is readable and committed now, as
  * for wz_dissect_live_follow; see the paragraph above for what is promised.
  * WZ_DISSECT_ERR_INVALID_ARG on a handle wz_dissect_live_follow_next moved on
- * to a later container (ABI 62): its packet numbers count across containers
- * and name no position in a lent one. */
+ * to a later container (ABI 62): a kept message's place is one offset with no
+ * container beside it, so a handle is lent one container (see "WHY A MOVED
+ * HANDLE IS LENT NO CONTAINER" there). */
 int wz_dissect_live_follow_lent(wz_dissect_live *h, const unsigned char *bytes,
                                 size_t len);
 

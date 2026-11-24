@@ -696,6 +696,8 @@ impl LiveDissection {
         if self.cursor.consumed() > 0 {
             self.cursor = self.cursor.next_container(first_packet);
             self.container += 1;
+            self.fields_memory.forget_container();
+            self.facts_memory.forget_container();
         }
         (first_packet, self.follow(bytes))
     }
@@ -703,22 +705,12 @@ impl LiveDissection {
     /// Whether this handle has gone on from the first container it read to a
     /// later one ([`Self::follow_next`]).
     ///
-    /// A packet number then counts across containers, so it is not a position in
-    /// the container a caller holds: the field documents read no container
-    /// again, and a container is not lent to it.
+    /// A packet number then counts across containers. The field documents read
+    /// packets again from the container the caller hands them, which is the one
+    /// the handle follows now, by subtracting where it began; a container is not
+    /// lent to such a handle (see the lending doors for why).
     pub fn moved_container(&self) -> bool {
         self.container > 0
-    }
-
-    /// The container the field documents may read packets again from: the one
-    /// handed in, or none once the handle has moved on from its first container,
-    /// whose packets the handle numbers apart from the container's own count.
-    fn reread_container<'c>(&self, capture: &'c [u8]) -> &'c [u8] {
-        if self.moved_container() {
-            &[]
-        } else {
-            capture
-        }
     }
 
     /// How many bytes of the container [`Self::follow`] has consumed.
@@ -1399,6 +1391,8 @@ impl LiveDissection {
     /// rows: this reader keeps no copy of a pushed packet, so those rows are
     /// re-read from it exactly as the capture doors re-read theirs. An empty
     /// slice renders none of them and says so with `capture_reread: false`.
+    /// After [`Self::follow_next`] it is the container the handle follows now,
+    /// and a row whose packet was in an earlier container is not re-read.
     pub fn fields_where(
         &mut self,
         capture: &[u8],
@@ -1407,7 +1401,6 @@ impl LiveDissection {
         filter: &wz_capture::filter::Filter,
     ) -> Option<String> {
         self.drain(&mut []);
-        let capture = self.reread_container(capture);
         let ids = HandleIds::of(self);
         let hook = self.progress;
         let ask = |done: u64, total: u64| asked(hook, done, total);
@@ -1600,7 +1593,6 @@ impl LiveDissection {
         max_rows: u64,
     ) -> Option<D> {
         self.drain(&mut []);
-        let capture = self.reread_container(capture);
         let ids = HandleIds::of(self);
         let hook = self.progress;
         let ask = |done: u64, total: u64| asked(hook, done, total);
@@ -2061,6 +2053,9 @@ fn record_of(
 struct HandleIds {
     lists: Vec<Option<ListNumbers>>,
     scouting: BTreeMap<FlowKey, ListNumbers>,
+    /// The number the first packet of the container the handle follows takes:
+    /// `0` until [`LiveDissection::follow_next`] moved it on.
+    first_packet: usize,
 }
 
 /// One list's id and the row sequence numbers of the messages it still holds.
@@ -2091,11 +2086,16 @@ impl HandleIds {
                 .iter()
                 .map(|(flow, mark)| (*flow, ListNumbers::of(mark)))
                 .collect(),
+            first_packet: handle.cursor.first_packet(),
         }
     }
 }
 
 impl wz_capture::fields_json::RowCoordinates for HandleIds {
+    fn container_first_packet(&self) -> usize {
+        self.first_packet
+    }
+
     fn list_id(&self, list: usize) -> Option<u64> {
         self.lists.get(list)?.as_ref().map(|n| n.list_id)
     }

@@ -4170,9 +4170,9 @@ pub unsafe extern "C" fn wz_dissect_live_follow_lent(
     }
     // SAFETY: caller contract above.
     let handle = unsafe { &mut *handle };
-    // A handle that moved on to a later container numbers its packets across
-    // containers, and a lent container is read by the positions those numbers
-    // stand for in it.
+    // A lent container is read by the one byte offset each kept message logged,
+    // with no container beside it, so a handle holds one lent container; a
+    // handle that moved on copies what it keeps (the header says why).
     if handle.moved_container() {
         return WZ_DISSECT_ERR_INVALID_ARG;
     }
@@ -5321,7 +5321,9 @@ pub unsafe extern "C" fn wz_dissect_live_session_table(
 /// read of their packets, because this reader keeps no copy of a pushed packet,
 /// and that read needs the container. A handle fed by
 /// [`wz_dissect_live_push`] has no container; pass `NULL, 0`, and the document
-/// renders no datagram rows and says so with `"capture_reread":false`.
+/// renders no datagram rows and says so with `"capture_reread":false`. A handle
+/// moved on by [`wz_dissect_live_follow_next`] takes the container it follows
+/// now, and a row whose packet was in an earlier one is not read again.
 ///
 /// # `handle` is not `const`
 ///
