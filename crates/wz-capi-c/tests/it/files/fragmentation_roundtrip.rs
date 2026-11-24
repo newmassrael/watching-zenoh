@@ -51,6 +51,7 @@ use wz_capi_c::abi::{
 use wz_capi_c::bytes::{z_bytes_copy_from_buf, z_bytes_to_slice};
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+use wz_capi_c::publisher::Z_CONGESTION_CONTROL_BLOCK;
 use wz_capi_c::put::{z_put, z_put_options_default, z_put_options_t};
 use wz_capi_c::result::Z_OK;
 use wz_capi_c::sample::z_sample_payload;
@@ -290,6 +291,18 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
 /// rejoins up to zenoh's `transport/link/rx/max_message_size` default (1 GiB);
 /// zenoh-pico's ABI rejoins no message past pico's `FRAG_MAX_SIZE`, as pico, and
 /// its own test holds that.
+///
+/// The puts block for room. A put that may be dropped, the default, is dropped
+/// whole once its fragments together have waited for the link past
+/// `wait_before_drop` and `max_wait_before_drop_fragments` (51 ms by default),
+/// with a stop fragment after the ones already sent, as upstream's is
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `fragment.ext_drop = Some(fragment::ext::Drop::new());`).
+/// At this batch, with the queue's two batches a lane, 4000000 bytes are about
+/// 2,770 fragments, so whether a droppable chain of them crosses is a race
+/// between the sender and the host's loopback: hosted Windows missed it on every
+/// retry for 30 s where Linux and macOS did not. That is the sender's congestion
+/// policy and not the rejoining held here, so the sender lets every fragment
+/// through, and a chain that still does not arrive whole is the receiver's.
 #[test]
 fn a_chain_up_to_the_largest_message_sent_arrives_whole() {
     const LONG: &[usize] = &[131_072, 262_144, 1_044_480, 4_000_000];
@@ -328,6 +341,7 @@ fn a_chain_up_to_the_largest_message_sent_arrives_whole() {
                 );
                 let mut opts: z_put_options_t = std::mem::zeroed();
                 z_put_options_default(&mut opts);
+                opts.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
                 assert_eq!(
                     z_put(
                         z_session_loan(&dialer),
