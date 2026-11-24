@@ -6998,7 +6998,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
         use crate::handshake_encode::encode_open_head_into;
-        let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
+        // The bound this node announces for the peer (Item 751, decided when the peer's Init or
+        // OpenSyn was admitted) and the Open's origin are read in one hold of the facts.
+        let (bound, derived) = self.with_facts(|f| {
+            (
+                f.handshake.local_remote_bound,
+                self.derive_open_initial_sn(f),
+            )
+        });
+        let initial_sn = self.reseed_tx_sn(derived).unwrap_or(self.params.initial_sn);
+        let bound_entry = bound.map(crate::extbound::encode_remote_bound_ext);
         // The Open is written in two steps, each under ONE session mutex: the
         // header and the body under the cookie's, when it echoes one, then the
         // staged chain under the chain's, where it lies. Session mutex scopes stay
@@ -7008,7 +7017,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the fixed profile, under the socket send of the handshake's answer.
         // The header's Z flag is read off the chain before either: the send is the
         // chain's only consumer, and the drive loop is one task on this profile.
+        // The bound is put on the chain, or a stale one taken off it, in the hold that reads the
+        // chain's emptiness: the pin's Open carries the entry exactly when its callback answered
+        // `Some`.
         let has_ext = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RemoteBound, bound_entry);
             !crate::ext_chain::ChainRef::from(&*chain).is_empty()
         });
         // Written once, into a slot lent for the most a handshake message can be, as
@@ -7728,18 +7741,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the TX conduits re-seeded to it, and no copy of the peer's zid: the
     /// derivation reads it where the session holds it. `None` when the peer zid
     /// is not yet known.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     fn open_initial_sn(&self) -> Option<u64> {
-        // The ring and the peer's zid are facts of one row, read in one hold of it.
-        let initial_sn = self.with_facts(|f| {
-            let mask = self.sn_mask_for(f.handshake.inbound_peer_init_caps);
-            f.handshake
-                .remote_peer_zid
-                .as_deref()
-                .map(|peer| crate::initial_sn::derive_initial_sn(&self.params.zid, peer, mask))
-        })?;
-        self.outbound_frame_sn.reset(initial_sn);
-        Some(initial_sn)
+        self.reseed_tx_sn(self.with_facts(|f| self.derive_open_initial_sn(f)))
+    }
+
+    /// The Open's `initial_sn` derived from the ring and the peer's zid, both read off `facts`,
+    /// the hold its caller has: `None` when the peer zid is not yet known.
+    #[cfg(feature = "codec-open-body")]
+    fn derive_open_initial_sn(&self, facts: &SessionFacts) -> Option<u64> {
+        let mask = self.sn_mask_for(facts.handshake.inbound_peer_init_caps);
+        facts
+            .handshake
+            .remote_peer_zid
+            .as_deref()
+            .map(|peer| crate::initial_sn::derive_initial_sn(&self.params.zid, peer, mask))
+    }
+
+    /// Re-seed the TX conduits to the Open's derived origin, when there is one, and hand it on.
+    #[cfg(feature = "codec-open-body")]
+    fn reseed_tx_sn(&self, initial_sn: Option<u64>) -> Option<u64> {
+        if let Some(initial_sn) = initial_sn {
+            self.outbound_frame_sn.reset(initial_sn);
+        }
+        initial_sn
     }
 
     fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<ExtChainBuf> {
@@ -9149,10 +9174,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// callback answered `Some`.
     ///
     /// Gated like its two callers (`send_open_syn`, `send_open_ack`): a build
-    /// with the Open body but neither side's session feature has no caller.
+    /// with the Open body but neither side's session feature has no caller. A
+    /// lend-only session stages it where it writes the Open (`send_open_lent`).
     #[cfg(all(
         feature = "codec-open-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+        not(feature = "tx-lend-only")
     ))]
     fn stage_local_remote_bound(&self, role: ExtChainRole) {
         let bound = self.local_remote_bound();
@@ -19170,7 +19197,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             a.stage_shm_challenge(ExtChainRole::OpenSyn, |a| a.shm_send_open_syn());
             // Item 751 — the `0x7` REMOTE-BOUND this node announces for the
             // peer, decided when the InitAck was admitted
-            // (`decide_local_remote_bound`); absent when it announces none.
+            // (`decide_local_remote_bound`); absent when it announces none. A
+            // lend-only session stages it where it writes the Open.
+            #[cfg(not(feature = "tx-lend-only"))]
             a.stage_local_remote_bound(ExtChainRole::OpenSyn);
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
@@ -19475,7 +19504,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             a.stage_shm_challenge(ExtChainRole::OpenAck, |a| a.shm_send_open_ack());
             // Item 751 — the acceptor's `0x7` REMOTE-BOUND, decided when the
             // OpenSyn was admitted and the peer's facts came back from the
-            // cookie (`decide_local_remote_bound`).
+            // cookie (`decide_local_remote_bound`). A lend-only session stages it
+            // where it writes the Open.
+            #[cfg(not(feature = "tx-lend-only"))]
             a.stage_local_remote_bound(ExtChainRole::OpenAck);
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
