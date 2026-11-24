@@ -418,7 +418,9 @@ mod against_the_open {
         // config, and dropping what it left is dropping nothing.
         unsafe {
             let mut config = config(entries);
-            let mut session = z_owned_session_t::null_value();
+            let mut session = core::mem::MaybeUninit::<z_owned_session_t>::uninit();
+            crate::session::z_internal_session_null(session.as_mut_ptr());
+            let mut session = session.assume_init();
             let code = z_open(&mut session, z_config_move(&mut config), core::ptr::null());
             if code == Z_OK {
                 z_session_drop(z_session_move(&mut session));
