@@ -28,8 +28,6 @@ use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
-#[cfg(feature = "alloc")]
-use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::transport_profile::owned::DeclareOwnedVariant;
@@ -97,29 +95,38 @@ use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 #[cfg(feature = "storage-profile")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublisherCriterion {
-    /// The publisher's keyexpr (a pattern; both sides may be wildcards). Read it
-    /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
-    /// with no allocator (`crate::declare::CriterionKey`).
+    /// The publisher's keyexpr (a pattern; both sides may be wildcards), held in the
+    /// criterion (`crate::declare::CriterionKey`). Read it through `as_str`.
     pub keyexpr: super::CriterionKey,
     /// The publisher's `allowed_destination`: which halves of the verdict
     /// it admits at all.
     pub locality: crate::locality::Locality,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 impl PublisherCriterion {
     /// Build from the publisher's own two knobs.
-    pub fn new(keyexpr: &str, locality: crate::locality::Locality) -> Self {
-        Self {
-            keyexpr: String::from(keyexpr),
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`] for a keyexpr longer than
+    /// [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES), which the criterion holds in
+    /// place.
+    pub fn new(keyexpr: &str, locality: crate::locality::Locality) -> Result<Self, RegisterError> {
+        Ok(Self {
+            keyexpr: super::criterion_key(keyexpr)?,
             locality,
-        }
+        })
     }
 
     /// The plain criterion a locality-blind caller means: any origin
     /// counts. The shape [`RemoteSubscriberRegistry::has_matching`] keeps
     /// for its existing callers.
-    pub fn any_locality(keyexpr: &str) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn any_locality(keyexpr: &str) -> Result<Self, RegisterError> {
         Self::new(keyexpr, crate::locality::Locality::Any)
     }
 }
@@ -496,6 +503,13 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         declared_reaches(&self.declared, criterion)
     }
 
+    /// [`Self::has_matching_for`] over the publisher's own two knobs, the keyexpr borrowed: a
+    /// poll asks it with no criterion made, so no keyexpr is copied and none is refused.
+    #[cfg(feature = "storage-profile")]
+    pub fn has_matching_at(&self, keyexpr: &str, locality: crate::locality::Locality) -> bool {
+        locality.allows_remote() && declared_intersects(&self.declared, keyexpr)
+    }
+
     /// Drop everything the peer declared, in place; the refusal count is kept.
     /// Returns how many declarations were dropped.
     #[cfg(feature = "storage-profile")]
@@ -651,8 +665,17 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
 
     /// R311kh — register a matching-listener watch over `keyexpr`; see
     /// [`RemoteSubscriberTable::declare_matching_listener`].
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`], with no watch registered, as
+    /// [`PublisherCriterion::new`] refuses `keyexpr`.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+    pub fn declare_matching_listener(
+        &mut self,
+        keyexpr: &str,
+        sink: BoxedMatchingSink,
+    ) -> Result<u64, RegisterError> {
         self.table
             .declare_matching_listener(&self.peer, keyexpr, sink)
     }
@@ -870,19 +893,24 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// semantics; `get_matching_status` remains the poll for the current
     /// value). Returns the watch id for
     /// [`Self::undeclare_matching_listener`].
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::KeyexprTooLong`], with no watch registered, as
+    /// [`PublisherCriterion::new`] refuses `keyexpr`.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener<Q: Storage>(
         &mut self,
         peer: &RemoteSubscriberPeer<Q>,
         keyexpr: &str,
         sink: M,
-    ) -> u64 {
-        self.declare_matching_listener_seeded(
+    ) -> Result<u64, RegisterError> {
+        Ok(self.declare_matching_listener_seeded(
             peer,
-            PublisherCriterion::any_locality(keyexpr),
+            PublisherCriterion::any_locality(keyexpr)?,
             false,
             sink,
-        )
+        ))
     }
 
     /// R311y788 — [`Self::declare_matching_listener`] with the
@@ -1731,7 +1759,7 @@ mod tests {
         // Already matching by the seed, so the registration hands the sink `true`.
         let id = table.declare_matching_listener_seeded(
             &peer,
-            PublisherCriterion::any_locality("home/temp"),
+            PublisherCriterion::any_locality("home/temp").expect("a short key"),
             true,
             Counted(log.clone()),
         );
@@ -1739,6 +1767,62 @@ mod tests {
         assert_eq!(table.matching_listener_len(), 1);
         assert!(table.undeclare_matching_listener(id));
         assert_eq!(table.matching_listener_len(), 0);
+    }
+
+    /// A criterion holds its keyexpr in place: a key of the bound is held, one byte more is
+    /// refused, and the poll asked over a borrowed key answers as the criterion of the same knobs.
+    #[test]
+    fn a_publisher_criterion_holds_its_key_to_the_bound_and_a_poll_needs_none() {
+        use crate::locality::Locality;
+
+        let fits = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES);
+        let past = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
+        let held = PublisherCriterion::new(&fits, Locality::Any).expect("a key of the bound");
+        assert_eq!(held.keyexpr.as_str(), fits.as_str());
+        assert_eq!(
+            PublisherCriterion::new(&past, Locality::Any),
+            Err(RegisterError::KeyexprTooLong)
+        );
+
+        let mut reg = RemoteSubscriberRegistry::new();
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        for key in ["home/temp", "garage/door"] {
+            for locality in [Locality::Any, Locality::Remote, Locality::SessionLocal] {
+                assert_eq!(
+                    reg.peer.has_matching_at(key, locality),
+                    reg.has_matching_for(
+                        &PublisherCriterion::new(key, locality).expect("a short key")
+                    ),
+                    "{key} {locality:?}",
+                );
+            }
+        }
+        assert!(reg.peer.has_matching_at("home/temp", Locality::Remote));
+        assert!(!reg
+            .peer
+            .has_matching_at("home/temp", Locality::SessionLocal));
+        assert!(!reg.peer.has_matching_at("garage/door", Locality::Any));
+    }
+
+    /// A matching listener on a key longer than a criterion holds is refused, and no watch is
+    /// left registered. CONTROL: the same listener on a short key registers.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_matching_listener_past_the_key_bound_is_refused_with_no_watch() {
+        use crate::declare::matching::BoxedMatchingSink;
+
+        let mut reg = RemoteSubscriberRegistry::new();
+        let past = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
+        assert_eq!(
+            reg.declare_matching_listener(&past, BoxedMatchingSink::new(|_| {})),
+            Err(RegisterError::KeyexprTooLong)
+        );
+        assert_eq!(reg.matching_listener_len(), 0, "no watch is left");
+        reg.declare_matching_listener("home/temp", BoxedMatchingSink::new(|_| {}))
+            .expect("CONTROL: a short key registers");
+        assert_eq!(reg.matching_listener_len(), 1);
     }
 
     /// R311kh — matching listener flip-fires through the production
@@ -1754,10 +1838,12 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
         let log_cb = log.clone();
-        let id = reg.declare_matching_listener(
-            "home/temp",
-            BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
-        );
+        let id = reg
+            .declare_matching_listener(
+                "home/temp",
+                BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
+            )
+            .expect("a short key");
         assert_eq!(reg.matching_listener_len(), 1);
         assert!(log.lock().unwrap().is_empty(), "registration never fires");
 
@@ -1820,7 +1906,8 @@ mod tests {
         reg.declare_matching_listener(
             "home/temp",
             BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
-        );
+        )
+        .expect("a short key");
 
         let body =
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 0, Some("home/temp")));
@@ -1855,7 +1942,7 @@ mod tests {
         let log_cb = log.clone();
         let mut reg = RemoteSubscriberRegistry::new();
         reg.declare_matching_listener_seeded(
-            PublisherCriterion::any_locality("home/temp"),
+            PublisherCriterion::any_locality("home/temp").expect("a short key"),
             /*local_matching=*/ true,
             BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
         );

@@ -630,6 +630,36 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
     );
 }
 
+/// A matching listener's criterion holds its key in place, so a key longer than that is refused
+/// for its length before anything is taken or sent, and its sink is let go of.
+#[test]
+fn a_listener_on_a_key_past_the_criterion_is_refused_for_its_length() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let before = router.seen(|s| s.declares);
+    let past = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    assert_eq!(
+        engine.declare_matching_listener(
+            FilterPlane::Subscribers,
+            &past,
+            Arc::clone(&listener),
+            false
+        ),
+        Err(Refusal::KeyTooLong)
+    );
+    settle(&engine);
+    assert_eq!(
+        Arc::strong_count(&listener),
+        1,
+        "the refused sink is let go"
+    );
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
+}
+
 /// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
 /// that finds no room there is refused as a full table refuses, before an id is taken or anything
 /// sent, its callback let go of, and the keys an undeclaration gives back are taken by the next

@@ -735,13 +735,11 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             let complete_required = self.complete_required();
             R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "declare-queryable")]
-                let remote = obs.face_ref().remote_queryables.has_matching_for(
-                    &wz_session_core::declare::queryable::QuerierCriterion::new(
-                        &self.keyexpr,
-                        locality,
-                        complete_required,
-                    )
-                    .with_remote_inclusion(self.options.remote_inclusion()),
+                let remote = obs.face_ref().remote_queryables.has_matching_at(
+                    &self.keyexpr,
+                    locality,
+                    complete_required,
+                    self.options.remote_inclusion(),
                 );
                 #[cfg(not(feature = "declare-queryable"))]
                 let remote = false;
@@ -805,6 +803,22 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
         #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
         {
             use super::matching_listener::{BoxedMatchingCallback, MatchingListenerCell};
+            // R311y797 — seed with the SAME verdict the poll reports, and
+            // store the SAME criterion the poll computes, so registration
+            // and `get_matching_status` cannot disagree at the instant the
+            // listener is created and cannot drift afterwards: the watch
+            // keeps re-evaluating under this querier's own target.
+            let complete_required = self.complete_required();
+            let locality = self.options.allowed_destination;
+            // The watch holds its key in place: a key it cannot hold is refused before
+            // anything is registered or asked of the peer.
+            let criterion = wz_session_core::declare::queryable::QuerierCriterion::new(
+                &self.keyexpr,
+                locality,
+                complete_required,
+            )
+            .map_err(|_| MatchingListenerError::KeyexprTooLong)?
+            .with_remote_inclusion(self.options.remote_inclusion());
             let erased: BoxedMatchingCallback = Box::new(callback);
             let cell: MatchingListenerCell<R> =
                 wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
@@ -814,13 +828,6 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 let cell = cell_for_sink.clone();
                 cell.stage(&queue, move |cb| cb(MatchingStatus { matching: m }));
             });
-            // R311y797 — seed with the SAME verdict the poll reports, and
-            // store the SAME criterion the poll computes, so registration
-            // and `get_matching_status` cannot disagree at the instant the
-            // listener is created and cannot drift afterwards: the watch
-            // keeps re-evaluating under this querier's own target.
-            let complete_required = self.complete_required();
-            let locality = self.options.allowed_destination;
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "query-queryable")]
                 let local = locality.allows_local()
@@ -833,12 +840,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 obs.with_parts(|app, face| {
                     app.remote_queryables.declare_matching_listener_seeded(
                         &*face.remote_queryables,
-                        wz_session_core::declare::queryable::QuerierCriterion::new(
-                            &self.keyexpr,
-                            locality,
-                            complete_required,
-                        )
-                        .with_remote_inclusion(self.options.remote_inclusion()),
+                        criterion,
                         local,
                         sink,
                     )
@@ -1120,13 +1122,11 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
             let complete_required = self.options.matching_needs_complete();
             R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "declare-queryable")]
-                let remote = obs.face_ref().remote_queryables.has_matching_for(
-                    &wz_session_core::declare::queryable::QuerierCriterion::new(
-                        &_effective_keyexpr,
-                        locality,
-                        complete_required,
-                    )
-                    .with_remote_inclusion(self.options.remote_inclusion()),
+                let remote = obs.face_ref().remote_queryables.has_matching_at(
+                    &_effective_keyexpr,
+                    locality,
+                    complete_required,
+                    self.options.remote_inclusion(),
                 );
                 #[cfg(not(feature = "declare-queryable"))]
                 let remote = false;

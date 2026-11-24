@@ -2287,22 +2287,25 @@ enum Watched {
 
 impl Watched {
     /// The criterion a listener on `plane` over `keyexpr` counts with, the session's own
-    /// entities among it with `count_local` as its write filter's are (`counted`); `None` for a
-    /// plane this build does not hold.
+    /// entities among it with `count_local` as its write filter's are (`counted`);
+    /// [`Declined::NotBuilt`] for a plane this build does not hold, and
+    /// [`Declined::KeyTooLong`] for a key longer than the criterion holds in place.
     // Out of line, with the other parts the key and Interest holding share: measured smaller apart.
     #[inline(never)]
-    fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Option<Self> {
+    fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Result<Self, Declined> {
         let locality = counted(plane, count_local);
         match plane {
-            FilterPlane::Subscribers => {
-                Some(Self::Publishers(PublisherCriterion::new(keyexpr, locality)))
-            }
+            FilterPlane::Subscribers => PublisherCriterion::new(keyexpr, locality)
+                .map(Self::Publishers)
+                .map_err(Declined::from),
             #[cfg(any(feature = "query", feature = "queryable"))]
-            FilterPlane::Queryables { complete_required } => Some(Self::Queriers(
-                QuerierCriterion::new(keyexpr, locality, complete_required),
-            )),
+            FilterPlane::Queryables { complete_required } => {
+                QuerierCriterion::new(keyexpr, locality, complete_required)
+                    .map(Self::Queriers)
+                    .map_err(Declined::from)
+            }
             #[cfg(not(any(feature = "query", feature = "queryable")))]
-            FilterPlane::Queryables { .. } => None,
+            FilterPlane::Queryables { .. } => Err(Declined::NotBuilt),
         }
     }
 }
@@ -6617,7 +6620,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<MatchId, Declined> {
         // A plane the build does not hold is refused first, with nothing taken. Every refusal
         // lets `sink` go as it returns, before the caller hears of it.
-        let watched = Watched::of(plane, keyexpr, count_local).ok_or(Declined::NotBuilt)?;
+        let watched = Watched::of(plane, keyexpr, count_local)?;
         let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
         // A full table refuses the listener before its Interest is asked.
