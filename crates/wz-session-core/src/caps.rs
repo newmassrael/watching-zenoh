@@ -609,6 +609,12 @@ pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
 /// transports that stand with those the listener was told.
 pub const MAX_CONNECTIVITY_REPLAY_EVENTS: usize = generated::MAX_CONNECTIVITY_REPLAY_EVENTS;
 
+/// The face rows a connectivity plane keeps as it told its listeners they came, so the rows its
+/// queue of face events lost ([`MAX_FACE_WATCH_ROWS`]) are told against the rows that stand. A
+/// row past them is told and not kept: told came again at each loss, its departure not told when a
+/// loss carries it.
+pub const MAX_CONNECTIVITY_TOLD_ROWS: usize = generated::MAX_CONNECTIVITY_TOLD_ROWS;
+
 /// The rows of faces that came or went a session holds for the program's watchers of its faces
 /// between two deliveries, reserved at its open: a session that holds fewer faces reserves fewer.
 /// A row past them is let go of and counted on the last row kept, which tells the watchers of it

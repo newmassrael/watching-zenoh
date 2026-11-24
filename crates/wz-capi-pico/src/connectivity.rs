@@ -76,6 +76,19 @@
 //! (`wz_capi_port::told`). The contract that follows, stated as pico's
 //! listener has none to compare with: a transport that came and went inside the
 //! replay window is not told, and past the queue one reconnect may be lost.
+//!
+//! ## A row the session's queue lost
+//!
+//! pico calls its listeners from the task that saw the peer come or go, so a listener misses
+//! nothing. Here the rows of faces wait for the hand-out in a queue of `MAX_FACE_WATCH_ROWS`, and
+//! a row that finds it full is let go of and counted on the last row kept
+//! (`FaceLinkRow::lost_after`). So the hub keeps each row it told came, as it told it, in the
+//! `MAX_CONNECTIVITY_TOLD_ROWS` rows reserved with it, and after the row that counts a loss tells
+//! what the lost rows changed, against the rows that stand: each row told that no longer stands as
+//! it was told is told left, its transport after its face's last kept row, then each row that
+//! stands and was not told is told came, its transport first. A row that left and came back with
+//! the same ends inside the loss is told neither. A row past the kept rows is told came again at
+//! each loss, and its departure, when a loss carries it, is not told.
 
 use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
@@ -1073,11 +1086,93 @@ fn converge_links(engine: &Engine, slot: usize, listener: &LinkListener) {
     }
 }
 
-/// The transport and link listeners of ONE session, and the watcher that feeds
-/// them; see the module doc for why there is one.
+/// How many face rows the hub keeps as it told its listeners they came
+/// (`MAX_CONNECTIVITY_TOLD_ROWS`).
+const TOLD_ROWS: usize = wz_session_core::caps::MAX_CONNECTIVITY_TOLD_ROWS;
+
+/// The face rows the hub told its listeners came and not yet that they left, each as it told it,
+/// in [`TOLD_ROWS`] rows reserved with the hub: what a loss of the session's queue of face rows is
+/// told against ([`Connectivity::catch_up`]). A row that finds every row held is told, not kept.
+struct Told {
+    rows: [Option<FaceLinkRow>; TOLD_ROWS],
+}
+
+impl Told {
+    fn new() -> Self {
+        Self {
+            rows: core::array::from_fn(|_| None),
+        }
+    }
+
+    /// The place of the row of `key`.
+    fn place_of(&self, key: &ToldKey) -> Option<usize> {
+        self.rows.iter().position(|held| {
+            held.as_ref()
+                .is_some_and(|held| ToldKey::of_row(held) == *key)
+        })
+    }
+
+    /// Keep `row`, told came, in place of the row of its key or in a free place: whether it is
+    /// news, which a row kept already with the same ends is not.
+    fn came(&mut self, row: &FaceLinkRow) -> bool {
+        let at = self.place_of(&ToldKey::of_row(row));
+        if at
+            .and_then(|at| self.rows.get(at))
+            .and_then(Option::as_ref)
+            .is_some_and(|held| same_ends(held, row))
+        {
+            return false;
+        }
+        let at = at.or_else(|| self.rows.iter().position(Option::is_none));
+        if let Some(place) = at.and_then(|at| self.rows.get_mut(at)) {
+            *place = Some(row.clone());
+        }
+        true
+    }
+
+    /// Let go of the row of `key`, told left.
+    fn went(&mut self, key: &ToldKey) {
+        if let Some(place) = self.place_of(key).and_then(|at| self.rows.get_mut(at)) {
+            *place = None;
+        }
+    }
+
+    /// Whether a row of the face `row` is of is kept.
+    fn holds_face_of(&self, row: &FaceLinkRow) -> bool {
+        self.rows
+            .iter()
+            .flatten()
+            .any(|held| held.zid == row.zid && held.is_multicast == row.is_multicast)
+    }
+}
+
+/// Whether `a` and `b`, rows of one key, are of one link: a link that went and came back under
+/// its key has other ends.
+fn same_ends(a: &FaceLinkRow, b: &FaceLinkRow) -> bool {
+    a.src == b.src && a.dst == b.dst && a.group_endpoint == b.group_endpoint
+}
+
+/// Whether the row of `told`'s key stands, as `standing` reads the rows one at a time, with the
+/// ends it was told with: one that stands with other ends went and came back.
+fn stands_as_told(told: &FaceLinkRow, standing: &impl Fn(usize) -> Option<FaceLinkRow>) -> bool {
+    let key = ToldKey::of_row(told);
+    let mut at: usize = 0;
+    while let Some(row) = standing(at) {
+        if ToldKey::of_row(&row) == key {
+            return same_ends(&row, told);
+        }
+        // No engine holds a row at `usize::MAX`, so the walk ends there.
+        at = at.saturating_add(1);
+    }
+    false
+}
+
+/// The transport and link listeners of ONE session, the watcher that feeds
+/// them, and the rows it told them came; see the module doc for why there is one.
 pub(crate) struct Connectivity {
     transports: Mutex<TransportTable>,
     links: Mutex<LinkTable>,
+    told: Mutex<Told>,
 }
 
 impl Connectivity {
@@ -1085,6 +1180,7 @@ impl Connectivity {
         Arc::new(Self {
             transports: Mutex::new(Table::new()),
             links: Mutex::new(Table::new()),
+            told: Mutex::new(Told::new()),
         })
     }
 
@@ -1098,29 +1194,92 @@ impl Connectivity {
     /// Arrival is the transport, at the face's first row, then each link; departure is each
     /// link, then the transport, at the face's last row. A face with no link is told by one row,
     /// which is its transport alone.
-    pub(crate) fn on_face_row(&self, kind: FaceEventKind, row: &FaceLinkRow) {
-        // Rows the session's queue lost after this one (`row.lost_after`) are told to no listener:
-        // pico calls its listeners from the task that saw the peer come or go and queues nothing
-        // (`_z_connectivity_peer_disconnected`, cited in the module doc), so its listeners have no
-        // event that says one was missed. Nor is a live listener brought to the faces as they
-        // stand, as a replaying one is: what it was told is noted only while it replays.
+    ///
+    /// The rows the session's queue lost after `row` (`row.lost_after`) happened after it, so they
+    /// are told after it, against the rows that stand, which `standing` reads one at a time
+    /// ([`Self::catch_up`]).
+    pub(crate) fn on_face_row(
+        &self,
+        kind: FaceEventKind,
+        row: &FaceLinkRow,
+        standing: impl Fn(usize) -> Option<FaceLinkRow>,
+    ) {
         let has_link = row.links > 0;
         match kind {
             FaceEventKind::Up => {
-                if row.link == 0 {
+                // A row a catch-up told came ahead of it, as it is, is not told again.
+                let news = lock(&self.told).came(row);
+                if news && row.link == 0 {
                     self.fan_transport(Z_SAMPLE_KIND_PUT, row);
                 }
-                if has_link {
+                if news && has_link {
                     self.fan_link(Z_SAMPLE_KIND_PUT, row);
                 }
             }
             FaceEventKind::Down => {
+                lock(&self.told).went(&ToldKey::of_row(row));
                 if has_link {
                     self.fan_link(Z_SAMPLE_KIND_DELETE, row);
                 }
                 if row.is_last_of_face() {
                     self.fan_transport(Z_SAMPLE_KIND_DELETE, row);
                 }
+            }
+        }
+        if row.lost_after > 0 {
+            self.catch_up(&standing);
+        }
+    }
+
+    /// The row the hub keeps at `at`, copied out so no lock is held past it; `None` past the last.
+    fn told_at(&self, at: usize) -> Option<Option<FaceLinkRow>> {
+        lock(&self.told).rows.get(at).cloned()
+    }
+
+    /// Tell every listener what rows the session's queue lost changed, against the rows that stand,
+    /// which `standing` reads one at a time: each row told came that no longer stands as it was
+    /// told is told left, the transport after its face's last kept row, then each row that stands
+    /// and was not told is told came, the transport before its face's first. A listener whose
+    /// history is being replayed holds what this tells as it holds any row.
+    fn catch_up(&self, standing: &impl Fn(usize) -> Option<FaceLinkRow>) {
+        let mut at: usize = 0;
+        while let Some(held) = self.told_at(at) {
+            at = at.saturating_add(1);
+            let Some(row) = held else {
+                continue;
+            };
+            if stands_as_told(&row, standing) {
+                continue;
+            }
+            let face_left = {
+                let mut told = lock(&self.told);
+                told.went(&ToldKey::of_row(&row));
+                !told.holds_face_of(&row)
+            };
+            if row.links > 0 {
+                self.fan_link(Z_SAMPLE_KIND_DELETE, &row);
+            }
+            if face_left {
+                self.fan_transport(Z_SAMPLE_KIND_DELETE, &row);
+            }
+        }
+        let mut at: usize = 0;
+        while let Some(row) = standing(at) {
+            at = at.saturating_add(1);
+            let face_told = {
+                let mut told = lock(&self.told);
+                if told.place_of(&ToldKey::of_row(&row)).is_some() {
+                    continue;
+                }
+                let face_told = told.holds_face_of(&row);
+                told.came(&row);
+                face_told
+            };
+            if !face_told {
+                self.fan_transport(Z_SAMPLE_KIND_PUT, &row);
+            }
+            if row.links > 0 {
+                self.fan_link(Z_SAMPLE_KIND_PUT, &row);
             }
         }
     }
@@ -2520,7 +2679,7 @@ pub(crate) mod tests {
 
     /// Tell `hub` of `face` as an engine tells it, a row at a time.
     fn tell(hub: &Connectivity, kind: FaceEventKind, face: &FaceSnapshot) {
-        FaceLinkRow::each_of_snapshot(face, |row| hub.on_face_row(kind, &row));
+        FaceLinkRow::each_of_snapshot(face, |row| hub.on_face_row(kind, &row, |_| None));
     }
 
     /// The transport pico reports for `face`, read off its first row as an event's is.
@@ -2725,6 +2884,110 @@ pub(crate) mod tests {
                 "link DEL tcp/127.0.0.1:7447",
                 "transport DEL 7",
             ]
+        );
+        // SAFETY: the listeners declared above, each let go of once.
+        unsafe {
+            release_transport_listener(transport);
+            release_link_listener(link);
+        }
+    }
+
+    /// Tell `hub` of `face` as an engine tells it, its last row counting `lost` rows the queue
+    /// lost after it, the faces that stand then being `standing`.
+    fn tell_losing(
+        hub: &Connectivity,
+        kind: FaceEventKind,
+        face: &FaceSnapshot,
+        lost: usize,
+        standing: &[FaceSnapshot],
+    ) {
+        let mut stand = Vec::new();
+        for face in standing {
+            FaceLinkRow::each_of_snapshot(face, |row| stand.push(row));
+        }
+        let mut rows = Vec::new();
+        FaceLinkRow::each_of_snapshot(face, |row| rows.push(row));
+        if let Some(last) = rows.last_mut() {
+            last.lost_after = lost;
+        }
+        for row in &rows {
+            hub.on_face_row(kind, row, |at| stand.get(at).cloned());
+        }
+    }
+
+    /// Rows the session's queue lost are told after the row that counts them, against the faces
+    /// that stand, so the listeners end told the faces as they stand: a face whose departure was
+    /// lost is told left, one whose arrival was lost is told came, one that stands with other ends
+    /// is told left and came, and one that stands as it was told is told nothing more, each in
+    /// pico's order; what the catch-up told is kept, so a later loss tells it again only when it
+    /// changed.
+    ///
+    /// # Control
+    ///
+    /// Reading `lost_after` with nothing (the lost rows told to no listener) leaves the last
+    /// eight lines of the first sequence untold and reds the first assertion; a catch-up that keeps
+    /// nothing it told came tells peers 1 and 3 again at the second loss, and one that tells a row
+    /// kept already as it is tells peer 3 again, each of which reds the second.
+    #[test]
+    fn rows_the_queue_lost_are_told_against_the_faces_that_stand() {
+        let hub = Connectivity::new();
+        let engine: Arc<Engine> = Arc::new(shared());
+        let log = log();
+        let transport = hub
+            .declare_transport(&engine, false, transport_closure(log))
+            .expect("a place is free");
+        let link = hub
+            .declare_link(&engine, false, None, link_closure(log))
+            .expect("a place is free");
+
+        tell(
+            &hub,
+            FaceEventKind::Up,
+            &face(1, false, "tcp/127.0.0.1:7001"),
+        );
+        tell(
+            &hub,
+            FaceEventKind::Up,
+            &face(2, false, "tcp/127.0.0.1:7002"),
+        );
+        // Lost after peer 4 came: peer 2 left, peer 1 left and came back from another port, and
+        // peer 3 came.
+        let four = face(4, false, "tcp/127.0.0.1:7004");
+        let standing = [
+            face(1, false, "tcp/127.0.0.1:7011"),
+            four.clone(),
+            face(3, false, "tcp/127.0.0.1:7003"),
+        ];
+        tell_losing(&hub, FaceEventKind::Up, &four, 3, &standing);
+        assert_eq!(
+            seen(log),
+            [
+                "transport PUT 1",
+                "link PUT tcp/127.0.0.1:7001",
+                "transport PUT 2",
+                "link PUT tcp/127.0.0.1:7002",
+                "transport PUT 4",
+                "link PUT tcp/127.0.0.1:7004",
+                "link DEL tcp/127.0.0.1:7001",
+                "transport DEL 1",
+                "link DEL tcp/127.0.0.1:7002",
+                "transport DEL 2",
+                "transport PUT 1",
+                "link PUT tcp/127.0.0.1:7011",
+                "transport PUT 3",
+                "link PUT tcp/127.0.0.1:7003",
+            ]
+        );
+
+        // Peer 3's arrival the queue kept after the loss was told by the catch-up already.
+        tell(&hub, FaceEventKind::Up, &standing[2]);
+        // Lost after peer 4 left: nothing that changed the faces.
+        let after = [standing[0].clone(), standing[2].clone()];
+        tell_losing(&hub, FaceEventKind::Down, &four, 1, &after);
+        assert_eq!(
+            seen(log).split_off(14),
+            ["link DEL tcp/127.0.0.1:7004", "transport DEL 4"],
+            "the faces the catch-up told are not told again"
         );
         // SAFETY: the listeners declared above, each let go of once.
         unsafe {
@@ -3311,6 +3574,89 @@ pub(crate) mod tests {
                 "drop(context) ran once"
             );
         }
+    }
+}
+
+/// The rows the hub keeps as it told its listeners they came, with any engine.
+#[cfg(test)]
+mod told_tests {
+    use super::*;
+    use wz_session_core::face::RowText;
+
+    /// The row of a peer whose zid starts with `n`'s bytes, from `src`.
+    fn row(n: usize, src: &str) -> FaceLinkRow {
+        let mut zid = [0u8; 16];
+        zid[..8].copy_from_slice(&u64::try_from(n).expect("a small n").to_le_bytes());
+        FaceLinkRow {
+            zid,
+            whatami: 1,
+            is_qos: false,
+            is_multicast: false,
+            is_shm: false,
+            link: 0,
+            links: 1,
+            src: RowText::of(src),
+            dst: RowText::of("tcp/127.0.0.1:1"),
+            kind: None,
+            mtu: 0,
+            group_endpoint: None,
+            lost_after: 0,
+        }
+    }
+
+    fn kept(told: &Told) -> usize {
+        told.rows.iter().flatten().count()
+    }
+
+    /// A row told came is kept once per key, the last told in place of an earlier one of its key;
+    /// one that finds every place held is not kept, and a row told left frees its place.
+    ///
+    /// # Control
+    ///
+    /// Answering news for a row kept as it is reds the second assertion; keeping a row in a free
+    /// place without looking for its key first reds the count after the third; keeping one past
+    /// the places (overwriting a held place) reds the assertion on the row past them.
+    #[test]
+    fn the_told_rows_are_kept_once_per_key_within_their_places() {
+        let mut told = Told::new();
+        assert!(told.came(&row(1, "tcp/127.0.0.1:7001")));
+        assert!(
+            !told.came(&row(1, "tcp/127.0.0.1:7001")),
+            "the same row again is no news"
+        );
+        assert!(
+            told.came(&row(1, "tcp/127.0.0.1:7011")),
+            "other ends are news"
+        );
+        assert_eq!(kept(&told), 1, "one row per key");
+        assert_eq!(
+            told.rows
+                .iter()
+                .flatten()
+                .next()
+                .map(|row| row.src.as_str().to_owned()),
+            Some("tcp/127.0.0.1:7011".to_owned()),
+            "the row last told stands in for the earlier one"
+        );
+        for n in 2..=TOLD_ROWS.saturating_add(1) {
+            assert!(told.came(&row(n, "tcp/127.0.0.1:7000")));
+        }
+        let past = row(TOLD_ROWS.saturating_add(1), "tcp/127.0.0.1:7000");
+        assert!(
+            told.place_of(&ToldKey::of_row(&past)).is_none(),
+            "a row past the places is not kept"
+        );
+        assert_eq!(kept(&told), TOLD_ROWS);
+        told.went(&ToldKey::of_row(&row(1, "")));
+        assert!(
+            !told.holds_face_of(&row(1, "")),
+            "a row told left is let go of"
+        );
+        assert!(told.came(&past));
+        assert!(
+            told.place_of(&ToldKey::of_row(&past)).is_some(),
+            "the place it freed takes the next row"
+        );
     }
 }
 

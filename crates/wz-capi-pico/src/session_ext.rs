@@ -132,10 +132,16 @@ impl PicoSessionExt {
         #[cfg(feature = "connectivity")]
         let watch_id = {
             let sink = Arc::clone(&connectivity);
+            // Weak: the engine holds the watch, and a strong hold in it would keep the engine
+            // alive through its own watcher.
+            let faces = Arc::downgrade(engine);
             SessionEngine::watch_face_rows(
                 Arc::as_ref(engine),
                 Arc::new(move |kind, row| {
-                    sink.on_face_row(kind, row);
+                    sink.on_face_row(kind, row, |at| {
+                        let engine = faces.upgrade()?;
+                        SessionEngine::face_link_at(Arc::as_ref(&engine), at)
+                    });
                 }),
             )
         };

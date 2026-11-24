@@ -3793,6 +3793,31 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the face events waiting for a watcher: zenoh-pico calls its connectivity listeners from the task that saw the transport come or go, and zenoh tells them under one lock, so neither holds them in a queue."
 
 [[limit]]
+id = "MAX_CONNECTIVITY_TOLD_ROWS"
+kconfig = "WZ_LIMIT_MAX_CONNECTIVITY_TOLD_ROWS"
+kind = "bound"
+driven = "remote"
+default = 8
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The transports and links a session's connectivity plane keeps as it told
+its listeners they came, reserved with the plane. When the queue of face
+events loses rows, the listeners are told what the lost rows changed by
+comparing these with the transports and links that stand: one that left is
+told left, one that came is told came. A row past them is told and not
+kept: it is told came again at each loss, and its departure is not told
+when a loss carries it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the transports a listener was told: zenoh-pico calls its connectivity listeners from the task that saw the transport come or go, so it loses no event and keeps none, and zenoh tells them under one lock."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"
