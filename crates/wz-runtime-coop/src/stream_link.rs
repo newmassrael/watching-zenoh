@@ -272,9 +272,9 @@ pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + EndsFit +
     /// The link over the connected `socket`, receiving into `rx` and building its frames in `tx`.
     fn over(socket: S, rx: B, tx: X) -> Self;
 
-    /// The same link, waited on by its owner ([`StreamDriver::waited_by_owner`]).
+    /// Have the link's owner wait on it, where the link lies ([`StreamDriver::wait_by_owner`]).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn waited_by_owner(self) -> Self;
+    fn wait_by_owner(&mut self);
 }
 
 /// The link a stack holds over the connected `socket` ([`StreamSocket::Link`]).
@@ -342,8 +342,8 @@ impl<B, X> StreamLink<NoStream, B, X> for NoStream {
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn waited_by_owner(self) -> Self {
-        self
+    fn wait_by_owner(&mut self) {
+        match *self {}
     }
 }
 
@@ -741,8 +741,15 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.input_wait().is_some();
+        self.wait_by_owner();
         self
+    }
+
+    /// [`Self::waited_by_owner`] where the link lies: a stack that makes a link sets it there,
+    /// so the link is not moved through a second value of its whole size.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn wait_by_owner(&mut self) {
+        self.owner_waits = self.socket.input_wait().is_some();
     }
 
     /// The most recent failure the socket reported, if it has failed.
@@ -1341,8 +1348,8 @@ where
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn waited_by_owner(self) -> Self {
-        StreamDriver::waited_by_owner(self)
+    fn wait_by_owner(&mut self) {
+        StreamDriver::wait_by_owner(self);
     }
 }
 

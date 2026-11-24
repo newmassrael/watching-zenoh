@@ -435,8 +435,15 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.input_wait().is_some();
+        self.wait_by_owner();
         self
+    }
+
+    /// [`Self::waited_by_owner`] where the link lies: a stack that makes a link sets it there,
+    /// so the link is not moved through a second value of its whole size.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn wait_by_owner(&mut self) {
+        self.owner_waits = self.socket.input_wait().is_some();
     }
 
     /// Let this link wait up to `ms` milliseconds for a datagram when its session has nothing due

@@ -1290,25 +1290,23 @@ impl OwnerWaits {
     /// A stream link as the links open it.
     fn stream(
         self,
-        link: StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>,
+        mut link: StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>,
     ) -> StreamDriver<AppStreamSocket, RxBuffer, TxBuffer> {
         if self.0 {
-            link.waited_by_owner()
-        } else {
-            link
+            link.wait_by_owner();
         }
+        link
     }
 
     /// A datagram link as the links open it.
     fn datagram(
         self,
-        link: UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>,
+        mut link: UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>,
     ) -> UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer> {
         if self.0 {
-            link.waited_by_owner()
-        } else {
-            link
+            link.wait_by_owner();
         }
+        link
     }
 }
 

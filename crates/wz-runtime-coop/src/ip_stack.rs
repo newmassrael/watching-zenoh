@@ -393,24 +393,22 @@ impl LinkShape {
         rx: RxBuffer,
         tx: TxBuffer,
     ) -> S::Link<RxBuffer, TxBuffer> {
-        let link = link_over(socket, rx, tx);
+        let mut link = link_over(socket, rx, tx);
         if self.owner_waits {
-            link.waited_by_owner()
-        } else {
-            link
+            link.wait_by_owner();
         }
+        link
     }
 
     /// A datagram link as the stack opens it: waited on by its owner when the shape says so.
     fn datagram<U: DatagramSocket>(
         &self,
-        link: UdpDriver<U, RxBuffer, TxBuffer>,
+        mut link: UdpDriver<U, RxBuffer, TxBuffer>,
     ) -> UdpDriver<U, RxBuffer, TxBuffer> {
         if self.owner_waits {
-            link.waited_by_owner()
-        } else {
-            link
+            link.wait_by_owner();
         }
+        link
     }
 }
 
