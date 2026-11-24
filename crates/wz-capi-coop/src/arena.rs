@@ -215,9 +215,9 @@ const OWED_ROWS: usize = (cfg!(all(
 /// The session's declarations ([`ArenaPlan::put_entities`]): the session's one table set and the
 /// key arena.
 const ENTITY_ROWS: usize = 2;
-/// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
-/// ([`ArenaPlan::holding_cells`]).
-const CELL_ROWS: usize = 6;
+/// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
+/// table of flags and cells ([`ArenaPlan::holding_cells`]).
+const CELL_ROWS: usize = 8;
 /// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
 const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
@@ -590,9 +590,10 @@ impl EntityRows {
     }
 }
 
-/// One of each table of a cell for each link: the link's driver's, its gates' and its session's
-/// actions'. A plan holds each table's cell bytes ([`ArenaPlan::holding_cells`]); an open, the
-/// tables the session's arena lends it (`TransportRows::lent_from`).
+/// One of each table of a cell for each link: the link's driver's, its gates', its session's
+/// actions' and the two halves those actions hold. A plan holds each table's cell bytes
+/// ([`ArenaPlan::holding_cells`]); an open, the tables the session's arena lends it
+/// (`TransportRows::lent_from`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkCells<T> {
     /// The cells of the stack's drivers of the links.
@@ -601,31 +602,36 @@ pub struct LinkCells<T> {
     pub gate: T,
     /// The cells of the bundle of each link's session actions.
     pub actions: T,
+    /// The cells of the two halves each link's actions hold, together: the link's own state and
+    /// the session's kernel.
+    pub halves: T,
 }
 
 impl<T> LinkCells<T> {
-    /// The three in the order their tables are laid out and lent: the driver's, the gate's, the
-    /// actions'.
-    pub fn into_array(self) -> [T; 3] {
-        [self.driver, self.gate, self.actions]
+    /// The four in the order their tables are laid out and lent: the driver's, the gate's, the
+    /// actions', the halves'.
+    pub fn into_array(self) -> [T; 4] {
+        [self.driver, self.gate, self.actions, self.halves]
     }
 
-    /// The three from [`Self::into_array`]'s order.
-    pub fn from_array([driver, gate, actions]: [T; 3]) -> Self {
+    /// The four from [`Self::into_array`]'s order.
+    pub fn from_array([driver, gate, actions, halves]: [T; 4]) -> Self {
         Self {
             driver,
             gate,
             actions,
+            halves,
         }
     }
 }
 
 /// The names of the two rows of each table of [`LinkCells`], in [`LinkCells::into_array`]'s
 /// order: its flags, then its cells.
-const CELL_ROWS_NAMED: [[&str; 2]; 3] = [
+const CELL_ROWS_NAMED: [[&str; 2]; 4] = [
     ["link cell flags", "link cells"],
     ["link gate flags", "link gates"],
     ["link actions flags", "link actions"],
+    ["link halves flags", "link halves"],
 ];
 
 /// The limits a table of a cell for each link is sized by.
@@ -693,7 +699,7 @@ impl TransportRows {
     /// The transport's tables, lent by `lend` in the order the plan laid them out.
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> TransportTables {
         let links = self.links_from(lend);
-        let mut cells = [None, None, None];
+        let mut cells = [None, None, None, None];
         for (bytes, lent) in self.cell_bytes.into_array().into_iter().zip(&mut cells) {
             if bytes != 0 {
                 *lent = Some(lend.byte_cells(bytes, self.links));
@@ -2391,6 +2397,7 @@ mod tests {
             driver: 40,
             gate: 0,
             actions: 24,
+            halves: 56,
         };
         let plan = plan.holding_cells(asked).expect("the cells fit");
         let plan = plan.holding_cells(asked).expect("held already");
@@ -2401,11 +2408,15 @@ mod tests {
                 "link cell flags",
                 "link cells",
                 "link actions flags",
-                "link actions"
+                "link actions",
+                "link halves flags",
+                "link halves"
             ]
         );
         assert_eq!(plan.rows().nth(1).map(|row| row.entry_bytes), Some(40));
         assert_eq!(plan.rows().nth(3).map(|row| row.count), Some(3));
+        assert_eq!(plan.rows().nth(5).map(|row| row.entry_bytes), Some(56));
+        assert_eq!(plan.rows().nth(5).map(|row| row.count), Some(3));
     }
 
     /// A plan reads the rows it laid out and none past them, in order, and two plans that laid

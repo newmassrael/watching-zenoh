@@ -1485,6 +1485,42 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
     drop(router);
 }
 
+/// The two halves a link's actions hold (the link's own state and the session's kernel) lie in
+/// the link's cell of the session's table: the dial role's link holds one, and the link dialled
+/// again after the first is lost holds one, the lost link's given back first, so a link made
+/// after the open takes no memory of the heap for them. The arena holds one link, so a lost link
+/// whose cell is not given back leaves the next dial no cell. Turned red by halves held on the
+/// heap (`McuActions::build` in `start_wire`), which take no cell of the table.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_links_halves_lie_in_its_cell_across_a_redial() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        max_faces: 0,
+        ..config(&router)
+    });
+    until(&engine, "the first link", || engine.faces_up() == 1);
+    assert_eq!(
+        engine.link_halves_in_use(),
+        Some(1),
+        "the dial role's link holds its halves in one cell"
+    );
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the link to be lost", || engine.faces_up() == 0);
+    let router = Router::start_on(port, CatchAll::None);
+    // The lost link's task may let go of its actions a step after the link dialled again is up.
+    until(
+        &engine,
+        "the lost link's cell to go back and the link dialled again to hold one",
+        || engine.faces_up() == 1 && engine.link_halves_in_use() == Some(1),
+    );
+    drop(router);
+}
+
 /// A session whose config admits no face besides the dial role's attaches none, as its arena holds
 /// the buffers of one link; the CONTROL is the plan of the same config.
 #[cfg(feature = "listen")]
@@ -2369,6 +2405,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
             driver: 64,
             gate: 64,
             actions: 64,
+            halves: 64,
         })
     })
     .and_then(|plan| plan.holding(&held))
