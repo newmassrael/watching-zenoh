@@ -476,6 +476,9 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     /// stranger's datagram, another source's `InitSyn`, anything before an accepting link's first
     /// `InitSyn`) is counted ([`Self::foreign`]) and the caller discards it; the socket is this
     /// link's alone, so nothing it discards is anyone else's.
+    // Out of line: the one body of both reads that take a datagram, the receive's
+    // (`Self::next_admitted`) and the wait's that reads as it waits (`Self::wait_for_datagram`).
+    #[inline(never)]
     fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
         // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator no
         // row of the build holds is not taken, so no session stands on a link it cannot name.
