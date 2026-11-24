@@ -10508,13 +10508,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
     /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
-        self.observe_control(&frame.control_facts().unchained());
+        self.observe_control(&frame.control_facts());
     }
 
     /// What the link records about one received transport message, whichever read it: the
     /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
     /// taken, so it cannot fail.
-    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_, ()>) {
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor
