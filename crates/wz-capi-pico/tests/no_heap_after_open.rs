@@ -67,7 +67,8 @@ use wz_capi_pico::{
     z_bytes_copy_from_buf, z_bytes_move, z_declare_keyexpr, z_declare_publisher,
     z_encoding_from_str, z_encoding_move, z_keyexpr_move, z_owned_bytes_t, z_owned_encoding_t,
     z_owned_publisher_t, z_publisher_move, z_put, z_put_options_default, z_put_options_t,
-    z_session_loan, z_undeclare_keyexpr, z_undeclare_publisher, z_view_keyexpr_loan, Z_OK,
+    z_session_loan, z_timestamp_new, z_timestamp_t, z_undeclare_keyexpr, z_undeclare_publisher,
+    z_view_keyexpr_loan, Z_OK,
 };
 
 #[path = "support/pipe_pair.rs"]
@@ -270,11 +271,12 @@ enum Round {
     PublisherPut,
     Delete,
     PutEncoded,
+    PutTimestamped,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 21] = [
+    const ALL: [Round; 22] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -296,6 +298,7 @@ impl Round {
         Round::PublisherPut,
         Round::Delete,
         Round::PutEncoded,
+        Round::PutTimestamped,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -320,7 +323,8 @@ impl Round {
             | Round::ConfigClone
             | Round::PublisherPut
             | Round::Delete
-            | Round::PutEncoded => true,
+            | Round::PutEncoded
+            | Round::PutTimestamped => true,
         }
     }
 }
@@ -337,7 +341,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 24] = [
+const FAMILIES: [(&str, Round, Part); 25] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -366,6 +370,7 @@ const FAMILIES: [(&str, Round, Part); 24] = [
     ("publisher-put", Round::PublisherPut, Part::Calling),
     ("delete", Round::Delete, Part::Calling),
     ("put-encoded", Round::PutEncoded, Part::Calling),
+    ("put-timestamped", Round::PutTimestamped, Part::Calling),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -778,6 +783,7 @@ impl Bench {
             Round::PublisherPut => self.publisher_put(),
             Round::Delete => self.delete(),
             Round::PutEncoded => self.put_encoded(),
+            Round::PutTimestamped => self.put_timestamped(),
         }
     }
 
@@ -978,6 +984,39 @@ impl Bench {
         assert!(
             wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
             "a put with an encoding did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Put from the dialler with a timestamp the program minted from the session's clock, as a
+    /// program stamps its own samples, and wait for the listener to hear it.
+    unsafe fn put_timestamped(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let session = z_session_loan(self.pair.dialler());
+        let mut stamp: z_timestamp_t = std::mem::zeroed();
+        assert_eq!(
+            z_timestamp_new(&mut stamp, session),
+            Z_OK,
+            "a timestamp is minted from the session's clock"
+        );
+        let mut options: z_put_options_t = std::mem::zeroed();
+        z_put_options_default(&mut options);
+        options.timestamp = &mut stamp;
+        let mut bytes = payload();
+        let ke = view(DATA_KEY);
+        assert_eq!(
+            z_put(
+                session,
+                z_view_keyexpr_loan(&ke),
+                z_bytes_move(&mut bytes),
+                &options,
+            ),
+            Z_OK,
+            "a put with a timestamp is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put with a timestamp did not cross within {WAIT_BOUND:?}"
         );
     }
 
