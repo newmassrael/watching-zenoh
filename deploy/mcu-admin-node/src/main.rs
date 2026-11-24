@@ -182,7 +182,9 @@ fn params(signing_key: &[u8], policy: &SessionPolicy, limits: &SessionLimits) ->
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
         limits: *limits,
-        cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
+        cookie_signing_key: SigningKey::new(signing_key.to_vec())
+            .expect("32-byte key")
+            .into(),
     }
 }
 

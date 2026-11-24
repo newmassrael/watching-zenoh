@@ -145,12 +145,12 @@ use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_actions::Probed;
 use wz_session_core::session_actions::{LinkState, SessionCore};
 use wz_session_core::session_init_params::{
-    HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
+    CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
+    ZidError,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
-use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
@@ -2861,9 +2861,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     ) -> Result<Wire<C>, OpenError> {
         // The cookie key of the attempt is drawn before the parameters are read off the config:
         // drawn among them, its refusal would leave every field read before it in a temporary
-        // of its own, moved again into the parameters once the key is there.
-        let cookie_signing_key = SigningKey::from_entropy(&mut self.entropy)
-            .map_err(|_| OpenError::EntropyUnavailable)?;
+        // of its own, moved again into the parameters once the key is there. A build whose
+        // session machine has no accepting role holds no key, and its draw takes nothing.
+        let cookie_signing_key =
+            CookieKey::draw(&mut self.entropy).map_err(|_| OpenError::EntropyUnavailable)?;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
         let params = SessionInitParams {

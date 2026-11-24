@@ -982,11 +982,16 @@ async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
         } => body.cookie.expect("the InitAck carries a cookie").to_vec(),
         _ => panic!("the acceptor's answer is an InitAck"),
     };
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies")
-        .multilink
-        .0
-        .expect("a multilink handshake carries its state");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies")
+    .multilink
+    .0
+    .expect("a multilink handshake carries its state");
     assert_eq!(
         carried.1, initiator_key,
         "the cookie carries the key the initiator offered"

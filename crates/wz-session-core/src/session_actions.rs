@@ -8276,7 +8276,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
             self.accept_cookie_members();
         crate::accept_cookie::encode_accept_cookie_into(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &crate::accept_cookie::AcceptCookieView {
                 peer_zid,
                 peer_whatami,
@@ -8514,7 +8514,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => return false,
         };
         let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &echoed,
         ) {
             Ok(c) => c,
@@ -19661,7 +19661,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
-                        &a.params.cookie_signing_key,
+                        a.params.cookie_signing_key.signing_key(),
                         &a.accept_cookie_state(zid, n),
                     ),
                     _ => None,
@@ -20050,12 +20050,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // while a decode takes the state OFF the wire. `decode_accept_cookie`
         // verifies the MAC over the whole payload before it parses a field,
         // so anything past this point is bytes this node minted.
-        let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
-            &echoed,
-        ) {
-            Ok(c) => c,
-            Err(_) => return false,
+        let Some(carried) = self.params.cookie_signing_key.decode(&echoed) else {
+            return false;
         };
         // Upstream's rule, and the reason ONE value still crosses the
         // InitAck/OpenSyn boundary in memory: the MAC says "this node minted
