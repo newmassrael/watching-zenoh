@@ -160,6 +160,7 @@ pub(super) const DECLARATION_SYNC_TX_NO_PROGRESS_MS: usize = limit(
     option_env!("WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"),
     0,
 );
+pub(super) const HANDED_LEG_BYTES: usize = limit(option_env!("WZ_LIMIT_HANDED_LEG_BYTES"), 4096);
 pub(super) const PICO_UNICAST_BATCH_BYTES: usize =
     limit(option_env!("WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"), 2048);
 pub(super) const PICO_MULTICAST_BATCH_BYTES: usize =

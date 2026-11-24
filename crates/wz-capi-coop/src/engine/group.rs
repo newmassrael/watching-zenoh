@@ -24,6 +24,7 @@
 //! leaves.
 
 use alloc::rc::Rc;
+use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
@@ -78,6 +79,7 @@ use {
 use crate::prelude::*;
 
 use super::registry::{FaceId, Registry};
+use crate::round::Round;
 
 /// The rows of each group's member table: a member whose JOIN finds them all held is turned
 /// away, as a group whose `max_sessions` is reached turns one away. A table that does not grow,
@@ -153,10 +155,24 @@ impl MemberEvents {
 /// The stack's group transport as the group's task holds it, marked each time it hands the task
 /// a datagram: the task takes one datagram a step, as the group's loop always has, so a group
 /// that took one may hold more, and the session's read steps it again at once rather than after
-/// a tick.
+/// a tick. A transport that leaves what it lends where it lies until its next receive lends it to
+/// the session's round of deliveries, whose records read it there, and the buffer it gives back
+/// as the group is left goes back through the round ([`Round::keep_rx`]).
 struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
+    /// The session's round of deliveries.
+    lane: Arc<Round>,
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        if let Some(buf) = self.inner.give_back_rx() {
+            // SAFETY: the group's transport is let go of by the session's step, or by the engine's
+            // drop, which holds the session's state alone, and nothing borrows the round's table.
+            unsafe { self.lane.keep_rx(buf) };
+        }
+    }
 }
 
 impl GroupTransport for Watched {
@@ -197,11 +213,29 @@ impl GroupTransport for Watched {
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        let took = self.inner.recv_with(f);
+        let took = if self.inner.lends_until_next_receive() {
+            let lane = &self.lane;
+            self.inner.recv_with(&mut |datagram, from| {
+                // SAFETY: a group's transport is read by the session's step alone, under its lock,
+                // and this one leaves the bytes where they lie until it is next asked to receive,
+                // which the group's input gate holds back while a record lies in them
+                // (`round::takes_a_group_read`).
+                unsafe { lane.set_lending(Some(datagram)) };
+                f(datagram, from);
+                // SAFETY: as above.
+                unsafe { lane.set_lending(None) };
+            })
+        } else {
+            self.inner.recv_with(f)
+        };
         if took {
             self.took.set(true);
         }
         took
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.inner.lends_until_next_receive()
     }
 
     fn keeps_input(&self) -> bool {
@@ -249,6 +283,9 @@ pub(super) struct GroupJoining {
     /// Whether the session has room for what the group delivers: the delivery lane's room for one
     /// record of the group's batch.
     pub(super) input_gate: GroupInputGate,
+    /// The session's round of deliveries, which reads what the group's transport lends where it
+    /// lies and keeps the buffer it gives back while a record still reads it.
+    pub(super) lane: Arc<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
@@ -342,6 +379,7 @@ impl<W: LinkWaits> GroupFace<W> {
             join,
             transport,
             input_gate,
+            lane,
             params,
             policy,
             limits,
@@ -375,6 +413,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let link = GroupLink::new(Watched {
             inner: transport,
             took: Rc::clone(&took),
+            lane,
         });
         let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
             config,

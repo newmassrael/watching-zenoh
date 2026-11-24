@@ -337,7 +337,7 @@ mod tests {
     /// session's own identity, role and snapshot as they were handed in.
     #[test]
     fn a_profile_gives_the_group_session_its_every_field() {
-        use wz_session_core::multicast_params::{zid_vec, GroupJoinRule};
+        use wz_session_core::multicast_params::GroupJoinRule;
         let profile = GroupProfile {
             lease_ms: 7_000,
             join_interval_ms: 300,
@@ -350,7 +350,7 @@ mod tests {
             join_rule: GroupJoinRule::Zenoh,
         };
         let policy = SessionPolicy::defaults();
-        let zid = zid_vec(&[0x5a, 0x5b, 0x5c]);
+        let zid = wz_session_core::session_zid::SessionZid::from_array([0x5a, 0x5b, 0x5c]);
         let params = profile.params(
             WhatAmI::Router,
             zid,

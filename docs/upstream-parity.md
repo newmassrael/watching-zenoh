@@ -518,8 +518,8 @@ derived from the declaration and never chosen by hand:
   pico C ABI runs on the cooperative engine with no heap after a session opens: every byte a
   session needs is reserved at open from the configured limits, and nothing is allocated after.
   The engine and its pools are the decision record `docs/c-abi-engine-and-memory.md`; this is how
-  the migration to it is held. Layer C1nh builds the cooperative engine with every capability a
-  family exercises and runs `crates/wz-capi-pico/tests/no_heap_after_open.rs`: two sessions open
+  the migration to it is held. Layer C1nh builds the release profile's library
+  (`configs/profiles/host-peer-ext.conf`, resolved as the packager resolves it) and runs `crates/wz-capi-pico/tests/no_heap_after_open.rs`: two sessions open
   over the program's own transport, and each operation family (a publisher declared and
   undeclared, a small put and one near the batch limit, the subscriber's receiving of each, a get
   and the queryable's reply, a key expression declared, a liveliness token and a liveliness get,

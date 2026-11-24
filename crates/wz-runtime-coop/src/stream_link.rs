@@ -487,6 +487,9 @@ enum Front {
 /// The most frames a stream link owes its stream at once: one for each slot its book can lend.
 const OWED: usize = u8::BITS as usize;
 
+/// How long a service turn waits for room to write, in microseconds.
+const SERVICE_WAIT_US: u64 = SERVICE_WAIT_MS as u64 * 1_000;
+
 /// What a stream link owes its stream: the rest of a frame the stream took only in part, or a
 /// frame handed over behind one ([`StreamDriver::write_owed`]).
 enum Owed {
@@ -515,9 +518,9 @@ impl Owed {
     /// `taken` more bytes of it were written.
     fn advance(&mut self, taken: usize) {
         match self {
-            Self::Slot { from, .. } => *from += taken,
+            Self::Slot { from, .. } => *from = from.saturating_add(taken),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Self::Bytes { from, .. } => *from += taken,
+            Self::Bytes { from, .. } => *from = from.saturating_add(taken),
         }
     }
 }
@@ -547,8 +550,12 @@ impl OwedQueue {
         if self.len == OWED {
             return Err(owed);
         }
-        self.places[(self.head + self.len) % OWED] = Some(owed);
-        self.len += 1;
+        // `head` is a place of the ring and `len` below its places, so neither sum wraps.
+        let Some(place) = self.places.get_mut(self.head.wrapping_add(self.len) % OWED) else {
+            return Err(owed);
+        };
+        *place = Some(owed);
+        self.len = self.len.wrapping_add(1);
         Ok(())
     }
 
@@ -557,7 +564,7 @@ impl OwedQueue {
         if self.len == 0 {
             return None;
         }
-        self.places[self.head].as_mut()
+        self.places.get_mut(self.head)?.as_mut()
     }
 
     /// Take the oldest out.
@@ -565,9 +572,10 @@ impl OwedQueue {
         if self.len == 0 {
             return None;
         }
-        let owed = self.places[self.head].take();
-        self.head = (self.head + 1) % OWED;
-        self.len -= 1;
+        let owed = self.places.get_mut(self.head)?.take();
+        // A place of the ring, and a length of one or more, checked above.
+        self.head = self.head.wrapping_add(1) % OWED;
+        self.len = self.len.wrapping_sub(1);
         owed
     }
 }
@@ -575,16 +583,20 @@ impl OwedQueue {
 /// Copy what `parts` hold after their first `skip` bytes into `out`, which is that long.
 fn copy_rest(parts: &[&[u8]], skip: usize, out: &mut [u8]) {
     let mut skip = skip;
-    let mut at = 0;
+    let mut left = out;
     for &part in parts {
-        if skip >= part.len() {
-            skip -= part.len();
+        let Some(rest) = part.get(skip..) else {
+            // The part lies wholly before the bytes asked for.
+            skip = skip.saturating_sub(part.len());
             continue;
-        }
-        let rest = &part[skip..];
+        };
         skip = 0;
-        out[at..at + rest.len()].copy_from_slice(rest);
-        at += rest.len();
+        let Some((into, after)) = core::mem::take(&mut left).split_at_mut_checked(rest.len())
+        else {
+            return;
+        };
+        into.copy_from_slice(rest);
+        left = after;
     }
 }
 
@@ -605,13 +617,14 @@ fn owed_bytes(_parts: &[&[u8]], _skip: usize, _len: usize) -> Option<Owed> {
 
 /// Read the front of `held`, the bytes a buffer of `capacity` bytes holds.
 fn front(held: &[u8], capacity: usize) -> Front {
-    let Some(prefix) = held.get(..STREAM_BATCH_LENGTH_BYTES) else {
+    let Some(&prefix) = held.first_chunk::<STREAM_BATCH_LENGTH_BYTES>() else {
         return Front::Partial;
     };
-    let len = u16::from_le_bytes([prefix[0], prefix[1]]) as usize;
-    if STREAM_BATCH_LENGTH_BYTES + len > capacity {
+    let len = usize::from(u16::from_le_bytes(prefix));
+    let whole = len.saturating_add(STREAM_BATCH_LENGTH_BYTES);
+    if whole > capacity {
         Front::TooLong
-    } else if held.len() >= STREAM_BATCH_LENGTH_BYTES + len {
+    } else if held.len() >= whole {
         Front::Batch(len)
     } else {
         Front::Partial
@@ -756,12 +769,15 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         let mut start = self.spent.get();
         let mut held = self.held.get();
         let lent = loop {
-            match front(&bytes[start..held], self.rx_len) {
-                Front::Batch(0) => start += STREAM_BATCH_LENGTH_BYTES,
+            // `start` and `held` are places of the buffer, `start` the earlier, and a batch `front`
+            // answered lies whole between them: the sums below stay inside it.
+            match front(bytes.get(start..held).unwrap_or_default(), self.rx_len) {
+                Front::Batch(0) => start = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES),
                 Front::Batch(len) => {
-                    let end = start + STREAM_BATCH_LENGTH_BYTES + len;
+                    let body = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES);
+                    let end = body.wrapping_add(len);
                     self.keeping.set(false);
-                    f(&bytes[start + STREAM_BATCH_LENGTH_BYTES..end]);
+                    f(bytes.get(body..end).unwrap_or_default());
                     // A batch kept is lent again by the next receive; one let go is passed over
                     // there.
                     if !self.keeping.replace(false) {
@@ -780,15 +796,19 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                         bytes.copy_within(start..held, 0);
                         #[cfg(test)]
                         self.moved.set(self.moved.get() + (held - start));
-                        held -= start;
+                        held = held.wrapping_sub(start);
                         start = 0;
                     }
-                    match self.socket.try_read(&mut bytes[held..]) {
+                    match self
+                        .socket
+                        .try_read(bytes.get_mut(held..).unwrap_or_default())
+                    {
                         Ok(Some(0)) => {
                             self.end(LostCause::PeerClosed);
                             break false;
                         }
-                        Ok(Some(n)) => held += n,
+                        // A read fills at most the room after `held`.
+                        Ok(Some(n)) => held = held.wrapping_add(n),
                         Ok(None) => break false,
                         Err(e) => {
                             self.error.set(Some(e));
@@ -802,7 +822,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         self.spent.set(start);
         self.held.set(held);
         self.ready.set(matches!(
-            front(&bytes[start..held], self.rx_len),
+            front(bytes.get(start..held).unwrap_or_default(), self.rx_len),
             Front::Batch(_)
         ));
         // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
@@ -923,7 +943,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                 self.owe(
                     Owed::Slot {
                         slot,
-                        from: from + taken,
+                        from: from.saturating_add(taken),
                         end,
                     },
                     taken,
@@ -1210,7 +1230,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         if self.lost.get().is_none() && !self.batch_held() && !self.owner_waits {
             if !self.owes() {
                 self.socket.wait_readable(SERVICE_WAIT_MS);
-            } else if self.socket.wait_writable(SERVICE_WAIT_MS as u64 * 1_000) {
+            } else if self.socket.wait_writable(SERVICE_WAIT_US) {
                 self.write_owed();
             }
         }

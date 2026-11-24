@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (131) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (87) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -262,39 +262,27 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
 | TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
-| TD-004 | `wz-session-core` | `session_actions` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 85 | open |
+| TD-004 | `wz-session-core` | `session_actions` | `expect_used`, `unreachable` | 10 | open |
 | TD-017 | `wz-session-core` | `frame_encode` | `expect_used` | 37 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
-| TD-042 | `wz-session-core` | `serial_link` | `expect_used` | 20 | open |
 | TD-044 | `wz-session-core` | `encoded_push` | `expect_used` | 19 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
 | TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
 | TD-051 | `wz-session-core` | `ext_chain` | `expect_used`, `panic`, `arithmetic_side_effects` | 16 | open |
 | TD-054 | `wz-session-core` | `reassembly_dispatch` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
-| TD-055 | `wz-session-core` | `text_out` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
 | TD-058 | `wz-session-core` | `declare` | `expect_used`, `arithmetic_side_effects` | 12 | in flight |
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
-| TD-065 | `wz-session-core` | `tx_lease` | `arithmetic_side_effects` | 11 | open |
 | TD-066 | `wz-session-core` | `inbound` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
-| TD-073 | `wz-session-core` | `signing_key` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 9 | open |
-| TD-076 | `wz-session-core` | `reconnect` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 8 | open |
 | TD-085 | `wz-session-core` | `query` | `expect_used`, `arithmetic_side_effects` | 6 | in flight |
-| TD-086 | `wz-session-core` | `session_init_params` | `expect_used`, `panic`, `arithmetic_side_effects` | 6 | open |
-| TD-088 | `wz-session-core` | `session_zid` | `panic` | 6 | open |
 | TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
-| TD-095 | `wz-session-core` | `slot_observer` | `panic`, `arithmetic_side_effects` | 5 | open |
-| TD-098 | `wz-session-core` | `handshake_encode` | `expect_used`, `arithmetic_side_effects` | 4 | open |
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
-| TD-109 | `wz-session-core` | `reset_generations` | `indexing_slicing`, `unreachable` | 3 | open |
-| TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
-| TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
-| TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
+| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | open |
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
@@ -319,38 +307,21 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-188 | `wz-capi-pico` | `object_pool` | `arithmetic_side_effects` | 2 | in flight |
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
-| TD-200 | `wz-runtime-coop` | `stream_link` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
 | TD-202 | `wz-runtime-coop` | `app_link` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
-| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
-| TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
-| TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
+| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing` | 1 | open |
 | TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
-| TD-208 | `wz-session-mcu` | `dial` | `indexing_slicing`, `arithmetic_side_effects` | 32 | open |
 | TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
-| TD-216 | `wz-session-mcu` | `admin_host` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
-| TD-219 | `wz-session-mcu` | `admin_fixed` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
-| TD-220 | `wz-session-mcu` | `slot_group` | `indexing_slicing` | 4 | open |
-| TD-221 | `wz-session-mcu` | `client_node` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
-| TD-223 | `wz-session-mcu` | `memory` | `arithmetic_side_effects` | 2 | open |
-| TD-224 | `wz-session-mcu` | `app_layer` | `arithmetic_side_effects` | 1 | open |
-| TD-225 | `wz-session-mcu` | `slot_client` | `indexing_slicing` | 1 | open |
-| TD-228 | `wz-capi-port` | `cancellation` | `arithmetic_side_effects` | 5 | open |
-| TD-229 | `wz-capi-port` | `listeners` | `arithmetic_side_effects` | 1 | open |
 
 TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
-fills a list of `N` zids from the text a build states: on Rust 1.81 a `const fn` takes no `&mut`,
-so a row of an array whose length is a generic is written by index, as in TD-049.
+fills a list of `N` zids from the text a build states. It reads the text by slice pattern; the row
+it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
+that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
+(`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
 
 TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
 (`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
 once that lands, in the same module.
-
-Two rows of `wz-runtime-coop` are one panic each, held for a contract outside the module:
-TD-205 is the stall of `CoopRuntime::block_on` (a future nothing can wake), whose refusal is
-`RuntimeError::Stalled`, as `CoopLocalSet::block_on_local` answers it, once `block_on` answers a
-`Result`, which moves its callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
-to give, and whose refusal belongs in that trait of `wz-session-core`.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
 is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
@@ -372,10 +343,7 @@ TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen by
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse. TD-042 (`serial_link`) keeps the
-two `expect`s of the handshake, which frames an `INIT` and an `INIT|ACK` of no payload through
-`encode_frame`: that answers a `Result` for any payload, and an empty one is always within the
-MTU. A frame of fixed bytes made when the build is compiled would pay them. TD-108
+through `Bounded::new`, over a sink that cannot refuse. TD-108
 (`query_options::loopback_query`) builds the loopback's Query body (`QueryBuilder`), whose
 bounded copies answer a `Result`: a value form moves its callers in the cooperative engine and
 the tokio session, and is made with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
@@ -393,8 +361,10 @@ made after the branches restructuring those land; the same `expect` in `encoded_
 with it.
 
 TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn` that fills an
-array of `N` waits when the build is compiled: on Rust 1.81 a `const fn` takes no `&mut`, so an
-element of an array whose length is a generic is written by index; the loop bound is `N`.
+array of `N` waits when the build is compiled, and TD-102 (`ext_name`) keeps it for
+`identities_of`, a `const fn` that projects a row table into a `[u8; N]` of identities. Each
+writes an element of an array whose length is a generic, which a `const fn` of Rust 1.81 can do
+only by index, as TD-207 says; both are paid with `get_mut` when the MSRV is 1.83.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,

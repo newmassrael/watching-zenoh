@@ -117,6 +117,12 @@ pub(crate) fn priority_try_from_wire(byte: u8) -> Option<Priority> {
     (byte < Priority::NUM as u8).then(|| Priority::from_wire(byte))
 }
 
+/// Where the band's last priority sits in a `QoSLink` body: the byte after the first's.
+const BAND_END_SHIFT: u32 = 11;
+
+/// Where the reliability bit sits in a `QoSLink` body: past the band's two bytes.
+const CLASS_SHIFT: u32 = 19;
+
 /// Read a `QoSLink` z64 body as upstream's `State::try_from_u64` does.
 ///
 /// The three low bits are the tag: `0b000` is no QoS, `0b001` is QoS with no
@@ -133,7 +139,7 @@ pub fn state_from_link_body(value: u64) -> Result<QosAcceptState, QosOfferError>
             let priorities = if tag & 0b010_u64 != 0 {
                 let start = priority_try_from_wire(((value >> 3) & 0xff) as u8)
                     .ok_or(QosOfferError::InvalidValue)?;
-                let end = priority_try_from_wire(((value >> (3 + 8)) & 0xff) as u8)
+                let end = priority_try_from_wire(((value >> BAND_END_SHIFT) & 0xff) as u8)
                     .ok_or(QosOfferError::InvalidValue)?;
                 Some(if start <= end {
                     (start, end)
@@ -144,7 +150,7 @@ pub fn state_from_link_body(value: u64) -> Result<QosAcceptState, QosOfferError>
                 None
             };
             let reliability = if tag & 0b100_u64 != 0 {
-                let bit = ((value >> (3 + 8 + 8)) & 0x1) as u8 == 1;
+                let bit = ((value >> CLASS_SHIFT) & 0x1) as u8 == 1;
                 Some(Reliability::from_reliable_bool(bit))
             } else {
                 None

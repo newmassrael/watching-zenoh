@@ -455,6 +455,15 @@ impl<'a> PeerSpace<'a> {
         Self(PeerSpaceRepr::LentTable(table))
     }
 
+    /// The key the peer declared for `id`, when its table keeps it in the session's key arena (the
+    /// lent policy's): the row's own key, whose block a holder may keep. `None` on any other table.
+    fn held(&self, id: crate::wire_id::ExprId) -> Option<&'a crate::key_arena::KeyRef> {
+        match self.0 {
+            PeerSpaceRepr::LentTable(table) => table.find(crate::wire_id::peer_key(id)),
+            _ => None,
+        }
+    }
+
     /// The literal keyexpr the peer declared for `id`.
     ///
     /// A peer's table holds ids widened to 64 bits, as the id map every
@@ -823,6 +832,28 @@ pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
         WireexprVariantIn::WireexprNonlocal(_) => Space::Own,
     };
     resolve_parts(arm, id, suffix, spaces, own, out)
+}
+
+/// [`resolve_wireexpr_view_over`], with the key of the session's key arena the answer is the
+/// whole text of, when it is one: an `M=1` id of the peer's with no suffix, read out of a table
+/// that keeps its keys there (`PeerSpace::held`). Every other answer, a suffix joined, our own
+/// space's key copied, the shared dictionary's, is as `resolve_wireexpr_view_over` gives it, with
+/// no key.
+pub fn resolve_wireexpr_view_held_over<'k, 'f: 'k, D: WireexprLentStorage>(
+    body: &WireexprVariantIn<Lent<'f, D>>,
+    spaces: MappingSpaces<'k>,
+    own: Option<OwnSpace<'_>>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    if let WireexprVariantIn::WireexprLocal(_) = body {
+        let (id, suffix) = id_and_suffix_view(body);
+        if id != 0 && suffix.is_none() {
+            if let Some(held) = spaces.peer.held(id) {
+                return Ok(Some((held.as_str(), Some(held))));
+            }
+        }
+    }
+    resolve_wireexpr_view_over(body, spaces, own, out).map(|text| text.map(|text| (text, None)))
 }
 
 /// The `(id, suffix)` a wireexpr read as its view (`WireexprView`) carries, as

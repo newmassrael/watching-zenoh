@@ -368,7 +368,7 @@ impl EngineSubscriber {
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start(
-                        engine,
+                        engine.clone(),
                         period_ms,
                         Arc::new(move || {
                             let Some(shared) = weak.upgrade() else {
@@ -393,7 +393,7 @@ impl EngineSubscriber {
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start(
-                        engine,
+                        engine.clone(),
                         period_ms,
                         Arc::new(move || {
                             let Some(shared) = weak.upgrade() else {

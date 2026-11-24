@@ -461,11 +461,13 @@ fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + '
     }
     let mut cursor = session.replay(declarations.len(), now_ms);
     let turn = replay_turn(&mut cursor, replay_burst(pacing), |at| {
-        match listed_entity_id(at) {
-            Some(id) => declare(session.actions(), id, &declarations[at])
-                .map_err(|error| Refusal::of(&error)),
-            // A place past the ids a list can name is a declaration no session can make.
-            None => Err(Refusal::Failed),
+        match (listed_entity_id(at), declarations.get(at)) {
+            (Some(id), Some(declaration)) => {
+                declare(session.actions(), id, declaration).map_err(|error| Refusal::of(&error))
+            }
+            // A place past the ids a list can name, or past the list, is a declaration no
+            // session can make.
+            _ => Err(Refusal::Failed),
         }
     });
     if turn.told {

@@ -825,7 +825,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -1921,7 +1921,7 @@ mod in_place {
     use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
     use wz_session_core::limits::SessionLimits;
     use wz_session_core::multicast_join::encode_join;
-    use wz_session_core::multicast_params::{zid_vec, GroupJoinRule, MulticastParams};
+    use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::push_build::build_push_literal;
     use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
@@ -1935,7 +1935,7 @@ mod in_place {
         let policy = SessionPolicy::defaults();
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: zid_vec(&[member; 4]),
+            zid: wz_session_core::session_zid::SessionZid::from_array([member; 4]),
             lease_ms: 10_000,
             join_interval_ms: 100,
             seq_num_res: 0x02,

@@ -5,7 +5,7 @@
 //! reaches the subscriber, and a Response the get that asked for it, from the frame's own bytes,
 //! each record lent for its dispatch, as the copying receive delivers them.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limit_binding::Quota;
@@ -13,7 +13,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
 use super::entity_tables::{lowered, open_under};
-use super::{open, until, CatchAll, Command, Router};
+use super::{open, until, CatchAll, Command, Engine, Router};
 use crate::round::RoundCounts;
 
 /// A Push the router sends is read in place and reaches the subscriber with its key and payload.
@@ -41,6 +41,60 @@ fn a_push_read_in_place_reaches_the_subscriber() {
     assert_eq!(
         *got.lock().unwrap(),
         [("demo/in-place".to_owned(), b"lent".to_vec())]
+    );
+}
+
+/// A Push naming the router's alias of a key with no suffix is handed its key where the session's
+/// key arena keeps the alias. The router undeclares the alias in the same frame, after the Push,
+/// so the alias is gone before the callback runs: the callback still reads the key, and the arena
+/// holds as much as it did with the alias declared, the round holding the alias's block. The
+/// round lets go of the block at the session's next step, and the arena is back to what it held
+/// before the alias. The CONTROL is the Push after the undeclaration, which the session can no
+/// longer resolve and drops: one sample reaches the callback. Turned red by a round that copies
+/// the key (the arena smaller while the callback runs) or never lets go of the block.
+#[test]
+fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let watched: Arc<OnceLock<Weak<Engine>>> = Arc::default();
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let (watched, got) = (watched.clone(), got.clone());
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            // Called with no lock of the session held (decision D8), so the arena can be read.
+            let used = watched
+                .get()
+                .and_then(Weak::upgrade)
+                .map(|engine| engine.key_counts().used);
+            got.lock().unwrap().push((
+                sample.keyexpr().to_owned(),
+                sample.payload().to_vec(),
+                used,
+            ));
+        })
+    };
+    let _ = watched.set(Arc::downgrade(&engine));
+    engine
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, sink)
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares >= 1)
+    });
+    let before = engine.key_counts().used;
+    router.send(Command::DeclareKeyexpr(9, "demo/alias"));
+    until(&engine, "the alias in the session's key arena", || {
+        engine.key_counts().used > before
+    });
+    let declared = engine.key_counts().used;
+    router.send(Command::PushAliasThenUndeclare(9, b"v"));
+    until(&engine, "the sample", || !got.lock().unwrap().is_empty());
+    until(&engine, "the alias's block back", || {
+        engine.key_counts().used == before
+    });
+    assert_eq!(
+        *got.lock().unwrap(),
+        [("demo/alias".to_owned(), b"v".to_vec(), Some(declared))],
+        "the key read where the alias kept it, after the alias was undeclared"
     );
 }
 

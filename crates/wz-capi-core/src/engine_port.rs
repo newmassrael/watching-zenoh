@@ -156,6 +156,32 @@ impl SessionState {
     }
 }
 
+impl wz_capi_port::KeyHolds for SharedSession {
+    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::release_keyexpr(self, mapping_id)
+    }
+
+    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::retain_keyexpr(self, mapping_id)
+    }
+}
+
+impl wz_capi_port::Tickers for SharedSession {
+    #[cfg(feature = "advanced")]
+    fn start_ticker(
+        &self,
+        period_ms: u64,
+        tick: wz_capi_port::Tick,
+    ) -> Result<wz_capi_port::TickerId, Refusal> {
+        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
+    }
+
+    #[cfg(feature = "advanced")]
+    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
+        SharedSession::stop_ticker(self, id);
+    }
+}
+
 impl SessionEngine for SharedSession {
     fn is_closed(&self) -> bool {
         SharedSession::is_closed(self)
@@ -332,13 +358,6 @@ impl SessionEngine for SharedSession {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
 
-    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::release_keyexpr(self, mapping_id)
-    }
-
-    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::retain_keyexpr(self, mapping_id)
-    }
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -536,20 +555,6 @@ impl SessionEngine for SharedSession {
                     .with_retraction_naming_the_key(retraction.is_some()),
             )
         })
-    }
-
-    #[cfg(feature = "advanced")]
-    fn start_ticker(
-        &self,
-        period_ms: u64,
-        tick: wz_capi_port::Tick,
-    ) -> Result<wz_capi_port::TickerId, Refusal> {
-        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
-    }
-
-    #[cfg(feature = "advanced")]
-    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
-        SharedSession::stop_ticker(self, id);
     }
 
     #[cfg(feature = "liveliness")]

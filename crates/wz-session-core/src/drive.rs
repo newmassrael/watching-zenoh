@@ -1170,7 +1170,10 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
     }
-    #[cfg(feature = "codec-open-body")]
+    // A build without the accepting role reaches this function with no OpenSyn: the frame
+    // maps to no event there (`inbound::control_event`). Gated by the role, so the compiler
+    // need not keep an arm it cannot prove unreachable from `facts` alone.
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
         is_ack: false,
         lease,
@@ -1496,6 +1499,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: true, ..
             }) => engine.get_current_state() == S::SentInitSyn,
+            // The acceptor's Open, which only a build with the accepting role is handed here.
+            #[cfg(feature = "session-unicast-accept")]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false, ..
             }) => true,
@@ -2462,7 +2467,9 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         }
     };
     let facts = message.facts();
-    actions.observe_control(&facts.unchained());
+    // The facts every reader below that takes no chain reads, made once.
+    let unchained = facts.unchained();
+    actions.observe_control(&unchained);
     // R2825 — one transport message read off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
     note_rx_transport_message(actions);
@@ -2472,7 +2479,7 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         unit.len()
     };
     let mut decided = None;
-    let outcome = match crate::inbound::control_event(message.ext_admission(), &facts.unchained()) {
+    let outcome = match crate::inbound::control_event(message.ext_admission(), &unchained) {
         Some(event) => decide_admitted(event, &facts, &mut decided, actions, engine),
         None => match facts {
             #[cfg(feature = "codec-keep-alive")]

@@ -29,6 +29,7 @@ use wz_runtime_posix::multicast::{
     bind_joined, bind_sender, mark_traffic_class, HostGroupTransport, Loopback, MulticastError,
     RxBind, SocketConfig,
 };
+use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::locator::{parse_locator, ParsedLocator, Proto};
 use wz_session_core::policy::{MulticastLoopback, SessionPolicy};
 
@@ -76,11 +77,15 @@ impl<S> HostGroups<S> {
 }
 
 impl<S: MulticastSocket + 'static> GroupJoiner for HostGroups<S> {
-    fn join(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+    fn join(
+        &self,
+        endpoint: &str,
+        rx: Option<ByteBuf>,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         let group = group_of(endpoint).ok_or(LinkOpenError::Unsupported)?;
         let named_port = group.addr.port();
         let port = self.port_given(endpoint).unwrap_or(named_port);
-        let transport = join::<S>(&group, port, self).map_err(|e| {
+        let transport = join::<S>(&group, port, self, rx).map_err(|e| {
             log::warn!("group {endpoint}: the host did not join it: {e}");
             LinkOpenError::Refused
         })?;
@@ -101,14 +106,16 @@ fn group_of(endpoint: &str) -> Option<ParsedLocator> {
 }
 
 /// Join the group `group` names on `port` (its own port, or the one a first join of a port 0 was
-/// given), as `groups` joins one. Port 0 is given its port by the bind of the joined socket, which
-/// the send socket addresses the group by, as upstream's multicast link reads the port of its
-/// bound socket (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+/// given), as `groups` joins one, receiving into `rx` when the session lent a buffer. Port 0 is
+/// given its port by the bind of the joined socket, which the send socket addresses the group by,
+/// as upstream's multicast link reads the port of its bound socket
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
 /// `We may have bind to port 0, so we need to retrieve the actual port`).
 fn join<S: MulticastSocket>(
     group: &ParsedLocator,
     port: u16,
     groups: &HostGroups<S>,
+    rx: Option<ByteBuf>,
 ) -> Result<HostGroupTransport<S>, MulticastError<S::Error>> {
     let options = group.socket.as_deref();
     let config = SocketConfig {
@@ -132,7 +139,7 @@ fn join<S: MulticastSocket>(
     }
     let mut to = read.peer;
     to.set_port(port);
-    Ok(HostGroupTransport::new(read.socket, write.socket, to))
+    Ok(HostGroupTransport::new(read.socket, write.socket, to, rx))
 }
 
 #[cfg(all(test, feature = "std", unix))]
@@ -156,7 +163,10 @@ mod tests {
             "not a locator",
         ] {
             assert!(
-                matches!(groups().join(endpoint), Err(LinkOpenError::Unsupported)),
+                matches!(
+                    groups().join(endpoint, None),
+                    Err(LinkOpenError::Unsupported)
+                ),
                 "{endpoint}"
             );
         }
@@ -169,7 +179,7 @@ mod tests {
     #[test]
     fn a_group_whose_keys_make_no_socket_is_refused() {
         assert!(matches!(
-            groups().join("udp/239.255.77.12:0#iface=127.0.0.1;join=ff02::1"),
+            groups().join("udp/239.255.77.12:0#iface=127.0.0.1;join=ff02::1", None),
             Err(LinkOpenError::Refused)
         ));
     }
@@ -213,8 +223,8 @@ mod tests {
             loopback: Loopback::On,
             ..groups()
         };
-        let mut a = joiner.join(&endpoint).expect("member a joins");
-        let mut b = joiner.join(&endpoint).expect("member b joins");
+        let mut a = joiner.join(&endpoint, None).expect("member a joins");
+        let mut b = joiner.join(&endpoint, None).expect("member b joins");
         assert!(a.open() && b.open());
         a.send_to_group(b"hello group");
         let mut seen = None;

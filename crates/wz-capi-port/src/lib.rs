@@ -77,8 +77,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
-// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;
@@ -86,8 +84,6 @@ mod engine;
 pub mod entity_place;
 pub mod group;
 pub mod held_key;
-// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -111,7 +107,7 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
-pub use engine::{RedeclareRefusal, SessionEngine};
+pub use engine::{KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
 pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
@@ -229,7 +225,7 @@ impl Drop for SubscriberSink {
 /// entity id the token is declared under, of the width [`SubId`] has for the same reason.
 pub type TokenId = wz_session_core::wire_id::EntityId;
 
-/// The id of one periodic job an engine runs ([`SessionEngine::start_ticker`]).
+/// The id of one periodic job an engine runs ([`Tickers::start_ticker`]).
 pub type TickerId = u64;
 
 /// What a periodic job does each time it is due, and whether it goes on: `false` ends it.
@@ -240,24 +236,22 @@ pub type Tick = Arc<dyn Fn() -> bool + Send + Sync>;
 /// A periodic job running on an engine, ended when this is dropped.
 ///
 /// It holds the engine, so the engine lives as long as the job can be asked to stop; a job whose
-/// owner is gone does not outlive it.
+/// owner is gone does not outlive it. It names the engine by its periodic jobs alone
+/// ([`Tickers`]), so a build that reaches its engine as its own type makes no table of every
+/// operation of the session for it.
 pub struct Ticker {
     /// `None` once [`Self::detach`] let the job go on without this handle.
-    engine: Option<Arc<dyn SessionEngine>>,
+    engine: Option<Arc<dyn Tickers>>,
     id: TickerId,
 }
 
 impl Ticker {
-    /// Start `tick` on `engine` every `period_ms` ([`SessionEngine::start_ticker`]), refused as
-    /// the engine refuses it.
-    pub fn start(
-        engine: &Arc<dyn SessionEngine>,
-        period_ms: u64,
-        tick: Tick,
-    ) -> Result<Self, Refusal> {
+    /// Start `tick` on `engine` every `period_ms` ([`Tickers::start_ticker`]), refused as the
+    /// engine refuses it. The handle keeps `engine`.
+    pub fn start(engine: Arc<dyn Tickers>, period_ms: u64, tick: Tick) -> Result<Self, Refusal> {
         let id = engine.start_ticker(period_ms, tick)?;
         Ok(Self {
-            engine: Some(Arc::clone(engine)),
+            engine: Some(engine),
             id,
         })
     }
@@ -629,12 +623,13 @@ impl core::fmt::Debug for WireKey {
 }
 
 /// One hold on a keyexpr declaration of a session, taken from and given back to the engine's own
-/// count of the declaration's holders ([`SessionEngine::retain_keyexpr`],
-/// [`SessionEngine::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
+/// count of the declaration's holders ([`KeyHolds::retain_keyexpr`],
+/// [`KeyHolds::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
 /// keeps nothing of its own on the heap, and once the session is gone a copy and a drop do
 /// nothing.
 pub struct KeyHold {
-    engine: alloc::sync::Weak<dyn SessionEngine>,
+    /// The session, named by its count of holders alone ([`KeyHolds`]).
+    engine: alloc::sync::Weak<dyn KeyHolds>,
     mapping_id: wz_session_core::wire_id::ExprId,
 }
 
@@ -642,7 +637,7 @@ impl KeyHold {
     /// The hold on `mapping_id` that the caller took through `engine`
     /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
     pub fn taken(
-        engine: alloc::sync::Weak<dyn SessionEngine>,
+        engine: alloc::sync::Weak<dyn KeyHolds>,
         mapping_id: wz_session_core::wire_id::ExprId,
     ) -> Self {
         Self { engine, mapping_id }

@@ -74,6 +74,14 @@ fn rooms(answers: &Answers) -> LinkRooms<Answers> {
     LinkRooms::new(answers.clone(), 4)
 }
 
+/// The places of the faces `room` names congested, or `None` for another answer.
+fn congested(room: Room) -> Option<Vec<usize>> {
+    match room {
+        Room::Congested(set) => Some((0..64).filter(|at| set.contains(*at)).collect()),
+        _ => None,
+    }
+}
+
 /// A session none of whose links gives a wait cannot be asked: the publish waits for the session.
 #[test]
 fn a_session_whose_links_give_no_wait_is_not_asked() {
@@ -95,7 +103,11 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     assert_eq!(answers.asked(10), [1_234]);
 
     rooms.hold(2, answers.face(20, false));
-    assert_eq!(rooms.within(1_234), Room::Congested(vec![2]));
+    assert_eq!(
+        congested(rooms.within(1_234)),
+        Some(vec![1]),
+        "the second face's place"
+    );
     assert_eq!(answers.asked(20), [1_234], "the full link was asked");
 }
 
@@ -109,7 +121,7 @@ fn only_the_faces_without_room_are_the_congestion() {
     rooms.hold(1, answers.face(10, false));
     rooms.hold(2, answers.face(20, true));
     rooms.hold(3, answers.face(30, false));
-    assert_eq!(rooms.within(1_000), Room::Congested(vec![1, 3]));
+    assert_eq!(congested(rooms.within(1_000)), Some(vec![0, 2]));
     assert_eq!(answers.asked(10), [1_000], "the first spends the wait");
     assert_eq!(
         answers.asked(20),
@@ -192,8 +204,8 @@ fn a_link_that_has_gone_is_not_asked() {
     let rooms = rooms(&answers);
     rooms.hold(1, answers.face(10, false));
     assert_eq!(
-        rooms.within(1_000),
-        Room::Congested(vec![1]),
+        congested(rooms.within(1_000)),
+        Some(vec![0]),
         "CONTROL: while it is up"
     );
     rooms.forget(1);
@@ -207,6 +219,40 @@ fn a_link_that_has_gone_is_not_asked() {
     );
     rooms.forget_all();
     assert_eq!(rooms.within(1_000), Room::Unasked);
+}
+
+/// A face keeps its place while it is up, and a publish dropped on a set read at one mark is sent
+/// to the faces that held their places then and are not in it: one it was dropped on, and one
+/// that takes a freed place after the drop, are passed over, as a transport that opened after a
+/// publish is not sent it. A face that holds no place is named as every face, which drops the
+/// publish on all. Turned red by a place reused without its mark, or a face with no place the set
+/// leaves out.
+#[cfg(any(feature = "listen", feature = "group"))]
+#[test]
+fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, false));
+    rooms.hold(2, answers.face(20, true));
+    let Room::Congested(dropped) = rooms.within(1_000) else {
+        panic!("the first face is congested");
+    };
+    assert!(rooms.skips(&dropped, 1), "the face it was dropped on");
+    assert!(!rooms.skips(&dropped, 2), "a face with room is sent it");
+    rooms.forget(1);
+    rooms.hold(3, answers.face(30, true));
+    assert!(
+        rooms.skips(&dropped, 3),
+        "the face that took the first face's place came after the drop"
+    );
+    assert!(
+        !rooms.skips(&rooms.dropped_on(2), 3),
+        "CONTROL: a set read now owes it"
+    );
+    assert!(
+        rooms.dropped_on(9).is_every(),
+        "a face with no place is every face"
+    );
 }
 
 /// The session's counters are its links': puts it sent on the link it holds are counted there and
@@ -458,6 +504,111 @@ mod stalled_link {
         assert_eq!(
             seen.unsent_drops, 1,
             "the dropped publish is counted as the transport's drop"
+        );
+    }
+
+    /// What a droppable publish with `options` did under zenoh's profile while a blocking one held
+    /// the session waiting for room on the full link: its answer, whether the blocking one still
+    /// held the session when it returned, and what the publishing thread allocated while it ran.
+    /// The publish's options are made before it is counted, as a program makes them before its put.
+    fn counted_behind_a_held_session(
+        options: &PublishOptions<'_>,
+    ) -> (Option<Result<usize, FanoutError>>, bool, u64) {
+        let peer = open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: Some(vec![0xa8; 4]),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        });
+        let endpoint = peer.listening().pop().expect("one port is bound");
+        SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
+        let publisher = open_with(CoopConfig {
+            endpoints: vec![endpoint],
+            zid: Some(vec![0xb8; 4]),
+            tx_queue: stalling(TxQueueConf {
+                wait_before_drop_us: DROP_WAIT_US,
+                held_drop: HeldDrop::WaitForRoom,
+                ..client_config().tx_queue
+            }),
+            ..client_config()
+        });
+        let started = Instant::now();
+        while peer.faces_up() == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the peer never held the publisher's face"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        SessionDrive::stop_read_task(&*peer).expect("the peer's read task stops");
+        let blocking = hold_with_a_blocking_publish(&publisher);
+
+        let key = WireKey::literal();
+        let mut dropped = None;
+        let allocations = super::super::redial_heap::counted(|| {
+            dropped = Some(publisher.publish_on_wire_all("demo/stall", &key, b"dropped", options));
+        });
+        let still_held = !blocking.is_finished();
+
+        let _ = blocking.join();
+        until(
+            &publisher,
+            "the session to close after the blocking publish's wait",
+            || SessionDrive::is_closed(&*publisher),
+        );
+        SessionDrive::close(&*peer);
+        (dropped, still_held, allocations)
+    }
+
+    /// Under zenoh's profile, a droppable publish that finds the session held by a blocking one
+    /// waiting for room on the full link asks the link for room and is dropped, and allocates
+    /// nothing of the heap doing so: what a session does after its open takes no memory. CONTROL:
+    /// the publish was dropped, the ask made. Turned red by an ask that copies the faces it asks
+    /// out of their table, or a drop that lists the faces it was dropped on on the heap.
+    #[test]
+    fn a_droppable_publish_behind_a_held_session_allocates_nothing() {
+        let (dropped, still_held, allocations) =
+            counted_behind_a_held_session(&publish(CongestionControl::Drop));
+        assert_eq!(
+            dropped,
+            Some(Ok(0)),
+            "CONTROL: the publish found the session held and was dropped"
+        );
+        assert!(
+            still_held,
+            "CONTROL: the blocking publish still held the session"
+        );
+        assert_eq!(
+            allocations, 0,
+            "a droppable publish behind a held session allocated"
+        );
+    }
+
+    /// The same publish carrying an encoding with a schema and an attachment allocates nothing
+    /// either: what the session keeps of it for its other faces is kept whole, in memory the open
+    /// took. CONTROL as above. Turned red by an encoding whose schema the kept publish copies onto
+    /// the heap, or an attachment it copies there.
+    #[test]
+    fn a_droppable_publish_with_a_schema_behind_a_held_session_allocates_nothing() {
+        let options = publish(CongestionControl::Drop)
+            .with_encoding(wz_session_core::sample::EncodingHint {
+                packed_id: 7,
+                schema: Some(b"text".to_vec()),
+            })
+            .with_attachment(b"att");
+        let (dropped, still_held, allocations) = counted_behind_a_held_session(&options);
+        assert_eq!(
+            dropped,
+            Some(Ok(0)),
+            "CONTROL: the publish found the session held and was dropped"
+        );
+        assert!(
+            still_held,
+            "CONTROL: the blocking publish still held the session"
+        );
+        assert_eq!(
+            allocations, 0,
+            "a droppable publish with a schema behind a held session allocated"
         );
     }
 

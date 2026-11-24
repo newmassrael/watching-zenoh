@@ -1633,7 +1633,8 @@ mod batch_walk_tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             whatami: WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(zid),
+            zid: crate::session_zid::SessionZid::new(zid)
+                .expect("a 1 to 16 byte zid, not all zero"),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,
@@ -2537,6 +2538,19 @@ mod control_extent_tests {
             steps_as_decoded(&[T_MID_KEEP_ALIVE, NEXT]);
             steps_as_decoded(&[T_MID_KEEP_ALIVE | FLAG_T_Z, 0x1F, NEXT]);
         }
+    }
+
+    /// A Close whose chain carries a byte-string extension is stepped over where it lies, as far as
+    /// its decode reads, and one whose extension is cut short ends the walk as its decode refuses.
+    /// Turned red by a step that reads the chain otherwise than the decode keeps it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_close_with_a_byte_string_extension_is_stepped_over_as_its_decode_reads_it() {
+        steps_as_decoded(&[T_MID_CLOSE | FLAG_T_Z, 0x00, 0x42, 0x02, 0xAB, 0xCD, NEXT]);
+        let cut = [T_MID_CLOSE | FLAG_T_Z, 0x00, 0x42, 0x05, 0xAB];
+        assert!(parse_inbound_consuming(&cut).is_err());
+        assert!(matches!(control_extent(&cut), Some(Err(_))));
+        assert_eq!(multicast_message_len(&cut), None);
     }
 
     #[cfg(feature = "alloc")]

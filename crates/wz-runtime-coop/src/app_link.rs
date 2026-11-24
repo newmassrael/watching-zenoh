@@ -58,9 +58,9 @@ use wz_session_core::app_link_table::{
     OpenProgress, SendGate, SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
-use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
 
-use crate::group_transport::{GroupSend, GroupTransport};
+use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::CellRc;
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
@@ -1050,14 +1050,19 @@ impl DatagramSocket for AppDatagramSocket {
 /// group is closing the link.
 pub struct AppGroupTransport {
     held: Option<Held>,
-    /// The datagram the last receive lent, which the transport keeps until its next receive so
-    /// that a datagram asked to be kept is lent again whole. Its storage is taken when the group
-    /// is joined, room for the widest datagram, and each receive copies into it.
-    lent: alloc::vec::Vec<u8>,
-    /// The source of the datagram in `lent`, `None` while it holds none.
+    /// What each datagram the program hands in is copied into, and kept until the next receive so
+    /// that a datagram asked to be kept is lent again whole: a buffer the session lent, as long
+    /// as the group's batch, or one of the transport's own, room for the widest datagram, both
+    /// taken when the group is joined.
+    rx: GroupRx,
+    /// How many bytes of `rx` the datagram the last receive lent holds.
+    len: usize,
+    /// The source of the datagram in `rx`, `None` while it holds none.
     lent_from: Option<SocketAddr>,
-    /// Whether the next receive lends `lent` again ([`GroupTransport::keep`]).
+    /// Whether the next receive lends `rx` again ([`GroupTransport::keep`]).
     kept: bool,
+    /// Datagrams longer than a lent buffer, dropped: see [`Self::oversized`].
+    oversized: u64,
 }
 
 impl AppGroupTransport {
@@ -1068,16 +1073,18 @@ impl AppGroupTransport {
         waits: &AppWaits,
         locator: &str,
     ) -> Result<Self, LinkOpenError> {
-        Self::join_bounded(transport, waits, locator, None)
+        Self::join_bounded(transport, waits, locator, None, None)
     }
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
-    /// one ([`AppLinks::with_open_bound`]).
+    /// one ([`AppLinks::with_open_bound`]), receiving into `rx` when the session lent a buffer
+    /// (`LinkTables::group_rx`).
     pub fn join_bounded(
         transport: &SessionTransport,
         waits: &AppWaits,
         locator: &str,
         bound: Option<&OpenBound>,
+        rx: Option<ByteBuf>,
     ) -> Result<Self, LinkOpenError> {
         Ok(Self {
             held: Some(open_link(
@@ -1087,10 +1094,20 @@ impl AppGroupTransport {
                 locator,
                 bound,
             )?),
-            lent: alloc::vec::Vec::with_capacity(DATAGRAM_MAX),
+            rx: GroupRx::lent_or_own(rx, DATAGRAM_MAX),
+            len: 0,
             lent_from: None,
             kept: false,
+            oversized: 0,
         })
+    }
+
+    /// How many datagrams the program handed in that were longer than the buffer the session
+    /// lent, each dropped whole rather than read cut: a member that sends batches longer than
+    /// this node's group batch. A buffer of the transport's own holds the widest datagram, and
+    /// drops none.
+    pub fn oversized(&self) -> u64 {
+        self.oversized
     }
 }
 
@@ -1177,33 +1194,45 @@ impl GroupTransport for AppGroupTransport {
         // A datagram kept is lent again before the program's next one is read.
         if core::mem::take(&mut self.kept) {
             if let Some(source) = self.lent_from {
-                f(self.lent.as_slice(), source);
+                f(
+                    self.rx.as_slice().get(..self.len).unwrap_or_default(),
+                    source,
+                );
                 return true;
             }
         }
         let Some(held) = &self.held else {
             return false;
         };
-        let lent = &mut self.lent;
-        let read = held.transport.with(|table| {
-            table.read_datagram(held.handle, None, |datagram| {
-                lent.resize(datagram.len(), 0);
-                datagram.copy_to(lent);
-                // The table holds a group's datagrams only with their source.
-                datagram.source().map_or(
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                    socket_of,
-                )
-            })
-        });
-        held.tell_drained();
-        match read {
-            DatagramRead::Datagram(source) => {
-                self.lent_from = Some(source);
-                f(self.lent.as_slice(), source);
-                true
+        loop {
+            let rx = &mut self.rx;
+            let read = held.transport.with(|table| {
+                table.read_datagram(held.handle, None, |datagram| {
+                    let buf = rx.as_mut_slice();
+                    // A datagram the buffer cannot hold whole is not read cut.
+                    let copied = (datagram.len() <= buf.len()).then(|| datagram.copy_to(buf));
+                    // The table holds a group's datagrams only with their source.
+                    let source = datagram.source().map_or(
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                        socket_of,
+                    );
+                    (copied, source)
+                })
+            });
+            held.tell_drained();
+            match read {
+                DatagramRead::Datagram((Some(len), source)) => {
+                    self.len = len;
+                    self.lent_from = Some(source);
+                    f(self.rx.as_slice().get(..len).unwrap_or_default(), source);
+                    return true;
+                }
+                // Dropped and counted, and the next datagram is read in its place.
+                DatagramRead::Datagram((None, _)) => {
+                    self.oversized = self.oversized.saturating_add(1);
+                }
+                DatagramRead::Empty | DatagramRead::End => return false,
             }
-            DatagramRead::Empty | DatagramRead::End => false,
         }
     }
 
@@ -1214,6 +1243,17 @@ impl GroupTransport for AppGroupTransport {
 
     fn keep(&mut self) {
         self.kept = self.lent_from.is_some();
+    }
+
+    // A lent buffer is the session's, which holds what it reads there until it asks for the next
+    // datagram; a buffer of the transport's own is lent for the call, as the trait provides.
+    fn lends_until_next_receive(&self) -> bool {
+        self.rx.is_lent()
+    }
+
+    // Asked once the group is left, when no receive copies into the buffer again.
+    fn give_back_rx(&mut self) -> Option<ByteBuf> {
+        self.rx.give_back()
     }
 }
 
@@ -1459,11 +1499,18 @@ impl SessionLinks for AppLinks {
         if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
             return Err(LinkOpenError::Unsupported);
         }
+        // A session that lent a table of group buffers gives the group one of them, and a group
+        // that finds every one held is not joined; without the table the group makes its own.
+        let rx = match self.lent.and_then(|tables| tables.group_rx()) {
+            Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
+            None => None,
+        };
         Ok(Box::new(AppGroupTransport::join_bounded(
             &self.transport,
             &self.waits,
             endpoint,
             self.open_bound.as_ref(),
+            rx,
         )?))
     }
 
@@ -2188,6 +2235,133 @@ mod tests {
             dialled.try_recv(&mut buf),
             Ok(Some((2, SocketAddr::from(([203, 0, 113, 7], 9)))))
         );
+    }
+
+    /// A group joined over a buffer the session lent reads each datagram into it, where it lies
+    /// until the next receive, drops and counts one longer than the buffer instead of reading it
+    /// cut, reads the next in its place, and gives the buffer back once as it is left. The
+    /// CONTROL is a group over its own buffer, which holds the longer datagram whole and gives
+    /// nothing back.
+    #[test]
+    fn a_group_over_a_lent_buffer_reads_into_it_and_drops_what_it_cannot_hold() {
+        use wz_session_core::byte_cells::{ByteCells, ByteSource};
+
+        static CELLS: ByteCells<8, 1> = ByteCells::new();
+        let member = SocketAddr::from(([198, 51, 100, 20], 7447));
+        let (_script, transport) = transport();
+        let waits = AppWaits::new(Arc::clone(&transport));
+        let join = |rx| {
+            AppGroupTransport::join_bounded(
+                &session(&transport, 64),
+                &waits,
+                "udp/239.7.7.7:7447#iface=lan7",
+                None,
+                rx,
+            )
+            .expect("joined")
+        };
+
+        let mut own = join(None);
+        let handle = own.held.as_ref().unwrap().handle;
+        transport
+            .received(handle, b"ten bytes!", Some("udp/198.51.100.20:7447"))
+            .unwrap();
+        let mut seen = Vec::new();
+        assert!(own.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        assert_eq!(
+            seen,
+            [(b"ten bytes!".to_vec(), member)],
+            "CONTROL: held whole"
+        );
+        assert_eq!(own.oversized(), 0);
+        assert!(!own.lends_until_next_receive());
+        own.close();
+        assert!(
+            own.give_back_rx().is_none(),
+            "CONTROL: its own buffer stays"
+        );
+
+        let buf = CELLS.claim().expect("the cell");
+        let base = buf.raw().0 as usize;
+        let mut lent = join(Some(buf));
+        assert!(lent.lends_until_next_receive());
+        let handle = lent.held.as_ref().unwrap().handle;
+        for bytes in [b"ten bytes!".as_slice(), b"member".as_slice()] {
+            transport
+                .received(handle, bytes, Some("udp/198.51.100.20:7447"))
+                .unwrap();
+        }
+        let mut seen = Vec::new();
+        assert!(lent.recv_with(&mut |bytes, src| {
+            seen.push((bytes.to_vec(), src, bytes.as_ptr() as usize))
+        }));
+        assert_eq!(
+            seen,
+            [(b"member".to_vec(), member, base)],
+            "the longer datagram is not read cut; the next is read where the buffer lies"
+        );
+        assert_eq!(lent.oversized(), 1, "the dropped datagram is counted");
+        assert!(!lent.recv_with(&mut |_, _| {}));
+        lent.close();
+        let back = lent.give_back_rx().expect("the lent buffer");
+        assert!(lent.give_back_rx().is_none(), "given back once");
+        assert_eq!(CELLS.in_use(), 1, "the session holds it until it lets go");
+        drop(back);
+        assert_eq!(CELLS.in_use(), 0);
+    }
+
+    /// Links lent a table of group buffers give each group they join one of them, and refuse a
+    /// group past the table as exhausted before the program is asked; the buffer a left group
+    /// gives back is the table's again.
+    #[test]
+    fn links_lent_group_buffers_give_each_group_one() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        const GROUP: &str = "udp/239.7.7.7:7447#iface=lan7";
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let (rx_len, slot_len, group_len) = (66, 34, 48);
+        let bytes = Arena::byte_cells_bytes(rx_len, 1)
+            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+            .and_then(|both| Arena::byte_cells_bytes(group_len, 1).map(|group| both + group))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every buffer claimed from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
+        let tx = arena
+            .lend_byte_cells(2 * slot_len, 1)
+            .expect("the outbound table");
+        let groups = arena
+            .lend_byte_cells(group_len, 1)
+            .expect("the group table");
+
+        let (script, transport) = transport();
+        let mut links = AppLinks::new(session(&transport, 64));
+        links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        let mut first = links
+            .open_group(GROUP)
+            .expect("a group in the table's buffer");
+        assert!(first.lends_until_next_receive());
+        assert_eq!(groups.in_use(), 1, "the group took the table's buffer");
+        assert!(
+            matches!(links.open_group(GROUP), Err(LinkOpenError::Exhausted)),
+            "a second group finds the table held"
+        );
+        assert_eq!(
+            script.opens.lock().unwrap().len(),
+            1,
+            "the refused group never reached the program"
+        );
+        first.close();
+        drop(first.give_back_rx().expect("the lent buffer"));
+        assert_eq!(groups.in_use(), 0, "the table has its buffer again");
     }
 
     #[test]

@@ -95,6 +95,13 @@ enum Command {
     /// routes to once the subscriber has declared a key expression to it: the id is one the
     /// session under test declared, and the key is what that declaration says.
     PushReceiverAlias(wz_session_core::wire_id::ExprId, &'static [u8]),
+    /// Declare the key `.1` under id `.0` in the router's own space, as a peer that names its
+    /// keys by alias does.
+    DeclareKeyexpr(wz_session_core::wire_id::ExprId, &'static str),
+    /// In one batch window, so that one frame carries all three: push `.1` naming id `.0` of the
+    /// router's space with no suffix, undeclare the id, and push `.1` on it again, which the
+    /// receiver can no longer resolve.
+    PushAliasThenUndeclare(wz_session_core::wire_id::ExprId, &'static [u8]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -638,6 +645,33 @@ fn run_router(
                     );
                 let _ =
                     actions.send_network_message(NetworkMessage::Push(Box::new(push)), true, false);
+            }
+            Ok(Command::DeclareKeyexpr(id, key)) => {
+                let declare = wz_session_core::declare_build::build_declare_kexpr(id, key)
+                    .expect("a declaration");
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(declare)),
+                    true,
+                    false,
+                );
+            }
+            Ok(Command::PushAliasThenUndeclare(id, value)) => {
+                let aliased = || {
+                    NetworkMessage::Push(Box::new(
+                        wz_session_core::push_build::build_push_aliased(id, None, value)
+                            .expect("a Push naming an id"),
+                    ))
+                };
+                let undeclare = wz_session_core::declare_build::build_undeclare_kexpr(id);
+                let _ = actions.batch_start();
+                let _ = actions.send_network_message(aliased(), true, false);
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(undeclare)),
+                    true,
+                    false,
+                );
+                let _ = actions.send_network_message(aliased(), true, false);
+                let _ = actions.batch_stop();
             }
             #[cfg(any(
                 feature = "remote-declaration-watch",

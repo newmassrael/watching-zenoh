@@ -28,12 +28,14 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_codecs::whatami::WhatAmI;
-use wz_codecs::wire_const::{FLAG_T_FRAGMENT_M, FLAG_T_FRAGMENT_R, T_MID_FRAGMENT};
+use wz_codecs::wire_const::{
+    FLAG_T_FRAGMENT_M, FLAG_T_FRAGMENT_R, FLAG_T_FRAME_R, T_MID_FRAGMENT, T_MID_FRAME,
+};
 use wz_session_core::driver_loop::{IterationEvent, ReassemblyDropReason};
 use wz_session_core::extfragment::FRAGMENT_FIRST_EXT_ID;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
-use wz_session_core::multicast_params::{zid_vec, GroupJoinRule, MulticastParams};
+use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
 use wz_session_core::multicast_rx::dispatch_multicast_inbound_reassembling;
 use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
@@ -44,7 +46,8 @@ const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: zid_vec(zid),
+        zid: wz_session_core::session_zid::SessionZid::new(zid)
+            .expect("a 1 to 16 byte zid, not all zero"),
         lease_ms: 5_000,
         join_interval_ms: 1,
         seq_num_res: 0x02,
@@ -144,4 +147,98 @@ fn a_restarted_member_chain_is_reported_dropped_once_in_place() {
     }
     assert_eq!(drops, [ReassemblyDropReason::Superseded]);
     assert_eq!(r.active_chains(), 0, "the restarted chain completed");
+}
+
+/// A member admitted by its beacon, which announces the marker contract, to `d`.
+fn admitted(
+    d: &mut MulticastDispatcher<4>,
+    r: &mut ReassemblyDispatcher<4, 256>,
+    local: &MulticastParams,
+) {
+    let peer = params(&[0x22; 4]);
+    let mut beacon = [0u8; JOIN_MAX_BYTES];
+    let len = encode_join_into_slice(
+        &peer,
+        &MulticastTxConduits::new(mask_from_res(peer.seq_num_res)),
+        &mut beacon,
+    )
+    .expect("a JOIN fits JOIN_MAX_BYTES");
+    dispatch_multicast_inbound_reassembling(d, r, local, &beacon[..len], PEER, 0, &mut |_| {}, &());
+    assert!(d.peer_index_by_src(PEER).is_some());
+}
+
+/// `fragment` on the channel `reliable` names.
+fn fragment_on(reliable: bool, sn: u8, first: bool, more: bool, payload: u8) -> Vec<u8> {
+    let mut bytes = fragment(sn, first, more, payload);
+    if !reliable {
+        bytes[0] &= !FLAG_T_FRAGMENT_R;
+    }
+    bytes
+}
+
+/// A plain frame with no message, on the channel `reliable` names.
+fn plain_frame(reliable: bool, sn: u8) -> Vec<u8> {
+    let header = if reliable {
+        T_MID_FRAME | FLAG_T_FRAME_R
+    } else {
+        T_MID_FRAME
+    };
+    vec![header, sn]
+}
+
+/// A plain frame a member sends on a channel between two fragments of a chain on that channel
+/// ends the chain at the next fragment, whose SN follows the frame's and not the chain's last
+/// fragment's, on the reliable channel and the best-effort one alike: nothing of the chain is
+/// handed up. zenoh admits each message against the channel's last SN, which the frame moves
+/// (`zenoh-transport-1.10.2/src/multicast/rx.rs` @ `if !self.verify_sn("Frame", frame.sn, &mut guard)? {`),
+/// and then the fragment against the defragmenter's own SN, which only fragments move
+/// (`zenoh-transport-1.10.2/src/common/defragmentation.rs` @ `if sn != self.sn.get() {`): the
+/// two are different facts, and a reassembly that took the channel's SN for the chain's would go
+/// on with the chain here. Turned red by a chain that survives the frame between its fragments.
+#[test]
+fn a_frame_between_two_fragments_of_a_chain_ends_the_chain_at_the_next_fragment() {
+    for reliable in [true, false] {
+        let local = params(&[0x11; 4]);
+        let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        assert!(d.create().open());
+        assert!(!d.notify_link_ready().release());
+        let mut r: ReassemblyDispatcher<4, 256> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        admitted(&mut d, &mut r, &local);
+
+        let mut dropped = 0usize;
+        for (i, dgram) in [
+            fragment_on(reliable, 0, true, true, 0xAA),
+            plain_frame(reliable, 1),
+            fragment_on(reliable, 2, false, false, 0xBB),
+        ]
+        .iter()
+        .enumerate()
+        {
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                dgram,
+                PEER,
+                1 + i as u64,
+                &mut |event| {
+                    if let IterationEvent::ReassemblyDropped(_) = event {
+                        dropped += 1;
+                    }
+                },
+                &(),
+            );
+        }
+        // A chain that went on would have completed at the last fragment, unreported.
+        assert_eq!(
+            dropped, 1,
+            "reliable={reliable}: the chain is dropped, once"
+        );
+        assert_eq!(
+            r.active_chains(),
+            0,
+            "reliable={reliable}: nothing of it is held"
+        );
+    }
 }

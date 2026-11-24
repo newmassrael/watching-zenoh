@@ -296,7 +296,6 @@ where
     fn on_event(&mut self, event: IterationEvent<'_, '_>) {
         {
             let mut peers = self.handle.peers().borrow_mut();
-            let mut observer = self.observer.borrow_mut();
             // The queries of this session's link are asked by whom its key proved, or by nobody
             // shown (decision D12), and are answered by this session's policy: both are this
             // face's, read where the link may have just been established.
@@ -304,13 +303,17 @@ where
             peers
                 .queries
                 .set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
-            observer.dispatch(
-                &mut (),
-                &mut peers,
-                &mut self.requesters,
-                event,
-                &*self.handle,
-            );
+            // The cell lends nothing only before its install or to a dispatch from inside a
+            // dispatch; the one task never makes either, and the event then has no observer.
+            if let Some(mut observer) = self.observer.try_borrow_mut() {
+                observer.dispatch(
+                    &mut (),
+                    &mut peers,
+                    &mut self.requesters,
+                    event,
+                    &*self.handle,
+                );
+            }
         }
         // A query whose deadline has passed ends with a timeout reply and its final, here, because
         // this is the one place that runs on every iteration of the session and holds the pending
@@ -415,7 +418,8 @@ where
                 // One final: the peer's. A query answered from this node's own queryables
                 // would be a second, and a session on this profile does not loop a get back.
                 1,
-                Some(now_ms + u64::from(timeout_ms)),
+                // A clock this far along has no later instant: the get then waits on its final.
+                Some(now_ms.saturating_add(u64::from(timeout_ms))),
                 ReplyAcceptance::Matching(request.keyexpr),
                 sink,
             )

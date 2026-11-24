@@ -326,8 +326,6 @@ pub mod timestamp_visibility;
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,
 /// never cut short in silence) on the fixed one. Unconditional, like [`bounded`].
-// Totality debt TD-055 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod text_out;
 
 /// Fixed-memory step S9a — the id-keyed tables a PEER writes (its keyexpr
@@ -657,8 +655,6 @@ pub mod facilities;
 // Consumes the R311ns serial framing codecs (serial_envelope / cobs /
 // crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
 #[cfg(feature = "transport-link-serial")]
-// Totality debt TD-042 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod serial_link;
 
 // R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
@@ -688,12 +684,6 @@ pub mod peer_init_caps;
 // AP-only as a free fn in the tokio crate (getrandom has no MCU
 // backend, and the orphan rule forbids a cross-crate inherent method).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-073 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod signing_key;
 
 /// R2760 — the accept cookie that CARRIES the acceptor's state, so the
@@ -725,8 +715,6 @@ pub mod handshake_stray;
 /// A session's own zid as a value that is one to sixteen bytes by construction.
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.
-// Totality debt TD-088 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod session_zid;
 /// The zid a node derives from its address and listener ports under the `zid-derivation`
 /// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
@@ -757,8 +745,6 @@ pub mod locator_directory;
 /// R311ei moving SigningKey here. No codec coupling — drives the session
 /// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-086 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
 pub mod session_init_params;
 
 // Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
@@ -1201,8 +1187,6 @@ pub mod tx_buf;
 /// itself (it is a pointer into memory the link owns) and is gated with
 /// `link`, the module that defines the link driver trait it borrows.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-065 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod tx_lease;
 
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
@@ -1236,8 +1220,6 @@ pub mod frame_encode;
         feature = "transport-keepalive"
     )
 ))]
-// Totality debt TD-098 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod handshake_encode;
 
 /// The handshake's transport messages as `handshake_encode` writes them and
@@ -1370,8 +1352,6 @@ pub mod wireexpr_build;
 /// not exist. Widening costs nothing: the items are `pub`, so no configuration
 /// gains a dead-code finding.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-117 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod ext_nodeid;
 
 /// A list a message holds, kept within its bound as a type: how this crate reads, makes and edits
@@ -1749,8 +1729,6 @@ pub mod extpatch;
 /// `extqos`, which sends and negotiates: the passive observer folds both Inits
 /// of a handshake in a build that selects no QoS feature, and `extqos` reads
 /// through this module so that the two cannot disagree.
-// Totality debt TD-119 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos_offer;
 
 /// SSOT for the `0x8` REGION-NAME establishment ext — a node's region
@@ -1785,8 +1763,6 @@ pub mod extlowlatency;
 // half — the packed priority-range + reliability body and the DIRECTIONAL
 // containment that negotiates it (acceptor: subset; initiator: superset).
 #[cfg(feature = "transport-qos")]
-// Totality debt TD-118 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos;
 
 // SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
@@ -2064,8 +2040,6 @@ pub mod session_memory;
 /// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
 /// that holds several peers in one session (`tests/it/files/slot_observer_heap.rs`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-095 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
@@ -2211,12 +2185,7 @@ pub mod session_timeouts;
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-004 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used, clippy::unreachable)]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
@@ -2238,12 +2207,6 @@ pub mod session_slot;
 // signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types across feature states (R311g1).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-// Totality debt TD-076 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod reconnect;
 
 /// What a session still waits for from its peer before its declarations are SYNCED:
@@ -2297,7 +2260,7 @@ pub mod lifecycle_node;
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-109 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::unreachable)]
+#[allow(clippy::unreachable)]
 pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of
