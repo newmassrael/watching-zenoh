@@ -13762,9 +13762,12 @@ mod tests {
         .map(crate::filter::diagnose_json)
         .collect();
         // The binder verdict, over one selector per word of its `refusal` and a
-        // success that rewrites two terms: the four refusals carry different
-        // keys, so this is the population that shows a word and its shape agree.
+        // success that rewrites two terms: the refusals carry different keys,
+        // so this is the population that shows a word and its shape agree.
         let names = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        // The rule binder's three words, which only it writes: a rule that does
+        // not read, and a date its clock skips and one it shows twice.
+        let cet = "CET-1CEST,M3.5.0,M10.5.0/3";
         let bind_verdicts: Vec<String> = alloc::vec![
             crate::filter::bind_json("kind == put", None),
             crate::filter::bind_json(r#"node == cam or not node != lidar"#, Some(names)),
@@ -13772,6 +13775,10 @@ mod tests {
             crate::filter::bind_json(r#"node == twin"#, Some(r#"{"twin":"a1b2","twin":"c3d4"}"#),),
             crate::filter::bind_json("node ==", Some(names)),
             crate::filter::bind_json("node == cam", Some("[]")),
+            crate::filter::bind_json_in_tz("time > 12:04", None, cet),
+            crate::filter::bind_json_in_tz("time > 12:04", None, "CET-1CEST"),
+            crate::filter::bind_json_in_tz("time > 2026-03-29T02:30", None, cet),
+            crate::filter::bind_json_in_tz("time > 2026-10-25T02:30", None, cet),
         ];
         // The node sentence, over a success and one node per word of its
         // `refusal`, for the binder's reason.
