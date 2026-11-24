@@ -3481,7 +3481,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let tables = &*registry;
         let links = &self.transport.links;
         let faces = move || {
-            links.faces().filter_map(move |face| {
+            links.faces().iter().filter_map(move |face| {
                 let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
                     return None;
                 };
