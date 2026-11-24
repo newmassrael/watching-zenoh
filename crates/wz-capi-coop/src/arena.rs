@@ -1370,7 +1370,8 @@ impl ArenaPlan {
             }
         }
         plan.put_entities();
-        plan.settled()
+        plan.settled()?;
+        Ok(plan)
     }
 
     /// The rows the session's transport lends its tables from.
@@ -1566,28 +1567,29 @@ impl ArenaPlan {
         })
     }
 
-    /// The plan, or the first refusal met while it was laid out; refused as past the address
-    /// space when the rows' spans together are.
+    /// Whether the plan as laid out so far holds: the first refusal met while it was laid out,
+    /// or refused as past the address space when the rows' spans together are. Read where the
+    /// plan lies, which stays there.
     #[inline(never)]
-    fn settled(self) -> Result<Self, ArenaRefused> {
+    fn settled(&self) -> Result<(), ArenaRefused> {
         if let Some(refused) = self.refused {
             return Err(refused);
         }
         match self.reserved_bytes() {
-            Some(_) => Ok(self),
+            Some(_) => Ok(()),
             None => Err(ArenaRefused::TooLarge),
         }
     }
 
-    /// The plan with the places `held` names, lent after every other row: the ABI's handle of the
+    /// Lay out the places `held` names, lent after every other row: the ABI's handle of the
     /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
     /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
     /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
     /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
     /// already is not laid out again. Refused as past the address space when a place asks for more
     /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
-    /// places is.
-    pub fn holding(mut self, held: &HeldPlaces) -> Result<Self, ArenaRefused> {
+    /// places is. The plan is laid out where it lies; a refused one is no plan to open by.
+    pub fn holding(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
         if let Some(handle) = held.handle {
             if handle.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
@@ -1623,13 +1625,14 @@ impl ArenaPlan {
         self.settled()
     }
 
-    /// The plan with a table of a cell for each link of each kind `bytes` sizes: the links'
+    /// Lay out a table of a cell for each link of each kind `bytes` sizes: the links'
     /// drivers, which the stack places them in (`wz_runtime_coop::link_cells`, its
     /// `SessionLinks::link_cell_bytes`), and their gates and their actions, which the session
     /// places them in when it makes the link: a link the session opens then takes cells and no
     /// memory of the heap. Laid out before the ABI's handle ([`Self::holding`]). A size of `0`
-    /// adds no table, as a stack that places its links on the heap asks.
-    pub fn holding_cells(mut self, bytes: LinkCells<usize>) -> Result<Self, ArenaRefused> {
+    /// adds no table, as a stack that places its links on the heap asks. The plan is laid out
+    /// where it lies; a refused one is no plan to open by.
+    pub fn holding_cells(&mut self, bytes: LinkCells<usize>) -> Result<(), ArenaRefused> {
         let mut laid = self.transport.cell_bytes.into_array();
         for ((laid, asked), parts) in laid.iter_mut().zip(bytes.into_array()).zip(CELL_ROWS_NAMED) {
             if *laid == 0 && asked != 0 {
@@ -2386,6 +2389,22 @@ mod tests {
         assert_eq!(LAST.entities[..ENTITY_KINDS - 1], [None; ENTITY_KINDS - 1]);
     }
 
+    /// The ABI's handle is laid out on the plan where the plan lies, once: its flag before its
+    /// place, and a second ask of the same place adds no row. Turned red by a place laid out
+    /// again, or a plan the ask leaves without the place it laid.
+    #[test]
+    fn a_plan_lays_out_the_handle_it_holds_once_where_it_lies() {
+        let mut plan = empty_plan();
+        let place = Layout::new::<[u64; 3]>();
+        plan.holding(&HeldPlaces::handle(place))
+            .expect("the handle fits");
+        plan.holding(&HeldPlaces::handle(place))
+            .expect("held already");
+        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| row.part).collect();
+        assert_eq!(parts, ["session handle flag", "session handle"]);
+        assert_eq!(plan.handle_bytes(), place.size());
+    }
+
     /// A plan lays out each table of cells once, its flags before its cells, in the order of
     /// `LinkCells::into_array`, and none for a size of `0`. Turned red by a table laid out twice,
     /// or the gate's table laid out before the driver's.
@@ -2399,8 +2418,8 @@ mod tests {
             actions: 24,
             halves: 56,
         };
-        let plan = plan.holding_cells(asked).expect("the cells fit");
-        let plan = plan.holding_cells(asked).expect("held already");
+        plan.holding_cells(asked).expect("the cells fit");
+        plan.holding_cells(asked).expect("held already");
         let parts: alloc::vec::Vec<_> = plan.rows().map(|row| row.part).collect();
         assert_eq!(
             parts,

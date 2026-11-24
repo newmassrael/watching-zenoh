@@ -2488,14 +2488,14 @@ pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
     links: &impl SessionLinks,
     config: &CoopConfig<E>,
 ) -> Result<ArenaPlan, ArenaRefused> {
-    ArenaPlan::of(config, resolve_limits(config)).and_then(|plan| {
-        plan.holding_cells(LinkCells {
-            driver: links.link_cell_bytes(),
-            gate: CellRc::<LinkGate<C>>::cell_bytes(),
-            actions: CellRc::<McuActions<C>>::cell_bytes(),
-            halves: CellRc::<LinkHalves<C>>::cell_bytes(),
-        })
-    })
+    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
+    plan.holding_cells(LinkCells {
+        driver: links.link_cell_bytes(),
+        gate: CellRc::<LinkGate<C>>::cell_bytes(),
+        actions: CellRc::<McuActions<C>>::cell_bytes(),
+        halves: CellRc::<LinkHalves<C>>::cell_bytes(),
+    })?;
+    Ok(plan)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -3794,9 +3794,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let plan = arena_plan::<C, _>(&links, &config)
-            .and_then(|plan| plan.holding(&held))
-            .map_err(OpenError::Arena)?;
+        let mut plan = arena_plan::<C, _>(&links, &config).map_err(OpenError::Arena)?;
+        plan.holding(&held).map_err(OpenError::Arena)?;
         let mut lent = lend_session(&plan, memory, &config, &policy).map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source

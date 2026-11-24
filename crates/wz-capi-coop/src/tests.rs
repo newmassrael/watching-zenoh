@@ -2098,7 +2098,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         "an open asked for none lends none"
     );
 
-    let plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
+    let mut plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
     assert_eq!(
         plan.holding(&crate::arena::HeldPlaces::handle(
             Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")

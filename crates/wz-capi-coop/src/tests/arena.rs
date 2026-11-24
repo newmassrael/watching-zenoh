@@ -2225,9 +2225,10 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     let held = HeldPlaces::default()
         .with_entity(EntityKind::PendingGet, place)
         .with_entity(EntityKind::PendingLivelinessGet, place);
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding(&held))
+    let mut plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
         .expect("the build's limits lay an arena out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     let count = |part: &str| {
         plan.rows()
             .find(|row| row.part == part)
@@ -2255,9 +2256,10 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
     use crate::arena::{EntityKind, HeldPlaces};
     let place = core::alloc::Layout::new::<u64>();
     let held = HeldPlaces::default().with_entity(EntityKind::MatchingListener, place);
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding(&held))
+    let mut plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
         .expect("the build's limits lay an arena out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     let rows = plan.entities().matching_listeners;
     assert!(rows > 0, "the build's limits admit matching listeners");
     let laid = plan
@@ -2276,9 +2278,10 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
     let place = core::alloc::Layout::new::<u64>();
     let held = HeldPlaces::default().with_entity(EntityKind::DeclWatch, place);
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding(&held))
+    let mut plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
         .expect("the build's limits lay an arena out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     let rows = plan.entities().decl_watches;
     let laid = plan
         .rows()
@@ -2305,9 +2308,10 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
     let place = core::alloc::Layout::new::<u64>();
     let held = HeldPlaces::default().with_entity(EntityKind::TransportEventsListener, place);
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding(&held))
+    let mut plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
         .expect("the build's limits lay an arena out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     let rows = plan.entities().transport_events_listeners;
     let laid = plan
         .rows()
@@ -2337,9 +2341,10 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
     let place = core::alloc::Layout::new::<u64>();
     let held = HeldPlaces::default().with_entity(EntityKind::LinkEventsListener, place);
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .and_then(|plan| plan.holding(&held))
+    let mut plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
         .expect("the build's limits lay an arena out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     let rows = plan.entities().link_events_listeners;
     let laid = plan
         .rows()
@@ -2392,7 +2397,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
             held.with_entity(kind, place)
         });
     // Faces that share their pools, so the table of tokens the faces that went owe is put too.
-    let plan = ArenaPlan::of(
+    let mut plan = ArenaPlan::of(
         &CoopConfig {
             max_faces: 3,
             groups: vec![join; groups],
@@ -2400,15 +2405,15 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         },
         &SessionLimits::defaults(),
     )
-    .and_then(|plan| {
-        plan.holding_cells(crate::arena::LinkCells {
-            driver: 64,
-            gate: 64,
-            actions: 64,
-            halves: 64,
-        })
-    })
-    .and_then(|plan| plan.holding(&held))
     .expect("the build's limits lay an arena out");
+    plan.holding_cells(crate::arena::LinkCells {
+        driver: 64,
+        gate: 64,
+        actions: 64,
+        halves: 64,
+    })
+    .expect("the build's limits lay the cells out");
+    plan.holding(&held)
+        .expect("the build's limits lay the places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
 }
