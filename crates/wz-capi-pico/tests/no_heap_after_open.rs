@@ -277,11 +277,12 @@ enum Round {
     AdvancedPut,
     AdvancedHistory,
     GroupReceive,
+    TransportEventsListener,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 25] = [
+    const ALL: [Round; 26] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -307,6 +308,7 @@ impl Round {
         Round::AdvancedPut,
         Round::AdvancedHistory,
         Round::GroupReceive,
+        Round::TransportEventsListener,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -322,6 +324,7 @@ impl Round {
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::AdvancedPut | Round::AdvancedHistory => cfg!(feature = "advanced"),
             Round::GroupReceive => cfg!(feature = "multicast-transport"),
+            Round::TransportEventsListener => cfg!(feature = "connectivity"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -351,7 +354,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 29] = [
+const FAMILIES: [(&str, Round, Part); 30] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -395,6 +398,11 @@ const FAMILIES: [(&str, Round, Part); 29] = [
     // What a group member's receive takes: the datagram read where it lies and handed to the
     // subscriber, on the receiving member's threads.
     ("group-receive", Round::GroupReceive, Part::Others),
+    (
+        "transport-events-listener",
+        Round::TransportEventsListener,
+        Part::All,
+    ),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -959,6 +967,10 @@ impl Bench {
                 #[cfg(feature = "advanced")]
                 self.advanced.history(&self.pair);
             }
+            Round::TransportEventsListener => {
+                #[cfg(feature = "connectivity")]
+                self.transport_events_listener();
+            }
         }
     }
 
@@ -1000,6 +1012,44 @@ impl Bench {
             wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(&mut queryable)),
             Z_OK,
             "a queryable is undeclared"
+        );
+    }
+
+    /// Declare a transport events listener on the dialling session and retract it: the
+    /// connectivity door a program reaches after open.
+    #[cfg(feature = "connectivity")]
+    unsafe fn transport_events_listener(&self) {
+        use wz_capi_pico::connectivity::{
+            z_closure_transport_event, z_closure_transport_event_move,
+            z_declare_transport_events_listener, z_owned_closure_transport_event_t,
+            z_owned_transport_events_listener_t, z_transport_events_listener_move,
+            z_undeclare_transport_events_listener,
+        };
+        let mut closure: z_owned_closure_transport_event_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_transport_event(
+                &mut closure,
+                None,
+                Some(counted_drop),
+                pipe_pair::context(&self.pair.counts),
+            ),
+            Z_OK
+        );
+        let mut listener: z_owned_transport_events_listener_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_transport_events_listener(
+                z_session_loan(self.pair.dialler()),
+                &mut listener,
+                z_closure_transport_event_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a transport events listener is declared"
+        );
+        assert_eq!(
+            z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener)),
+            Z_OK,
+            "a transport events listener is undeclared"
         );
     }
 

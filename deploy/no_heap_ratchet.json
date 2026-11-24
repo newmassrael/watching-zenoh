@@ -147,6 +147,11 @@
       "allocs_per_round": 0,
       "locked": true,
       "debt": null
+    },
+    "transport-events-listener": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
     }
   },
   "capabilities": {
@@ -173,6 +178,11 @@
     },
     "conformance-digest": {
       "reason": "the digest is a static string of the build (crates/wz-capi-pico/src/conformance.rs:21), which no session holds and no call allocates"
+    },
+    "connectivity": {
+      "families": [
+        "transport-events-listener"
+      ]
     },
     "e2e-receiver": {
       "families": [
