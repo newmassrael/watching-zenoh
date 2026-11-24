@@ -1277,7 +1277,7 @@ pub fn encoded_body_len(encode: &BodyEncoder<'_>) -> Result<usize, CodecError> {
 /// `truncate` cannot un-forward them.
 #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
 struct BodyWindow<'w, 'i> {
-    inner: &'w mut (dyn TxBuf + 'i),
+    inner: &'w mut (dyn TxBuf<Error = CodecError> + 'i),
     /// Where `inner` stood when the window opened.
     inner_at: usize,
     start: usize,
@@ -1288,7 +1288,7 @@ struct BodyWindow<'w, 'i> {
 
 #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
 impl<'w, 'i> BodyWindow<'w, 'i> {
-    fn new(inner: &'w mut (dyn TxBuf + 'i), start: usize, end: usize) -> Self {
+    fn new(inner: &'w mut (dyn TxBuf<Error = CodecError> + 'i), start: usize, end: usize) -> Self {
         let inner_at = inner.len();
         Self {
             inner,
@@ -1307,6 +1307,8 @@ impl<'w, 'i> BodyWindow<'w, 'i> {
 
 #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
 impl TxBuf for BodyWindow<'_, '_> {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         self.pos
     }

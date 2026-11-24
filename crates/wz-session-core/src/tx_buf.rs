@@ -44,6 +44,11 @@ use sce_forge_runtime::codec::{CodecError, SceSink};
 
 /// What an outbound frame encoder needs of the place it writes to.
 pub trait TxBuf {
+    /// What a write this buffer refuses is refused with: [`CodecError`] for a buffer whose room
+    /// runs out. A sink over the buffer answers the same error ([`TxSink`]), so the type of a
+    /// destination says whether a frame written into it can be refused.
+    type Error: core::fmt::Debug;
+
     /// Bytes written so far.
     fn len(&self) -> usize;
 
@@ -63,10 +68,10 @@ pub trait TxBuf {
 
     /// Append `bytes`. A growable buffer always succeeds; a fixed one returns
     /// [`CodecError::BufferOverflow`] and leaves its length as it was.
-    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError>;
+    fn append(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
 
     /// Append one byte.
-    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+    fn append_byte(&mut self, byte: u8) -> Result<(), Self::Error> {
         self.append(&[byte])
     }
 
@@ -78,7 +83,7 @@ pub trait TxBuf {
     /// `Ok(None)` means this buffer does not hand windows out and nothing was taken; the writer
     /// appends instead. [`CodecError::BufferOverflow`] means the `n` bytes do not fit, and the
     /// length is as it was, as for [`Self::append`].
-    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, Self::Error> {
         let _ = n;
         Ok(None)
     }
@@ -86,6 +91,8 @@ pub trait TxBuf {
 
 #[cfg(feature = "alloc")]
 impl TxBuf for alloc::vec::Vec<u8> {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         alloc::vec::Vec::len(self)
     }
@@ -142,6 +149,8 @@ impl<'a> SliceTxBuf<'a> {
 }
 
 impl TxBuf for SliceTxBuf<'_> {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         self.len
     }
@@ -201,6 +210,8 @@ impl CountTxBuf {
 }
 
 impl TxBuf for CountTxBuf {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         self.len
     }
@@ -256,18 +267,20 @@ pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -
 /// Like [`SliceTxBuf`] it needs no allocation and no runtime, so it is
 /// unconditional; its caller in the session is the lending send path.
 pub struct CappedTxBuf<'a, 'b> {
-    inner: &'a mut (dyn TxBuf + 'b),
+    inner: &'a mut (dyn TxBuf<Error = CodecError> + 'b),
     cap: usize,
 }
 
 impl<'a, 'b> CappedTxBuf<'a, 'b> {
     /// `inner`, held to `cap` bytes in all (what it already holds included).
-    pub fn new(inner: &'a mut (dyn TxBuf + 'b), cap: usize) -> Self {
+    pub fn new(inner: &'a mut (dyn TxBuf<Error = CodecError> + 'b), cap: usize) -> Self {
         Self { inner, cap }
     }
 }
 
 impl TxBuf for CappedTxBuf<'_, '_> {
+    type Error = CodecError;
+
     fn len(&self) -> usize {
         self.inner.len()
     }
@@ -327,7 +340,7 @@ pub struct TxSink<'a, B: TxBuf + ?Sized = EncodeBuf<'a>> {
 /// is a trait object, so no type reachable from the session can prove that a
 /// slot is never lent.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
-pub type EncodeBuf<'a> = dyn TxBuf + 'a;
+pub type EncodeBuf<'a> = dyn TxBuf<Error = CodecError> + 'a;
 /// See the lending form above.
 #[cfg(all(not(feature = "transport-tx-lend"), feature = "alloc"))]
 pub type EncodeBuf<'a> = alloc::vec::Vec<u8>;
@@ -413,22 +426,25 @@ impl<'a, B: TxBuf + ?Sized> TxSink<'a, B> {
 
     /// The next `n` bytes of the buffer as a window to fill, or `None` when the buffer hands
     /// none out (see [`TxBuf::reserve`]). The sink's position counts the window as written.
-    pub fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+    pub fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, B::Error> {
         self.buf.reserve(n)
     }
 }
 
-impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B> {
+impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B>
+where
+    CodecError: From<B::Error>,
+{
     /// A write the buffer refuses is the sink's error, and it is the codec's own: a codec that can
     /// refuse a value takes `CodecError: From<Self::Error>`, which this type meets by being it.
     type Error = CodecError;
 
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        self.buf.append(bytes)
+        self.buf.append(bytes).map_err(CodecError::from)
     }
 
     fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
-        self.buf.append_byte(b)
+        self.buf.append_byte(b).map_err(CodecError::from)
     }
 
     fn position(&self) -> usize {

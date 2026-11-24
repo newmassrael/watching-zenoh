@@ -430,7 +430,10 @@ impl<'a> ResponseWriter<'a> {
     pub fn encode_tx<B: crate::tx_buf::TxBuf + ?Sized>(
         &self,
         sink: &mut crate::tx_buf::TxSink<'_, B>,
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), CodecError>
+    where
+        CodecError: From<B::Error>,
+    {
         if GENERIC_REACHABLE && !self.is_direct() {
             return self.encode_generic(sink);
         }
