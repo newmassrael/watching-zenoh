@@ -112,7 +112,8 @@ impl MemberRows {
             return false;
         };
         *row = Some(member);
-        self.len += 1;
+        // The row just filled lies below the rows' count, so the count after it is at most that.
+        self.len = self.len.saturating_add(1);
         true
     }
 
@@ -121,7 +122,8 @@ impl MemberRows {
         let at = self.iter().position(|member| member.peer == *peer)?;
         let gone = self.rows.get_mut(at)?.take();
         self.rows.get_mut(at..self.len)?.rotate_left(1);
-        self.len -= 1;
+        // The member was found below `len`, so there is one to count off.
+        self.len = self.len.saturating_sub(1);
         gone
     }
 
