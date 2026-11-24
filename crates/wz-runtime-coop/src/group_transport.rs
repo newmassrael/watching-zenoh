@@ -181,8 +181,9 @@ pub trait GroupTransport {
     /// The buffer the transport receives into, given back as the group is left, when it is one
     /// its session lent it (`LinkTables`): the session keeps the buffer while it still reads a
     /// datagram there, and its table has the buffer again once that ends. Asked after
-    /// [`Self::close`]; the transport receives nothing after it. `None`, the provided answer,
-    /// from a transport whose buffer is its own.
+    /// [`Self::close`], or as the transport is let go of without one; either way the transport
+    /// receives nothing after it. `None`, the provided answer, from a transport whose buffer is its
+    /// own.
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         None
     }
