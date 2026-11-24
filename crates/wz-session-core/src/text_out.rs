@@ -78,32 +78,8 @@ pub trait TextOut: fmt::Write {
                     push_ipv4(self, v4);
                     return;
                 }
-                let groups = v6.segments();
-                // The first longest run of zero groups: a later run of the same length keeps the
-                // first, as `Display` keeps it.
-                let (mut best_at, mut best_len, mut run_at, mut run_len) =
-                    (0usize, 0usize, 0usize, 0usize);
-                for (at, &group) in groups.iter().enumerate() {
-                    if group == 0 {
-                        if run_len == 0 {
-                            run_at = at;
-                        }
-                        run_len = run_len.saturating_add(1);
-                        if run_len > best_len {
-                            (best_at, best_len) = (run_at, run_len);
-                        }
-                    } else {
-                        run_len = 0;
-                    }
-                }
-                if best_len > 1 {
-                    push_groups(self, groups.get(..best_at).unwrap_or_default());
-                    self.push_str("::");
-                    let after = best_at.saturating_add(best_len);
-                    push_groups(self, groups.get(after..).unwrap_or_default());
-                } else {
-                    push_groups(self, &groups);
-                }
+                let mut text = [0u8; IPV6_TEXT_LEN];
+                self.push_str(ipv6_text(v6.segments(), &mut text));
             }
         }
     }
@@ -138,14 +114,70 @@ fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
     }
 }
 
-/// IPv6 groups in hexadecimal, colon separated, as [`TextOut::push_ip`] writes either side of a
-/// `::`.
-fn push_groups<W: TextOut + ?Sized>(out: &mut W, groups: &[u16]) {
+/// The longest IPv6 text [`ipv6_text`] writes: eight groups of four digits and seven colons.
+const IPV6_TEXT_LEN: usize = 39;
+
+/// The groups of an IPv6 address that is not IPv4-mapped, as [`TextOut::push_ip`] writes them,
+/// written at the front of `text`: the text of the address. One body for every sink, out of line,
+/// as [`decimal`] is: written through a sink's own `push_str`, the eight groups, their separators
+/// and the `::` were a copy of the sink's write at each, some 1.5 KB of an image that names its
+/// links' ends.
+#[inline(never)]
+fn ipv6_text(groups: [u16; 8], text: &mut [u8; IPV6_TEXT_LEN]) -> &str {
+    // The first longest run of two or more zero groups, which `::` stands for: a later run of the
+    // same length keeps the first, as `Display` keeps it.
+    let (mut best_at, mut best_len, mut run_at, mut run_len) = (0usize, 0usize, 0usize, 0usize);
     for (at, &group) in groups.iter().enumerate() {
-        if at > 0 {
-            out.push_str(":");
+        if group == 0 {
+            if run_len == 0 {
+                run_at = at;
+            }
+            run_len = run_len.saturating_add(1);
+            if run_len > best_len {
+                (best_at, best_len) = (run_at, run_len);
+            }
+        } else {
+            run_len = 0;
         }
-        out.push_hex_u128(u128::from(group));
+    }
+    let (gap_at, gap_end) = if best_len > 1 {
+        (best_at, best_at.saturating_add(best_len))
+    } else {
+        (usize::MAX, usize::MAX)
+    };
+    let mut len = 0;
+    for (at, &group) in groups.iter().enumerate() {
+        if at == gap_at {
+            len = put_ascii(text, len, b"::");
+            continue;
+        }
+        if at > gap_at && at < gap_end {
+            continue;
+        }
+        // The group after the run follows the `::`, which already ends in a colon.
+        if at > 0 && at != gap_end {
+            len = put_ascii(text, len, b":");
+        }
+        let mut nibbles = [0u8; 32];
+        len = put_ascii(
+            text,
+            len,
+            hexadecimal(u128::from(group), &mut nibbles).as_bytes(),
+        );
+    }
+    ascii(text.get(..len))
+}
+
+/// Copy `bytes` into `text` at `len`: the length after them. Bytes past the end of `text` are
+/// not written, which [`ipv6_text`]'s bound keeps from happening.
+fn put_ascii(text: &mut [u8], len: usize, bytes: &[u8]) -> usize {
+    let end = len.saturating_add(bytes.len());
+    match text.get_mut(len..end) {
+        Some(room) => {
+            room.copy_from_slice(bytes);
+            end
+        }
+        None => len,
     }
 }
 
@@ -428,6 +460,11 @@ mod tests {
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 1, 0, 0, 1),
             Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 1, 1, 1, 1),
             Ipv6Addr::new(1, 0, 0, 0, 0, 0, 0, 0),
+            Ipv6Addr::new(1, 2, 3, 4, 5, 6, 0, 0),
+            Ipv6Addr::new(0, 0, 1, 2, 3, 4, 5, 6),
+            Ipv6Addr::new(1, 0, 2, 3, 4, 5, 6, 7),
+            Ipv6Addr::new(1, 0, 0, 2, 0, 0, 3, 4),
+            Ipv6Addr::new(1, 0, 0, 2, 0, 0, 0, 3),
             Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0xc000, 0x0280),
             Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc000, 0x0280),
             Ipv6Addr::new(
