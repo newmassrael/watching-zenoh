@@ -3807,7 +3807,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn assemble(
-        mut links: L,
+        links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         source: impl OpenSource,
@@ -3825,16 +3825,50 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .and_then(|plan| plan.holding(&held))
             .map_err(OpenError::Arena)?;
         let mut lent = lend_session(&plan, memory, &config, &policy).map_err(OpenError::Arena)?;
-        links.lend_buffers(lent.link_tables);
-        if let Some(driver_cells) = lent.cells.driver {
-            links.lend_cells(driver_cells);
-        }
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
         write_endpoints(&mut EndpointWriter::over(&mut lent.endpoints))?;
         let mut entropy = SessionEntropy::new(entropy);
         let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
+        let (core, handle_place) = Self::core_of(
+            links,
+            clock,
+            entropy,
+            config,
+            policy,
+            wire,
+            &plan,
+            lent,
+            #[cfg(feature = "shared-key-ids")]
+            key_ids,
+            #[cfg(feature = "shared-key-ids")]
+            key_forms,
+        );
+        Ok(Self::engine_of(core, handle_place))
+    }
+
+    /// The session's state out of what its open made: the links lent their buffers and cells, the
+    /// task and timer tables reserved, the dial role's face and every table `lent` holds in place.
+    /// Out of line, so the open's measure shows it apart.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn core_of(
+        mut links: L,
+        clock: C,
+        entropy: SessionEntropy,
+        config: CoopConfig<Counted>,
+        policy: SessionPolicy,
+        wire: SessionZid,
+        plan: &ArenaPlan,
+        lent: SessionLent,
+        #[cfg(feature = "shared-key-ids")] key_ids: OpenKeyIds,
+        #[cfg(feature = "shared-key-ids")] key_forms: LinkKeyForms,
+    ) -> (Core<L, C>, Option<HandlePlace>) {
+        links.lend_buffers(lent.link_tables);
+        if let Some(driver_cells) = lent.cells.driver {
+            links.lend_cells(driver_cells);
+        }
         let entities = plan.entities();
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
@@ -3923,13 +3957,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             live_subs: lent.live_subs,
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
-            lane: lent.samples.clone(),
+            lane: lent.samples,
             router: lent.router,
             lend: RouterLend::new(),
             session_time,
             places: lent.places,
             arena: lent.arena,
         };
+        (core, lent.handle_place)
+    }
+
+    /// The engine over `core`, held where its own handle (`this`) reaches it, with the ABI's
+    /// handle's place `handle_place`. Out of line, so the open's measure shows it apart.
+    #[inline(never)]
+    fn engine_of(core: Core<L, C>, handle_place: Option<HandlePlace>) -> Arc<Self> {
+        let samples = core.lane.clone();
+        let wire = core.wire_zid;
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
         #[cfg(feature = "query")]
@@ -3946,7 +3989,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let held_drop = core.config.tx_queue.held_drop;
         let handed_at_most = core.config.tx_queue.sizes;
         let arena_bytes = core.arena.bytes();
-        Ok(Arc::new_cyclic(|this| Self {
+        Arc::new_cyclic(|this| Self {
             core: CoreLock::new(core),
             rooms,
             wait_before_drop_us,
@@ -3958,7 +4001,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             handed_at_most,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
-            samples: lent.samples,
+            samples,
             matching: Arc::new(Queued::new(MatchFlips::new())),
             #[cfg(feature = "queryable")]
             plane,
@@ -3978,11 +4021,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             reader: Mutex::new(None),
             deliveries: Deliveries::new(),
             arena_bytes,
-            handle_place: lent.handle_place,
+            handle_place,
             #[cfg(test)]
             takes: Takes::default(),
             this: this.clone(),
-        }))
+        })
     }
 
     /// Open the links of the engine [`Self::assemble`] built: the ports bound and the groups
