@@ -2096,6 +2096,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
 /// A system that gives no thread for the read task is answered, not panicked on: the start answers
 /// `NoThread`, the task is not running, the session is still open, and a start once the system
 /// gives a thread starts it. zenoh-pico answers its task creation's error the same way.
+#[cfg(feature = "threads")]
 #[test]
 fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     use wz_capi_port::ReadTaskStartRefused;
@@ -2121,6 +2122,7 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
 /// handed to the system's spawn, and the stop moves the engine's run of tasks, so no box and no
 /// word is made for either. A system that gives no thread is the start's every step but the
 /// thread. Turned red by a body boxed for the spawn or a stop word shared with the task.
+#[cfg(feature = "threads")]
 #[test]
 fn starting_the_read_task_makes_nothing_of_the_heap_of_its_own() {
     use wz_capi_port::ReadTaskStartRefused;

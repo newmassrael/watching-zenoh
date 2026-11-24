@@ -26,13 +26,14 @@ use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::named_key::NamedKey;
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::RowCallback;
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 use wz_session_mcu::dial::McuActions;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
+use crate::round::Latch;
 
 #[cfg(feature = "group")]
 use super::transport::TellGroups;
@@ -103,7 +104,7 @@ pub(crate) struct LivelinessRow {
     /// session's arena and never move one.
     sink: LivelinessSink,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: CallLatch,
+    latch: Latch,
 }
 
 impl super::RowHolds for LivelinessRow {
@@ -118,7 +119,7 @@ impl LivelinessRow {
         Self {
             holds,
             sink,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -210,7 +211,7 @@ impl LivelinessCall {
     pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
-        // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
+        // (`Latch::ENDS_HELD` is asserted false where the rows are chosen).
         unsafe { <LivelinessRow as RowCallback>::end(self.call) }
     }
 }

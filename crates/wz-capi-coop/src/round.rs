@@ -14,6 +14,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
+use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::sink::SampleRef;
 
 #[cfg(feature = "query")]
@@ -42,6 +43,25 @@ pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 
 /// The engine's round of deliveries.
 pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
+
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(feature = "threads")]
+pub(crate) type CoopForm = wz_session_core::row_callback::Threads;
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(not(feature = "threads"))]
+pub(crate) type CoopForm = wz_session_core::row_callback::OneThread;
+
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(feature = "threads")]
+pub(crate) type Latch = wz_session_core::row_callback::CallLatch;
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(not(feature = "threads"))]
+pub(crate) type Latch = wz_session_core::row_callback::LocalLatch;
+
+// The latch named above is the one the form names, so a row and the round agree on the form.
+const _: fn(Latch) -> <CoopForm as ThreadForm>::Latch = |latch| latch;
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
@@ -194,6 +214,7 @@ impl RoundCalls for CoopCalls {
     type Tally = Handed;
     #[cfg(not(all(test, feature = "std")))]
     type Tally = ();
+    type Form = CoopForm;
 }
 
 impl PlaneCalls for CoopCalls {

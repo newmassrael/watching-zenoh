@@ -166,6 +166,9 @@ pub trait RoundCalls: 'static {
     type Locks: LockFamily;
     /// What the round counts of what it hands out.
     type Tally: RoundTally;
+    /// Whether the calls the round owes may run on another thread than the one that holds the
+    /// session's tables, and so the latch the rows count them on.
+    type Form: crate::row_callback::ThreadForm;
 }
 
 /// What the session's planes are made of in an engine's own types beyond what its round owes:

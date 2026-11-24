@@ -52,7 +52,7 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     SessionArena, SessionRows, TransportTables,
 };
-use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
+use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
@@ -60,7 +60,7 @@ use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
@@ -76,7 +76,9 @@ use wz_session_core::slot_observer::ObserverRows;
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
 #[cfg(feature = "listen")]
 use crate::admission_gate::AdmissionGate;
-use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
+use wz_capi_port::os::{self, Mutex, MutexGuard};
+#[cfg(feature = "threads")]
+use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
     KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused,
@@ -1005,9 +1007,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// entity ids are spent.
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
+    #[cfg(feature = "threads")]
     reader: Mutex<Option<ReadTask>>,
     /// The run of read tasks, one past each stop: a read task steps the session while the run is
     /// the one it was started in, so a stop needs no word made for it (`ReaderBody`).
+    #[cfg(feature = "threads")]
     reader_run: core::sync::atomic::AtomicUsize,
     /// The threads handing deliveries out for this engine now, and the callbacks each runs
     /// ([`Deliveries`]): a callback that steps its session again from one of them queues what it
@@ -1630,6 +1634,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
+#[cfg(feature = "threads")]
 struct ReadTask {
     thread: JoinHandle,
     id: ThreadId,
@@ -1638,11 +1643,13 @@ struct ReadTask {
 /// What the read task's thread runs, handed to whatever makes the thread: a hold of the engine,
 /// stepped until the engine's run of read tasks is no longer this one's (`reader_run`). A value
 /// of a type that can be named, so the start boxes nothing and makes no word for the stop.
+#[cfg(feature = "threads")]
 pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: Arc<CoopEngine<L, C>>,
     run: usize,
 }
 
+#[cfg(feature = "threads")]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
     /// Step the session until the task is told to stop or the session ends.
     pub(crate) fn run(self) {
@@ -1885,7 +1892,7 @@ pub(crate) struct SubscriberRow {
     /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
     expose: bool,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: CallLatch,
+    latch: Latch,
 }
 
 /// A row of the session's own declarations whose key holds the session's declarations: taken out
@@ -1914,7 +1921,7 @@ impl SubscriberRow {
             holds,
             sink,
             expose,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -1973,7 +1980,7 @@ const _: () = assert!(
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
 // the tables held has no atomic read-modify-write of a word, and so no `Arc` this engine is built on.
 const _: () = assert!(
-    !CallLatch::ENDS_HELD,
+    !Latch::ENDS_HELD,
     "a call of a subscriber's callback ends with no lock held"
 );
 
@@ -4126,7 +4133,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 closed: AtomicBool::new(false),
                 #[cfg(any(feature = "query", feature = "ticker"))]
                 next_local: AtomicU64::new(1),
+                #[cfg(feature = "threads")]
                 reader: Mutex::new(None),
+                #[cfg(feature = "threads")]
                 reader_run: core::sync::atomic::AtomicUsize::new(0),
                 deliveries: Deliveries::new(),
                 arena_bytes,
@@ -5502,6 +5511,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// out of its table is under way. At once on a thread that delivers now (see
     /// [`Self::wait_for_release`]).
     fn wait_until_let_go(&self, held: impl Fn(&CoopTables) -> bool, settled: impl Fn() -> bool) {
+        // Every call runs on this thread: one that runs now is below on this stack and lets the
+        // row go as the delivery it is inside of ends (the delivery here is then none), and with
+        // none running the delivery here ends every call the round owes and lets the rows go.
+        if !<CoopForm as ThreadForm>::OTHER_THREADS {
+            self.deliver();
+            return;
+        }
         if self.deliveries.delivers_here() {
             return;
         }
@@ -6135,6 +6151,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// is answered (`NoThread`), and the task is left not running, so a later start tries again:
     /// zenoh-pico's start answers its task creation's error the same way, and a panic here would
     /// leave the C caller nothing to read on a build that aborts on one.
+    #[cfg(feature = "threads")]
     pub(crate) fn start_reader(
         &self,
         spawn: impl FnOnce(ReaderBody<L, C>) -> Option<(JoinHandle, ThreadId)>,
@@ -6158,6 +6175,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Stop the read task, from a thread that is not it.
+    #[cfg(feature = "threads")]
     fn stop_reader(&self) -> Result<(), CalledFromReadTask> {
         let task = {
             let mut reader = lock(&self.reader);
@@ -7813,6 +7831,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // The read task stops first, so the close is the last thing the session does. A close
         // from the read task itself stops nothing and leaves the thread to see the session
         // closed.
+        #[cfg(feature = "threads")]
         let _ = self.stop_reader();
         let mut guard = self.core.lock();
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -7895,18 +7914,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.closed.load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "threads")]
     fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
         self.start_reader(|body| os::spawn(move || body.run()))
     }
 
+    // A build of one thread starts none: its rows count their calls for that thread alone
+    // (`CoopForm`), and a read task would end them on another.
+    #[cfg(not(feature = "threads"))]
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        Err(ReadTaskStartRefused::NoThread)
+    }
+
+    #[cfg(feature = "threads")]
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
         self.stop_reader()
     }
 
+    #[cfg(not(feature = "threads"))]
+    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        Ok(())
+    }
+
+    #[cfg(feature = "threads")]
     fn read_task_is_running(&self) -> bool {
         lock(&self.reader)
             .as_ref()
             .is_some_and(|task| !task.thread.is_finished())
+    }
+
+    #[cfg(not(feature = "threads"))]
+    fn read_task_is_running(&self) -> bool {
+        false
     }
 
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {

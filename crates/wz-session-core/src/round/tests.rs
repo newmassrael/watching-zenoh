@@ -114,6 +114,7 @@ impl RoundCalls for Kept {
     type Group = Present;
     type Locks = StdLocks;
     type Tally = Counted;
+    type Form = crate::row_callback::Threads;
 }
 
 /// A round that keeps samples alone, offered calls of every other kind all the same.
@@ -134,6 +135,7 @@ impl RoundCalls for Lean {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
 }
 
 /// One block of an arena's memory, aligned as an arena's spans start.
