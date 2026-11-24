@@ -2176,7 +2176,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
                         is_ack: (view.header & wire_const::FLAG_T_INIT_A) != 0,
                         version: view.body.version,
                         whatami: view.body.whatami(),
-                        zid: *view.body.zid.inner(),
+                        zid: view.body.zid.inner(),
                         s: view.body.s,
                         cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
                     }),

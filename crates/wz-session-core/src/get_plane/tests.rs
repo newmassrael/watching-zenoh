@@ -178,11 +178,21 @@ impl ReplyView for Answer {
     }
 }
 
-/// A reply a test hands a leg.
-const REPLY: Answer = Answer {
+/// A reply a test hands a leg. A static, so its payload lies in one place a round can be lent
+/// ([`lend_reply`]).
+static REPLY: Answer = Answer {
     key: "demo/a",
     payload: b"a",
 };
+
+/// Lend `round` the bytes [`REPLY`]'s payload lies in, as a link lends the step the datagram a
+/// reply was read in: the round copies no part, so a reply whose payload lies nowhere it was lent
+/// is refused as unplaced.
+fn lend_reply<C: RoundCalls>(round: &Round<C>) {
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
+    // payload is static, so it lies where it is while the round reads it.
+    unsafe { round.set_lending(Some(REPLY.payload)) };
+}
 
 /// The end of leg `leg`, which the timeout of `rid` ended when there is one.
 fn ended_by(leg: u64, timed_out: Option<RequestId>) -> Ended {
@@ -345,6 +355,7 @@ fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     let mut sink = unsafe { LegSink::new(3, row, &plane, &round) };
+    lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
     assert!(!plane.captures(row), "one leg for each capture");
@@ -379,6 +390,7 @@ fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     let mut sink = unsafe { LegSink::new(3, row, &plane, &round) };
+    lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
     assert_eq!(plane.captured(), None);
@@ -386,6 +398,11 @@ fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
     unsafe { round.seal() };
     assert!(round.deliver(), "the reply was held for the leg");
     assert_eq!(seen.calls(), 1);
+    assert_eq!(
+        round.counts().unplaced,
+        0,
+        "the payload was read where it lies"
+    );
 }
 
 /// A sink's drop is its leg's end, with the timeout it was told of; while the sink lives no end

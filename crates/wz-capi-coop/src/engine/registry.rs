@@ -1716,7 +1716,7 @@ mod tests {
                     names_key: false,
                 },
                 super::super::LivelinessRow::new(
-                    WireKey::literal(),
+                    WireKey::literal().into_holds(),
                     LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
                         if sample.kind == LivelinessSampleKind::Delete {
                             into.lock()
