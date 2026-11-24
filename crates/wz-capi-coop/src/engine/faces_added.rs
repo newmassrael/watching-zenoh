@@ -18,26 +18,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         endpoint: Option<DialEndpoint>,
     ) {
         let pending = self
+            .transport
             .links
             .faces()
             .iter()
             .filter(|face| face.id != DIAL_FACE && matches!(face.link, Link::Opening { .. }))
             .count();
-        if self.links.faces().len() > self.config.max_faces || pending >= self.config.accept_pending
+        if self.transport.links.faces().len() > self.config.max_faces
+            || pending >= self.config.accept_pending
         {
             return;
         }
-        let id = self.links.next_face_id();
+        let id = self.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step. A link past
         // the sets the open lent is closed unread, as one past `max_faces` is.
-        if self.registry.borrow_mut().add_face(id).is_err() {
+        if self.session.registry.borrow_mut().add_face(id).is_err() {
             return;
         }
         let Ok(wire) = self.open_wire(id, opened, SessionRole::Acceptor, endpoint.as_ref()) else {
-            self.registry.borrow_mut().remove_face(id);
+            self.session.registry.borrow_mut().remove_face(id);
             return;
         };
-        self.links.advance_face_id();
+        self.transport.links.advance_face_id();
         // The handshake is the acceptor's whole-handshake bound; the session's own timer in the
         // state machine is the same bound and ends the task, so whichever is first removes the face.
         let deadline_us = self.clock.now_us().saturating_add(
@@ -67,11 +69,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             link,
             replay: Replay::with_pacing(pacing),
         };
-        if let Err(face) = self.links.push_face(face) {
+        if let Err(face) = self.transport.links.push_face(face) {
             if let Some(wire) = face.link.wire() {
                 wire.abort();
             }
-            self.registry.borrow_mut().remove_face(face.id);
+            self.session.registry.borrow_mut().remove_face(face.id);
         }
     }
 }
@@ -103,15 +105,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // A face past `max_faces` would have no buffers: the arena holds the links of as many
         // faces as the config admits, and an accepted link past them is closed unread.
-        if core.links.faces().len() > core.config.max_faces {
+        if core.transport.links.faces().len() > core.config.max_faces {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
                 endpoint,
                 Refusal::FacesFull,
             )));
         }
-        let id = core.links.next_face_id();
+        let id = core.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step.
-        if core.registry.borrow_mut().add_face(id).is_err() {
+        if core.session.registry.borrow_mut().add_face(id).is_err() {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
                 endpoint,
                 Refusal::FacesFull,
@@ -122,11 +124,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let pending = match core.begin_dial(endpoint) {
             Ok(pending) => pending,
             Err(refused) => {
-                core.registry.borrow_mut().remove_face(id);
+                core.session.registry.borrow_mut().remove_face(id);
                 return Err(refused);
             }
         };
-        core.links.advance_face_id();
+        core.transport.links.advance_face_id();
         let deadline_us = core.open_deadline_us();
         core.push_face(
             id,
