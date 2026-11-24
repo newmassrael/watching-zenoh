@@ -6102,7 +6102,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = &guard.0;
         // What the peers hold now is told first, so the ring must have the rows for it before
         // the watch is declared.
-        let mut held = 0;
+        let mut held: usize = 0;
         {
             let registry = core.session.registry.borrow();
             for face in core.transport.links.faces() {
@@ -6110,7 +6110,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     continue;
                 }
                 if let Some(tables) = registry.tables_of(face.id) {
-                    held += decl_watch::held(plane, tables);
+                    held = held.saturating_add(decl_watch::held(plane, tables));
                 }
             }
         }
@@ -6201,7 +6201,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // and nothing local when the link refused it.
         let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
         #[cfg(feature = "local-subscriber")]
-        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts)?;
+        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
         Ok(sent)
     }
 
@@ -6704,7 +6704,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .count();
             #[cfg(not(feature = "group"))]
             let groups = 0;
-            links + groups
+            links.saturating_add(groups)
         })
     }
 
