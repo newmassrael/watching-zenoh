@@ -1987,20 +1987,20 @@ mod tests {
         use wz_session_core::query::QueryReply;
         use wz_session_core::reply_stage::{PartsBody, PartsKind, ReplyParts};
         use wz_session_core::sample::QosLevel;
-        let staged = |keyexpr| ReplyParts {
-            rid: 9,
-            keyexpr,
-            responder: Some((&[1, 2, 3, 4], 5)),
-            qos: QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: None,
-            kind: PartsKind::Reply {
-                body: PartsBody::Put(b"answer"),
-                encoding: None,
-                timestamp: None,
-                attachment: None,
-                source_info: None,
-            },
+        let staged = |keyexpr| {
+            ReplyParts::new(
+                9,
+                keyexpr,
+                Some((&[1, 2, 3, 4], 5)),
+                QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+                PartsKind::Reply {
+                    body: PartsBody::Put(b"answer"),
+                    encoding: None,
+                    timestamp: None,
+                    attachment: None,
+                    source_info: None,
+                },
+            )
         };
         let mut params = params();
         params.is_qos = true;
