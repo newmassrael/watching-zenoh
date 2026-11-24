@@ -1201,15 +1201,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // one sits after its own reject: a refused Init must not have
     // its other extensions merged into the session first.
     #[cfg(feature = "codec-init-body")]
-    if let Some(region) = peer_region {
-        if !actions.admit_read_peer_region(region) {
+    if let (Some(region), Some(patch)) = (peer_region, peer_patch) {
+        if !actions.admit_init_region_and_patch(region, patch) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::InitRegionRejected;
         }
-    }
-    #[cfg(feature = "codec-init-body")]
-    if let Some(patch) = peer_patch {
-        actions.negotiate_patch_against_peer(patch);
     }
     // transport-lowlatency — AND the peer's lowlatency offer into
     // the session capability on every admitted Init frame (zenoh
