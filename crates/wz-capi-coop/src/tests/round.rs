@@ -369,6 +369,52 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
     );
 }
 
+/// A group's receive buffer given back while a record of the round reads a datagram in it is
+/// kept, the round sealed and handed out meanwhile, and goes back to its table once the lock
+/// holder settles the round after the delivery; one in which no record reads goes back at once.
+/// Turned red by a round that lets go of the buffer a delivery reads, or keeps one it reads
+/// nothing in.
+#[test]
+fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
+    static RX: ByteCells<16, 2> = ByteCells::new();
+    let round = round(1024, 4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let mut buf = RX.claim().expect("a group's buffer");
+    buf.as_mut_slice()[..2].copy_from_slice(&[7, 7]);
+    let (base, _) = buf.raw();
+    // SAFETY: the first two bytes of the buffer, which the claim holds until it is given back and
+    // the round, which keeps it, lets go of it after the delivery read them.
+    let datagram = unsafe { core::slice::from_raw_parts(base.cast_const(), 2) };
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is.
+    unsafe { round.set_lending(Some(datagram)) };
+    unsafe { round.offer_sample(first.call(), &borrowed(datagram), true) };
+    unsafe { round.set_lending(None) };
+    unsafe { round.seal() };
+    unsafe { round.keep_rx(buf) };
+    assert_eq!(RX.in_use(), 1, "a sealed record reads in it, so it is kept");
+    let other = RX.claim().expect("the other buffer");
+    unsafe { round.keep_rx(other) };
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "CONTROL: nothing reads in the other, so it went back"
+    );
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 7, base as usize)],
+        "read where it lies"
+    );
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "handed out with no lock held, it waits for the lock holder"
+    );
+    unsafe { round.settle() };
+    assert_eq!(RX.in_use(), 0, "settled, the buffer is its table's again");
+}
+
 /// A key arena of 256 bytes the test leaks, so it outlives every key and round of the test.
 fn key_space() -> KeySpace {
     use crate::arena::{AllocatorMemory, SessionArena};

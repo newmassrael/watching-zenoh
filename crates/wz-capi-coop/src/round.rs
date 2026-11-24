@@ -49,7 +49,7 @@ use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
-use wz_session_core::byte_cells::KeptBytes;
+use wz_session_core::byte_cells::{ByteBuf, KeptBytes};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -1041,6 +1041,14 @@ pub(crate) struct Round {
     /// The buffer of the rejoined message the table reads, kept until the lock holder finds the
     /// table no longer reads it ([`Self::settle`]). Written under the session's lock.
     kept: UnsafeCell<Option<KeptBytes>>,
+    /// The datagram a record of the table reads where it lies, as the lock holder last wrote it
+    /// ([`Self::filled`]): what a buffer given back is asked about while a delivery has the table
+    /// ([`Self::keep_rx`]). Written under the session's lock.
+    reading: UnsafeCell<Option<(*const u8, usize)>>,
+    /// The receive buffer of a group the session left whose datagram the table reads, kept until
+    /// the lock holder finds the table no longer reads it ([`Self::settle`]). Written under the
+    /// session's lock.
+    kept_rx: UnsafeCell<Option<ByteBuf>>,
     /// The calls of the subscribers the samples offered now reach, begun on their rows and handed
     /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
     /// Written under the session's lock.
@@ -1067,12 +1075,13 @@ pub(crate) struct Round {
 
 // SAFETY: the table is reached by the holder of the session's lock while the state is empty or
 // filling, and by the one delivery that took it while it is delivering; `lending`, `rejoining`,
-// `kept` and `capturing` by the holder of the session's lock alone, so the kept buffer, whose
-// claim belongs to the session's task, is let go of on that task alone; `released` behind its own
-// lock; every other field is an atomic or never written after the round is made. A call the table
-// owes reads a row its table keeps where it lies until the call ends, through a sink that is
-// `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and the parts it reads
-// lie where the link, the kept buffer and the arena keep them while it holds them.
+// `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
+// kept buffers, whose claims belong to the session's task, are let go of on that task alone;
+// `released` behind its own lock; every other field is an atomic or never written after the round
+// is made. A call the table owes reads a row its table keeps where it lies until the call ends,
+// through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
+// the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
+// them.
 unsafe impl Send for Round {}
 // SAFETY: as `Send`.
 unsafe impl Sync for Round {}
@@ -1134,6 +1143,8 @@ impl Round {
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).rejoining), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).kept), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).reading), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).kept_rx), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).released), Released::new());
@@ -1171,6 +1182,8 @@ impl Round {
             lending: _,
             rejoining: _,
             kept: _,
+            reading: _,
+            kept_rx: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
             released: _,
@@ -1219,6 +1232,8 @@ impl Round {
                     if table.spent {
                         table.clear();
                         *self.kept.get() = None;
+                        *self.reading.get() = None;
+                        *self.kept_rx.get() = None;
                     }
                     Some(table)
                 }
@@ -1231,10 +1246,15 @@ impl Round {
     }
 
     /// A record was written into `table`: it is filling, and lends what it lends.
-    fn filled(&self, table: &Table) {
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    unsafe fn filled(&self, table: &Table) {
         if table.lends() {
             self.lends.store(true, Ordering::Release);
         }
+        // SAFETY: the caller's contract: written under the session's lock alone.
+        unsafe { *self.reading.get() = table.datagram };
         self.state.store(FILLING, Ordering::Release);
     }
 
@@ -1355,7 +1375,8 @@ impl Round {
         } else {
             match self.join_sample(table, call) {
                 Ok(()) => {
-                    self.filled(table);
+                    // SAFETY: the caller's contract: the session's lock is held.
+                    unsafe { self.filled(table) };
                     return;
                 }
                 Err(call) => call,
@@ -1399,7 +1420,8 @@ impl Round {
             }
         };
         debug_assert!(kept, "the table had the room its checks found");
-        self.filled(table);
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
     }
 
     /// Owe `call` in `table`, which has the room for it: `false`, the call ended, when it had
@@ -1512,7 +1534,8 @@ impl Round {
                 if let Some(last) = table.entries.last_mut() {
                     last.owed = last.owed.saturating_add(1);
                 }
-                self.filled(table);
+                // SAFETY: the caller's contract: the session's lock is held.
+                unsafe { self.filled(table) };
                 return;
             }
         }
@@ -1549,7 +1572,8 @@ impl Round {
             }
         };
         debug_assert!(kept, "the table had the room its checks found");
-        self.filled(table);
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
     }
 
     /// Hold `view`, a reply, for `callback`, the leg's it answers, each part read where it lies
@@ -1585,7 +1609,8 @@ impl Round {
                 .push(Owed::Reply(Arc::clone(callback)))
                 .is_ok();
         debug_assert!(kept, "the table had the room its checks found");
-        self.filled(table);
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
     }
 
     /// `view` placed in `table`; `None` when a part finds no room.
@@ -1720,6 +1745,32 @@ impl Round {
         let _ = unsafe { self.writable() };
     }
 
+    /// `buf`, the receive buffer of a group the session is leaving, given back by its transport
+    /// (`GroupTransport::give_back_rx`): kept while a record of the table reads a datagram in it,
+    /// until the lock holder finds the table no longer does ([`Self::settle`]), and let go of at
+    /// once otherwise, which gives it back to the session's table of group buffers. The table reads
+    /// one datagram at most, so the round keeps one such buffer at most.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, and holds no borrow of the table.
+    pub(crate) unsafe fn keep_rx(&self, buf: ByteBuf) {
+        // SAFETY: the caller's contract; `reading` and `kept_rx` are written under that lock
+        // alone. A round handed out and not yet cleared is cleared first, so what it read is not
+        // taken for what the next one reads.
+        unsafe {
+            self.settle();
+            let (base, len) = buf.raw();
+            let inside = (*self.reading.get()).is_some_and(|(at, n)| {
+                let (start, end) = (base as usize, (base as usize).saturating_add(len));
+                let at = at as usize;
+                at >= start && at.saturating_add(n) <= end
+            });
+            if inside {
+                *self.kept_rx.get() = Some(buf);
+            }
+        }
+    }
+
     /// Whether a record lies in the datagram a link lent: no link is read or serviced until its
     /// callbacks have returned. Asked by the session's step, which holds the session's lock.
     pub(crate) fn lends_a_datagram(&self) -> bool {
@@ -1772,6 +1823,8 @@ impl Round {
         unsafe {
             *self.rejoining.get() = None;
             *self.kept.get() = None;
+            *self.reading.get() = None;
+            *self.kept_rx.get() = None;
         }
         self.lends.store(false, Ordering::Release);
         self.state.store(EMPTY, Ordering::Release);
