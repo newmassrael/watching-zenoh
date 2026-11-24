@@ -82,9 +82,10 @@ pub(super) enum DialRow<D, P> {
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState<L, C> {
-    /// The dial role's face, which the session holds for its whole life.
-    pub(super) fn dial(&self) -> &Face<C, L> {
-        &self.links.faces()[0]
+    /// The dial role's face, which the session holds for its whole life: the first of the faces,
+    /// placed by the open, so `None` is a session no open made.
+    pub(super) fn dial(&self) -> Option<&Face<C, L>> {
+        self.links.faces().first()
     }
 
     /// The actions of every face whose link is up, which is what the session sends through. A
@@ -369,10 +370,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     /// Whether the dial role's face has what an open waits for: its link is up, or the node it
     /// reached is held by another face (`Link::Held`, with `listen`).
     pub(super) fn dial_settled(&self) -> bool {
-        match self.dial().link {
-            Link::Up(_) => true,
+        match self.dial().map(|face| &face.link) {
+            Some(Link::Up(_)) => true,
             #[cfg(feature = "listen")]
-            Link::Held { .. } => true,
+            Some(Link::Held { .. }) => true,
             _ => false,
         }
     }
@@ -493,7 +494,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
         while let Some(accepted) = self.links.accept_at(*at) {
             match accepted {
                 Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),
-                Accepted::Idle => *at += 1,
+                Accepted::Idle => *at = at.saturating_add(1),
                 Accepted::Broken => {}
             }
         }

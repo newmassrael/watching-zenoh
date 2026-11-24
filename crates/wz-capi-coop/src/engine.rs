@@ -4225,8 +4225,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// its readers are: the tests module is a host's (`all(test, feature = "std")`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
-        self.live()
-            .map(|core| (core.0.transport.dial().replay.pacing(), core.0.policy))
+        self.live().map(|core| {
+            let dial = core.0.transport.dial();
+            (dial.and_then(|dial| dial.replay.pacing()), core.0.policy)
+        })
     }
 
     /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
