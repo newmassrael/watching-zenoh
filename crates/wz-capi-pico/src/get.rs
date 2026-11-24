@@ -1120,11 +1120,211 @@ fn appends_anyke(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> bool {
 
 // --- z_get -----------------------------------------------------------------
 
+/// What a get's options move into the call, taken off `z_get_options_t` and
+/// `z_querier_get_options_t` alike: the value's payload and encoding, the attachment, the source
+/// info and the cancellation token. They are taken FIRST, before the null-callback return, which
+/// is a path they must also be let go of on: pico takes the closure by value up front and drops
+/// the moved bytes, the encoding and the token at every exit (`src/api/api.c:1753-1786`), so taking
+/// any of them later would leak it and leave the caller's owned struct non-null. A payload or an
+/// attachment the program moved out of a callback's sample is copied here, and with no room for
+/// the copy the get is refused once its closure is adopted ([`Self::adopt`]).
+pub(crate) struct GetMoved {
+    payload: Result<Option<crate::bytes::ByteBuf>, crate::bytes::NoRoom>,
+    attachment: Result<Option<crate::bytes::ByteBuf>, crate::bytes::NoRoom>,
+    encoding: Option<crate::encoding::OwnedEncoding>,
+    source_info: Option<wz_session_core::sample::SourceInfo>,
+    token: Option<Arc<CancellationToken>>,
+}
+
+impl GetMoved {
+    /// What a NULL options pointer moves in: nothing.
+    pub(crate) fn none() -> Self {
+        Self {
+            payload: Ok(None),
+            attachment: Ok(None),
+            encoding: None,
+            source_info: None,
+            token: None,
+        }
+    }
+
+    /// Take what the options' fields move in; `token` is the one taken off the options already.
+    ///
+    /// # Safety
+    /// Each pointer must be null or valid as the options struct it was read from requires.
+    pub(crate) unsafe fn take(
+        payload: *mut z_moved_bytes_t,
+        encoding: *mut c_void,
+        attachment: *mut z_moved_bytes_t,
+        source_info: *const crate::pubsub::z_source_info_t,
+        token: Option<Arc<CancellationToken>>,
+    ) -> Self {
+        Self {
+            payload: crate::pubsub::take_moved_bytes(payload),
+            attachment: crate::pubsub::take_moved_bytes(attachment),
+            encoding: crate::encoding::take_moved_encoding(encoding),
+            source_info: crate::pubsub::source_info_hint_of(source_info),
+            token,
+        }
+    }
+
+    /// The get's closure, adopted and nulled at its source as pico does, with what the get
+    /// carries. A null `callback` is `Z_ERR_NULL`, what was taken let go of. A payload or an
+    /// attachment that had no room to be copied refuses the get with its code once the closure is
+    /// adopted, so the closure's drop reports the get over. One body for `z_get` and
+    /// `z_querier_get`, out of line so that neither door holds a copy of it.
+    ///
+    /// # Safety
+    /// `callback` must be null or a valid moved reply closure.
+    #[inline(never)]
+    pub(crate) unsafe fn adopt(
+        self,
+        callback: *mut z_moved_closure_reply_t,
+    ) -> Result<(GetHeld, CReplyClosure), ZResult> {
+        if callback.is_null() {
+            return Err(Z_ERR_NULL);
+        }
+        let closure = adopt_reply_closure(callback);
+        let (payload, attachment) = match (self.payload, self.attachment) {
+            (Ok(payload), Ok(attachment)) => (payload, attachment),
+            (Err(no_room), _) | (_, Err(no_room)) => return Err(no_room.code()),
+        };
+        let held = GetHeld {
+            payload,
+            attachment,
+            encoding: self.encoding,
+            source_info: self.source_info,
+            token: self.token,
+        };
+        Ok((held, closure))
+    }
+}
+
+/// What a get carries for the length of the call, its closure adopted ([`GetMoved::adopt`]).
+pub(crate) struct GetHeld {
+    payload: Option<crate::bytes::ByteBuf>,
+    attachment: Option<crate::bytes::ByteBuf>,
+    encoding: Option<crate::encoding::OwnedEncoding>,
+    source_info: Option<wz_session_core::sample::SourceInfo>,
+    /// The token the program handed the get, which the door takes before it asks.
+    pub(crate) token: Option<Arc<CancellationToken>>,
+}
+
+impl GetHeld {
+    /// The ask of a get shaped `shape` with `parameters`, lending what the get carries. A get
+    /// with no encoding of its own sends its value with `fallback`, a querier's.
+    pub(crate) fn ask<'a>(
+        &'a mut self,
+        parameters: &'a [u8],
+        shape: GetShape,
+        fallback: Option<&'a crate::encoding::OwnedEncoding>,
+    ) -> GetAsk<'a> {
+        let source_info = self.source_info.take();
+        let held: &'a Self = self;
+        GetAsk {
+            parameters,
+            target: shape.target,
+            consolidation: shape.consolidation,
+            timeout_ms: shape.timeout_ms,
+            accept_replies: shape.accept_replies,
+            payload: held.payload.as_ref(),
+            attachment: held.attachment.as_ref(),
+            qos: shape.qos,
+            value_meta: PicoQueryValueMeta {
+                encoding: held
+                    .encoding
+                    .as_ref()
+                    .or(fallback)
+                    .map(crate::encoding::OwnedEncoding::view),
+                source_info,
+            },
+        }
+    }
+}
+
+/// How a get asks, as `z_get_options_t` and `z_querier_options_t` both state it: its target, its
+/// consolidation, its timeout, the reply keys it accepts and its request QoS. A querier keeps it
+/// for every get it issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GetShape {
+    pub(crate) target: z_query_target_t,
+    pub(crate) consolidation: z_consolidation_mode_t,
+    pub(crate) timeout_ms: u64,
+    pub(crate) accept_replies: z_reply_keyexpr_t,
+    pub(crate) qos: PicoQueryQos,
+}
+
+impl GetShape {
+    /// What a NULL options pointer of either door means: the values `z_get_options_default` and
+    /// `z_querier_options_default` write, as pico reads a NULL pointer as its defaults
+    /// (`api.c:1756-1761`).
+    pub(crate) fn defaults() -> Self {
+        Self {
+            target: Z_QUERY_TARGET_BEST_MATCHING,
+            consolidation: Z_CONSOLIDATION_MODE_AUTO,
+            timeout_ms: 0,
+            accept_replies: crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            qos: PicoQueryQos::defaults(),
+        }
+    }
+
+    /// The shape `options` state, or [`Self::defaults`] for NULL.
+    ///
+    /// # Safety
+    /// `options` must be null or valid.
+    pub(crate) unsafe fn of_get(options: *const z_get_options_t) -> Self {
+        let Some(options) = options.as_ref() else {
+            return Self::defaults();
+        };
+        Self {
+            target: options.target,
+            consolidation: options.consolidation.mode,
+            timeout_ms: options.timeout_ms,
+            accept_replies: options.accept_replies,
+            qos: PicoQueryQos {
+                congestion_control: options.congestion_control,
+                priority: options.priority,
+                is_express: options.is_express,
+                destination: options.allowed_destination(),
+            },
+        }
+    }
+}
+
+/// The selector parameters `parameters` points at, `len` bytes; none for a null pointer.
+///
+/// # Safety
+/// `parameters` must be null or readable for `len` bytes, for as long as the slice is used.
+pub(crate) unsafe fn parameters_in<'a>(
+    parameters: *const core::ffi::c_char,
+    len: usize,
+) -> &'a [u8] {
+    if parameters.is_null() || len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(parameters.cast::<u8>(), len)
+    }
+}
+
+/// The length of the NUL-terminated `parameters`, 0 for a null pointer: the `strlen` pico's own
+/// `z_get` and `z_querier_get` delegate to their `_with_parameters_substr` forms with
+/// (`src/api/api.c:1743-1746`).
+///
+/// # Safety
+/// `parameters` must be null or a NUL-terminated C string.
+pub(crate) unsafe fn parameters_strlen(parameters: *const core::ffi::c_char) -> usize {
+    if parameters.is_null() {
+        0
+    } else {
+        core::ffi::CStr::from_ptr(parameters).to_bytes().len()
+    }
+}
+
 /// Shared body of `z_get` / `z_get_with_parameters_substr`.
 ///
-/// The moved closure and both moved byte arguments are consumed on EVERY path
-/// (pico's contract — its own `z_get` takes the closure by value up front and
-/// `z_bytes_drop`s payload/attachment at every exit, `src/api/api.c:1753-1786`).
+/// The moved closure and the moved parts of the options are consumed on EVERY path
+/// ([`GetMoved`]). There is no pico behaviour to mirror for a null callback (pico dereferences
+/// it and crashes); the standard is this function's own consume-on-every-path contract.
 ///
 /// `addressed` is the node the get is addressed to (`wz_ext_get_to_peer`), or
 /// the code its refusal answers; `Ok(None)` for every `z_*` entry point.
@@ -1141,51 +1341,22 @@ pub(crate) unsafe fn get_inner(
     options: *mut z_get_options_t,
     addressed: Result<Option<Vec<u8>>, ZResult>,
 ) -> ZResult {
-    // Consume the moved payload / attachment FIRST — before the null-callback
-    // return below, which is a path they must also be freed on. `z_bytes_*` IS
-    // exported, so a C program can build these; taking them only after the
-    // callback check would leak both on `z_get(zs, ke, p, NULL, &opts)` and
-    // leave the caller's `z_owned_bytes_t` non-null, so ownership would be
-    // ambiguous rather than merely leaked. The sibling `z_put` takes its bytes
-    // first for the same reason. There is no pico behaviour to mirror here
-    // (pico derefs the null callback and crashes); the standard is this
-    // function's own consume-on-EVERY-path contract.
-    let (payload, attachment, (encoding, source_info), token) = if options.is_null() {
-        (Ok(None), Ok(None), (None, None), None)
+    let moved = if options.is_null() {
+        GetMoved::none()
     } else {
-        (
-            crate::pubsub::take_moved_bytes((*options).payload),
-            crate::pubsub::take_moved_bytes((*options).attachment),
-            // R311y562 — the moved encoding is consumed on this same
-            // every-path line, for the same reason the two byte buffers are; it is held here
-            // for the call and lent to the get.
-            (
-                crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
-                crate::pubsub::source_info_hint_of((*options).source_info()),
-            ),
-            // R311y575 — the cancellation token joins the same consume-first
-            // line. It is a MOVED handle upstream drops unconditionally
-            // (`api.c:1783`), so taking it anywhere later would leak it on the
-            // null-callback return below, exactly as the two byte buffers would.
+        GetMoved::take(
+            (*options).payload,
+            (*options).encoding as *mut c_void,
+            (*options).attachment,
+            (*options).source_info(),
             (*options).take_cancellation_token(),
         )
     };
-
-    if callback.is_null() {
-        return Z_ERR_NULL;
-    }
-    // Adopt the closure FIRST and null the source, exactly as pico does
-    // (`_z_closure_reply_t closure = callback->_this._val;
-    //   z_internal_closure_reply_null(&callback->_this);`). From here the
-    // `CReplyClosure` owns the C `drop(context)`, so every early return below
-    // frees it — and, because the drop IS the completion signal, an early error
-    // also correctly reports "this get is over".
-    let mut cclosure = adopt_reply_closure(callback);
-    // A payload or an attachment the program moved out of a callback's sample is copied, and with
-    // no room for the copy the get is refused; the closure adopted above reports it over.
-    let (payload, attachment) = match (payload, attachment) {
-        (Ok(payload), Ok(attachment)) => (payload, attachment),
-        (Err(no_room), _) | (_, Err(no_room)) => return no_room.code(),
+    // From here the adopted closure owns the C `drop(context)`, so every early return below frees
+    // it, and, because the drop IS the completion signal, reports the get over.
+    let (mut held, mut cclosure) = match moved.adopt(callback) {
+        Ok(adopted) => adopted,
+        Err(code) => return code,
     };
     // A refused target is answered before the session is read, as the zenoh-c
     // ABI's statement doors answer theirs; the closure adopted above runs its
@@ -1210,66 +1381,15 @@ pub(crate) unsafe fn get_inner(
         Ok(k) => k,
         Err(code) => return code,
     };
-
-    // pico dereferences `options` only when non-null and otherwise fills the
-    // defaults (`api.c:1756-1761`), so a null `options` is a valid default get.
-    let (target, consolidation, timeout_ms, accept_replies, qos) = if options.is_null() {
-        (
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            0u64,
-            crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
-            PicoQueryQos::defaults(),
-        )
-    } else {
-        (
-            (*options).target,
-            (*options).consolidation.mode,
-            (*options).timeout_ms,
-            (*options).accept_replies,
-            PicoQueryQos {
-                congestion_control: (*options).congestion_control,
-                priority: (*options).priority,
-                is_express: (*options).is_express,
-                destination: (*options).allowed_destination(),
-            },
-        )
-    };
-
-    let params_in: &[u8] = if parameters.is_null() || parameters_len == 0 {
-        &[]
-    } else {
-        core::slice::from_raw_parts(parameters as *const u8, parameters_len)
-    };
-    // R2959 — the query names the caller's key in its own wire form, as pico's
+    let shape = GetShape::of_get(options);
+    let params_in = parameters_in(parameters, parameters_len);
+    // The query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
     let engine = crate::session::engine_of(handle);
     let wire = wire_key_of(keyexpr, Arc::as_ref(&engine));
-
-    let value_meta = PicoQueryValueMeta {
-        encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),
-        source_info,
-    };
-    let ask = GetAsk {
-        parameters: params_in,
-        target,
-        consolidation,
-        timeout_ms,
-        accept_replies,
-        payload: payload.as_ref(),
-        attachment: attachment.as_ref(),
-        qos,
-        value_meta,
-    };
-    issue_get(
-        &engine,
-        ke,
-        wire,
-        &ask,
-        cclosure,
-        token.map(TokenRef::shared),
-        target_peer,
-    )
+    let token = held.token.take().map(TokenRef::shared);
+    let ask = held.ask(params_in, shape, None);
+    issue_get(&engine, ke, wire, &ask, cclosure, token, target_peer)
 }
 
 /// Adopt a moved reply closure and null the source, exactly as pico does
@@ -1331,7 +1451,7 @@ pub(crate) struct GetAsk<'a> {
 /// [`issue_get`] seam does not grow three more positional `c_int`s that a caller
 /// could transpose silently. `z_get_options_t` and `z_querier_options_t` both
 /// declare exactly these three, in this order, with the same pico enum types.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PicoQueryQos {
     /// pico `z_congestion_control_t` — BLOCK is **1** here (inverted vs
     /// zenoh-c).
@@ -1647,11 +1767,7 @@ pub unsafe extern "C" fn z_get(
     options: *mut z_get_options_t,
 ) -> ZResult {
     guarded(|| {
-        let len = if parameters.is_null() {
-            0
-        } else {
-            core::ffi::CStr::from_ptr(parameters).to_bytes().len()
-        };
+        let len = parameters_strlen(parameters);
         get_inner(zs, keyexpr, parameters, len, callback, options, Ok(None))
     })
 }
@@ -2588,5 +2704,133 @@ mod tests {
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+    /// A NULL options pointer shapes a get as the options `z_get_options_default` writes do, read
+    /// through the one reader a caller's options go through.
+    #[test]
+    fn a_null_gets_shape_is_the_default_options_shape() {
+        let mut options: z_get_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is a live, writable struct; NULL is read as the defaults.
+        let (defaulted, null) = unsafe {
+            z_get_options_default(&mut options);
+            (
+                GetShape::of_get(&options),
+                GetShape::of_get(core::ptr::null()),
+            )
+        };
+        assert_eq!(defaulted, GetShape::defaults());
+        assert_eq!(null, GetShape::defaults());
+    }
+
+    /// Every field a caller sets reaches the get's shape from its own field.
+    #[test]
+    fn a_gets_shape_reads_each_field_the_caller_set() {
+        let mut options: z_get_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is a live, writable struct.
+        unsafe { z_get_options_default(&mut options) };
+        options.target = Z_QUERY_TARGET_ALL;
+        options.consolidation = z_query_consolidation_t {
+            mode: Z_CONSOLIDATION_MODE_NONE,
+        };
+        options.timeout_ms = 1234;
+        options.accept_replies = crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
+        options.congestion_control = crate::qos::Z_CONGESTION_CONTROL_DROP;
+        options.priority = 2;
+        options.is_express = true;
+        // SAFETY: `options` is a live struct.
+        let shape = unsafe { GetShape::of_get(&options) };
+        assert_eq!(shape.target, Z_QUERY_TARGET_ALL);
+        assert_eq!(shape.consolidation, Z_CONSOLIDATION_MODE_NONE);
+        assert_eq!(shape.timeout_ms, 1234);
+        assert_eq!(
+            shape.accept_replies,
+            crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY
+        );
+        assert_eq!(
+            shape.qos.congestion_control,
+            crate::qos::Z_CONGESTION_CONTROL_DROP
+        );
+        assert_eq!(shape.qos.priority, 2);
+        assert!(shape.qos.is_express);
+        assert_ne!(shape, GetShape::defaults());
+    }
+
+    /// A get's closure is adopted only from a non-null callback, and a get whose payload or
+    /// attachment had no room to be copied is refused with that code AFTER its closure is
+    /// adopted, so the closure's drop runs and the caller's closure is left null.
+    #[test]
+    fn a_get_adopts_its_closure_before_a_refusal_for_room() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn counted_drop(_context: *mut c_void) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+        let closure = || {
+            let mut owned = z_owned_closure_reply_t::null_value();
+            // SAFETY: `owned` is a live, writable closure struct.
+            let code = unsafe {
+                z_closure_reply(&mut owned, None, Some(counted_drop), core::ptr::null_mut())
+            };
+            assert_eq!(code, Z_OK);
+            owned
+        };
+
+        // SAFETY: a null callback is refused before anything is adopted.
+        let refused = unsafe { GetMoved::none().adopt(core::ptr::null_mut()) };
+        assert!(matches!(refused, Err(Z_ERR_NULL)));
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+
+        for (payload, attachment) in [
+            (Err(crate::bytes::NoRoom), Ok(None)),
+            (Ok(None), Err(crate::bytes::NoRoom)),
+        ] {
+            let before = DROPS.load(Ordering::SeqCst);
+            let mut owned = closure();
+            let moved = GetMoved {
+                payload,
+                attachment,
+                ..GetMoved::none()
+            };
+            // SAFETY: `owned` is a valid closure moved into the call.
+            let refused = unsafe { moved.adopt(z_closure_reply_move(&mut owned)) };
+            assert!(matches!(refused, Err(code) if code == crate::bytes::NoRoom.code()));
+            assert_eq!(
+                DROPS.load(Ordering::SeqCst),
+                before + 1,
+                "the refused get's closure is reported over"
+            );
+            assert!(owned.drop.is_none(), "the caller's closure was taken");
+        }
+
+        let before = DROPS.load(Ordering::SeqCst);
+        let mut owned = closure();
+        // SAFETY: `owned` is a valid closure moved into the call.
+        let adopted = unsafe { GetMoved::none().adopt(z_closure_reply_move(&mut owned)) };
+        let (mut held, cclosure) = adopted.unwrap_or_else(|_| panic!("a get with room adopts"));
+        assert!(owned.drop.is_none(), "the caller's closure was taken");
+        assert!(held.token.is_none());
+        let ask = held.ask(b"p=1", GetShape::defaults(), None);
+        assert_eq!(ask.parameters, b"p=1");
+        assert!(ask.payload.is_none() && ask.attachment.is_none());
+        assert!(ask.value_meta.encoding.is_none() && ask.value_meta.source_info.is_none());
+        drop(cclosure);
+        assert_eq!(DROPS.load(Ordering::SeqCst), before + 1);
+    }
+
+    /// The parameters a get reads: none for a null pointer or a zero length, the bytes otherwise;
+    /// and a NUL-terminated string's length, 0 for a null pointer.
+    #[test]
+    fn a_gets_parameters_are_read_where_they_lie() {
+        let text = b"a=1;b=2\0";
+        let ptr = text.as_ptr().cast::<core::ffi::c_char>();
+        // SAFETY: `text` is NUL-terminated and readable for its length.
+        unsafe {
+            assert_eq!(parameters_strlen(core::ptr::null()), 0);
+            assert_eq!(parameters_strlen(ptr), 7);
+            assert_eq!(parameters_in(core::ptr::null(), 3), b"");
+            assert_eq!(parameters_in(ptr, 0), b"");
+            assert_eq!(parameters_in(ptr, 3), b"a=1");
+        }
     }
 }
