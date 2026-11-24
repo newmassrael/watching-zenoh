@@ -531,7 +531,7 @@ fn gated_timestamp_field(
 /// serialised. The param keeps the builder's signature stable across
 /// the toggle.
 fn gated_encoding_field(
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
 ) -> Result<Option<crate::wire::parts::EncodingOwned>, CodecError> {
     #[cfg(feature = "pubsub-encoding")]
     {
@@ -662,7 +662,7 @@ pub fn set_publication_timestamp(
 fn build_msg_put_with_meta(
     payload: &[u8],
     timestamp: Option<&crate::sample::TimestampHint>,
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
@@ -766,7 +766,7 @@ pub fn build_push_literal_with_meta(
 pub(crate) fn build_msg_put_shm(
     descriptor: &crate::extshm::ShmDescriptor,
     timestamp: Option<&crate::sample::TimestampHint>,
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
@@ -1149,7 +1149,7 @@ mod tests {
             packed_id: 13,
             schema: Some("application/json".into()),
         };
-        let put = build_msg_put_with_meta(b"payload", None, Some(&enc), None, None).unwrap();
+        let put = build_msg_put_with_meta(b"payload", None, Some(enc.view()), None, None).unwrap();
         assert!(put.encoding.is_some());
         assert_eq!(put.encoding.as_ref().unwrap().packed_id, 13);
         assert_eq!(
@@ -1814,7 +1814,7 @@ mod tests {
         };
         let meta = PushMetadata {
             timestamp: Some(&stamp),
-            encoding: Some(&encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
             attachment: Some(b"attach"),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
@@ -1903,7 +1903,7 @@ mod tests {
         };
         let meta = PushMetadata {
             timestamp: Some(&stamp),
-            encoding: Some(&encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
             attachment: Some(b"del-att"),
             qos: Some(QosLevel::from_raw(0x10)),

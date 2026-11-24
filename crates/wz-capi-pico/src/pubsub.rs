@@ -2009,7 +2009,9 @@ mod put_options_tests {
         let sent = declared.apply(call);
         assert_eq!(sent.attachment, Some(&[7u8, 8][..]));
         assert_eq!(
-            sent.encoding.as_ref().map(|encoding| encoding.packed_id),
+            sent.encoding
+                .as_ref()
+                .map(|encoding| encoding.view().packed_id),
             Some(4),
             "the call's encoding is kept"
         );
@@ -2020,7 +2022,9 @@ mod put_options_tests {
         );
         let bare = declared.apply(put_options());
         assert_eq!(
-            bare.encoding.as_ref().map(|encoding| encoding.packed_id),
+            bare.encoding
+                .as_ref()
+                .map(|encoding| encoding.view().packed_id),
             Some(2),
             "the publisher's encoding fills the gap"
         );

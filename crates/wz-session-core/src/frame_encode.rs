@@ -1758,7 +1758,7 @@ mod tests {
         };
         let everything = PushMetadata {
             timestamp: Some(&stamp),
-            encoding: Some(&encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],
                 zid_len: 16,
