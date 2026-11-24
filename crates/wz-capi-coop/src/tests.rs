@@ -2489,6 +2489,17 @@ fn made_bytes_of_zero_or_seventeen_are_refused_as_a_zid() {
     );
 }
 
+/// The limits an open holds its tables to are read where the config holds them: every reader
+/// of them is handed the config's own, and no copy is made to read them. Turned red by a
+/// resolver that hands back limits of its own.
+#[test]
+fn the_open_reads_its_limits_where_the_config_holds_them() {
+    use crate::engine::resolve_limits;
+
+    let config = client_config();
+    assert!(core::ptr::eq(resolve_limits(&config), &config.limits));
+}
+
 /// A zid's wire form ends at its last non-zero byte, whatever comes before it, and a zid whose
 /// last byte is not zero is its own wire form.
 #[test]
