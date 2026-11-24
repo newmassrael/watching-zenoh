@@ -922,6 +922,13 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     actions: &SessionLinkActions<R, T>,
     engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
+    // Every event this function hands the engine is a handshake's or an accepting side's; a build
+    // with neither body nor the accepting role names none.
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "session-unicast-accept"
+    ))]
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // A handshake message out of its step is judged first, before any admission,
     // check or merge below can take anything from it.
