@@ -667,10 +667,11 @@ const _: () = assert!(
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 
-/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`: [`Locator::text`],
+/// which holds every IP locator whole, so printing one carries no `core::net` formatting.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}/{}", self.proto.scheme(), self.at)
+        f.write_str(self.text().finish().map_err(|_| core::fmt::Error)?)
     }
 }
 
