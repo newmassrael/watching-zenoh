@@ -640,7 +640,7 @@ impl<const N: usize> CommanderList<N> {
     pub const fn parse(text: &str) -> Self {
         let mut zids = [[0u8; CREDENTIAL_ZID_BYTES]; N];
         let mut slots: &mut [DirectoryZid] = &mut zids;
-        let mut len = 0;
+        let mut len: usize = 0;
         let mut rest = text.as_bytes();
         while !rest.is_empty() {
             let (zid, after) = zid_from_hex(rest);
