@@ -2177,15 +2177,13 @@ where
             )
         });
     }
-    // One hand-off for every unit of the datagram.
+    // One hand-off and one call for every unit of the datagram: a datagram that holds more than
+    // one message is read on where it lies, as [`dispatch_datagram`] reads it.
     let mut hand = through_hand_off(reasm, actions, now_ms, on_event);
-    let (path, used, _) =
-        dispatch_datagram_reassembling_unit(unit, None, false, engine, record, &mut hand);
-    // The rest of a datagram that holds more than one message, as
-    // [`dispatch_datagram`] reads it.
-    let mut at = used;
-    while at > 0 && at < unit.len() {
-        let (_, used, _) = dispatch_datagram_reassembling_unit(
+    let mut path = None;
+    let mut at = 0;
+    loop {
+        let (read_by, used, _) = dispatch_datagram_reassembling_unit(
             &unit[at..],
             None,
             false,
@@ -2193,9 +2191,13 @@ where
             record,
             &mut hand,
         );
-        at = if used == 0 { unit.len() } else { at + used };
+        path.get_or_insert(read_by);
+        at += used;
+        if used == 0 || at >= unit.len() {
+            break;
+        }
     }
-    path
+    path.unwrap_or(DatagramPath::InPlace)
 }
 
 /// [`dispatch_datagram_reassembling`] for the unit at the front of `unit`, with the
