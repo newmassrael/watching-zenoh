@@ -1366,17 +1366,15 @@ type ScoutedLocators = Vec<String>;
 #[cfg(not(any(feature = "scout", feature = "scout-mcu", feature = "engine-tokio")))]
 type ScoutedLocators = [String; 0];
 
-#[cfg(all(
-    test,
-    not(any(feature = "scout", feature = "scout-mcu", feature = "engine-tokio"))
-))]
+#[cfg(all(test, not(feature = "engine-tokio")))]
 mod scouted_locators_tests {
     /// A cooperative build without a scout opens on no scouted list: none is held in the open's
-    /// request, and none is let go on any of its exits.
+    /// request, and none is let go on any of its exits. One that scouts holds the list it found.
     #[test]
     fn a_build_without_a_scout_opens_on_no_scouted_list() {
-        assert_eq!(core::mem::size_of::<super::ScoutedLocators>(), 0);
-        assert!(!core::mem::needs_drop::<super::ScoutedLocators>());
+        let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
+        assert_eq!(core::mem::size_of::<super::ScoutedLocators>() != 0, scouts);
+        assert_eq!(core::mem::needs_drop::<super::ScoutedLocators>(), scouts);
     }
 }
 
