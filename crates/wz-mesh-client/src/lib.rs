@@ -318,7 +318,7 @@ fn session_params(policy: &SessionPolicy) -> Result<SessionInitParams, ClientErr
     Ok(SessionInitParams {
         whatami: WhatAmI::Client,
         zid,
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: BATCH_SIZE,
         lease_ms: LEASE_MS,

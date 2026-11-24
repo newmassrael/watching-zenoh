@@ -687,6 +687,18 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
+    # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
+    # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
+    # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
+    # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
+    # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
+    # in this form too.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
+    # listener declared on a key is refused as not built, its sink let go of, while one on an
+    # entity's filter is taken. No other row builds without it, so this one runs the refusal.
+    "wz-capi-coop|hook|-default,std,threads|tests::entity_tables::a_build_without_key_listeners_refuses_one_as_not_built"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).
@@ -723,9 +735,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
     # And with the members' keyexprs read member by member (`multicast-declarations`,
     # `tests::group::member_keyexprs::`): two members that declare one keyexpr id for two keys each
-    # put on, and declare a subscriber on, the key that member declared. The group reads its
-    # datagrams into owned batches there, so the module's other tests, a get and its answer among
-    # them, run on that receive too.
+    # put on, and declare a subscriber on, the key that member declared, and one that leaves takes
+    # its keyexprs with it. The group still reads its records where the datagram lies, each under
+    # its member's tag, so the module's other tests, a get and its answer among them, run there too.
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link

@@ -55,7 +55,7 @@ impl Row {
     fn exposing(sink: SubscriberSink, expose: bool) -> Self {
         Self {
             row: Box::new(SubscriberRow::new(
-                WireKey::literal().into_holds(),
+                WireKey::literal().into_anchor(),
                 sink,
                 expose,
             )),
@@ -1071,7 +1071,7 @@ fn hearing(tag: u8, heard: &Heard) -> Hearing {
     let heard = heard.clone();
     Hearing {
         row: Box::new(crate::engine::LivelinessRow::new(
-            WireKey::literal().into_holds(),
+            WireKey::literal().into_anchor(),
             wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
                 heard
                     .lock()

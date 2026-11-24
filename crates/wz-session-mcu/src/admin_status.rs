@@ -531,7 +531,7 @@ mod tests {
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
                     zid: [0xa1, 0xb2].into(),
-                    seq_num_res: 2,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 2,
                     batch_size: 1024,
                     lease_ms: 10_000,
@@ -649,7 +649,7 @@ mod tests {
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
                     zid: [0xa1, 0xb2].into(),
-                    seq_num_res: 2,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 2,
                     batch_size: 1024,
                     lease_ms: 10_000,

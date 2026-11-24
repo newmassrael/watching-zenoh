@@ -7827,7 +7827,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
         let mut params = self.params.clone();
-        params.seq_num_res = seq_num_res;
+        params.seq_num_res = crate::policy::SnResolution::from_wire_code(seq_num_res);
         params.req_id_res = req_id_res;
         params.batch_size = batch_size;
         params
@@ -7842,7 +7842,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let params = &self.params;
         match peer {
             Some(p) => (
-                params.seq_num_res.min(p.seq_num_res),
+                params.seq_num_res.wire_code().min(p.seq_num_res),
                 params.req_id_res.min(p.req_id_res),
                 // R311kl — the min(local, peer) reduction on batch_size is
                 // core transport (pico runs it outside every
@@ -7862,7 +7862,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.own_batch_advertisement().min(p.batch_size),
             ),
             None => (
-                params.seq_num_res,
+                params.seq_num_res.wire_code(),
                 params.req_id_res,
                 self.own_batch_advertisement(),
             ),
@@ -7891,7 +7891,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.init_ack_sizes(peer)
         } else {
             (
-                self.params.seq_num_res,
+                self.params.seq_num_res.wire_code(),
                 self.params.req_id_res,
                 self.own_batch_advertisement(),
             )
@@ -7927,7 +7927,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `peer` as read by the caller.
     pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
-            self.params.seq_num_res,
+            self.params.seq_num_res.wire_code(),
             peer,
         ))
     }
@@ -7999,7 +7999,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn settle_tx_limits(&self) {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
-        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
+        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res.wire_code(), peer);
         for class in [Reliability::Reliable, Reliability::BestEffort] {
             let budget = self
                 .batch_mtu_for(peer, class)
@@ -12167,7 +12167,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch_size: Option<u16>,
     ) -> bool {
         !crate::peer_init_caps::init_ack_exceeds_advertisement(
-            self.params.seq_num_res,
+            self.params.seq_num_res.wire_code(),
             self.params.req_id_res,
             // R311kj — compare against the EFFECTIVE advertisement,
             // i.e. exactly the value the InitSyn put on the wire (0 =

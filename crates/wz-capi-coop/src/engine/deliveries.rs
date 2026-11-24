@@ -17,21 +17,84 @@
 //! taken of the heap; the count of that list says, without its lock, whether there is anything in
 //! it to look for. A set held per engine and keyed by thread is what a thread-local set keyed by
 //! engine would be, without a thread-local, which an MCU kernel does not give a Rust image.
+//!
+//! A build of one thread (no `threads`) has one thread to know of: whether it delivers now is one
+//! flag ([`OneThreadDeliveries`]), read and written with no read-modify-write and no lock.
 
+#[cfg(feature = "threads")]
 use core::cell::Cell;
 use core::sync::atomic::Ordering;
 
+#[cfg(feature = "threads")]
 use portable_atomic::AtomicUsize;
+#[cfg(feature = "threads")]
 use wz_capi_port::os;
+#[cfg(feature = "threads")]
 use wz_capi_port::sync::Lock;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
 
 /// What the owner's word holds while no thread holds it: no thread's word is 0.
+#[cfg(feature = "threads")]
 const NO_THREAD: usize = 0;
 
+/// The delivery of a build whose every call runs on the thread that steps the session.
+#[cfg(not(feature = "threads"))]
+pub(super) type Deliveries = OneThreadDeliveries;
+
+/// Whether the one thread of the engine delivers now: what [`Deliveries`] is in a build of one
+/// thread. An atomic flag read and written in two steps, so the engine stays `Sync` as the type
+/// of threads leaves it, with no read-modify-write and no lock.
+#[cfg(any(not(feature = "threads"), all(test, feature = "std")))]
+pub(super) struct OneThreadDeliveries {
+    delivering: core::sync::atomic::AtomicBool,
+}
+
+#[cfg(any(not(feature = "threads"), all(test, feature = "std")))]
+impl OneThreadDeliveries {
+    pub(super) fn new() -> Self {
+        Self {
+            delivering: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Run `f` as a delivery, told whether it is one: `false` inside the delivery already made,
+    /// which a callback that steps its session again is.
+    pub(super) fn within<R>(&self, f: impl FnOnce(bool) -> R) -> R {
+        if self.delivering.load(Ordering::Relaxed) {
+            return f(false);
+        }
+        self.delivering.store(true, Ordering::Relaxed);
+        let _delivering = Delivering(self);
+        f(true)
+    }
+
+    /// Whether the thread delivers now: a callback of the session may run below on its stack.
+    pub(super) fn delivers_here(&self) -> bool {
+        self.delivering.load(Ordering::Relaxed)
+    }
+
+    /// No list of other threads is kept, so none is ever taken.
+    #[cfg(all(test, feature = "std", not(feature = "threads")))]
+    pub(super) fn others_taken(&self) -> usize {
+        0
+    }
+}
+
+/// The delivery of the one thread, ended as it drops, so a callback that unwinds ends it too.
+#[cfg(any(not(feature = "threads"), all(test, feature = "std")))]
+struct Delivering<'a>(&'a OneThreadDeliveries);
+
+#[cfg(any(not(feature = "threads"), all(test, feature = "std")))]
+impl Drop for Delivering<'_> {
+    fn drop(&mut self) {
+        self.0.delivering.store(false, Ordering::Relaxed);
+    }
+}
+
 /// The threads delivering for one engine.
+#[cfg(feature = "threads")]
 pub(super) struct Deliveries {
     /// The word of the thread that delivers with the owner's place, or [`NO_THREAD`].
     owner: AtomicUsize,
@@ -47,6 +110,7 @@ pub(super) struct Deliveries {
 
 /// A thread delivering beside the owner: its link in [`Deliveries::others`], which lies in the
 /// thread's frame of [`Deliveries::within`] and is taken out of the list before that frame ends.
+#[cfg(feature = "threads")]
 struct Beside {
     word: usize,
     /// The next thread of the list, null for none; written only under the list's lock.
@@ -54,13 +118,16 @@ struct Beside {
 }
 
 /// The first thread of the list of those delivering beside the owner, null for none.
+#[cfg(feature = "threads")]
 struct Others(*const Beside);
 
 // SAFETY: the links are reached only under the lock that holds this head, and each stands in its
 // thread's frame for as long as it is linked (`Beside`), so whichever thread holds the lock reads
 // and writes links that stand, one thread at a time.
+#[cfg(feature = "threads")]
 unsafe impl Send for Others {}
 
+#[cfg(feature = "threads")]
 impl Deliveries {
     pub(super) fn new() -> Self {
         Self {
@@ -137,8 +204,10 @@ impl Deliveries {
 }
 
 /// The owner's place held by this thread, let go of as it drops.
+#[cfg(feature = "threads")]
 struct Owning<'a>(&'a Deliveries);
 
+#[cfg(feature = "threads")]
 impl Drop for Owning<'_> {
     fn drop(&mut self) {
         self.0.owner.store(NO_THREAD, Ordering::Release);
@@ -147,11 +216,13 @@ impl Drop for Owning<'_> {
 
 /// A thread's link in the list of those beside the owner, taken out as it drops, before the
 /// frame the link lies in ends.
+#[cfg(feature = "threads")]
 struct Linked<'a> {
     set: &'a Deliveries,
     link: &'a Beside,
 }
 
+#[cfg(feature = "threads")]
 impl<'a> Linked<'a> {
     /// Put `link` first in `set`'s list, and count it in.
     fn link(set: &'a Deliveries, link: &'a Beside) -> Self {
@@ -164,6 +235,7 @@ impl<'a> Linked<'a> {
     }
 }
 
+#[cfg(feature = "threads")]
 impl Drop for Linked<'_> {
     fn drop(&mut self) {
         self.set.beside.fetch_sub(1, Ordering::AcqRel);
@@ -191,7 +263,74 @@ impl Drop for Linked<'_> {
     }
 }
 
+/// The scenario both forms of the deliveries answer alike.
 #[cfg(all(test, feature = "std"))]
+mod both_forms {
+    use super::*;
+
+    /// What a test asks of either form.
+    trait Delivers {
+        fn enter(&self, f: &mut dyn FnMut(bool));
+        fn here(&self) -> bool;
+    }
+
+    impl Delivers for OneThreadDeliveries {
+        fn enter(&self, f: &mut dyn FnMut(bool)) {
+            self.within(f);
+        }
+
+        fn here(&self) -> bool {
+            self.delivers_here()
+        }
+    }
+
+    #[cfg(feature = "threads")]
+    impl Delivers for Deliveries {
+        fn enter(&self, f: &mut dyn FnMut(bool)) {
+            self.within(f);
+        }
+
+        fn here(&self) -> bool {
+            self.delivers_here()
+        }
+    }
+
+    /// A delivery is entered once on the thread: one made inside it (a callback that steps its
+    /// session again) is told it is none, the thread is known to deliver only while it does, and
+    /// one ended by a callback that unwinds is ended all the same.
+    fn one_delivery_at_a_time_on_the_thread(set: &dyn Delivers) {
+        assert!(!set.here(), "no delivery before the first");
+        set.enter(&mut |outer| {
+            assert!(outer, "the first delivery is entered");
+            assert!(set.here(), "and the thread is known to deliver");
+            set.enter(&mut |inner| assert!(!inner, "the same thread enters no second"));
+            assert!(
+                set.here(),
+                "the inner call left the outer delivery standing"
+            );
+        });
+        assert!(!set.here(), "ended with its frame");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set.enter(&mut |_| panic!("a callback that unwinds"));
+        }));
+        assert!(unwound.is_err(), "CONTROL: the callback unwound");
+        assert!(!set.here(), "an unwound delivery is ended too");
+        set.enter(&mut |again| assert!(again, "once it ended, the thread delivers again"));
+    }
+
+    #[test]
+    fn the_one_thread_form_enters_one_delivery_at_a_time() {
+        one_delivery_at_a_time_on_the_thread(&OneThreadDeliveries::new());
+    }
+
+    #[cfg(feature = "threads")]
+    #[test]
+    fn the_threads_form_enters_one_delivery_at_a_time() {
+        one_delivery_at_a_time_on_the_thread(&Deliveries::new());
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "threads"))]
 mod tests {
     use super::*;
     use std::sync::Barrier;
