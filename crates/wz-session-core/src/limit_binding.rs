@@ -802,8 +802,11 @@ impl<S> LimitEntry<S> {
             L::HELD == 0
                 || (core::mem::size_of::<Limited<L, 1>>() == core::mem::size_of::<usize>()
                     && core::mem::align_of::<Limited<L, 1>>() == core::mem::align_of::<usize>()
-                    && (L::AT & (core::mem::align_of::<usize>() - 1)) == 0
-                    && L::AT + core::mem::size_of::<usize>() <= core::mem::size_of::<S>()),
+                    && matches!(L::AT.checked_rem(core::mem::align_of::<usize>()), Some(0))
+                    && match L::AT.checked_add(core::mem::size_of::<usize>()) {
+                        Some(end) => end <= core::mem::size_of::<S>(),
+                        None => false,
+                    }),
             "a limit's field is not one word inside its snapshot"
         );
         Self {
