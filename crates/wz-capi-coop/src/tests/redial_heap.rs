@@ -178,6 +178,116 @@ fn a_session_that_dials_its_lost_link_again_allocates_nothing() {
     );
 }
 
+/// What watches the faces of a session whose loss is counted ([`a_loss_counted`]).
+#[cfg(feature = "connectivity")]
+#[derive(Clone, Copy)]
+enum Watching {
+    Nothing,
+    Rows,
+    Snapshots,
+}
+
+/// The allocations of the reads that take a session's face as lost and tell it, with `watching`
+/// watching the faces, and how many departures the watcher was told. Every dial after the loss is
+/// refused at once, so what is counted is the loss and its telling.
+#[cfg(feature = "connectivity")]
+fn a_loss_counted(watching: Watching) -> (u64, usize) {
+    use wz_capi_port::SessionEngine;
+    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot};
+
+    let router = Router::start(CatchAll::None);
+    let refusing = Arc::new(AtomicBool::new(false));
+    let links = Refusals {
+        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        refusing: refusing.clone(),
+        dials: Arc::new(AtomicUsize::new(0)),
+    };
+    let engine = CoopEngine::open(
+        links,
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            redial_ms: Some(0),
+            ..config(&router)
+        },
+    )
+    .expect("the session opens");
+    let downs = Arc::new(AtomicUsize::new(0));
+    let into = downs.clone();
+    let watched = match watching {
+        Watching::Nothing => Ok(0),
+        Watching::Rows => SessionEngine::watch_face_rows(
+            &*engine,
+            Arc::new(move |kind: FaceEventKind, _row: &FaceLinkRow| {
+                if kind == FaceEventKind::Down {
+                    into.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        ),
+        Watching::Snapshots => SessionEngine::watch_faces(
+            &*engine,
+            Arc::new(move |kind: FaceEventKind, _face: &FaceSnapshot| {
+                if kind == FaceEventKind::Down {
+                    into.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        ),
+    };
+    assert!(watched.is_ok(), "an open session watches its faces");
+    assert!(
+        SessionEngine::face_link_at(&*engine, 0).is_some(),
+        "the session stands on a face"
+    );
+
+    refusing.store(true, Ordering::SeqCst);
+    router.send(Command::Close);
+    drop(router);
+    let until = Instant::now() + Duration::from_secs(5);
+    let allocations = counted(|| {
+        while SessionEngine::face_link_at(&*engine, 0).is_some() && Instant::now() < until {
+            let _ = SessionDrive::read(&*engine, false);
+        }
+    });
+    assert!(
+        SessionEngine::face_link_at(&*engine, 0).is_none(),
+        "the face was not lost"
+    );
+    (allocations, downs.load(Ordering::SeqCst))
+}
+
+/// A face lost while its rows are watched is told with no memory of the heap: its rows are
+/// written in place under the session's lock, queued in the rows the watch reserved, and handed to
+/// each watcher one at a time with no list of them made. The loss with nothing watching is counted
+/// first, so a red names what allocates.
+///
+/// # Control
+///
+/// A watcher of snapshots, which is told a snapshot made of the same rows, allocates it, and the
+/// count sees it.
+#[cfg(feature = "connectivity")]
+#[test]
+fn a_face_lost_is_told_to_a_watcher_of_its_rows_with_nothing_allocated() {
+    assert_eq!(
+        a_loss_counted(Watching::Nothing),
+        (0, 0),
+        "the loss itself takes no memory of the heap"
+    );
+    assert_eq!(
+        a_loss_counted(Watching::Rows),
+        (0, 1),
+        "the loss is told once to the watcher of the rows, with nothing allocated"
+    );
+    let (snapshots, told) = a_loss_counted(Watching::Snapshots);
+    assert_eq!(
+        told, 1,
+        "CONTROL: the watcher of snapshots is told the loss once"
+    );
+    assert!(
+        snapshots > 0,
+        "CONTROL: a snapshot of the face lost takes memory of the heap"
+    );
+}
+
 /// A source whose config counts its endpoints and whose texts are `'static`: what an ABI that
 /// keeps its texts in a form of its own hands an open.
 struct Written {

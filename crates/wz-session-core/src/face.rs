@@ -78,6 +78,35 @@ impl LinkSnapshot {
         }
     }
 
+    /// The link of `row`, `None` for the row of a face alone: what a watcher of snapshots told
+    /// through rows builds a face's links from. What a row does not hold reads as not known (the
+    /// NICs, the name on the peer's certificate, the band and the class the handshake
+    /// negotiated), and a group's locator is the endpoint it was joined by without its metadata
+    /// and config, as the group is labelled where it is joined.
+    pub fn of_row(row: &FaceLinkRow) -> Option<Self> {
+        if row.links == 0 {
+            return None;
+        }
+        let group = row.group_endpoint.as_ref().map(|endpoint| {
+            let endpoint = endpoint.as_str();
+            GroupLink {
+                locator: String::from(endpoint.split(['#', '?']).next().unwrap_or(endpoint)),
+                endpoint: String::from(endpoint),
+            }
+        });
+        Some(Self {
+            src: String::from(row.src.as_str()),
+            dst: String::from(row.dst.as_str()),
+            kind: row.kind,
+            interfaces: None,
+            mtu: row.mtu,
+            group,
+            cert_common_name: None,
+            priorities: None,
+            reliable: None,
+        })
+    }
+
     /// Whether the link carries a byte stream rather than framed datagrams, as the Rust API's
     /// `Link::is_streamed` reports it. A link whose driver cannot name its kind is not streamed:
     /// nothing is known of it to say otherwise.
@@ -149,6 +178,21 @@ pub struct FaceSnapshot {
     pub is_shm: bool,
     /// This face's physical links, one entry each.
     pub links: Vec<LinkSnapshot>,
+}
+
+impl FaceSnapshot {
+    /// The face of `row`, with no link yet: what a watcher of snapshots told through rows starts
+    /// a face from, at its first row, and adds each row's link to ([`LinkSnapshot::of_row`]).
+    pub fn of_face_row(row: &FaceLinkRow) -> Self {
+        Self {
+            zid: row.zid,
+            whatami: row.whatami,
+            is_qos: row.is_qos,
+            is_multicast: row.is_multicast,
+            is_shm: row.is_shm,
+            links: Vec::new(),
+        }
+    }
 }
 
 #[cfg(feature = "session-unicast")]
@@ -293,6 +337,10 @@ pub struct FaceLinkRow {
     /// Which link of its face this is, `0` for the first: a reader that reports transports reads
     /// the rows whose link is `0`, one for each face.
     pub link: usize,
+    /// How many links its face has: a reader told a face's departure a row at a time tells the
+    /// transport after the last ([`Self::is_last_of_face`]). `0` for the one row a face with no
+    /// link is told by, which names the face alone: its ends are empty, with no kind and no MTU.
+    pub links: usize,
     /// This end's locator.
     pub src: RowText,
     /// The peer end's locator.
@@ -322,12 +370,53 @@ impl FaceLinkRow {
             is_multicast: face.is_multicast,
             is_shm: face.is_shm,
             link: at,
+            links: face.links.len(),
             src,
             dst,
             kind: link.kind,
             mtu: link.mtu,
             group_endpoint,
         })
+    }
+
+    /// The one row a face with no link is told by: the facts of `face` alone, no link
+    /// ([`Self::links`] `0`) and empty ends.
+    pub fn of_face_alone(face: &FaceSnapshot) -> Self {
+        Self {
+            zid: face.zid,
+            whatami: face.whatami,
+            is_qos: face.is_qos,
+            is_multicast: face.is_multicast,
+            is_shm: face.is_shm,
+            link: 0,
+            links: 0,
+            src: RowText::of(""),
+            dst: RowText::of(""),
+            kind: None,
+            mtu: 0,
+            group_endpoint: None,
+        }
+    }
+
+    /// Hand `tell` each row of `face`, its links in order, or the one row of the face alone when
+    /// it has none: what a watcher of the faces' rows is told of a face an engine reports by its
+    /// snapshot.
+    pub fn each_of_snapshot(face: &FaceSnapshot, mut tell: impl FnMut(Self)) {
+        if face.links.is_empty() {
+            tell(Self::of_face_alone(face));
+            return;
+        }
+        for at in 0..face.links.len() {
+            if let Some(row) = Self::of_snapshot(face, at) {
+                tell(row);
+            }
+        }
+    }
+
+    /// Whether this is the last row of its face, the row of a face alone among them: where a
+    /// reader told a face's departure a row at a time tells the transport, after its last link.
+    pub fn is_last_of_face(&self) -> bool {
+        self.link.saturating_add(1) >= self.links
     }
 }
 
@@ -356,6 +445,69 @@ impl FaceLinkRow {
         actions: &SessionLinkActions<R, T>,
         at: usize,
     ) -> Option<Self> {
+        let face = Self::face_of_actions(actions)?;
+        let mut links: usize = 0;
+        let mut ends = None;
+        actions.visit_link_ends(|link| {
+            if links == at {
+                ends = Some(ends_row(link));
+            }
+            // A count of the links a face holds, each a link the session admitted: it cannot
+            // reach the width of the count, and a saturated one would still be a bound.
+            links = links.saturating_add(1);
+            true
+        });
+        let (src, dst) = ends?;
+        Some(Self {
+            link: at,
+            links,
+            src,
+            dst,
+            ..face
+        })
+    }
+
+    /// Hand `tell` each row of the face `actions` is the end of, read as [`Self::of_actions`]
+    /// reads one, its links in order, or the one row of the face alone when it has none; none for
+    /// a half-open face. What a watcher of the faces' rows is told of a face that came up or went,
+    /// with nothing allocated for a link whose ends fit their rows.
+    pub fn each_of_actions<R: SessionRuntime, T: TimeSource>(
+        actions: &SessionLinkActions<R, T>,
+        mut tell: impl FnMut(Self),
+    ) {
+        let Some(face) = Self::face_of_actions(actions) else {
+            return;
+        };
+        let links = Self::links_of(actions);
+        if links == 0 {
+            tell(Self {
+                kind: None,
+                mtu: 0,
+                ..face
+            });
+            return;
+        }
+        let mut at: usize = 0;
+        actions.visit_link_ends(|link| {
+            let (src, dst) = ends_row(link);
+            tell(Self {
+                link: at,
+                links,
+                src,
+                dst,
+                ..face.clone()
+            });
+            at = at.saturating_add(1);
+            at < links
+        });
+    }
+
+    /// The facts of the face `actions` is the end of, with its transport's kind of link and MTU,
+    /// in a row of no link yet (`links` `0`, empty ends); `None` for a half-open face, whose
+    /// INIT has not populated the identity slots.
+    fn face_of_actions<R: SessionRuntime, T: TimeSource>(
+        actions: &SessionLinkActions<R, T>,
+    ) -> Option<Self> {
         let peer = actions.peer_session_zid()?;
         let whatami = actions.peer_whatami_wire()?;
         let mut zid = [0u8; 16];
@@ -373,33 +525,16 @@ impl FaceLinkRow {
         let is_shm = actions.is_shm();
         #[cfg(not(feature = "transport-shm"))]
         let is_shm = false;
-        let mut ends = None;
-        // The links still to pass over before the one asked for.
-        let mut skip = at;
-        actions.visit_link_ends(|link| {
-            if let Some(rest) = skip.checked_sub(1) {
-                skip = rest;
-                return true;
-            }
-            ends = Some(match link {
-                Some(link) => (
-                    end_row(|out| link.write_src(out)),
-                    end_row(|out| link.write_dst(out)),
-                ),
-                None => (RowText::of(""), RowText::of("")),
-            });
-            false
-        });
-        let (src, dst) = ends?;
         Some(Self {
             zid,
             whatami,
             is_qos,
             is_multicast: false,
             is_shm,
-            link: at,
-            src,
-            dst,
+            link: 0,
+            links: 0,
+            src: RowText::of(""),
+            dst: RowText::of(""),
             kind,
             mtu,
             group_endpoint: None,
@@ -432,12 +567,26 @@ impl FaceLinkRow {
             is_multicast: true,
             is_shm,
             link: 0,
+            links: 1,
             src: RowText::of(src),
             dst: udp_row(member.locator),
             kind: Some(LinkKind::Udp),
             mtu: 0,
             group_endpoint: Some(GroupRowText::of(endpoint)),
         })
+    }
+}
+
+/// The locators of the two ends of `link`, each in its row ([`end_row`]); both empty for a link
+/// whose driver lends no ends.
+#[cfg(feature = "session-unicast")]
+fn ends_row(link: Option<crate::link::LinkEnds<'_>>) -> (RowText, RowText) {
+    match link {
+        Some(link) => (
+            end_row(|out| link.write_src(out)),
+            end_row(|out| link.write_dst(out)),
+        ),
+        None => (RowText::of(""), RowText::of("")),
     }
 }
 
@@ -483,6 +632,12 @@ pub enum FaceEventKind {
 /// `Arc` rather than `Box` because a registry clones the sink list OUT of its lock before it
 /// invokes any of them: a sink may reach code that re-enters the registry.
 pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
+
+/// A face-lifecycle observer told a row at a time ([`FaceLinkRow`]): each link of a face that
+/// came up or went, its links in order, or the one row of a face with none, the face's facts in
+/// each. The rows of one face are told one after another. A row holds everything in itself, so
+/// an engine that writes its rows in place tells them with nothing allocated.
+pub type FaceRowSink = Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>;
 
 /// The one link of a group member's transport, as the host that joined the group labels it:
 /// this node's end on the group (`src`), the member's end and the kind of link the group is
@@ -606,7 +761,10 @@ mod tests {
     fn a_row_holds_the_face_and_the_link_asked() {
         let face = face_of("tcp/127.0.0.1:1", "tcp/127.0.0.1:2");
         let first = FaceLinkRow::of_snapshot(&face, 0).expect("the first link");
-        assert_eq!((first.zid, first.whatami, first.link), ([7; 16], 1, 0));
+        assert_eq!(
+            (first.zid, first.whatami, first.link, first.links),
+            ([7; 16], 1, 0, 2)
+        );
         assert_eq!(first.src.as_str(), "tcp/127.0.0.1:1");
         assert_eq!(first.dst.as_str(), "tcp/127.0.0.1:2");
         assert_eq!((first.kind, first.mtu), (Some(LinkKind::Tcp), 2048));
@@ -622,6 +780,70 @@ mod tests {
             FaceLinkRow::of_snapshot(&face, 2).is_none(),
             "past the last link"
         );
+    }
+
+    /// A face is told as each of its links in order, the last named so, and a face with no link as
+    /// one row of the face alone, which is its last. Turned red by a face with no link told by no
+    /// row, which would hide its transport, or by a row that miscounts its face's links, which
+    /// would tell a departure's transport early or never.
+    #[test]
+    fn a_face_is_its_links_rows_in_order_or_one_row_of_the_face_alone() {
+        let face = face_of("tcp/127.0.0.1:1", "tcp/127.0.0.1:2");
+        let mut rows = Vec::new();
+        FaceLinkRow::each_of_snapshot(&face, |row| rows.push(row));
+        let read: Vec<_> = rows
+            .iter()
+            .map(|row| (row.link, row.links, row.is_last_of_face()))
+            .collect();
+        assert_eq!(read, [(0, 2, false), (1, 2, true)]);
+        assert_eq!(rows[1].src.as_str(), "udp/a", "the second link's row");
+
+        let alone = FaceSnapshot {
+            links: Vec::new(),
+            ..face
+        };
+        let mut rows = Vec::new();
+        FaceLinkRow::each_of_snapshot(&alone, |row| rows.push(row));
+        assert_eq!(rows.len(), 1, "one row for a face with no link");
+        let row = &rows[0];
+        assert_eq!((row.zid, row.link, row.links), ([7; 16], 0, 0));
+        assert!(row.is_last_of_face());
+        assert_eq!((row.src.as_str(), row.dst.as_str()), ("", ""));
+        assert_eq!((row.kind, row.mtu), (None, 0));
+        assert!(
+            LinkSnapshot::of_row(row).is_none(),
+            "a face alone has no link"
+        );
+    }
+
+    /// A snapshot made again from a face's rows holds the face and every link the rows hold, a
+    /// group's locator read off the endpoint it was joined by, and what no row holds as not known.
+    /// Turned red by a link dropped or reordered between the rows and the snapshot, or by a
+    /// group's locator that keeps the endpoint's config.
+    #[test]
+    fn a_snapshot_made_from_its_rows_holds_what_the_rows_hold() {
+        let face = face_of("tcp/127.0.0.1:1", "tcp/127.0.0.1:2");
+        let mut rows = Vec::new();
+        FaceLinkRow::each_of_snapshot(&face, |row| rows.push(row));
+        let mut again = FaceSnapshot::of_face_row(&rows[0]);
+        again
+            .links
+            .extend(rows.iter().filter_map(LinkSnapshot::of_row));
+        assert_eq!(
+            (
+                again.zid,
+                again.whatami,
+                again.is_multicast,
+                again.links.len()
+            ),
+            (face.zid, face.whatami, face.is_multicast, 2)
+        );
+        for (made, held) in again.links.iter().zip(&face.links) {
+            assert_eq!((&made.src, &made.dst), (&held.src, &held.dst));
+            assert_eq!((made.kind, made.mtu), (held.kind, held.mtu));
+            assert_eq!(made.group, held.group);
+            assert_eq!(made.interfaces, None, "the NICs are not in a row");
+        }
     }
 
     /// A locator of the bound and the longest group endpoint within its own bound read whole from

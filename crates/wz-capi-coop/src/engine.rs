@@ -230,11 +230,20 @@ use {
 /// (`connectivity`).
 #[cfg(feature = "connectivity")]
 type FacePlane = wz_session_core::face_plane::FacePlane<CoopLocks>;
+
+/// The rows a session's queue of face events holds without growing: one for each face the config
+/// admits beside the dial role's and for each member each of its groups holds, every face of the
+/// session coming or going once between two deliveries. A coop face has one link, so one row.
+#[cfg(feature = "connectivity")]
+fn face_event_rows(max_faces: usize, groups: usize) -> usize {
+    let members = groups.saturating_mul(wz_session_core::caps::MAX_GROUP_MEMBERS);
+    max_faces.saturating_add(1).saturating_add(members)
+}
 #[cfg(feature = "connectivity")]
 mod told;
-use wz_session_core::face::{FaceEventKind, FaceSnapshot};
+use wz_session_core::face::{FaceEventKind, FaceLinkRow};
 #[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceEventSink, FaceLinkRow};
+use wz_session_core::face::{FaceEventSink, FaceRowSink, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 #[cfg(feature = "connectivity")]
@@ -3046,17 +3055,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// What a lost link of the face at `at`, numbered `id`, takes with it at `now_us`: its
     /// peer's chains, its room, what its peer declared, and the face's watchers are told it went.
     fn lose_face_link(&mut self, at: usize, id: FaceId, now_us: u64) {
-        // The face is read before the wire goes: what it was is what a watcher is told.
+        // The face is read before the wire goes: what it was is what a watcher is told, its rows
+        // queued now and handed out once the session is let go of.
         let lost = self
             .transport
             .links
             .faces()
             .get(at)
             .and_then(|face| face.link.wire());
-        let snapshot = lost.and_then(|wire| {
-            self.session
-                .face_of(|| FaceSnapshot::of_actions(&wire.actions))
-        });
+        if let Some(wire) = lost.filter(|_| self.session.faces_watched()) {
+            FaceLinkRow::each_of_actions(&*wire.actions, |row| {
+                self.session.report_face_row(FaceEventKind::Down, row);
+            });
+        }
         self.transport.end_peer_chains(at);
         // What a replaying listener was told of the face is read while its link is held.
         #[cfg(feature = "connectivity")]
@@ -3066,7 +3077,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .put_link(at, Link::Waiting { at_us: now_us });
         self.rooms.forget(id);
         self.lose_link(id);
-        self.session.report_face(FaceEventKind::Down, snapshot);
     }
 
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
@@ -3125,9 +3135,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
-        let snapshot = self.session.face_of(|| FaceSnapshot::of_actions(&actions));
         self.transport.links.establish(at);
-        self.session.report_face(FaceEventKind::Up, snapshot);
+        if self.session.faces_watched() {
+            FaceLinkRow::each_of_actions(&*actions, |row| {
+                self.session.report_face_row(FaceEventKind::Up, row);
+            });
+        }
     }
 
     /// Join every group the config lists, each a face of its own whose session is a task of the
@@ -3791,6 +3804,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             moves.watch(wake.waker.clone());
             Some(wake)
         });
+        #[cfg(feature = "connectivity")]
+        let face_rows = face_event_rows(config.max_faces, config.groups.len());
         // Each field is made in the order its makers need: the rooms ask the links' waits before the
         // supervisor takes the links, and the config and policy are read before they are moved.
         let core = Core {
@@ -3841,8 +3856,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             session: SessionState {
                 registry: Rc::new(RefCell::new(lent.registry)),
-                // No watcher yet, and `()` without `connectivity`.
-                watchers: Default::default(),
+                // No watcher yet: the queue's rows are reserved with the first watch.
+                #[cfg(feature = "connectivity")]
+                watchers: Arc::new(FacePlane::with_room(face_rows)),
+                #[cfg(not(feature = "connectivity"))]
+                watchers: (),
                 entities,
                 keys: lent.keys,
                 #[cfg(feature = "shared-key-ids")]
@@ -4541,14 +4559,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn hand_out(&self) -> bool {
         // The round the session wrote under its lock, in the order it was written.
         let mut handed = self.samples.deliver();
-        // A face that came up or went down, told to each watcher as it stands now: the list is
-        // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
+        // A face that came up or went down, a row at a time, told to each watcher as it stands
+        // now, each taken out of its lock alone, so a sink that undeclares a watcher does not
+        // wait on it.
         #[cfg(feature = "connectivity")]
-        while let Some((kind, face)) = self.faces.next_event() {
+        while self.faces.hand_out_next() {
             handed = true;
-            for sink in self.faces.sinks() {
-                sink(kind, &face);
-            }
         }
         // What a peer declared or retracted, told to the watch it is owed to.
         #[cfg(any(
@@ -6024,8 +6040,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
+    // The faces are told a row at a time, as they are written in place: a watcher of snapshots is
+    // told each face its rows gather into.
     #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
+        SessionEngine::watch_face_rows(self, wz_capi_port::face_rows::snapshots_of_rows(sink))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Declined> {
         if SessionEngine::is_closed(self) {
             return Err(Declined::Closed);
         }

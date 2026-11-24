@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
-use wz_session_core::face::{FaceEventSink, FaceLinkRow, FaceSnapshot};
+use wz_session_core::face::{FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -256,13 +256,25 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// callbacks and never under the session's lock, so it may reach back into the session.
     /// Refused, with `sink` let go of, on a closed session, which no face comes up on, and with
     /// [`Refusal::NotBuilt`] by an engine built without the connectivity plane, which is the
-    /// provided answer.
+    /// provided answer. An engine that tells its faces a row at a time answers it by gathering
+    /// each face's rows into its snapshot ([`crate::face_rows::snapshots_of_rows`]).
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
         let _ = sink;
         Err(Refusal::NotBuilt)
     }
 
-    /// Stop the face watch `id`: `true` when one was registered under it.
+    /// Tell `sink` each time a face comes up or goes down, from now on, a row at a time: each of
+    /// its links in order, or the one row of a face with none, and answer the id that stops it
+    /// ([`Self::unwatch_faces`]). Where the sink runs and when the watch is refused are as for
+    /// [`Self::watch_faces`]. An engine that writes its rows in place tells them with nothing
+    /// allocated for an event; the provided answer watches the snapshots and hands each on as its
+    /// rows ([`crate::face_rows::rows_of_snapshots`]).
+    fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Refusal> {
+        self.watch_faces(crate::face_rows::rows_of_snapshots(sink))
+    }
+
+    /// Stop the face watch `id`, of snapshots or of rows: `true` when one was registered under
+    /// it.
     fn unwatch_faces(&self, id: u64) -> bool {
         let _ = id;
         false
