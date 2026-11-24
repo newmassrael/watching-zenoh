@@ -5679,8 +5679,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // ends (`Self::answer`).
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let reply: wz_session_core::reply::InboundReply =
-                wz_session_core::query::QueryReply::from_parts(&parts).into();
+            // Handed as it lies: a requester that keeps the reply copies what it keeps, and keeps
+            // a buffer of shared memory as its page, as it keeps the owned projection's.
+            let reply = wz_session_core::reply::LocalReplyView::new(parts);
             self.gets.capture();
             core.0
                 .session
