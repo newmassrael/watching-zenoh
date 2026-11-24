@@ -219,8 +219,8 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         }
         let engine = engine_of(handle);
         let released = closure.release_latch();
-        let sink: DeclWatchSink =
-            Arc::new(move |event: DeclWatchEvent<'_>| tell(&closure, entity, &event));
+        let sink =
+            DeclWatchSink::shared(move |event: DeclWatchEvent<'_>| tell(&closure, entity, &event));
         match wz_capi_port::SessionEngine::declare_decl_watch(Arc::as_ref(&engine), plane, sink) {
             Ok(id) => {
                 let state = Box::new(WatchState {

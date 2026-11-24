@@ -144,7 +144,10 @@ fn named(peer: impl FnOnce() -> Option<Vec<u8>>) -> Option<Vec<u8>> {
 struct Watch {
     id: DeclWatchId,
     plane: DeclPlane,
-    sink: DeclWatchSink,
+    /// Taken out of the row under the table's lock for each event, called after it and put back
+    /// ([`DeclWatches::put_back`]), or let go of by the thread that called it when the watch went
+    /// meanwhile. `None` while it is out for a call.
+    sink: Option<DeclWatchSink>,
 }
 
 /// The observers installed in the application layer for one kind of entity, by the ids that
@@ -170,7 +173,15 @@ pub(super) struct DeclWatches {
     /// Written by the observers while a frame is dispatched, under the session's lock.
     staged: Arc<Mutex<Vec<Staged>>>,
     table: Mutex<Table>,
-    owed: Mutex<VecDeque<(DeclWatchId, Told)>>,
+    owed: Mutex<Owed>,
+}
+
+/// The events owed to the watches, in the order they were owed, and whether a thread is handing
+/// them out ([`DeclWatches::begin_handing`]).
+#[derive(Default)]
+struct Owed {
+    queue: VecDeque<(DeclWatchId, Told)>,
+    handing: bool,
 }
 
 impl DeclWatches {
@@ -206,7 +217,11 @@ impl DeclWatches {
         let mut table = lock(&self.table);
         table.next_id += 1;
         let id = table.next_id;
-        table.watches.push(Watch { id, plane, sink });
+        table.watches.push(Watch {
+            id,
+            plane,
+            sink: Some(sink),
+        });
         id
     }
 
@@ -245,7 +260,7 @@ impl DeclWatches {
         let peer = named(peer);
         let mut owed = lock(&self.owed);
         for (declared, keyexpr) in held {
-            owed.push_back((
+            owed.queue.push_back((
                 id,
                 Told::Declared {
                     id: declared,
@@ -257,8 +272,9 @@ impl DeclWatches {
     }
 
     /// Stop watch `id`: nothing more is owed to it, and the observers of its kind leave `app`
-    /// with the last watch of that kind. Its sink, for the caller to let go of with no lock held;
-    /// `None` when no watch is declared under `id`.
+    /// with the last watch of that kind. Its sink, for the caller to let go of with no lock held,
+    /// or `Some(None)` when the sink is out for a call, which the calling thread lets go of as the
+    /// call returns ([`Self::put_back`]); `None` when no watch is declared under `id`.
     pub(super) fn undeclare<
         K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
         P: Storage,
@@ -267,7 +283,7 @@ impl DeclWatches {
         &self,
         app: &mut SlotObserverOf<K, P, M>,
         id: DeclWatchId,
-    ) -> Option<DeclWatchSink> {
+    ) -> Option<Option<DeclWatchSink>> {
         let mut table = lock(&self.table);
         let at = table.watches.iter().position(|watch| watch.id == id)?;
         let watch = table.watches.remove(at);
@@ -281,18 +297,19 @@ impl DeclWatches {
             }
         }
         drop(table);
-        lock(&self.owed).retain(|(owed, _)| *owed != id);
+        lock(&self.owed).queue.retain(|(owed, _)| *owed != id);
         Some(watch.sink)
     }
 
     /// The session is closed: every watch goes, with what was owed to it. The sinks, for the
-    /// caller to let go of with no lock held. The observers stay in the closed session's
-    /// application layer, which dispatches nothing more.
+    /// caller to let go of with no lock held; one out for a call is let go of by the thread that
+    /// called it. The observers stay in the closed session's application layer, which dispatches
+    /// nothing more.
     pub(super) fn close(&self) -> Vec<DeclWatchSink> {
         let watches = core::mem::take(&mut lock(&self.table).watches);
-        lock(&self.owed).clear();
+        lock(&self.owed).queue.clear();
         lock(&self.staged).clear();
-        watches.into_iter().map(|watch| watch.sink).collect()
+        watches.into_iter().filter_map(|watch| watch.sink).collect()
     }
 
     /// Forget what an earlier dispatch staged and nobody settled: a group's.
@@ -323,25 +340,89 @@ impl DeclWatches {
                 .iter()
                 .filter(|watch| event.reaches(watch.plane))
             {
-                owed.push_back((watch.id, event.told(peer.as_deref())));
+                owed.queue
+                    .push_back((watch.id, event.told(peer.as_deref())));
             }
         }
     }
 
-    /// The next event to hand out and the sink of the watch it is owed to, in the order they were
-    /// owed; an event of a watch undeclared since is passed over. Each lock is let go of before
-    /// this returns, so the sink may reach back into the session.
-    pub(super) fn next(&self) -> Option<(DeclWatchSink, Told)> {
-        loop {
-            let (id, told) = lock(&self.owed).pop_front()?;
-            let sink = lock(&self.table)
-                .watches
-                .iter()
-                .find(|watch| watch.id == id)
-                .map(|watch| Arc::clone(&watch.sink));
-            if let Some(sink) = sink {
-                return Some((sink, told));
+    /// This thread's turn to hand the owed events out, or `None` when none is owed or another
+    /// thread's turn is running, which hands out what this one owed too. One thread hands them
+    /// out at a time, so a sink taken out of its row for a call is out for that call alone and no
+    /// event is passed over for a sink that is out.
+    pub(super) fn begin_handing(&self) -> Option<HandingTurn<'_>> {
+        let mut owed = lock(&self.owed);
+        if owed.queue.is_empty() || owed.handing {
+            return None;
+        }
+        owed.handing = true;
+        Some(HandingTurn {
+            watches: self,
+            over: false,
+        })
+    }
+
+    /// Put the sink of watch `id` back in its row after its call; the sink again when the watch
+    /// went during the call (an undeclare from inside it, or the session's close), for the caller
+    /// to let go of with no lock held.
+    pub(super) fn put_back(&self, id: DeclWatchId, sink: DeclWatchSink) -> Option<DeclWatchSink> {
+        let mut table = lock(&self.table);
+        match table.watches.iter_mut().find(|watch| watch.id == id) {
+            Some(watch) => {
+                watch.sink = Some(sink);
+                None
             }
+            None => Some(sink),
+        }
+    }
+}
+
+/// One thread's turn of handing the owed events out ([`DeclWatches::begin_handing`]): it ends
+/// when no event is left, or, should the thread unwind out of a sink, when it is dropped, so the
+/// next thread that finds an event owed hands it.
+pub(super) struct HandingTurn<'a> {
+    watches: &'a DeclWatches,
+    /// Whether the turn ended with no event left ([`Self::next`]).
+    over: bool,
+}
+
+impl HandingTurn<'_> {
+    /// The next event to hand out, the id of the watch it is owed to and that watch's sink, taken
+    /// out of its row, in the order the events were owed; an event of a watch undeclared since is
+    /// passed over. `None` ends the turn, under the lock an event is owed under, so no event owed
+    /// meanwhile is left with no thread to hand it. Each lock is let go of before this returns, so
+    /// the sink may reach back into the session.
+    pub(super) fn next(&mut self) -> Option<(DeclWatchId, DeclWatchSink, Told)> {
+        loop {
+            let popped = {
+                let mut owed = lock(&self.watches.owed);
+                let popped = owed.queue.pop_front();
+                if popped.is_none() {
+                    owed.handing = false;
+                }
+                popped
+            };
+            let Some((id, told)) = popped else {
+                self.over = true;
+                return None;
+            };
+            let sink = lock(&self.watches.table)
+                .watches
+                .iter_mut()
+                .find(|watch| watch.id == id)
+                .and_then(|watch| watch.sink.take());
+            if let Some(sink) = sink {
+                return Some((id, sink, told));
+            }
+        }
+    }
+}
+
+impl Drop for HandingTurn<'_> {
+    fn drop(&mut self) {
+        // A turn that ended itself is another thread's to begin again, and is not ended twice.
+        if !self.over {
+            lock(&self.watches.owed).handing = false;
         }
     }
 }
@@ -490,7 +571,7 @@ mod tests {
     fn recording() -> (DeclWatchSink, Arc<Mutex<Vec<String>>>) {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&log);
-        let sink: DeclWatchSink = Arc::new(move |event: DeclWatchEvent<'_>| {
+        let sink = DeclWatchSink::shared(move |event: DeclWatchEvent<'_>| {
             lock(&into).push(format!(
                 "{:?} {:?} {:?}",
                 event.declaration_id(),
@@ -503,9 +584,15 @@ mod tests {
 
     fn drain(watches: &DeclWatches) -> usize {
         let mut told = 0;
-        while let Some((sink, event)) = watches.next() {
-            sink(event.event());
-            told += 1;
+        if let Some(mut turn) = watches.begin_handing() {
+            while let Some((id, sink, event)) = turn.next() {
+                sink.call(event.event());
+                told += 1;
+                assert!(
+                    watches.put_back(id, sink).is_none(),
+                    "the watch stands, so its sink goes back"
+                );
+            }
         }
         told
     }
@@ -582,7 +669,7 @@ mod tests {
         });
         watches.settle(|| None);
 
-        assert!(watches.undeclare(&mut app, id).is_some());
+        assert!(matches!(watches.undeclare(&mut app, id), Some(Some(_))));
         assert_eq!(drain(&watches), 0, "what was owed went with the watch");
         assert!(lock(&log).is_empty());
         assert_eq!(app.remote_subscribers.on_decl_len(), 0);
@@ -626,15 +713,81 @@ mod tests {
     #[test]
     fn a_close_gives_back_every_sink_and_owes_nothing() {
         let watches = DeclWatches::default();
-        let (sink, _log) = recording();
-        watches.add(DeclPlane::Subscribers, Arc::clone(&sink));
-        lock(&watches.owed).push_back((1, Told::Undeclared { id: 2, peer: None }));
-        assert_eq!(watches.close().len(), 1);
+        let (sink, log) = recording();
+        watches.add(DeclPlane::Subscribers, sink);
+        lock(&watches.owed)
+            .queue
+            .push_back((1, Told::Undeclared { id: 2, peer: None }));
+        let sinks = watches.close();
+        assert_eq!(sinks.len(), 1);
         assert_eq!(drain(&watches), 0);
+        drop(sinks);
         assert_eq!(
-            Arc::strong_count(&sink),
+            Arc::strong_count(&log),
             1,
             "the table holds the sink no more"
+        );
+    }
+
+    /// A sink is out of its row for its call: a watch undeclared from inside the call hands the
+    /// undeclare no sink, and the sink comes back to the caller to let go of, since its row went.
+    #[test]
+    fn a_watch_undeclared_during_its_call_leaves_its_sink_with_the_caller() {
+        let watches = DeclWatches::default();
+        let mut app = SlotObserver::new();
+        watches
+            .observe(&mut app, DeclPlane::Subscribers)
+            .expect("an observer list with room");
+        let (sink, log) = recording();
+        let id = watches.add(DeclPlane::Subscribers, sink);
+        lock(&watches.owed)
+            .queue
+            .push_back((id, Told::Undeclared { id: 3, peer: None }));
+        let mut turn = watches.begin_handing().expect("an event is owed");
+        let (told_to, sink, event) = turn.next().expect("the event is handed");
+        assert_eq!(told_to, id);
+        assert!(
+            watches.begin_handing().is_none(),
+            "a second thread finds the turn running"
+        );
+        assert!(
+            matches!(watches.undeclare(&mut app, id), Some(None)),
+            "the watch is found, its sink out for the call"
+        );
+        sink.call(event.event());
+        let gone = watches.put_back(id, sink);
+        assert!(gone.is_some(), "the row went, so the sink is the caller's");
+        assert!(turn.next().is_none(), "nothing more is owed");
+        drop(turn);
+        drop(gone);
+        assert_eq!(lock(&log).len(), 1, "told once");
+        assert_eq!(Arc::strong_count(&log), 1, "let go of by the caller");
+    }
+
+    /// A turn dropped before it ran out, as by a sink that unwound, lets the next thread hand
+    /// what is owed.
+    #[test]
+    fn a_turn_dropped_early_lets_the_next_thread_hand() {
+        let watches = DeclWatches::default();
+        let (sink, _log) = recording();
+        let id = watches.add(DeclPlane::Subscribers, sink);
+        for declared in [1, 2] {
+            lock(&watches.owed).queue.push_back((
+                id,
+                Told::Undeclared {
+                    id: declared,
+                    peer: None,
+                },
+            ));
+        }
+        let mut turn = watches.begin_handing().expect("events are owed");
+        let (_, sink, _) = turn.next().expect("the first event is handed");
+        drop(turn);
+        assert!(watches.put_back(id, sink).is_none());
+        assert_eq!(
+            drain(&watches),
+            1,
+            "the second event is handed by the next turn"
         );
     }
 
