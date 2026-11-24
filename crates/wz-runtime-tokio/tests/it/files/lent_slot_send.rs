@@ -404,12 +404,13 @@ fn lowlatency_session(
     >,
 > {
     let actions = new_session_actions(link, params_with_sn_7(None), TokioTime::new());
-    actions.enter_established();
     assert!(
         actions.set_lowlatency_offer(true),
         "lowlatency offer applies"
     );
     actions.negotiate_lowlatency_against_peer(true);
+    // After the negotiation, as the handshake orders them: the send limits are settled from it.
+    actions.enter_established();
     assert!(actions.is_lowlatency(), "both sides offered it");
     actions
 }
@@ -626,6 +627,7 @@ fn chain_over(
         params_with_sn_7(Some(FRAG_BUDGET)),
         TokioTime::new(),
     );
+    actions.enter_established();
     actions.set_fragment_tx_budget(fragment_budget);
     let sent = actions.send_push_literal("home/lent", payload, true);
     let wire = link.doors().into_iter().map(|(_, frame)| frame).collect();
@@ -774,7 +776,9 @@ type Actions = Arc<wz_session_core::session_actions::SessionLinkActions<TokioRun
 
 #[cfg(feature = "transport-batching")]
 fn batching_session(link: Sink) -> Actions {
-    new_session_actions(link, params_with_sn_7(Some(BUDGET)), TokioTime::new())
+    let actions = new_session_actions(link, params_with_sn_7(Some(BUDGET)), TokioTime::new());
+    actions.enter_established();
+    actions
 }
 
 /// Open a window, push each payload, and close it.

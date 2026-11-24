@@ -2349,7 +2349,7 @@ mod tests {
     ///
     /// Eight-vector check across all `CloseReason` variants pins the
     /// reason discriminator byte. R311y839 — the header byte is
-    /// invariant HERE because `recording_actions()` is a single-link
+    /// invariant HERE because the fixture is a single-link
     /// session, not because the flag is hard-set: `_Z_FLAG_T_CLOSE_S`
     /// is derived per emit from the link set now, and this fixture's
     /// set is empty, which is the "this link IS the session" answer.
@@ -2359,8 +2359,8 @@ mod tests {
     /// R2389 — that "this link IS the session" reading was only half
     /// the question, and this fixture is on the other half: the scope is
     /// now derived from the PHASE first and the link set second, and
-    /// `recording_actions()` never drives a handshake, so its session
-    /// was never Established. The expected header is therefore the
+    /// `handshaking_actions_with_params` stands a bundle mid-handshake, so
+    /// its session was never Established. The expected header is therefore the
     /// LINK-scoped one — which is what zenoh puts on every
     /// pre-Established Close (`unicast/link.rs:103-114`). The
     /// vectors and this test's subject are untouched: the reason
@@ -2389,8 +2389,10 @@ mod tests {
             (CloseReason::ConnectionToSelf, 7u8),
         ] {
             // Close is a fixed 2-byte frame (no SN field), so the
-            // `recording_actions()` SSOT params are used verbatim.
-            let (actions, driver) = crate::test_fixtures::recording_actions();
+            // fixture's SSOT params are used verbatim.
+            let (actions, driver) = crate::test_fixtures::handshaking_actions_with_params(
+                wz_runtime_tokio_test_support::fixture_session_init_params(),
+            );
             assert_eq!(
                 actions.trace_snapshot().send_close_frame_with_reason,
                 0,
@@ -5494,6 +5496,7 @@ mod batch_tx_tests {
             flush: std::sync::Mutex::new(None),
         });
         let actions = super::new_session_actions(link.clone(), params, TokioTime::new());
+        actions.enter_established();
         for i in 0..3u8 {
             actions
                 .send_push_literal("home/batching", &[i], /*reliable=*/ true)
@@ -6064,8 +6067,8 @@ mod link_congestion_tests {
         assert_eq!(link.frames().len(), 1, "sent synchronously");
     }
 
-    /// A session over `link` whose first frame carries SN 7, so a frame's SN
-    /// is its second byte.
+    /// An established session over `link` whose first frame carries SN 7, so a
+    /// frame's SN is its second byte.
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         session_with_queue(
             link,
@@ -6081,20 +6084,34 @@ mod link_congestion_tests {
         link: Arc<CongestibleLink>,
         tx_queue: super::TxQueueConf,
     ) -> Arc<super::SessionLinkActions> {
+        let actions = handshaking_session_with_queue(link, tx_queue);
+        actions.enter_established();
+        actions
+    }
+
+    /// [`session_with_queue`] before establishment, for a test that drives the
+    /// handshake itself and reads the one queue shape its establishment hands the link.
+    fn handshaking_session_with_queue(
+        link: Arc<CongestibleLink>,
+        tx_queue: super::TxQueueConf,
+    ) -> Arc<super::SessionLinkActions> {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
         params.tx_queue = tx_queue;
         super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
     }
 
-    /// R2926 — a session whose batches hold 64 bytes, so a 300-byte payload
-    /// is a chain of fragments; its first frame carries SN 7.
+    /// R2926 — an established session whose batches hold 64 bytes, so a
+    /// 300-byte payload is a chain of fragments; its first frame carries SN 7.
     #[cfg(feature = "transport-fragmentation")]
     fn fragmenting_session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
         params.batch_size = 64;
-        super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+        let actions =
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
+        actions
     }
 
     /// R2926 — a DROPPABLE chain asks for room before each fragment against
@@ -6294,7 +6311,13 @@ mod link_congestion_tests {
     fn a_qos_session_shapes_its_link_with_a_queue_per_priority() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         let link = CongestibleLink::new();
-        let actions = session(link.clone());
+        let actions = handshaking_session_with_queue(
+            link.clone(),
+            super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+        );
         assert!(actions.set_qos_offer(true), "qos offer applies");
         actions.negotiate_qos_against_peer(true);
         let mut engine = super::new_session_engine(&actions);
@@ -6470,6 +6493,7 @@ mod link_congestion_tests {
         params.tx_queue = tx_queue;
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
         let blocking = {
             let actions = Arc::clone(&actions);
             std::thread::spawn(move || {
@@ -6675,11 +6699,10 @@ mod link_congestion_tests {
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
         };
-        check(super::new_session_actions(
-            link,
-            params,
-            crate::runtime_impl::TokioTime::new(),
-        ));
+        let actions =
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
+        check(actions);
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER` with nothing stated: the session keeps itself through as many
