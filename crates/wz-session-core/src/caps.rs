@@ -291,6 +291,14 @@ pub const HELD_ENCODINGS: usize = generated::HELD_ENCODINGS;
 /// short; one a peer sends is read where it lies.
 pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTES;
 
+/// The bytes one sample an advanced publisher's cache keeps may carry, payload and attachment
+/// together: the room of each row of a session's cache table. A put past it is refused.
+pub const ADVANCED_CACHE_SAMPLE_BYTES: usize = generated::ADVANCED_CACHE_SAMPLE_BYTES;
+
+/// The rows of a session's cache table, which the caches of its advanced publishers share. A
+/// cache asking for more rows than are free is refused at its declaration.
+pub const ADVANCED_CACHE_ROWS: usize = generated::ADVANCED_CACHE_ROWS;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
